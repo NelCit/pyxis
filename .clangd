@@ -40,19 +40,17 @@ Diagnostics:
   MissingIncludes: None
 
   ClangTidy:
-    # Mirror .clang-tidy's check set (per plan §36.2). We rely on the CI
-    # clang-tidy run to be authoritative; clangd's editor checks are a
-    # convenience only.
+    # `.clang-tidy` is the single source of truth for the check set
+    # (plan §36.2 / §37). clangd reads it natively. We deliberately do
+    # NOT add per-clangd Add:/Remove: lists here — they compose on top
+    # of `.clang-tidy`, which means an `Add: performance-*` here would
+    # re-enable checks that `.clang-tidy` has explicitly disabled (this
+    # is exactly what was happening to `performance-enum-size`).
+    #
+    # FastCheckFilter: Loose only relaxes how clangd selects which
+    # checks to run inline in the editor (slower checks may be skipped).
+    # It does not change the check set itself.
     FastCheckFilter: Loose
-    Add:
-      - bugprone-*
-      - performance-*
-      - modernize-use-nullptr
-      - modernize-use-override
-      - modernize-use-using
-      - cppcoreguidelines-pro-type-cstyle-cast
-    Remove:
-      - bugprone-easily-swappable-parameters
 
 # When clangd starts up against a fresh checkout, indexing the world is
 # expensive and CPU-hungry. Build the index in the background so the IDE
