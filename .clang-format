@@ -1,0 +1,69 @@
+# Pyxis clang-format — plan §36.1.
+#
+# Hand-tuned baseline, started from Google then narrowed to match §30 naming
+# and the 100-column house rule. CI runs `_tools/run_clang_format.py --check`.
+
+BasedOnStyle: Google
+ColumnLimit: 100
+IndentWidth: 2
+TabWidth: 2
+UseTab: Never
+
+DerivePointerAlignment: false
+PointerAlignment: Left
+ReferenceAlignment: Left
+
+AccessModifierOffset: -1
+
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLambdasOnASingleLine: All
+AllowShortCaseLabelsOnASingleLine: false
+
+BreakBeforeBraces: Attach
+BreakConstructorInitializers: BeforeColon
+BreakInheritanceList: BeforeColon
+BreakBeforeBinaryOperators: NonAssignment
+
+NamespaceIndentation: None
+FixNamespaceComments: true
+
+SortIncludes: CaseInsensitive
+SortUsingDeclarations: true
+
+# Group includes per §30.3:
+#   1) matching header   (in .cpp)        — implicit; clang-format keeps it first.
+#   2) Pyxis public      <Pyxis/...>
+#   3) NVRHI / Vulkan    <nvrhi/...>, <vulkan/...>
+#   4) third-party       <other/.../...>
+#   5) standard library  <foo>
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex: '^"'
+    Priority: 1
+  - Regex: '^<Pyxis/'
+    Priority: 2
+  - Regex: '^<nvrhi/'
+    Priority: 3
+  - Regex: '^<vulkan/'
+    Priority: 3
+  - Regex: '^<.*/.*>'
+    Priority: 4
+  - Regex: '^<[^/]+>'
+    Priority: 5
+
+# Modern C++ idioms.
+Cpp11BracedListStyle: true
+SpaceBeforeCpp11BracedList: false
+AlignAfterOpenBracket: Align
+AlignConsecutiveAssignments: None
+AlignConsecutiveDeclarations: None
+AlignTrailingComments: true
+AlignOperands: Align
+
+EmptyLineBeforeAccessModifier: LogicalBlock
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep: 1
+
+# Standard.
+Standard: c++20

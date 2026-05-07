@@ -1,0 +1,38 @@
+# Pyxis CODEOWNERS — plan §45.2.
+#
+# Last entry that matches a path wins (GitHub CODEOWNERS semantics).
+# Public-API changes and the plan itself are dual-owned (two approvals
+# required) per §45.2.
+
+# Default fallback — any unmatched path.
+*                                                       @pyxis-maintainers
+
+# Per-module ownership.
+/sources/pyxis_platform/                                @pyxis-platform-team
+/sources/pyxis_renderer/                                @pyxis-renderer-team
+/sources/pyxis_renderer/Public/                         @pyxis-renderer-team @pyxis-maintainers
+/sources/pyxis_renderer/Private/Scene/                  @pyxis-ecs-team @pyxis-renderer-team
+/sources/pyxis_renderer/Private/Passes/                 @pyxis-renderer-team
+/sources/pyxis_renderer/Private/Shaders/                @pyxis-shading-team
+/sources/pyxis_hydra/                                   @pyxis-ingest-team
+/sources/pyxis_usd_ingest/                              @pyxis-ingest-team
+/sources/pyxis_material_translation/                    @pyxis-shading-team @pyxis-ingest-team
+/sources/pyxis_app/                                     @pyxis-app-team
+
+# Shaders.
+/resources/shaders/                                     @pyxis-shading-team
+
+# Build / CI.
+/_cmake/                                                @pyxis-build-team
+/_pipelines/                                            @pyxis-build-team
+/_tools/                                                @pyxis-build-team
+
+# Documentation, RFCs, plan.
+/_documentation/rfcs/                                   @pyxis-maintainers
+/plan_final.md                                          @pyxis-maintainers
+/CLAUDE.md                                              @pyxis-maintainers
+/version.txt                                            @pyxis-maintainers
+/CONTRIBUTING.md                                        @pyxis-maintainers
+/CODEOWNERS                                             @pyxis-maintainers
+/LICENSE                                                @pyxis-maintainers
+/NOTICE                                                 @pyxis-maintainers
