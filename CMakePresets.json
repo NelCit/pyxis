@@ -1,0 +1,73 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 27, "patch": 0 },
+
+  "configurePresets": [
+    {
+      "name": "_pyxis-base",
+      "hidden": true,
+      "generator": "Ninja Multi-Config",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "toolchainFile": "${sourceDir}/_cmake/clang-cl.toolchain.cmake",
+      "cacheVariables": {
+        "CMAKE_TOOLCHAIN_FILE": {
+          "type": "FILEPATH",
+          "value": "${sourceDir}/_cmake/clang-cl.toolchain.cmake"
+        },
+        "CMAKE_CONFIGURATION_TYPES": "Debug;Release;RelWithDebInfo",
+        "VCPKG_OVERLAY_TRIPLETS": "${sourceDir}/_cmake/triplets",
+        "VCPKG_TARGET_TRIPLET":   "x64-windows-pyxis",
+        "VCPKG_HOST_TRIPLET":     "x64-windows-pyxis"
+      },
+      "environment": {
+        "VCPKG_FEATURE_FLAGS": "manifests,versions,binarycaching"
+      }
+    },
+    {
+      "name": "dev",
+      "displayName": "Dev (clang-cl + vcpkg, debug-tools on)",
+      "description": "Default developer build — Debug + Release configs, Flecs Explorer, validation layers.",
+      "inherits": "_pyxis-base",
+      "cacheVariables": {
+        "PYXIS_BUILD_TESTS":   "ON",
+        "PYXIS_DEBUG_TOOLS":   "ON",
+        "PYXIS_BUILD_VIEWER":  "ON",
+        "VCPKG_MANIFEST_FEATURES": "debug-tools"
+      }
+    },
+    {
+      "name": "ci",
+      "displayName": "CI (clang-cl + vcpkg, no viewer)",
+      "description": "CI build — headless tests, no Flecs Explorer, no viewer.",
+      "inherits": "_pyxis-base",
+      "cacheVariables": {
+        "PYXIS_BUILD_TESTS":  "ON",
+        "PYXIS_DEBUG_TOOLS":  "OFF",
+        "PYXIS_BUILD_VIEWER": "OFF"
+      }
+    }
+  ],
+
+  "buildPresets": [
+    { "name": "dev",         "configurePreset": "dev",  "configuration": "Debug" },
+    { "name": "dev-release", "configurePreset": "dev",  "configuration": "Release" },
+    { "name": "ci",          "configurePreset": "ci",   "configuration": "Release" }
+  ],
+
+  "testPresets": [
+    {
+      "name": "dev",
+      "configurePreset": "dev",
+      "configuration": "Debug",
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error", "stopOnFailure": false }
+    },
+    {
+      "name": "ci",
+      "configurePreset": "ci",
+      "configuration": "Release",
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error", "stopOnFailure": true }
+    }
+  ]
+}
