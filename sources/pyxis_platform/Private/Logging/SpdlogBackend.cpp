@@ -35,8 +35,8 @@ spdlog::level::level_enum ToSpdlog(LogLevel l) noexcept {
 }
 
 std::string DefaultLogDirectory() {
-    AssetLocator locator;
-    Path         dir = locator.LocalAppData().Join("Logs");
+    const AssetLocator locator;
+    const Path         dir = locator.LocalAppData().Join("Logs");
     (void)dir.EnsureDirectoryExists();
     return std::string{ dir.View() };
 }

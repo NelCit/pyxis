@@ -33,17 +33,17 @@ flecs::entity GetPhase(flecs::world& world, const char* tagName) {
 
 flecs::entity RegisterPhasePipeline(flecs::world& world) {
     // Phases in canonical order (§8.2).
-    flecs::entity uploadTextures  = RegisterPhase<PhaseUploadTextures> (world, "PhaseUploadTextures");
-    flecs::entity uploadMaterials = RegisterPhase<PhaseUploadMaterials>(world, "PhaseUploadMaterials", uploadTextures);
-    flecs::entity extractMeshes   = RegisterPhase<PhaseExtractMeshes>  (world, "PhaseExtractMeshes",   uploadMaterials);
-    flecs::entity buildBlas       = RegisterPhase<PhaseBuildBlas>      (world, "PhaseBuildBlas",       extractMeshes);
-    flecs::entity rebuildTlas     = RegisterPhase<PhaseRebuildTlas>    (world, "PhaseRebuildTlas",     buildBlas);
-    flecs::entity updateBindless  = RegisterPhase<PhaseUpdateBindless> (world, "PhaseUpdateBindless",  rebuildTlas);
-    flecs::entity clearDirty      = RegisterPhase<PhaseClearDirty>     (world, "PhaseClearDirty",      updateBindless);
+    const flecs::entity uploadTextures  = RegisterPhase<PhaseUploadTextures> (world, "PhaseUploadTextures");
+    const flecs::entity uploadMaterials = RegisterPhase<PhaseUploadMaterials>(world, "PhaseUploadMaterials", uploadTextures);
+    const flecs::entity extractMeshes   = RegisterPhase<PhaseExtractMeshes>  (world, "PhaseExtractMeshes",   uploadMaterials);
+    const flecs::entity buildBlas       = RegisterPhase<PhaseBuildBlas>      (world, "PhaseBuildBlas",       extractMeshes);
+    const flecs::entity rebuildTlas     = RegisterPhase<PhaseRebuildTlas>    (world, "PhaseRebuildTlas",     buildBlas);
+    const flecs::entity updateBindless  = RegisterPhase<PhaseUpdateBindless> (world, "PhaseUpdateBindless",  rebuildTlas);
+    const flecs::entity clearDirty      = RegisterPhase<PhaseClearDirty>     (world, "PhaseClearDirty",      updateBindless);
     (void)clearDirty;
 
     // Custom pipeline matching every phase tag in order.
-    flecs::entity pipeline = world.pipeline()
+    const flecs::entity pipeline = world.pipeline()
         .with(flecs::System)
         .with(flecs::Phase).cascade(flecs::DependsOn)
         .build();

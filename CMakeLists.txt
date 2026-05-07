@@ -62,6 +62,27 @@ option(PYXIS_DEBUG_TOOLS              "Enable debug tools (Flecs Explorer, hot-r
 option(PYXIS_ENABLE_AFTERMATH         "Enable NVIDIA Aftermath (Debug-only crash dumps)" OFF)
 option(PYXIS_ENABLE_TRACY             "Enable Tracy CPU/GPU profiling client" OFF)
 
+# Plan §37 / §36.2 — clang-tidy gates the build. Wired through
+# CMAKE_CXX_CLANG_TIDY so ninja invokes clang-tidy on every C++ TU it
+# compiles. Default ON: every build (dev or ci) runs the linter and a
+# new diagnostic fails the build, matching the §37 CI table. Pass
+# -DPYXIS_ENABLE_CLANG_TIDY=OFF for a fast-iteration build that skips
+# the linter (incremental rebuilds only re-run clang-tidy on changed
+# TUs anyway, so the steady-state cost is small).
+option(PYXIS_ENABLE_CLANG_TIDY        "Run clang-tidy on every C++ TU (matches §37 CI)" ON)
+if(PYXIS_ENABLE_CLANG_TIDY)
+    find_program(PYXIS_CLANG_TIDY_EXE clang-tidy REQUIRED)
+    set(CMAKE_CXX_CLANG_TIDY "${PYXIS_CLANG_TIDY_EXE}"
+        # Honour our repo-root .clang-tidy (§36.2).
+        "--config-file=${CMAKE_SOURCE_DIR}/.clang-tidy"
+        # Restrict header diagnostics to our own sources so we don't trip on
+        # vcpkg / Vulkan / Flecs headers we don't control.
+        "--header-filter=${CMAKE_SOURCE_DIR}/sources/pyxis_.*"
+        # Plan §37: any new diagnostic fails the build.
+        "--warnings-as-errors=*")
+    message(STATUS "Pyxis: clang-tidy enabled (${PYXIS_CLANG_TIDY_EXE})")
+endif()
+
 # Helpers ---------------------------------------------------------------------
 include(Compiler)
 include(Vulkan)

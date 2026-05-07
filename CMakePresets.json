@@ -34,7 +34,7 @@
     {
       "name": "ci",
       "displayName": "CI (clang-cl + vcpkg, no viewer)",
-      "description": "CI build — headless tests, no Flecs Explorer, no viewer.",
+      "description": "CI build — headless tests, no Flecs Explorer, no viewer. clang-tidy gates every TU (default ON; see CMakeLists.txt).",
       "inherits": "_pyxis-base",
       "cacheVariables": {
         "PYXIS_BUILD_TESTS":  "ON",

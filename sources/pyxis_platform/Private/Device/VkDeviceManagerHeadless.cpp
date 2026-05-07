@@ -23,7 +23,7 @@ VkInstance CreateInstance(bool enableValidation,
                           std::string_view appName, uint32_t appVersion) noexcept {
     VkApplicationInfo appInfo{};
     appInfo.sType              = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-    std::string namebuf{ appName };
+    const std::string namebuf{ appName };
     appInfo.pApplicationName   = namebuf.c_str();
     appInfo.applicationVersion = appVersion;
     appInfo.pEngineName        = "Pyxis";
@@ -53,7 +53,7 @@ VkInstance CreateInstance(bool enableValidation,
 VkDeviceManagerHeadless::VkDeviceManagerHeadless(const DeviceCreationParams& params,
                                                  const Resolution&           initialBackbuffer,
                                                  DeviceManagerCreateStatus*  outStatus) noexcept {
-    DeviceManagerCreateStatus status = Bringup(params, initialBackbuffer);
+    const DeviceManagerCreateStatus status = Bringup(params, initialBackbuffer);
     if (outStatus) *outStatus = status;
 }
 

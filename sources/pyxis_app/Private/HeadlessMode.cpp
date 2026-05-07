@@ -47,7 +47,7 @@ int RunHeadless(int adapterIndex, bool enableValidation) noexcept {
     params.framesInFlight   = 3;
     params.applicationName  = "pyxis (headless)";
 
-    Resolution                    backbuffer{ 1920, 1080 };
+    const Resolution              backbuffer{ 1920, 1080 };
     DeviceManagerCreateStatus     status = DeviceManagerCreateStatus::Unknown;
     IDeviceManager* dm = CreateHeadlessDeviceManager(params, backbuffer, &status);
     if (dm == nullptr) {
@@ -65,7 +65,7 @@ int RunViewer(int adapterIndex, bool enableValidation) noexcept {
     params.framesInFlight   = 2;
     params.applicationName  = "pyxis";
 
-    Resolution                    backbuffer{ 1920, 1080 };
+    const Resolution              backbuffer{ 1920, 1080 };
     DeviceManagerCreateStatus     status = DeviceManagerCreateStatus::Unknown;
     IDeviceManager* dm = CreateWindowedDeviceManager(params, backbuffer, &status);
     if (dm == nullptr) {

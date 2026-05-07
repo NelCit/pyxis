@@ -43,14 +43,14 @@ bool Path::IsAbsolute() const noexcept {
 }
 
 Path Path::Join(std::string_view child) const noexcept {
-    fs::path p = fs::path(View()) / fs::path(child);
+    const fs::path p = fs::path(View()) / fs::path(child);
     Path out;
     out.Assign(p.generic_string());
     return out;
 }
 
 Path Path::Parent() const noexcept {
-    fs::path p = fs::path(View()).parent_path();
+    const fs::path p = fs::path(View()).parent_path();
     Path out;
     out.Assign(p.generic_string());
     return out;
