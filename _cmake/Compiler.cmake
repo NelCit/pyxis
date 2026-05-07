@@ -49,13 +49,10 @@ function(pyxis_set_target_compile_options target)
             # default and warns when the user repeats them. We keep the flags
             # because §30.1 mandates them on cl.exe, but suppress the noise.
             $<$<CXX_COMPILER_ID:Clang>:-Wno-unused-command-line-argument>
-            # Vulkan / Win32 structs are routinely partial-initialised
-            # (`{ VK_STRUCTURE_TYPE_FOO }` zero-init's the rest deterministically).
-            # MSVC accepts this silently; clang-cl's stricter
-            # -Wmissing-field-initializers fires on every Vulkan call site, so
-            # turn it off project-wide rather than peppering pragmas in every
-            # platform/Vulkan TU.
-            $<$<CXX_COMPILER_ID:Clang>:-Wno-missing-field-initializers>
+            # -Wmissing-field-initializers is kept on. Vulkan struct sites
+            # use the zero-init + .sType = … pattern so every field is
+            # explicitly initialised; reviewers reject the
+            # `{ VK_STRUCTURE_TYPE_FOO }` shorthand.
             $<$<CXX_COMPILER_ID:Clang>:/clang:-Werror=date-time>     # §46.2 reproducible builds
             $<$<CXX_COMPILER_ID:Clang>:/clang:-fmacro-prefix-map=${CMAKE_SOURCE_DIR}=.>  # §46.2 PDB hygiene
         )

@@ -1,0 +1,61 @@
+# Pyxis clangd configuration.
+#
+# Fixes the IDE-side noise that comes from clangd not knowing the project's
+# include paths, dialect, or windows.h gotchas. CMake exports
+# `compile_commands.json` into the active build directory (we set
+# `CMAKE_EXPORT_COMPILE_COMMANDS=ON` at the top-level CMakeLists). Point
+# clangd at the dev-preset build dir below; bump the path if you regularly
+# build into a different directory.
+#
+# To make clangd pick this up after editing it, run "clangd: Restart language
+# server" in your IDE.
+
+CompileFlags:
+  # The compile_commands.json from cmake is the authoritative source for
+  # per-file flags (include paths, defines, /W4 /WX). The two extras below
+  # are clangd-only nudges that don't otherwise show up via the cmake DB
+  # because they are clang-cl driver behaviour.
+  Add:
+    - -std=c++23
+    # `namespace pyxis::scene { ... }` is a C++17 feature; without this hint
+    # clangd defaults to a pre-C++17 dialect and flags it as an extension.
+    # Plan §30.1 mandates C++23 across the board.
+    - -Wno-c++98-compat
+    - -Wno-c++98-compat-pedantic
+    # Win32 headers use #pragma pack and microsoft #include search paths;
+    # silence those inside clangd to mirror Compiler.cmake.
+    - -Wno-microsoft-include
+    - -Wno-pragma-pack
+
+  # Default location written by `cmake --preset dev`. Ninja Multi-Config
+  # writes per-config compile commands under build/dev/. Adjust if you use
+  # a different build dir (e.g. build/ci/).
+  CompilationDatabase: build/dev
+
+Diagnostics:
+  # The "header X is not used directly" hint is incorrect inside our
+  # transitively-rich source files (Vulkan and Windows headers pull a lot of
+  # required machinery via macros). Silence it project-wide.
+  UnusedIncludes: None
+  MissingIncludes: None
+
+  ClangTidy:
+    # Mirror .clang-tidy's check set (per plan §36.2). We rely on the CI
+    # clang-tidy run to be authoritative; clangd's editor checks are a
+    # convenience only.
+    FastCheckFilter: Loose
+    Add:
+      - bugprone-*
+      - performance-*
+      - modernize-use-nullptr
+      - modernize-use-override
+      - modernize-use-using
+      - cppcoreguidelines-pro-type-cstyle-cast
+    Remove:
+      - bugprone-easily-swappable-parameters
+
+# When clangd starts up against a fresh checkout, indexing the world is
+# expensive and CPU-hungry. Build the index in the background so the IDE
+# stays responsive.
+Index:
+  Background: Build

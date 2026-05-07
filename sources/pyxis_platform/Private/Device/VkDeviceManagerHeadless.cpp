@@ -21,7 +21,8 @@ constexpr uint32_t kVulkanApiVersion = VK_API_VERSION_1_3;
 
 VkInstance CreateInstance(bool enableValidation,
                           std::string_view appName, uint32_t appVersion) noexcept {
-    VkApplicationInfo appInfo{ VK_STRUCTURE_TYPE_APPLICATION_INFO };
+    VkApplicationInfo appInfo{};
+    appInfo.sType              = VK_STRUCTURE_TYPE_APPLICATION_INFO;
     std::string namebuf{ appName };
     appInfo.pApplicationName   = namebuf.c_str();
     appInfo.applicationVersion = appVersion;
@@ -34,7 +35,8 @@ VkInstance CreateInstance(bool enableValidation,
         layers.push_back("VK_LAYER_KHRONOS_validation");
     }
 
-    VkInstanceCreateInfo info{ VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO };
+    VkInstanceCreateInfo info{};
+    info.sType                   = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
     info.pApplicationInfo        = &appInfo;
     info.enabledLayerCount       = static_cast<uint32_t>(layers.size());
     info.ppEnabledLayerNames     = layers.data();
@@ -125,7 +127,8 @@ DeviceManagerCreateStatus VkDeviceManagerHeadless::Bringup(
     }
 
     const float qPriority = 1.0f;
-    VkDeviceQueueCreateInfo qInfo{ VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO };
+    VkDeviceQueueCreateInfo qInfo{};
+    qInfo.sType            = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
     qInfo.queueFamilyIndex = _graphicsFamily;
     qInfo.queueCount       = 1;
     qInfo.pQueuePriorities = &qPriority;
@@ -146,7 +149,8 @@ DeviceManagerCreateStatus VkDeviceManagerHeadless::Bringup(
     coreFeatures.shaderInt64 = VK_TRUE;
     coreFeatures.shaderStorageImageReadWithoutFormat = VK_TRUE;
 
-    VkDeviceCreateInfo dInfo{ VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
+    VkDeviceCreateInfo dInfo{};
+    dInfo.sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     dInfo.queueCreateInfoCount    = 1;
     dInfo.pQueueCreateInfos       = &qInfo;
     dInfo.enabledExtensionCount   = static_cast<uint32_t>(requiredExt.size());
