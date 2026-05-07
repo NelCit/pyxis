@@ -15,6 +15,10 @@ namespace pyxis {
 
 // Vendor IDs as published by Khronos / PCI-SIG. Listed for the vendors
 // Pyxis actually targets (RTX 30/40 + recent AMD/Intel ray-tracing GPUs).
+// `uint32_t` is the house default for `enum class` storage; `performance-
+// enum-size` is disabled in `.clang-tidy` so smaller enums don't get
+// auto-flagged. The separate `vendorId` field below mirrors
+// VkPhysicalDeviceProperties::vendorID byte-for-byte.
 enum class AdapterVendor : uint32_t {
     Unknown   = 0,
     Nvidia    = 0x10DE,
@@ -24,7 +28,7 @@ enum class AdapterVendor : uint32_t {
 };
 
 struct AdapterInfo {
-    static constexpr std::size_t kNameCapacity = 192;
+    static constexpr std::size_t NAME_CAPACITY = 192;
 
     // ---- Identity --------------------------------------------------------
     AdapterVendor vendor       = AdapterVendor::Unknown;
@@ -33,7 +37,7 @@ struct AdapterInfo {
     uint32_t      driverVersionRaw = 0;       // VkPhysicalDeviceProperties::driverVersion
 
     // ---- Inline-owning name buffer (no STL across DLL — §18.9-equivalent).
-    std::array<char, kNameCapacity> name{};
+    std::array<char, NAME_CAPACITY> name{};
     uint16_t                        nameSize = 0;
 
     [[nodiscard]] std::string_view NameView() const noexcept {

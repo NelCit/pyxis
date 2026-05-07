@@ -66,7 +66,7 @@ Renderer's public surface is exhaustive (§18.1) — `Forward.h`, `RendererApi.h
 - Public POD descriptors are byte-frozen: `sizeof`/`alignof`/offsets/padding are part of the contract. Adding a field consumes a trailing `_reserved*` slot (§22.3) or it's a MAJOR break.
 - **No STL containers cross the DLL boundary.** Inputs are `std::span<const T>` / `std::string_view` (borrowed). Outputs that own a string use the inline `ErrorMessage` / `ScopeName` PODs.
 - `std::span` / `std::string_view` are **input-only**; never persisted, never returned. The renderer copies what it needs internally.
-- Strong-handle enums (`MeshHandle`, `MaterialHandle`, `TextureHandle`, `InstanceHandle`, `LightHandle`) — `enum class : uint32_t`, `kInvalid = 0`, layout: 24-bit slot + 8-bit generation (§19.7).
+- Strong-handle enums (`MeshHandle`, `MaterialHandle`, `TextureHandle`, `InstanceHandle`, `LightHandle`) — `enum class : uint32_t`, `Invalid = 0`, layout: 24-bit slot + 8-bit generation (§19.7).
 - Methods returning `Expected<T>` are `[[nodiscard]]`. `void`-returning verbs silently ignore stale handles, counted in `FrameStats::staleHandleDrops` (§18.5).
 
 ---
@@ -75,7 +75,7 @@ Renderer's public surface is exhaustive (§18.1) — `Forward.h`, `RendererApi.h
 
 - **C++23**, clang-cl 17+, `/std:c++latest /W4 /WX /permissive-`, `/EHs-c-` in renderer/platform (no exceptions), `/EHsc` in Hydra (USD needs it).
 - **Forbidden**: RTTI in renderer/platform (`/GR-`), exceptions across DLL boundaries, STL streams, raw `new`/`delete` outside thin RAII.
-- **Naming** (§30.2): `PascalCase` types/free funcs/member funcs, `_camelCase` private fields, `camelCase` POD public fields/locals, `kPascalCase` constants, `PYXIS_SCREAM` macros, single flat `pyxis::` namespace. Acronyms count as words (`BlasCache`, not `BLASCache`).
+- **Naming** (§30.2): `PascalCase` types/free funcs/member funcs, `_camelCase` private fields, `camelCase` POD public fields/locals, `UPPER_SNAKE_CASE` compile-time constants (no prefix; `MAX_FRAMES_IN_FLIGHT`, `HANDLE_SLOT_BITS`), `PascalCase` enum-class constants (no prefix; `MeshHandle::Invalid`), `PYXIS_SCREAM` macros, single flat `pyxis::` namespace. Acronyms count as words (`BlasCache`, not `BLASCache`).
 - **No singletons** except `pyxis::Logging::Get()` (§33.10) and Tracy's client. `Profiler` is constructor-injected.
 - **No allocations in pass `Execute()`** — preallocate in `Declare()` / on-resize.
 - **Public headers must not** include `<windows.h>`, transitively pull `pxr/...` (renderer is USD-free), or expose NVRHI types beyond opaque `IDevice*` / `ICommandList*`.
@@ -108,7 +108,7 @@ Tracy zones use dotted prefixes by component: `ingest.hydra.*`, `ingest.usd.*`, 
 
 ## Frames-in-flight (§33.1)
 
-- `kMaxFramesInFlight = 3` is the compile-time cap (sizes every per-frame ring).
+- `MAX_FRAMES_IN_FLIGHT = 3` is the compile-time cap (sizes every per-frame ring).
 - `GpuSceneCreateDesc::framesInFlight` is the *active* runtime count: 2 default, 3 in headless for byte-identical EXR (§33.7).
 
 ---

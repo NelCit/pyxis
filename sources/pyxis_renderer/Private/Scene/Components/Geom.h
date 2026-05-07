@@ -23,8 +23,8 @@ struct Geom {
     uint32_t flags             = 0;   // bit 0 hasNormals, bit 1 hasTangents, bit 2 hasUV
 };
 
-inline constexpr uint32_t kGeomFlagHasNormals  = 1u << 0;
-inline constexpr uint32_t kGeomFlagHasTangents = 1u << 1;
-inline constexpr uint32_t kGeomFlagHasUv       = 1u << 2;
+inline constexpr uint32_t GEOM_FLAG_HAS_NORMALS  = 1u << 0;
+inline constexpr uint32_t GEOM_FLAG_HAS_TANGENTS = 1u << 1;
+inline constexpr uint32_t GEOM_FLAG_HAS_UV       = 1u << 2;
 
 }  // namespace pyxis::scene

@@ -15,7 +15,7 @@ Path::Path(std::string_view utf8) {
 }
 
 void Path::Assign(std::string_view utf8) noexcept {
-    const std::size_t n = (utf8.size() < kCapacity - 1) ? utf8.size() : kCapacity - 1;
+    const std::size_t n = (utf8.size() < CAPACITY - 1) ? utf8.size() : CAPACITY - 1;
     std::memcpy(_buf.data(), utf8.data(), n);
     _buf[n] = '\0';
     _size   = static_cast<uint16_t>(n);

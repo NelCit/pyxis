@@ -5,17 +5,17 @@
 namespace pyxis::scene {
 
 uint32_t HandleBimap::Encode(uint32_t slotIndex, uint8_t gen) noexcept {
-    return ((static_cast<uint32_t>(gen) << kHandleSlotBits) & kHandleGenerationMask)
-         | ((slotIndex + 1u) & kHandleSlotMask);
+    return ((static_cast<uint32_t>(gen) << HANDLE_SLOT_BITS) & HANDLE_GENERATION_MASK)
+         | ((slotIndex + 1u) & HANDLE_SLOT_MASK);
 }
 
 uint32_t HandleBimap::SlotIndex(uint32_t encoded) noexcept {
-    const uint32_t raw = (encoded & kHandleSlotMask);
+    const uint32_t raw = (encoded & HANDLE_SLOT_MASK);
     return raw == 0u ? 0u : raw - 1u;
 }
 
 uint8_t HandleBimap::Generation(uint32_t encoded) noexcept {
-    return static_cast<uint8_t>((encoded & kHandleGenerationMask) >> kHandleSlotBits);
+    return static_cast<uint8_t>((encoded & HANDLE_GENERATION_MASK) >> HANDLE_SLOT_BITS);
 }
 
 uint32_t HandleBimap::Allocate(flecs::entity entity) noexcept {

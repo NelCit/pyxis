@@ -17,7 +17,7 @@ namespace pyxis {
 
 namespace {
 
-constexpr uint32_t kVulkanApiVersion = VK_API_VERSION_1_3;
+constexpr uint32_t VULKAN_API_VERSION = VK_API_VERSION_1_3;
 
 VkInstance CreateInstance(bool enableValidation,
                           std::string_view appName, uint32_t appVersion) noexcept {
@@ -28,7 +28,7 @@ VkInstance CreateInstance(bool enableValidation,
     appInfo.applicationVersion = appVersion;
     appInfo.pEngineName        = "Pyxis";
     appInfo.engineVersion      = 0;
-    appInfo.apiVersion         = kVulkanApiVersion;
+    appInfo.apiVersion         = VULKAN_API_VERSION;
 
     std::vector<const char*> layers;
     if (enableValidation) {
@@ -74,14 +74,14 @@ DeviceManagerCreateStatus VkDeviceManagerHeadless::Bringup(
     _instance = CreateInstance(params.enableValidation,
                                params.applicationName, params.applicationVersion);
     if (_instance == VK_NULL_HANDLE) {
-        log.Error(log::kPlatform, "VkDeviceManagerHeadless: VkInstance creation failed");
+        log.Error(log::PLATFORM, "VkDeviceManagerHeadless: VkInstance creation failed");
         return DeviceManagerCreateStatus::InstanceCreationFailed;
     }
 
     uint32_t deviceCount = 0;
     vkEnumeratePhysicalDevices(_instance, &deviceCount, nullptr);
     if (deviceCount == 0) {
-        log.Error(log::kPlatform, "VkDeviceManagerHeadless: no Vulkan-capable GPU found");
+        log.Error(log::PLATFORM, "VkDeviceManagerHeadless: no Vulkan-capable GPU found");
         return DeviceManagerCreateStatus::NoCompatibleAdapter;
     }
     std::vector<VkPhysicalDevice> physicalDevices(deviceCount);
@@ -102,7 +102,7 @@ DeviceManagerCreateStatus VkDeviceManagerHeadless::Bringup(
         }
     }
     if (bestIndex < 0) {
-        log.Error(log::kPlatform, "VkDeviceManagerHeadless: no GPU satisfies §5.b features");
+        log.Error(log::PLATFORM, "VkDeviceManagerHeadless: no GPU satisfies §5.b features");
         return DeviceManagerCreateStatus::FeatureMissing;
     }
 
@@ -122,7 +122,7 @@ DeviceManagerCreateStatus VkDeviceManagerHeadless::Bringup(
         }
     }
     if (!foundGraphics) {
-        log.Error(log::kPlatform, "VkDeviceManagerHeadless: no graphics queue family");
+        log.Error(log::PLATFORM, "VkDeviceManagerHeadless: no graphics queue family");
         return DeviceManagerCreateStatus::FeatureMissing;
     }
 
@@ -158,7 +158,7 @@ DeviceManagerCreateStatus VkDeviceManagerHeadless::Bringup(
     dInfo.pEnabledFeatures        = &coreFeatures;
 
     if (vkCreateDevice(_physicalDevice, &dInfo, nullptr, &_device) != VK_SUCCESS) {
-        log.Error(log::kPlatform, "VkDeviceManagerHeadless: vkCreateDevice failed");
+        log.Error(log::PLATFORM, "VkDeviceManagerHeadless: vkCreateDevice failed");
         return DeviceManagerCreateStatus::DeviceCreationFailed;
     }
     vkGetDeviceQueue(_device, _graphicsFamily, 0, &_graphicsQueue);
@@ -172,7 +172,7 @@ DeviceManagerCreateStatus VkDeviceManagerHeadless::Bringup(
         msg += std::to_string(_adapter.totalDeviceLocalBytes / (1024ull * 1024ull));
         msg += " MiB  framesInFlight=";
         msg += std::to_string(_framesInFlight);
-        log.Info(log::kPlatform, msg);
+        log.Info(log::PLATFORM, msg);
     }
 
     return DeviceManagerCreateStatus::Ok;
