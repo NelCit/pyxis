@@ -80,7 +80,11 @@ Pyxis follows [Conventional Commits 1.0.0](https://www.conventionalcommits.org/e
 `{feat, fix, perf, refactor, test, docs, build, ci, chore, revert}`.
 
 `scope` ∈
-`{platform, renderer, hydra, usd_ingest, material, app, shaders, build, ci, docs, rfc}`.
+`{platform, renderer, hydra, usd_ingest, material, app, shaders, build, ci, docs, rfc,
+m0, m1, m2, m3, m3.5, m4, m5, m6, m7, m8a, m8b, m9, m10, m11}`.
+
+The milestone scopes (`m0..m11`) are reserved for the *squash-merge* commit
+that lands a milestone PR on `main`. See "Milestone branches" below.
 
 CI lints commit messages via `_tools/check_commit_messages.py`. A breaking
 change footer **plus** a `version.txt` major bump are required for any change
@@ -96,6 +100,58 @@ that breaks `Public/` source compatibility (plan §22.1).
 - Force-pushes to a feature branch are allowed only by the branch's author.
 - Hooks (`--no-verify`, `--no-gpg-sign`) **must not** be skipped on commit
   unless the user has explicitly approved a one-off bypass.
+
+## Milestone branches
+
+Pyxis ships in milestones M0..M11 (plan §38 / §41). **Each milestone is its own
+branch and its own PR**, squash-merged to `main` when complete:
+
+```
+milestone/m0-skeleton
+milestone/m1-viewer-triangle
+milestone/m2-headless-triangle
+milestone/m3-pathtrace-box
+milestone/m3.5-default-scene
+milestone/m4-hydra-stub-and-usd-direct-stub
+milestone/m5-usdpreview-to-openpbr
+milestone/m6-native-instancing
+milestone/m7-lighting
+milestone/m8a-moana-subset
+milestone/m8b-moana-full-load
+milestone/m9-moana-visually-correct
+milestone/m10-moana-headless-regression
+milestone/m11-profiling-polish
+```
+
+Workflow:
+
+1. `git checkout -b milestone/m<N>-<slug>` off `main`.
+2. Iterate freely on the branch — small focused commits, Conventional-Commits
+   subjects, code-style + clang-tidy clean per §30 / §36.2 (the build gates
+   both via `/W4 /WX` and `CMAKE_CXX_CLANG_TIDY`).
+3. Every PR checklist (§45.1) item is green; the milestone's §41 exit
+   criteria are demonstrably met (a one-line "Verification" section in the
+   PR body that names what proves each criterion: `pyxis.exe --headless`
+   logs, `ctest --preset dev` summary, regression image RMSE, …).
+4. Open a PR `feat(m<N>): <milestone title>` against `main`. Required
+   reviewers per §45.2 CODEOWNERS for any path the milestone touches.
+5. **Squash-merge.** The squash subject becomes the single commit on `main`
+   (e.g. `feat(m1): viewer triangle (#42)`). The branch stays around as
+   immutable history of that milestone's iteration.
+6. Tag the squash commit: `git tag m1-done <sha>` (post-merge, on `main`).
+
+> **M0 exception.** M0 (the bootstrap milestone) landed directly on `main`
+> across 12 small commits before this convention was written down. Its
+> per-step audit trail is genuinely useful and is preserved as-is. From M1
+> onward every milestone uses the branch + squash-merge flow above.
+
+Branch-naming is enforced loosely: anything matching
+`^milestone/m[0-9]+(\\.[0-9]+)?(-[a-z0-9-]+)?$` is fine. CI clang-tidy and
+`/W4 /WX` are the same gates on a milestone branch as on `main`.
+
+A *post-merge* hotfix to a milestone (S1 incident — §45.3) does not need a
+new milestone branch; it follows the standard `fix(<scope>): ...` flow on a
+short-lived `fix/<slug>` branch and squash-merges to `main`.
 
 ---
 
