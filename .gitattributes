@@ -1,0 +1,51 @@
+# Default: detect text and normalize to LF in the repo
+* text=auto eol=lf
+
+# Windows-only scripts: keep CRLF
+*.ps1   text eol=crlf
+*.cmd   text eol=crlf
+*.bat   text eol=crlf
+
+# Source files: explicit text
+*.c     text
+*.cc    text
+*.cpp   text
+*.cxx   text
+*.h     text
+*.hh    text
+*.hpp   text
+*.ipp   text
+*.inl   text
+*.slang text
+*.hlsli text
+*.hlsl  text
+*.glsl  text
+*.cmake text
+*.txt   text
+*.md    text
+*.json  text
+*.jsonc text
+*.yml   text
+*.yaml  text
+*.py    text
+*.sh    text eol=lf
+
+# Binary artefacts: never normalise
+*.exr   binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.bmp   binary
+*.tga   binary
+*.tex   binary
+*.dds   binary
+*.pdb   binary
+*.dll   binary
+*.exe   binary
+*.lib   binary
+*.obj   binary
+*.spv   binary
+*.usd   binary
+*.usdc  binary
+*.usdz  binary
+*.bin   binary

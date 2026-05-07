@@ -1,0 +1,76 @@
+# Build / CMake
+build/
+out/
+_build/
+_deps/
+*.cmake.cache
+CMakeUserPresets.json
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+
+# vcpkg
+vcpkg_installed/
+.vcpkg-root
+vcpkg-bootstrap.log
+vcpkg-init.log
+
+# Generated NOTICE
+NOTICE.generated
+
+# IDE / editor
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.sln.docstates
+*.swp
+*.swo
+*~
+
+# Compiler / linker outputs
+*.obj
+*.o
+*.lib
+*.dll
+*.exe
+*.pdb
+*.ilk
+*.exp
+*.dSYM/
+*.spv
+
+# Test / regression / profile outputs
+out/profile.json
+out/profile.csv
+out/frame.exr
+out/frame.png
+out/effective.json
+out/load_profile.json
+out/frame_profile.csv
+*.nv-gpudmp
+*.dmp
+
+# Logs
+*.log
+Logs/
+
+# Caches
+.cache/
+.ccache/
+__pycache__/
+*.pyc
+
+# Crash reports / minidumps
+Crashes/
+
+# Local user config
+parameters.local.json
+
+# OS detritus
+Thumbs.db
+.DS_Store
+desktop.ini

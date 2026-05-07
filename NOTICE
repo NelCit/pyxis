@@ -1,0 +1,136 @@
+Pyxis
+Copyright 2026 The Pyxis Project Authors
+
+This product includes software developed at The Pyxis Project (the "Project").
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+================================================================================
+Third-party software included or linked by Pyxis
+================================================================================
+
+This NOTICE file is the canonical attribution surface for every third-party
+component Pyxis links against, in source or binary form. Per plan §48.3 it is
+asserted byte-equal in CI to `NOTICE.generated` produced by
+`_tools/license_audit.py`. Adding or removing a dependency requires updating
+both files in the same PR.
+
+All listed components are distributed under licenses compatible with Apache 2.0
+(MIT, BSD-2/3, Apache-2.0, Zlib, public domain / Unlicense, or
+Boost-equivalent). No GPL, AGPL, or SSPL components are linked.
+
+--------------------------------------------------------------------------------
+OpenUSD (Universal Scene Description)
+  https://github.com/PixarAnimationStudios/OpenUSD
+  Modified Apache 2.0 (TOST license — Apache 2.0 with redistribution clauses
+  reflecting Pixar trademark guidance).
+  Used by: pyxis_hydra, pyxis_usd_ingest, pyxis_material_translation.
+
+MaterialX
+  https://github.com/AcademySoftwareFoundation/MaterialX
+  Apache 2.0 (with modifications, see MaterialX LICENSE).
+  Used by: pyxis_material_translation (MaterialX → OpenPBR translation).
+
+NVRHI
+  https://github.com/NVIDIAGameWorks/nvrhi
+  MIT License.
+  Used by: pyxis_platform (Vulkan device abstraction), pyxis_renderer.
+
+Slang
+  https://github.com/shader-slang/slang
+  Apache 2.0 with LLVM exceptions.
+  Used by: shader compilation pipeline.
+
+ShaderMake
+  https://github.com/NVIDIA-RTX/ShaderMake
+  MIT License.
+  Used by: build-time shader permutation expansion + Slang invocation.
+
+Vulkan-Headers
+  https://github.com/KhronosGroup/Vulkan-Headers
+  Apache 2.0.
+  Used by: pyxis_platform (Vulkan API headers).
+
+GLFW
+  https://github.com/glfw/glfw
+  Zlib/libpng License.
+  Used by: pyxis_platform (viewer-mode window + input).
+
+Dear ImGui (docking branch)
+  https://github.com/ocornut/imgui
+  MIT License.
+  Used by: pyxis_app (viewer UI).
+
+Tracy
+  https://github.com/wolfpld/tracy
+  3-clause BSD License.
+  Used by: pyxis_platform (CPU/GPU profiling).
+
+spdlog
+  https://github.com/gabime/spdlog
+  MIT License.
+  Used by: pyxis_platform (logging).
+
+Flecs
+  https://github.com/SanderMertens/flecs
+  MIT License.
+  Used by: pyxis_renderer (SceneWorld ECS — linked PRIVATE; no Flecs header
+  is exposed through pyxis_renderer/Public/).
+
+moodycamel-concurrentqueue
+  https://github.com/cameron314/concurrentqueue
+  Simplified BSD License (with LICENSE.md attribution).
+  Used by: pyxis_renderer (multi-producer / single-consumer mutation queue).
+
+hlslpp
+  https://github.com/redorav/hlslpp
+  MIT License.
+  Used by: pyxis_renderer, pyxis_renderer/Public/* (HLSL-shaped C++ math types
+  for shader interop; deliberately chosen over GLM for HLSL/Slang semantics).
+
+nlohmann/json
+  https://github.com/nlohmann/json
+  MIT License.
+  Used by: pyxis_app (parameters.json parsing, JSON profiling output).
+
+stb (stb_image, stb_image_write)
+  https://github.com/nothings/stb
+  Public Domain (Unlicense) / MIT (dual).
+  Used by: pyxis_renderer (LDR texture decode), pyxis_app (PNG output).
+
+tinyexr
+  https://github.com/syoyo/tinyexr
+  3-clause BSD License.
+  Used by: pyxis_renderer (HDR/EXR texture decode), pyxis_app (EXR output).
+
+MikkTSpace
+  https://github.com/mmikk/MikkTSpace
+  Zlib License.
+  Used by: pyxis_renderer (tangent-space generation for normal maps).
+
+GoogleTest
+  https://github.com/google/googletest
+  3-clause BSD License.
+  Used by: pyxis_unit_tests (unit-test framework, not shipped in release
+  binaries).
+
+================================================================================
+Optional / build-time-only third-party components
+================================================================================
+
+NVIDIA Aftermath SDK (optional, gated by PYXIS_ENABLE_AFTERMATH)
+  https://developer.nvidia.com/nsight-aftermath
+  NVIDIA Aftermath SDK License Agreement.
+  Used by: pyxis_platform (Debug-only, Windows-only crash diagnostics).
+  Not redistributed in the Pyxis source tree; consumers must source the SDK
+  separately from NVIDIA. The optional integration code is gated by a CMake
+  flag and excluded from default builds.
+
+NVIDIA Nsight Capture (optional)
+  https://developer.nvidia.com/nsight-graphics
+  NVIDIA SDK License.
+  Used by: pyxis_platform (optional capture hookup, Debug-only).
+  Same redistribution policy as Aftermath above.
+
+================================================================================
+End of NOTICE
+================================================================================
