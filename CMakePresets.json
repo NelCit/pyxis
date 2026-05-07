@@ -8,16 +8,13 @@
       "hidden": true,
       "generator": "Ninja Multi-Config",
       "binaryDir": "${sourceDir}/build/${presetName}",
-      "toolchainFile": "${sourceDir}/_cmake/clang-cl.toolchain.cmake",
+      "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
       "cacheVariables": {
-        "CMAKE_TOOLCHAIN_FILE": {
-          "type": "FILEPATH",
-          "value": "${sourceDir}/_cmake/clang-cl.toolchain.cmake"
-        },
         "CMAKE_CONFIGURATION_TYPES": "Debug;Release;RelWithDebInfo",
-        "VCPKG_OVERLAY_TRIPLETS": "${sourceDir}/_cmake/triplets",
-        "VCPKG_TARGET_TRIPLET":   "x64-windows-pyxis",
-        "VCPKG_HOST_TRIPLET":     "x64-windows-pyxis"
+        "VCPKG_TARGET_TRIPLET":      "x64-windows",
+        "VCPKG_HOST_TRIPLET":        "x64-windows",
+        "CMAKE_C_COMPILER":          "clang-cl",
+        "CMAKE_CXX_COMPILER":        "clang-cl"
       },
       "environment": {
         "VCPKG_FEATURE_FLAGS": "manifests,versions,binarycaching"
