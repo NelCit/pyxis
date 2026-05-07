@@ -20,8 +20,8 @@ namespace pyxis::app {
 
 namespace {
 
-constexpr int kExitOk         = 0;
-constexpr int kExitConfigFail = 3;
+constexpr int EXIT_OK         = 0;
+constexpr int EXIT_CONFIG_FAIL = 3;
 
 void ConfigureLogging() noexcept {
     LogConfig cfg{};
@@ -38,7 +38,7 @@ void EmitVersionBanner() noexcept {
                   pyxis::GetVersionString(),
                   pyxis::GetVersionEncoded(),
                   pyxis::GetVersionGitSha());
-    log.Info(log::kApp, banner);
+    log.Info(log::APP, banner);
 }
 
 }  // namespace
@@ -53,17 +53,17 @@ int Run(int argc, char** argv) noexcept {
                      static_cast<int>(cli.invalidArg.size()),
                      cli.invalidArg.data());
         PrintUsage();
-        return kExitConfigFail;
+        return EXIT_CONFIG_FAIL;
     }
 
     if (cli.showHelp) {
         PrintUsage();
-        return kExitOk;
+        return EXIT_OK;
     }
 
     if (cli.showVersion) {
         PrintVersion();
-        return kExitOk;
+        return EXIT_OK;
     }
 
     EmitVersionBanner();

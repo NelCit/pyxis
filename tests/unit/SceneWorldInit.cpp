@@ -61,13 +61,13 @@ TEST(SceneWorldInit, ShutdownThenReinit) {
 }
 
 // Plan §19.7 — slot + generation handle bits are encoded in
-// kHandleSlotMask / kHandleGenerationMask.  Asserting them at compile
+// HANDLE_SLOT_MASK / HANDLE_GENERATION_MASK.  Asserting them at compile
 // time keeps the layout pinned (a non-additive change becomes an
 // instantly-failing build, not a silent regression).
-static_assert(pyxis::kHandleSlotBits        == 24, "slot bits must be 24 (§19.7)");
-static_assert(pyxis::kHandleGenerationBits  ==  8, "generation bits must be 8 (§19.7)");
-static_assert(pyxis::kHandleSlotMask        == 0x00FFFFFFu);
-static_assert(pyxis::kHandleGenerationMask  == 0xFF000000u);
-static_assert(pyxis::kMaxFramesInFlight     ==  3, "kMaxFramesInFlight must be 3 (§33.1)");
+static_assert(pyxis::HANDLE_SLOT_BITS        == 24, "slot bits must be 24 (§19.7)");
+static_assert(pyxis::HANDLE_GENERATION_BITS  ==  8, "generation bits must be 8 (§19.7)");
+static_assert(pyxis::HANDLE_SLOT_MASK        == 0x00FFFFFFu);
+static_assert(pyxis::HANDLE_GENERATION_MASK  == 0xFF000000u);
+static_assert(pyxis::MAX_FRAMES_IN_FLIGHT     ==  3, "MAX_FRAMES_IN_FLIGHT must be 3 (§33.1)");
 
 }  // namespace

@@ -49,12 +49,12 @@ bool SceneWorld::Init() noexcept {
 #if defined(PYXIS_DEBUG_TOOLS) && defined(FLECS_REST)
     // Flecs Explorer at http://localhost:27750 (Debug only — §30.11 / §4).
     _world->set<flecs::Rest>({});
-    Logging::Get().Info(log::kRender, "Flecs Explorer up at http://localhost:27750");
+    Logging::Get().Info(log::RENDER, "Flecs Explorer up at http://localhost:27750");
 #endif
 
     _alive     = true;
     _tickCount = 0;
-    Logging::Get().Info(log::kRender, "SceneWorld: initialised, phase pipeline live");
+    Logging::Get().Info(log::RENDER, "SceneWorld: initialised, phase pipeline live");
     return true;
 }
 

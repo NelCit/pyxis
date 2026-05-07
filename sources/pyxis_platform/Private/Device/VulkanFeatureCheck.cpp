@@ -44,7 +44,7 @@ bool QueryAdapterFeatures(VkPhysicalDevice device, AdapterInfo& outInfo) noexcep
     }
 
     const std::size_t nameLen =
-        std::min<std::size_t>(std::strlen(props.deviceName), AdapterInfo::kNameCapacity - 1);
+        std::min<std::size_t>(std::strlen(props.deviceName), AdapterInfo::NAME_CAPACITY - 1);
     std::memcpy(outInfo.name.data(), props.deviceName, nameLen);
     outInfo.name[nameLen] = '\0';
     outInfo.nameSize      = static_cast<uint16_t>(nameLen);
@@ -100,7 +100,7 @@ bool QueryAdapterFeatures(VkPhysicalDevice device, AdapterInfo& outInfo) noexcep
         ok = false;
         std::string msg = "missing required feature/extension: ";
         msg += name;
-        log.Error(log::kPlatform, msg);
+        log.Error(log::PLATFORM, msg);
     };
 
     if (!outInfo.supportsRayTracingPipeline)     missing(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME);

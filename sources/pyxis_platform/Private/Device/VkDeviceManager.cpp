@@ -28,7 +28,7 @@ namespace pyxis {
 
 namespace {
 
-constexpr uint32_t kVulkanApiVersion = VK_API_VERSION_1_3;
+constexpr uint32_t VULKAN_API_VERSION = VK_API_VERSION_1_3;
 
 const char* StatusName(DeviceManagerCreateStatus s) noexcept {
     switch (s) {
@@ -56,7 +56,7 @@ VkInstance CreateInstance(bool enableValidation,
     appInfo.applicationVersion = appVersion;
     appInfo.pEngineName        = "Pyxis";
     appInfo.engineVersion      = 0;
-    appInfo.apiVersion         = kVulkanApiVersion;
+    appInfo.apiVersion         = VULKAN_API_VERSION;
 
     std::vector<const char*> extensions;
     // M0: no surface yet; viewer mode adds VK_KHR_surface + VK_KHR_win32_surface in M1.
@@ -108,7 +108,7 @@ DeviceManagerCreateStatus VkDeviceManager::Bringup(const DeviceCreationParams& p
                                params.applicationName, params.applicationVersion,
                                &instStatus);
     if (_instance == VK_NULL_HANDLE) {
-        log.Error(log::kPlatform, "VkDeviceManager: VkInstance creation failed");
+        log.Error(log::PLATFORM, "VkDeviceManager: VkInstance creation failed");
         return instStatus;
     }
 
@@ -116,7 +116,7 @@ DeviceManagerCreateStatus VkDeviceManager::Bringup(const DeviceCreationParams& p
     uint32_t deviceCount = 0;
     vkEnumeratePhysicalDevices(_instance, &deviceCount, nullptr);
     if (deviceCount == 0) {
-        log.Error(log::kPlatform, "VkDeviceManager: no Vulkan-capable GPU found");
+        log.Error(log::PLATFORM, "VkDeviceManager: no Vulkan-capable GPU found");
         return DeviceManagerCreateStatus::NoCompatibleAdapter;
     }
     std::vector<VkPhysicalDevice> physicalDevices(deviceCount);
@@ -143,7 +143,7 @@ DeviceManagerCreateStatus VkDeviceManager::Bringup(const DeviceCreationParams& p
         }
     }
     if (bestIndex < 0) {
-        log.Error(log::kPlatform, "VkDeviceManager: no GPU satisfies §5.b required features");
+        log.Error(log::PLATFORM, "VkDeviceManager: no GPU satisfies §5.b required features");
         return DeviceManagerCreateStatus::FeatureMissing;
     }
 
@@ -165,7 +165,7 @@ DeviceManagerCreateStatus VkDeviceManager::Bringup(const DeviceCreationParams& p
         }
     }
     if (!foundGraphics) {
-        log.Error(log::kPlatform, "VkDeviceManager: chosen GPU has no graphics queue family");
+        log.Error(log::PLATFORM, "VkDeviceManager: chosen GPU has no graphics queue family");
         return DeviceManagerCreateStatus::FeatureMissing;
     }
 
@@ -202,7 +202,7 @@ DeviceManagerCreateStatus VkDeviceManager::Bringup(const DeviceCreationParams& p
     dInfo.pEnabledFeatures        = &coreFeatures;
 
     if (vkCreateDevice(_physicalDevice, &dInfo, nullptr, &_device) != VK_SUCCESS) {
-        log.Error(log::kPlatform, "VkDeviceManager: vkCreateDevice failed");
+        log.Error(log::PLATFORM, "VkDeviceManager: vkCreateDevice failed");
         return DeviceManagerCreateStatus::DeviceCreationFailed;
     }
     vkGetDeviceQueue(_device, _graphicsFamily, 0, &_graphicsQueue);
@@ -216,7 +216,7 @@ DeviceManagerCreateStatus VkDeviceManager::Bringup(const DeviceCreationParams& p
         msg += "  vram=";
         msg += std::to_string(_adapter.totalDeviceLocalBytes / (1024ull * 1024ull));
         msg += " MiB";
-        log.Info(log::kPlatform, msg);
+        log.Info(log::PLATFORM, msg);
     }
 
     // M0: NVRHI wrap is deferred until the FetchContent SHA in
@@ -275,7 +275,7 @@ IDeviceManager* CreateWindowedDeviceManager(const DeviceCreationParams&  params,
     auto* dm = new VkDeviceManager(params, initialBackbuffer, &localStatus);
     if (status) *status = localStatus;
     if (localStatus != DeviceManagerCreateStatus::Ok) {
-        Logging::Get().Error(log::kPlatform,
+        Logging::Get().Error(log::PLATFORM,
             std::string{"CreateWindowedDeviceManager: failed with status="} + StatusName(localStatus));
         delete dm;
         return nullptr;

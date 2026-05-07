@@ -16,22 +16,25 @@ class ICommandList;
 
 namespace pyxis {
 
-// Strong handles per plan §19.7 — 24-bit slot + 8-bit generation. kInvalid = 0.
-enum class MeshHandle     : uint32_t { kInvalid = 0 };
-enum class MaterialHandle : uint32_t { kInvalid = 0 };
-enum class TextureHandle  : uint32_t { kInvalid = 0 };
-enum class InstanceHandle : uint32_t { kInvalid = 0 };
-enum class LightHandle    : uint32_t { kInvalid = 0 };
+// Strong handles per plan §18.9 / §19.7. The underlying type AND the
+// `Invalid = 0` symbol name are part of the byte-frozen ABI contract.
+// Runtime values pack a 24-bit slot + 8-bit generation into the uint32_t
+// (§19.7); the literal `0` enumerator is the canonical "no handle" sentinel.
+enum class MeshHandle     : uint32_t { Invalid = 0 };
+enum class MaterialHandle : uint32_t { Invalid = 0 };
+enum class TextureHandle  : uint32_t { Invalid = 0 };
+enum class InstanceHandle : uint32_t { Invalid = 0 };
+enum class LightHandle    : uint32_t { Invalid = 0 };
 
 // 24-bit slot mask + 8-bit generation mask (plan §19.7).
-inline constexpr uint32_t kHandleSlotBits       = 24;
-inline constexpr uint32_t kHandleGenerationBits = 8;
-inline constexpr uint32_t kHandleSlotMask       = (1u << 24) - 1u;
-inline constexpr uint32_t kHandleGenerationMask = ~kHandleSlotMask;
+inline constexpr uint32_t HANDLE_SLOT_BITS       = 24;
+inline constexpr uint32_t HANDLE_GENERATION_BITS = 8;
+inline constexpr uint32_t HANDLE_SLOT_MASK       = (1u << 24) - 1u;
+inline constexpr uint32_t HANDLE_GENERATION_MASK = ~HANDLE_SLOT_MASK;
 
 // Compile-time cap for every per-frame ring (command lists, binding sets,
 // staging, deletion, queries). Plan §33.1.
-inline constexpr uint32_t kMaxFramesInFlight = 3;
+inline constexpr uint32_t MAX_FRAMES_IN_FLIGHT = 3;
 
 // Future public surface — forward-declared so consumers compile against the
 // shape now. Definitions appear in their respective headers when the

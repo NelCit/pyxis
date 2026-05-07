@@ -17,7 +17,7 @@ namespace pyxis {
 
 class PYXIS_PLATFORM_API Path final {
 public:
-    static constexpr std::size_t kCapacity = 1024;  // > MAX_PATH; tolerates long paths.
+    static constexpr std::size_t CAPACITY = 1024;  // > MAX_PATH; tolerates long paths.
 
     Path() = default;
     explicit Path(std::string_view utf8);
@@ -27,7 +27,7 @@ public:
     [[nodiscard]] bool             IsDirectory() const noexcept;
     [[nodiscard]] bool             IsAbsolute() const noexcept;
 
-    // Replaces the path's contents from a UTF-8 view. Truncates to kCapacity.
+    // Replaces the path's contents from a UTF-8 view. Truncates to CAPACITY.
     void Assign(std::string_view utf8) noexcept;
 
     // Joins `child` onto the current path with the platform separator.
@@ -42,7 +42,7 @@ public:
     [[nodiscard]] bool EnsureDirectoryExists() const noexcept;
 
 private:
-    std::array<char, kCapacity> _buf{};
+    std::array<char, CAPACITY> _buf{};
     uint16_t                    _size = 0;
 };
 

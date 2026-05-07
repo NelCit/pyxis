@@ -76,8 +76,12 @@ if(PYXIS_ENABLE_CLANG_TIDY)
         # Honour our repo-root .clang-tidy (§36.2).
         "--config-file=${CMAKE_SOURCE_DIR}/.clang-tidy"
         # Restrict header diagnostics to our own sources so we don't trip on
-        # vcpkg / Vulkan / Flecs headers we don't control.
-        "--header-filter=${CMAKE_SOURCE_DIR}/sources/pyxis_.*"
+        # vcpkg / Vulkan / Flecs headers we don't control. The character
+        # class `[/\\]` is mandatory: on Windows clang-tidy emits absolute
+        # header paths with backslashes for the prefix, so the historical
+        # forward-slash-only regex silently skipped every Public/ header
+        # and let bad-naming / enum-size issues sneak through the build.
+        "--header-filter=.*[/\\\\]sources[/\\\\]pyxis_.*"
         # Plan §37: any new diagnostic fails the build.
         "--warnings-as-errors=*")
     message(STATUS "Pyxis: clang-tidy enabled (${PYXIS_CLANG_TIDY_EXE})")

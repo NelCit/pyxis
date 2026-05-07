@@ -8,6 +8,7 @@ Checks: >
   bugprone-*,
   -bugprone-easily-swappable-parameters,
   performance-*,
+  -performance-enum-size,
   modernize-use-nullptr,
   modernize-use-override,
   modernize-use-default-member-init,
@@ -46,20 +47,24 @@ CheckOptions:
   readability-identifier-naming.ProtectedMemberPrefix:     '_'
   readability-identifier-naming.ProtectedMemberCase:       camelBack
 
-  readability-identifier-naming.GlobalConstantCase:        CamelCase
-  readability-identifier-naming.GlobalConstantPrefix:      'k'
-  readability-identifier-naming.ConstexprVariableCase:     CamelCase
-  readability-identifier-naming.ConstexprVariablePrefix:   'k'
-  readability-identifier-naming.StaticConstantCase:        CamelCase
-  readability-identifier-naming.StaticConstantPrefix:      'k'
+  # Compile-time constants share the macro casing (UPPER_CASE, no prefix
+  # — macros keep their PYXIS_ prefix). House preference; the §30.2 row
+  # has been updated in lockstep.
+  readability-identifier-naming.GlobalConstantCase:        UPPER_CASE
+  readability-identifier-naming.ConstexprVariableCase:     UPPER_CASE
+  readability-identifier-naming.StaticConstantCase:        UPPER_CASE
+  readability-identifier-naming.ClassConstantCase:         UPPER_CASE
 
   readability-identifier-naming.NamespaceCase:             lower_case
 
   readability-identifier-naming.MacroDefinitionCase:       UPPER_CASE
   readability-identifier-naming.MacroDefinitionPrefix:     'PYXIS_'
 
+  # Enum constants are plain CamelCase (no prefix) — house preference.
+  # Compile-time scalar constants use UPPER_CASE (above) so the two
+  # categories are visually distinct; macros keep their PYXIS_ prefix on
+  # top of UPPER_CASE.
   readability-identifier-naming.EnumConstantCase:          CamelCase
-  readability-identifier-naming.EnumConstantPrefix:        'k'
 
   # Performance: avoid silent surprise from copies in range-based for.
   performance-for-range-copy.WarnOnAllAutoCopies: true

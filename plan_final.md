@@ -384,7 +384,7 @@ Pyxis that touches raw Vulkan or GLFW; every other module sees `nvrhi::IDevice*`
 - The `VkDevice` + queues (graphics / compute / transfer; one queue family per role where the driver supports it, otherwise the closest fit).
 - The `nvrhi::IDevice*` wrapping that VkDevice — *owned* here, *borrowed* by every
   consumer (§32).
-- Per-frame fence / timeline-semaphore plumbing (`kMaxFramesInFlight = 3`).
+- Per-frame fence / timeline-semaphore plumbing (`MAX_FRAMES_IN_FLIGHT = 3`).
 - Aftermath / Nsight hookup (Debug only, §33.9).
 - Lifetime: ctor creates instance + device; dtor `vkDeviceWaitIdle` then tears down.
 
@@ -677,7 +677,7 @@ class IRenderPass {
 ```
 
 `PassContext` exposes `GpuScene*`, `RenderSettings*`, `ProfilerScope*`, `frameIndex`,
-`framesInFlight` (runtime active count, `\u2264 kMaxFramesInFlight` \u2014 \u00a730.1). ImGui is
+`framesInFlight` (runtime active count, `\u2264 MAX_FRAMES_IN_FLIGHT` \u2014 \u00a730.1). ImGui is
 not visible from passes.
 
 ### 9.1 Worked example — `ToneMapPass`
@@ -724,11 +724,11 @@ class ToneMapPass final : public IRenderPass {
   nvrhi::BindingLayoutHandle     _bindingLayout;
   nvrhi::ComputePipelineHandle   _pipeline;
 
-  // Ring of binding sets: one per frame in flight (kMaxFramesInFlight, §33.1).
-  // The compile-time cap is kMaxFramesInFlight = 3; the runtime active count
+  // Ring of binding sets: one per frame in flight (MAX_FRAMES_IN_FLIGHT, §33.1).
+  // The compile-time cap is MAX_FRAMES_IN_FLIGHT = 3; the runtime active count
   // is `GpuSceneCreateDesc::framesInFlight` (default 2, headless 3 — §33.1).
   // Recreated on resize when SRV/UAV identities change.
-  std::array<nvrhi::BindingSetHandle, kMaxFramesInFlight> _bindingSets{};
+  std::array<nvrhi::BindingSetHandle, MAX_FRAMES_IN_FLIGHT> _bindingSets{};
 
   // Resource handles registered with the graph in Declare(); resolved each Execute().
   RgTextureRef _hdrInput{};   // ToneMap reads
@@ -790,7 +790,7 @@ void ToneMapPass::Execute(nvrhi::ICommandList* cl, const PassContext& ctx) {
   nvrhi::ITexture* hdr = ctx.graph->Resolve(_hdrInput);
   nvrhi::ITexture* ldr = ctx.graph->Resolve(_ldrOutput);
 
-  const uint32_t frameSlot = ctx.frameIndex % ctx.framesInFlight;  // runtime, ≤ kMaxFramesInFlight
+  const uint32_t frameSlot = ctx.frameIndex % ctx.framesInFlight;  // runtime, ≤ MAX_FRAMES_IN_FLIGHT
   auto&          set       = _bindingSets[frameSlot];
 
   // Rebuild the binding set lazily when the resolved texture identity changes
@@ -818,9 +818,9 @@ void ToneMapPass::Execute(nvrhi::ICommandList* cl, const PassContext& ctx) {
   cl->setPushConstants(&constants, sizeof(constants));
 
   // 8x8 thread groups; matches numthreads in ToneMap.cs.
-  constexpr uint32_t kTileSize = 8;
-  cl->dispatch((constants.outputSize.x + kTileSize - 1) / kTileSize,
-               (constants.outputSize.y + kTileSize - 1) / kTileSize,
+  constexpr uint32_t TILE_SIZE = 8;
+  cl->dispatch((constants.outputSize.x + TILE_SIZE - 1) / TILE_SIZE,
+               (constants.outputSize.y + TILE_SIZE - 1) / TILE_SIZE,
                1);
 }
 
@@ -901,7 +901,7 @@ _renderGraph.AddPass(std::make_unique<CopyToHydraRenderBufferPass>(_device));
 6. **C++/Slang struct is shared via `PYXIS_INTEROP_STRUCT`** (§23). Layout is the
    default HLSL cbuffer/std140-equivalent rhythm (16-byte vector alignment —
    convention), row-major; never duplicate the struct in the shader.
-7. **Frame-in-flight ring of binding sets**: one entry per `kMaxFramesInFlight` slot
+7. **Frame-in-flight ring of binding sets**: one entry per `MAX_FRAMES_IN_FLIGHT` slot
    (compile-time cap = 3, §33.1); only the first `framesInFlight` slots are alive at
    runtime. A frame's binding set is never recycled while still in use by the GPU.
 8. **No exceptions, no RTTI, no `std::filesystem` calls in `Execute`** (§30.1).
@@ -941,8 +941,8 @@ namespace pyxis {
 // Opaque indices into RenderGraph's resource table. NOT pointers; valid only
 // for the graph instance that produced them. Comparable, hashable, default
 // construction = invalid.
-enum class RgTextureRef : uint32_t { kInvalid = 0 };
-enum class RgBufferRef  : uint32_t { kInvalid = 0 };
+enum class RgTextureRef : uint32_t { Invalid = 0 };
+enum class RgBufferRef  : uint32_t { Invalid = 0 };
 
 } // namespace pyxis
 ```
@@ -955,7 +955,7 @@ struct PassContext {
   RenderSettings*   settings       = nullptr;     // borrowed; mutable for reactive knobs
   RenderGraph*      graph          = nullptr;     // for Resolve(), BindingsInvalidated()
   uint64_t          frameIndex     = 0;           // monotonic; never wraps in v1
-  uint32_t          framesInFlight = 2;           // runtime, ≤ kMaxFramesInFlight (§33.1)
+  uint32_t          framesInFlight = 2;           // runtime, ≤ MAX_FRAMES_IN_FLIGHT (§33.1)
   uint2             renderResolution{};           // backbuffer pixels (not DIPs, §5)
 };
 ```
@@ -1057,7 +1057,7 @@ private:
 
   // Per-frame-slot, per-resource identity revisions remembered by passes via
   // BindingsInvalidated; flat dense table to keep Execute() allocation-free.
-  std::array<std::vector<uint64_t>, kMaxFramesInFlight> _seenRevisions{};
+  std::array<std::vector<uint64_t>, MAX_FRAMES_IN_FLIGHT> _seenRevisions{};
 };
 
 } // namespace pyxis
@@ -1284,7 +1284,7 @@ struct OpenPBRMaterialDesc {
   // Subsurface (deferred)
   float           subsurfaceWeight = 0.0f;
   hlslpp::float3  subsurfaceColor  = {1, 1, 1};
-  // Texture slots (TextureHandle::kInvalid if absent)
+  // Texture slots (TextureHandle::Invalid if absent)
   TextureHandle   baseColorMap, metallicMap, roughnessMap, normalMap,
                   emissionMap, opacityMap, transmissionMap, coatRoughnessMap;
   // Provenance \u2014 the enum is declared at namespace scope in OpenPBRMaterialDesc.h (see \u00a728.4);
@@ -1320,24 +1320,24 @@ so the closesthit shader's branchless dispatch reads the same bits.
 
 ```cpp
 enum class MaterialFlag : uint32_t {
-  kNone               = 0,
-  kDoubleSided        = 1u << 0,
-  kHasBaseColorMap    = 1u << 1,
-  kHasNormalMap       = 1u << 2,
-  kHasMetallicMap     = 1u << 3,
-  kHasRoughnessMap    = 1u << 4,
-  kHasEmissionMap     = 1u << 5,
-  kHasOpacityMap      = 1u << 6,
-  kHasTransmissionMap = 1u << 7,
-  kHasCoatRoughnessMap = 1u << 8,
-  kAlphaTested        = 1u << 9,   // opacityThreshold > 0
-  kCoatEnabled        = 1u << 10,  // coatWeight > 0
-  kTransmissionEnabled= 1u << 11,  // transmissionWeight > 0
-  kEmissive           = 1u << 12,  // emissionWeight > 0 OR emissionMap valid
+  None               = 0,
+  DoubleSided        = 1u << 0,
+  HasBaseColorMap    = 1u << 1,
+  HasNormalMap       = 1u << 2,
+  HasMetallicMap     = 1u << 3,
+  HasRoughnessMap    = 1u << 4,
+  HasEmissionMap     = 1u << 5,
+  HasOpacityMap      = 1u << 6,
+  HasTransmissionMap = 1u << 7,
+  HasCoatRoughnessMap = 1u << 8,
+  AlphaTested        = 1u << 9,   // opacityThreshold > 0
+  CoatEnabled        = 1u << 10,  // coatWeight > 0
+  TransmissionEnabled= 1u << 11,  // transmissionWeight > 0
+  Emissive           = 1u << 12,  // emissionWeight > 0 OR emissionMap valid
 };
 ```
 
-The closesthit shader uses `(flags & kCoatEnabled)` etc. to skip lobe evaluation
+The closesthit shader uses `(flags & CoatEnabled)` etc. to skip lobe evaluation
 entirely — "branchless on flags" means a single conditional per lobe, predicated on
 bit-test, never a string of `if (material has X)` lookups against texture handles.
 ```
@@ -1686,11 +1686,11 @@ namespace pyxis {
 
 // Strong handles (§30.4). Opaque to consumers; the renderer maps these to
 // `flecs::entity` via an internal HandleBimap (§8.2).
-enum class MeshHandle     : uint32_t { kInvalid = 0 };
-enum class MaterialHandle : uint32_t { kInvalid = 0 };
-enum class TextureHandle  : uint32_t { kInvalid = 0 };
-enum class InstanceHandle : uint32_t { kInvalid = 0 };
-enum class LightHandle    : uint32_t { kInvalid = 0 };
+enum class MeshHandle     : uint32_t { Invalid = 0 };
+enum class MaterialHandle : uint32_t { Invalid = 0 };
+enum class TextureHandle  : uint32_t { Invalid = 0 };
+enum class InstanceHandle : uint32_t { Invalid = 0 };
+enum class LightHandle    : uint32_t { Invalid = 0 };
 
 // POD descriptors (full definitions in Descs/*.h, summarised in §18.4).
 struct MeshDesc;
@@ -1736,8 +1736,8 @@ enum class ErrorKind : uint16_t { /* see §20 */ };
 // allocates; truncates with a trailing ellipsis past the buffer size.
 // Built by PYXIS_ERROR(...) at the failure site.
 struct ErrorMessage {
-  static constexpr size_t kCapacity = 240;
-  std::array<char, kCapacity> data{};
+  static constexpr size_t CAPACITY = 240;
+  std::array<char, CAPACITY> data{};
   uint16_t                    size = 0;   // not including null terminator
   [[nodiscard]] std::string_view View() const noexcept { return { data.data(), size }; }
 };
@@ -1787,7 +1787,7 @@ struct OpenPBRMaterialDesc {
   float          metalness    = 0.0f;
   float          roughness    = 0.5f;
   // ... specular / transmission / coat / emission / geometry blocks (see §11)
-  TextureHandle  baseColorMap = TextureHandle::kInvalid;
+  TextureHandle  baseColorMap = TextureHandle::Invalid;
   TextureHandle  metallicMap, roughnessMap, normalMap, emissionMap,
                  opacityMap, transmissionMap, coatRoughnessMap;
   enum class Source : uint8_t { UsdPreviewSurface, MaterialX, RenderManFallback, Default };
@@ -1801,8 +1801,8 @@ struct OpenPBRMaterialDesc {
 
 // Public/Pyxis/Renderer/Descs/InstanceDesc.h
 struct InstanceDesc {
-  MeshHandle        mesh        = MeshHandle::kInvalid;
-  MaterialHandle    material    = MaterialHandle::kInvalid;
+  MeshHandle        mesh        = MeshHandle::Invalid;
+  MaterialHandle    material    = MaterialHandle::Invalid;
   hlslpp::float4x4  worldFromLocal{};   // row-major (§10)
   bool              visible     = true;
   std::string_view  debugName;
@@ -1828,7 +1828,7 @@ struct LightDesc {
   // Distant
   hlslpp::float3   direction = {0, -1, 0};
   // Dome
-  TextureHandle    envMap    = TextureHandle::kInvalid;
+  TextureHandle    envMap    = TextureHandle::Invalid;
   // Rect
   hlslpp::float3   position  = {0, 0, 0};
   hlslpp::float3   axisU     = {1, 0, 0};
@@ -1866,14 +1866,14 @@ struct RenderSettings {
 
 // Public/Pyxis/Renderer/Descs/RenderTargets.h
 enum class AovFlag : uint32_t {
-  kNone         = 0,
-  kColor        = 1u << 0,
-  kDepth        = 1u << 1,
-  kNormal       = 1u << 2,
-  kAlbedo       = 1u << 3,
-  kMotionVector = 1u << 4,
-  kMaterialId   = 1u << 5,
-  kInstanceId   = 1u << 6,
+  None         = 0,
+  Color        = 1u << 0,
+  Depth        = 1u << 1,
+  Normal       = 1u << 2,
+  Albedo       = 1u << 3,
+  MotionVector = 1u << 4,
+  MaterialId   = 1u << 5,
+  InstanceId   = 1u << 6,
 };
 
 struct RenderTargets {
@@ -1894,7 +1894,7 @@ struct FrameStats {
   uint64_t blasCount, blasBytes, tlasBytes;
   uint64_t vertexBytes, indexBytes, textureBytes;
   uint64_t pendingUploads, pendingBlasBuilds;
-  uint64_t staleHandleDrops; // Destroy*/Update* on a recycled or kInvalid handle (§18.5)
+  uint64_t staleHandleDrops; // Destroy*/Update* on a recycled or Invalid handle (§18.5)
   bool     degraded;       // true if any soft-fallback fired this frame
 };
 
@@ -1909,8 +1909,8 @@ struct FrameProfile {
   // FrameProfile returned by LastFrameProfile() stays valid indefinitely — it does
   // not point into Profiler-owned storage that rotates on the next EndFrame.
   struct ScopeName {
-    static constexpr size_t kCapacity = 56;
-    std::array<char, kCapacity> data{};
+    static constexpr size_t CAPACITY = 56;
+    std::array<char, CAPACITY> data{};
     uint8_t                     size = 0;
     [[nodiscard]] std::string_view View() const noexcept { return { data.data(), size }; }
   };
@@ -2028,7 +2028,7 @@ public:
 
   // ── Stale-handle policy ────────────────────────────────────────────────
   // Destroy* and Update* verbs above return `void` by design: stale handles
-  // (handle whose generation has already been recycled, or InstanceHandle::kInvalid)
+  // (handle whose generation has already been recycled, or InstanceHandle::Invalid)
   // are silently ignored and counted in `FrameStats::staleHandleDrops` (§18.4).
   // Callers that need a hard guarantee probe with `HasMesh` / `HasMaterial` /
   // `HasTexture` / `HasInstance` first.
@@ -2228,7 +2228,7 @@ NVRHI-private headers escape through the public surface.
   `ErrorMessage`/`ScopeName` PODs precisely because of this rule).
 - Public method signatures are append-only between minor versions; renames or removals
   are major-version breaks.
-- Strong-handle enum underlying types are fixed at `uint32_t` and their `kInvalid = 0`
+- Strong-handle enum underlying types are fixed at `uint32_t` and their `Invalid = 0`
   contract is permanent.
 
 ### 18.10 Worked example — how a consumer uses the API
@@ -2341,7 +2341,7 @@ while (running) {
 
   // (B) Drain pending GPU work — uploads, BLAS builds, TLAS refit.
   //     Pull a pre-allocated command list from a per-frame ring sized to
-  //     `kMaxFramesInFlight`; only `framesInFlight` slots are live at runtime.
+  //     `MAX_FRAMES_IN_FLIGHT`; only `framesInFlight` slots are live at runtime.
   //     Recycle each entry after the frame's fence has signalled.
   nvrhi::ICommandList* commandList = _frameCommandLists[frameIndex % framesInFlight];
   commandList->open();
@@ -2449,7 +2449,7 @@ struct PyxisCapabilities {
   uint32_t maxInstancesPerTlas;
   uint32_t blasCompactionTriThreshold;
   // Frames in flight.
-  uint32_t maxFramesInFlight;     // == kMaxFramesInFlight
+  uint32_t maxFramesInFlight;     // == MAX_FRAMES_IN_FLIGHT
   uint32_t defaultFramesInFlight; // == GpuSceneCreateDesc default
   // Trailing reserved (§22.3).
   uint32_t _reserved0 = 0, _reserved1 = 0, _reserved2 = 0, _reserved3 = 0;
@@ -2567,8 +2567,8 @@ have to roll their own readback:
 
 ```cpp
 struct PickResult {
-  InstanceHandle instance = InstanceHandle::kInvalid;
-  MaterialHandle material = MaterialHandle::kInvalid;
+  InstanceHandle instance = InstanceHandle::Invalid;
+  MaterialHandle material = MaterialHandle::Invalid;
   hlslpp::float3 worldHit = {};
   float          distance = 0.0f;
   bool           isValid  = false;
@@ -2598,10 +2598,10 @@ struct PickResult {
 //   bits 24..31   generation  (256 reuses before wrap; on wrap the slot is
 //                              quarantined and the handle is allocated from a
 //                              fresh slot).
-constexpr uint32_t kHandleSlotBits       = 24;
-constexpr uint32_t kHandleGenerationBits = 8;
-constexpr uint32_t kHandleSlotMask       = (1u << 24) - 1u;
-constexpr uint32_t kHandleGenerationMask = ~kHandleSlotMask;
+constexpr uint32_t HANDLE_SLOT_BITS       = 24;
+constexpr uint32_t HANDLE_GENERATION_BITS = 8;
+constexpr uint32_t HANDLE_SLOT_MASK       = (1u << 24) - 1u;
+constexpr uint32_t HANDLE_GENERATION_MASK = ~HANDLE_SLOT_MASK;
 ```
 
 `HandleBimap` quarantines a slot whose generation reaches 255 and never reuses
@@ -2615,11 +2615,11 @@ The contract for null vs. enabled:
 - `RenderTargets::color` is always required; `nullptr` is
   `ErrorKind::AovColorRequired`.
 - For every other AOV (depth, normal, albedo, motionVector, materialId,
-  instanceId): if `enabledAovs & kFlag` is set **and** the corresponding
+  instanceId): if `enabledAovs & Flag` is set **and** the corresponding
   `RenderTargets::*` pointer is `nullptr`, `RenderFrame` returns
   `ErrorKind::AovTargetMissing` synchronously *before* opening the command
   list. No partial frame.
-- If `enabledAovs & kFlag` is *not* set, the corresponding pointer is ignored
+- If `enabledAovs & Flag` is *not* set, the corresponding pointer is ignored
   whether null or not.
 - `materialId` and `instanceId` AOVs share the requirement that the
   closesthit shader writes them; they cannot be silently dropped under high
@@ -3672,8 +3672,9 @@ standards and modern C++ Core Guidelines, narrowed for this codebase.
 | Public field of POD struct | `camelCase` | `RenderSettings::maxBounces` |
 | Private field | `_camelCase` | `_uploadQueue` |
 | Local variable | `camelCase` | `triangleCount` |
-| Constant (compile-time) | `kPascalCase` | `kMaxBindlessTextures` |
-| Macro | `PYXIS_SCREAM` | `PYXIS_DEBUG_TOOLS` |
+| Constant (compile-time, including `constexpr`/`static constexpr` members) | `UPPER_SNAKE_CASE` | `MAX_BINDLESS_TEXTURES`, `HANDLE_SLOT_BITS` |
+| Enum constant (`enum class` member) | `PascalCase` (no prefix) | `MaterialFlag::DoubleSided`, `MeshHandle::Invalid` |
+| Macro | `PYXIS_SCREAM` (UPPER_SNAKE_CASE with `PYXIS_` prefix) | `PYXIS_DEBUG_TOOLS` |
 | Namespace | `lowercase` | `pyxis` (single, flat — no per-module sub-namespace) |
 | File | `PascalCase.{h,cpp}` matches primary type | `GpuScene.h` |
 | Slang/HLSL identifier | `camelCase` for vars and entry points (`raygenMain`), `PascalCase` for structs | `OpenPBRMaterialGPU` |
@@ -3738,7 +3739,7 @@ convention and matches the SPIR-V tooling expectations.
 - **POD structs** (config, GPU layouts, `RenderSettings`): default-constructible, all members
   public, no non-trivial constructors, only data. Use designated initializers at use sites.
 - **Strong types** for handles: `MeshHandle`, `MaterialHandle`, etc. — `enum class` over
-  `uint32_t` with `kInvalid = 0`. No bare `uint32_t` indices crossing module boundaries.
+  `uint32_t` with `Invalid = 0`. No bare `uint32_t` indices crossing module boundaries.
 - `final` classes by default if not designed for inheritance.
 - `[[nodiscard]]` on every factory and every `std::expected`-returning function.
 
@@ -3927,13 +3928,13 @@ have an NVRHI device (Houdini / Maya plugins, sample apps embedding Pyxis side-b
 NVRHI handles most barriers; the rules below are what we add on top.
 
 ### 33.1 Frames in flight
-- `inline constexpr uint32_t kMaxFramesInFlight = 3;` is the compile-time upper bound
+- `inline constexpr uint32_t MAX_FRAMES_IN_FLIGHT = 3;` is the compile-time upper bound
   used to size every per-frame ring (command lists, binding sets, staging buffers,
-  deletion lists, query pools). It is the dimension of every `std::array<..., kMaxFramesInFlight>`
+  deletion lists, query pools). It is the dimension of every `std::array<..., MAX_FRAMES_IN_FLIGHT>`
   in the codebase.
 - `GpuSceneCreateDesc::framesInFlight` (default 2; 3 for headless determinism) is the
   *active* count actually in flight at runtime; the renderer asserts
-  `framesInFlight <= kMaxFramesInFlight` at construction.
+  `framesInFlight <= MAX_FRAMES_IN_FLIGHT` at construction.
 - One semaphore per active frame.
 - `DeletionQueue::flush(currentFrame - framesInFlight)` runs at start of frame.
 
@@ -4668,7 +4669,7 @@ what it must not foreclose.
 - **Skeletal animation (UsdSkel).** Adds `Dirty<SkinPose>`, a per-instance
   blendshape buffer, and a compute pre-pass that writes skinned vertex
   positions into a transient buffer the BLAS rebuild reads. v1 hook:
-  `MeshDesc::flags` reserves a `kSkinned` bit; `GpuInstance` reserves
+  `MeshDesc::flags` reserves a `Skinned` bit; `GpuInstance` reserves
   `skeletonHandle`; `BLAS_BUILD_FLAG_ALLOW_UPDATE` is already a known flag.
 - **Blend-shape / corrective targets.** Same compute pre-pass as skinning, with
   a per-target weight buffer. Reuses the skinned-vertex transient buffer.
@@ -4729,7 +4730,7 @@ what it must not foreclose.
   radius. Same intersection-program path as curves, simpler shader.
 - **Volumes (`UsdVolVolume` + OpenVDB).** Heterogeneous media path tracer
   with delta tracking / ratio tracking, NanoVDB on the GPU. Adds
-  `kVolume` to `MaterialFlag` and a separate any-hit path. v1 hook:
+  `Volume` to `MaterialFlag` and a separate any-hit path. v1 hook:
   `GeometryKind::Volume`.
 - **Displacement.** Either offline pre-displaced meshes (treat as plain
   polymesh) or runtime tessellation + displacement compute pass before
@@ -5207,7 +5208,7 @@ MINOR bump (§22.3) rather than a MAJOR rework.
   `hlslpp::float4x4 worldFromLocalPrev{};` (defaulted to identity ⇒
   prev == curr ⇒ zero motion vectors, matching §18.6's first-frame
   contract).
-- The motion-vector AOV (§18.4 `kMotionVector`) already uses the prev/curr
+- The motion-vector AOV (§18.4 `MotionVector`) already uses the prev/curr
   matrix pair, so adding shutter integration is a closesthit-shader change
   and a TLAS-build flag (`PREFER_FAST_BUILD | MOTION`), not an API break.
 - v1 closes the shutter unconditionally; M11 RFC re-enables.
@@ -5223,7 +5224,7 @@ MINOR bump (§22.3) rather than a MAJOR rework.
 ### 43.4 Tone-map LUT
 
 - Reserved field on `RenderSettings`: `TextureHandle toneMapLut3D =
-  TextureHandle::kInvalid;`. Sampler: `RenderSettings::ToneMap::Lut3D`
+  TextureHandle::Invalid;`. Sampler: `RenderSettings::ToneMap::Lut3D`
   added to the enum *at the end* (additive — §22.1 MINOR).
 - LUT format: 33³ RGB16F `.cube` decoded by `pyxis_app/Resources/cube_decoder.cpp`
   into a `Texture3D` uploaded through the standard `TextureCache`.

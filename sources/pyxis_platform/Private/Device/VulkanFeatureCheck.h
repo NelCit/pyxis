@@ -22,7 +22,7 @@ struct RequiredFeature {
     bool        required;         // false → optional (memory budget, etc.).
 };
 
-inline constexpr std::array<RequiredFeature, 12> kRequiredFeatures{{
+inline constexpr std::array<RequiredFeature, 12> REQUIRED_FEATURES{{
     { VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,                   true,  true  },
     { VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,                     true,  true  },
     { VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,                 true,  true  },

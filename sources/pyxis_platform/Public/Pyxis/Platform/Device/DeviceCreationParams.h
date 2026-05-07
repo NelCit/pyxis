@@ -22,7 +22,7 @@ struct DeviceCreationParams {
     // Aftermath crash diagnostics (Debug + Windows only — plan §33.9).
     bool enableAftermath = false;
 
-    // Number of frames in flight. Compile-time cap = kMaxFramesInFlight (3).
+    // Number of frames in flight. Compile-time cap = MAX_FRAMES_IN_FLIGHT (3).
     // Runtime default = 2 viewer / 3 headless for byte-identical EXR (§33.1).
     uint32_t framesInFlight = 2;
 
