@@ -2,6 +2,7 @@
 build/
 out/
 _build/
+_audit_build/
 _deps/
 *.cmake.cache
 CMakeUserPresets.json

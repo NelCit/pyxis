@@ -28,8 +28,12 @@ public:
     [[nodiscard]] uint32_t QueryCount() const noexcept { return _count; }
 
 private:
-    flecs::world* _world = nullptr;
-    uint32_t      _count = 0;
+    // World pointer is captured for the M3+ build-out (real flecs::query<...>
+    // construction will call back through it). M0 doesn't read it; mark it
+    // [[maybe_unused]] so /Werror,-Wunused-private-field doesn't fire while
+    // the field is part of the public contract that lands later.
+    [[maybe_unused]] flecs::world* _world = nullptr;
+    uint32_t                       _count = 0;
 };
 
 }  // namespace pyxis::scene

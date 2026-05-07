@@ -29,7 +29,10 @@ public:
     // Resolves a `relative` path against the Resources/ tree. Returns
     // an empty Path on miss; the renderer logs once and falls back to
     // the appropriate magenta/grey default.
-    [[nodiscard]] Path FindResource(std::string_view relative) const noexcept;
+    //
+    // Named LocateResource (not FindResource) because <windows.h> already
+    // `#define`s the latter to FindResourceA / FindResourceW.
+    [[nodiscard]] Path LocateResource(std::string_view relative) const noexcept;
 
     // %LOCALAPPDATA%/Pyxis/, the per-user state directory used by:
     //   - the rotating log sink (§47.2)

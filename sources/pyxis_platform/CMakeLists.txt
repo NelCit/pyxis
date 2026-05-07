@@ -69,9 +69,6 @@ target_link_libraries(pyxis_platform
 # helpers and SetUnhandledExceptionFilter on the future crash reporter.
 target_link_libraries(pyxis_platform PRIVATE Dbghelp Shlwapi)
 
-# Versioning (§22.2): pyxis_platform is the canonical owner of the
-# generated Version.h / Version.cpp because pyxis_renderer.dll links it
-# transitively for adapter logging.
-include(Version)
-pyxis_generate_version_header(pyxis_platform)
-pyxis_generate_version_source(pyxis_platform)
+# Versioning (§22.2): the version symbols live in pyxis_renderer.dll
+# (Version.h is decorated PYXIS_RENDERER_API). pyxis_platform doesn't
+# generate anything here.

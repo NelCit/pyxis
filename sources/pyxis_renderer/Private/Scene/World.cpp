@@ -32,14 +32,12 @@ SceneWorld::~SceneWorld() { Shutdown(); }
 bool SceneWorld::Init() noexcept {
     if (_alive) return true;
 
-    try {
-        _world = std::make_unique<flecs::world>();
-    } catch (...) {
-        // Flecs may throw std::bad_alloc on init; the renderer perimeter
-        // forbids exceptions (§30.6) so we catch and surface as a false
-        // return.
-        return false;
-    }
+    // Flecs's flecs::world ctor allocates internally. The renderer perimeter
+    // is /EHs-c- (§30.6) so a try/catch is unavailable; we rely on the
+    // PYXIS_NO_EXCEPTIONS path's std::set_terminate handler (§49) to flush
+    // logs + abort cleanly if the (rare) bad_alloc fires.
+    _world = std::make_unique<flecs::world>();
+    if (!_world) return false;
 
     RegisterComponents();
 

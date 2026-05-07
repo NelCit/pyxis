@@ -16,6 +16,10 @@ namespace pyxis {
 struct Logger::Impl {
     std::shared_ptr<spdlog::logger> logger;
     bool                            configured = false;
+
+    // Lazy default sink (a console-only logger) so calls before Configure()
+    // still produce output. Defined in SpdlogBackend.cpp.
+    void EnsureLogger() noexcept;
 };
 
 }  // namespace pyxis

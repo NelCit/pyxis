@@ -21,97 +21,111 @@ Boost-equivalent). No GPL, AGPL, or SSPL components are linked.
 --------------------------------------------------------------------------------
 OpenUSD (Universal Scene Description)
   https://github.com/PixarAnimationStudios/OpenUSD
-  Modified Apache 2.0 (TOST license — Apache 2.0 with redistribution clauses
-  reflecting Pixar trademark guidance).
+  Apache-2.0-Modified.
   Used by: pyxis_hydra, pyxis_usd_ingest, pyxis_material_translation.
+  TOST license — Apache 2.0 with redistribution clauses reflecting Pixar trademark guidance.
 
+--------------------------------------------------------------------------------
 MaterialX
   https://github.com/AcademySoftwareFoundation/MaterialX
-  Apache 2.0 (with modifications, see MaterialX LICENSE).
+  Apache-2.0.
   Used by: pyxis_material_translation (MaterialX → OpenPBR translation).
 
+--------------------------------------------------------------------------------
 NVRHI
   https://github.com/NVIDIAGameWorks/nvrhi
-  MIT License.
+  MIT.
   Used by: pyxis_platform (Vulkan device abstraction), pyxis_renderer.
 
+--------------------------------------------------------------------------------
 Slang
   https://github.com/shader-slang/slang
-  Apache 2.0 with LLVM exceptions.
+  Apache-2.0-LLVM.
   Used by: shader compilation pipeline.
 
+--------------------------------------------------------------------------------
 ShaderMake
   https://github.com/NVIDIA-RTX/ShaderMake
-  MIT License.
+  MIT.
   Used by: build-time shader permutation expansion + Slang invocation.
 
+--------------------------------------------------------------------------------
 Vulkan-Headers
   https://github.com/KhronosGroup/Vulkan-Headers
-  Apache 2.0.
+  Apache-2.0.
   Used by: pyxis_platform (Vulkan API headers).
 
+--------------------------------------------------------------------------------
 GLFW
   https://github.com/glfw/glfw
-  Zlib/libpng License.
+  Zlib.
   Used by: pyxis_platform (viewer-mode window + input).
 
+--------------------------------------------------------------------------------
 Dear ImGui (docking branch)
   https://github.com/ocornut/imgui
-  MIT License.
+  MIT.
   Used by: pyxis_app (viewer UI).
 
+--------------------------------------------------------------------------------
 Tracy
   https://github.com/wolfpld/tracy
-  3-clause BSD License.
+  BSD-3-Clause.
   Used by: pyxis_platform (CPU/GPU profiling).
 
+--------------------------------------------------------------------------------
 spdlog
   https://github.com/gabime/spdlog
-  MIT License.
+  MIT.
   Used by: pyxis_platform (logging).
 
+--------------------------------------------------------------------------------
 Flecs
   https://github.com/SanderMertens/flecs
-  MIT License.
-  Used by: pyxis_renderer (SceneWorld ECS — linked PRIVATE; no Flecs header
-  is exposed through pyxis_renderer/Public/).
+  MIT.
+  Used by: pyxis_renderer (SceneWorld ECS — linked PRIVATE).
 
+--------------------------------------------------------------------------------
 moodycamel-concurrentqueue
   https://github.com/cameron314/concurrentqueue
-  Simplified BSD License (with LICENSE.md attribution).
+  BSD-2-Clause.
   Used by: pyxis_renderer (multi-producer / single-consumer mutation queue).
 
+--------------------------------------------------------------------------------
 hlslpp
   https://github.com/redorav/hlslpp
-  MIT License.
-  Used by: pyxis_renderer, pyxis_renderer/Public/* (HLSL-shaped C++ math types
-  for shader interop; deliberately chosen over GLM for HLSL/Slang semantics).
+  MIT.
+  Used by: pyxis_renderer, pyxis_renderer/Public/* (HLSL-shaped C++ math types).
 
+--------------------------------------------------------------------------------
 nlohmann/json
   https://github.com/nlohmann/json
-  MIT License.
+  MIT.
   Used by: pyxis_app (parameters.json parsing, JSON profiling output).
 
+--------------------------------------------------------------------------------
 stb (stb_image, stb_image_write)
   https://github.com/nothings/stb
-  Public Domain (Unlicense) / MIT (dual).
+  Public-Domain.
   Used by: pyxis_renderer (LDR texture decode), pyxis_app (PNG output).
 
+--------------------------------------------------------------------------------
 tinyexr
   https://github.com/syoyo/tinyexr
-  3-clause BSD License.
+  BSD-3-Clause.
   Used by: pyxis_renderer (HDR/EXR texture decode), pyxis_app (EXR output).
 
+--------------------------------------------------------------------------------
 MikkTSpace
   https://github.com/mmikk/MikkTSpace
-  Zlib License.
+  Zlib.
   Used by: pyxis_renderer (tangent-space generation for normal maps).
 
+--------------------------------------------------------------------------------
 GoogleTest
   https://github.com/google/googletest
-  3-clause BSD License.
-  Used by: pyxis_unit_tests (unit-test framework, not shipped in release
-  binaries).
+  BSD-3-Clause.
+  Used by: pyxis_unit_tests.
 
 ================================================================================
 Optional / build-time-only third-party components

@@ -10,44 +10,41 @@
   "$plan-references": [
     "§4 third-party dependency table (canonical justification per dep)",
     "§33.10 spdlog SHARED linkage rule (Tracy follows the same rule)",
-    "§49 single-source-of-truth versioning (this file's builtin-baseline + _cmake/Thirdparty.cmake's GIT_TAG SHAs are reviewed together)"
+    "§49 single source of truth for versions: builtin-baseline below + _cmake/Thirdparty.cmake's GIT_TAG SHAs are reviewed together"
   ],
 
   "$builtin-baseline-comment": [
-    "Pinned baseline of the Microsoft/vcpkg registry — this is what reproduces a build (§49).",
-    "Bumping this is reviewed alongside _cmake/Thirdparty.cmake. CI's _tools/check_pins.py asserts both files move together."
+    "Pinned baseline of the Microsoft/vcpkg registry — this *is* what reproduces a build (§49).",
+    "All ports below resolve to whatever version the baseline lists; we do not pin individual",
+    "versions on top, since that fights vcpkg's version-database resolution and makes lockstep",
+    "bumps painful. To bump: update this hash AND the GIT_TAG SHAs in _cmake/Thirdparty.cmake",
+    "in the same PR (CI's _tools/check_pins.py asserts both files move together)."
   ],
-  "builtin-baseline": "0000000000000000000000000000000000000000",
+  "builtin-baseline": "bc71aa640f89933294f16e004b212c7fd3183eed",
 
   "dependencies": [
     {
       "name": "spdlog",
-      "version>=": "1.13.0",
       "$comment": "Logging. Linked SHARED via the x64-windows-pyxis triplet — see plan §33.10."
     },
     {
       "name": "fmt",
-      "version>=": "10.2.0",
-      "$comment": "Required by spdlog when external-fmt is on; pinned to keep ABI stable across DLLs."
+      "$comment": "Required transitively by spdlog when external-fmt is on; pinned via baseline."
     },
     {
       "name": "glfw3",
-      "version>=": "3.4.0",
-      "$comment": "Viewer-mode window + input. Plan §4."
+      "$comment": "Viewer-mode window + input (M1+). Plan §4."
     },
     {
       "name": "gtest",
-      "version>=": "1.14.0",
       "$comment": "Unit tests (pyxis_unit_tests). Not shipped in release. Plan §4."
     },
     {
       "name": "nlohmann-json",
-      "version>=": "3.11.3",
       "$comment": "parameters.json parsing + JSON profiling output. Plan §4 / §21."
     },
     {
       "name": "tinyexr",
-      "version>=": "1.0.7",
       "$comment": "EXR decode/encode. Plan §4."
     },
     {
@@ -60,14 +57,12 @@
     },
     {
       "name": "hlslpp",
-      "version>=": "3.5.3",
       "$comment": "HLSL-shaped C++ math types — appears in pyxis_renderer/Public/. Plan §4 / §23."
     },
     {
       "name": "tracy",
-      "version>=": "0.11.0",
       "features": [],
-      "$comment": "CPU/GPU profiling. Linked SHARED via the x64-windows-pyxis triplet (§33.10). Pin same minor as the server (§4)."
+      "$comment": "CPU/GPU profiling. Linked SHARED via x64-windows-pyxis triplet (§33.10). Pin same minor as the server (§4)."
     },
     {
       "name": "concurrentqueue",
@@ -75,24 +70,11 @@
     },
     {
       "name": "flecs",
-      "version>=": "4.0.0",
-      "default-features": false,
-      "$comment": "ECS for SceneWorld. Linked PRIVATE into pyxis_renderer; no Flecs header escapes Public/. Plan §4 / §8 / §30.11."
+      "$comment": "ECS for SceneWorld. Linked PRIVATE into pyxis_renderer; no Flecs header escapes Public/. Plan §4 / §8 / §30.11. The vcpkg port builds Flecs's monolithic profile (FLECS_REST + FLECS_HTTP enabled at compile time), so the Explorer UI at http://localhost:27750 is reachable in any build — Pyxis still gates the *call* to flecs::Rest behind PYXIS_DEBUG_TOOLS so production builds don't bind the listen socket (§30.11)."
     }
   ],
 
-  "features": {
-    "debug-tools": {
-      "description": "Enables Flecs Explorer (REST UI on http://localhost:27750) gated behind PYXIS_DEBUG_TOOLS — Debug builds only. Plan §4 / §30.11.",
-      "dependencies": [
-        {
-          "name": "flecs",
-          "default-features": false,
-          "features": [ "rest" ]
-        }
-      ]
-    }
-  },
+  "features": {},
 
   "overrides": []
 }

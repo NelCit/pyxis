@@ -5,13 +5,12 @@
 
 #include <Pyxis/Platform/FileSystem/AssetLocator.h>
 
-#include <algorithm>
-#include <array>
-
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
 #include <Shlobj.h>
 #include <windows.h>
+
+#include <algorithm>
+#include <array>
+#include <string>
 
 namespace pyxis {
 
@@ -35,7 +34,8 @@ AssetLocator::AssetLocator() = default;
 const Path& AssetLocator::ExecutableDirectory() const noexcept {
     if (!_exeDirCached) {
         std::array<wchar_t, MAX_PATH> wbuf{};
-        const DWORD len = ::GetModuleFileNameW(nullptr, wbuf.data(), static_cast<DWORD>(wbuf.size()));
+        const DWORD len = ::GetModuleFileNameW(nullptr, wbuf.data(),
+                                               static_cast<DWORD>(wbuf.size()));
         if (len > 0 && len < wbuf.size()) {
             std::string utf8 = Wide2Utf8(wbuf.data());
             const auto pos = utf8.find_last_of("/\\");
@@ -51,7 +51,11 @@ Path AssetLocator::Resources() const noexcept {
     return ExecutableDirectory().Join("Resources");
 }
 
-Path AssetLocator::FindResource(std::string_view relative) const noexcept {
+// NOTE: the public method is named `LocateResource` — `<windows.h>` already
+// `#define`s `FindResource` to FindResourceA / FindResourceW, so the original
+// `FindResource` member name collided with the macro.  See AssetLocator.h
+// where the macro-safe spelling lives.
+Path AssetLocator::LocateResource(std::string_view relative) const noexcept {
     Path p = Resources().Join(relative);
     if (!p.Exists()) return {};
     return p;

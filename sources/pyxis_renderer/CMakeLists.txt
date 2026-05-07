@@ -81,3 +81,10 @@ target_link_libraries(pyxis_renderer
 target_compile_definitions(pyxis_renderer PRIVATE
     $<$<BOOL:${PYXIS_DEBUG_TOOLS}>:PYXIS_DEBUG_TOOLS=1>
 )
+
+# Versioning (§22.2): pyxis_renderer.dll is the canonical owner of the
+# generated Version.h / Version.cpp. Version.h is PYXIS_RENDERER_API
+# decorated, so it lives here, not in pyxis_platform.
+include(Version)
+pyxis_generate_version_header(pyxis_renderer)
+pyxis_generate_version_source(pyxis_renderer)

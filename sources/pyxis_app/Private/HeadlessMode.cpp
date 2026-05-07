@@ -2,7 +2,9 @@
 
 #include "HeadlessMode.h"
 
+#include <Pyxis/Platform/Device/DeviceCreationParams.h>
 #include <Pyxis/Platform/Device/IDeviceManager.h>
+#include <Pyxis/Platform/Device/Resolution.h>
 #include <Pyxis/Platform/Logging/Log.h>
 #include <Pyxis/Platform/Logging/LogCategories.h>
 #include <Pyxis/Renderer/SceneWorldFacade.h>

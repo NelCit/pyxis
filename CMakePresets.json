@@ -31,8 +31,7 @@
       "cacheVariables": {
         "PYXIS_BUILD_TESTS":   "ON",
         "PYXIS_DEBUG_TOOLS":   "ON",
-        "PYXIS_BUILD_VIEWER":  "ON",
-        "VCPKG_MANIFEST_FEATURES": "debug-tools"
+        "PYXIS_BUILD_VIEWER":  "ON"
       }
     },
     {

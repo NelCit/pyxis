@@ -112,26 +112,22 @@ void Logger::Flush() noexcept {
     if (_impl->logger) _impl->logger->flush();
 }
 
-namespace {
-
-void EnsureLogger(Logger::Impl* impl) noexcept {
-    if (impl->logger) return;
+void Logger::Impl::EnsureLogger() noexcept {
+    if (logger) return;
     auto console = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
     console->set_level(spdlog::level::info);
-    impl->logger = std::make_shared<spdlog::logger>("pyxis", spdlog::sinks_init_list{ console });
-    impl->logger->set_level(spdlog::level::trace);
-    impl->logger->set_pattern("%Y-%m-%d %H:%M:%S.%e [%l] %v");
-    spdlog::register_logger(impl->logger);
+    logger = std::make_shared<spdlog::logger>("pyxis", spdlog::sinks_init_list{ console });
+    logger->set_level(spdlog::level::trace);
+    logger->set_pattern("%Y-%m-%d %H:%M:%S.%e [%l] %v");
+    spdlog::register_logger(logger);
 }
-
-}  // namespace
 
 // Per-level emit. The category is rendered as a `[cat] ` prefix. The bounded
 // std::string concat is acceptable here — logging is not in the hot path
 // (§30.10 forbids allocs in pass Execute(), not inside the platform logger).
 #define PYXIS_LOG_IMPL(LevelLower, SpdlogLevel)                                          \
     void Logger::LevelLower(std::string_view category, std::string_view message) noexcept { \
-        EnsureLogger(_impl);                                                             \
+        _impl->EnsureLogger();                                                           \
         std::string buf;                                                                 \
         buf.reserve(category.size() + message.size() + 4);                               \
         buf.append(1, '[').append(category).append("] ").append(message);                \

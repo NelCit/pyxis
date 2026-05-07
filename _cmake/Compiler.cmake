@@ -39,11 +39,25 @@ function(pyxis_set_target_compile_options target)
             /utf-8
 
             # clang-cl extras: warning parity, MSVC-style diag format, helpful
-            # extras that the GCC -Wall -Wextra path also gives us.
+            # extras that the GCC -Wall -Wextra path also gives us. Long-form
+            # POSIX flags (-f*) go through /clang: because the clang-cl driver
+            # rejects them otherwise (and we want -Werror=unknown-argument to
+            # stay on so genuinely-bad flags fail builds).
             $<$<CXX_COMPILER_ID:Clang>:-Wno-microsoft-include>
             $<$<CXX_COMPILER_ID:Clang>:-Wno-pragma-pack>
-            $<$<CXX_COMPILER_ID:Clang>:-Werror=date-time>     # §46.2 reproducible builds
-            $<$<CXX_COMPILER_ID:Clang>:-fmacro-prefix-map=${CMAKE_SOURCE_DIR}=.>  # §46.2 PDB hygiene
+            # Newer clang-cl already implements many MSVC `/Zc:*` modes by
+            # default and warns when the user repeats them. We keep the flags
+            # because §30.1 mandates them on cl.exe, but suppress the noise.
+            $<$<CXX_COMPILER_ID:Clang>:-Wno-unused-command-line-argument>
+            # Vulkan / Win32 structs are routinely partial-initialised
+            # (`{ VK_STRUCTURE_TYPE_FOO }` zero-init's the rest deterministically).
+            # MSVC accepts this silently; clang-cl's stricter
+            # -Wmissing-field-initializers fires on every Vulkan call site, so
+            # turn it off project-wide rather than peppering pragmas in every
+            # platform/Vulkan TU.
+            $<$<CXX_COMPILER_ID:Clang>:-Wno-missing-field-initializers>
+            $<$<CXX_COMPILER_ID:Clang>:/clang:-Werror=date-time>     # §46.2 reproducible builds
+            $<$<CXX_COMPILER_ID:Clang>:/clang:-fmacro-prefix-map=${CMAKE_SOURCE_DIR}=.>  # §46.2 PDB hygiene
         )
         target_compile_definitions(${target} PRIVATE
             _CRT_SECURE_NO_WARNINGS
