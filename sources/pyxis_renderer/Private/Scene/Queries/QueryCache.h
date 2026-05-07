@@ -17,7 +17,6 @@ namespace pyxis::scene {
 class QueryCache final {
 public:
     explicit QueryCache(flecs::world& world);
-    ~QueryCache();
 
     QueryCache(const QueryCache&)            = delete;
     QueryCache& operator=(const QueryCache&) = delete;
