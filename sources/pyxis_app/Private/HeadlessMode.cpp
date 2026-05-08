@@ -43,11 +43,36 @@ int RunHeadless(const Configuration& config) noexcept {
         return EXIT_CONFIG_FAIL;
     }
 
+    // ---- §33.7 determinism pinning -------------------------------------
+    // Headless raises framesInFlight to 3 regardless of config.
+    // Rationale: M3+'s samplesPerFrame * accumulationFrameLimit loop
+    // submits work in flight, and the byte-identical EXR contract
+    // requires consistent FIF across runs (different FIF changes the
+    // submission interleaving + thus floating-point reduction order
+    // for accumulation). Sized to cap = §33.1 MAX_FRAMES_IN_FLIGHT.
+    // RNG seed != 0 + non-empty output.image were already validated.
+    constexpr uint32_t HEADLESS_FRAMES_IN_FLIGHT = 3;
+    if (config.limits.framesInFlight != HEADLESS_FRAMES_IN_FLIGHT) {
+        log.Info(log::APP, "headless: §33.7 pinning framesInFlight=" +
+                           std::to_string(HEADLESS_FRAMES_IN_FLIGHT) +
+                           " (config requested " +
+                           std::to_string(config.limits.framesInFlight) + ")");
+    }
+    {
+        std::string summary = "headless: determinism pin — seed=";
+        summary += std::to_string(config.render.seed);
+        summary += "  framesInFlight=" + std::to_string(HEADLESS_FRAMES_IN_FLIGHT);
+        summary += "  dims=" + std::to_string(config.render.width) +
+                   "x" + std::to_string(config.render.height);
+        summary += "  samples=" + std::to_string(config.render.samplesPerFrame);
+        log.Info(log::APP, summary);
+    }
+
     // ---- Device manager + offscreen render target ----------------------
     DeviceCreationParams params{};
     params.adapterIndex     = -1;     // M3+ wires config.adapter; for now use the discrete-first picker.
     params.enableValidation = config.diagnostics.validationLayer;
-    params.framesInFlight   = config.limits.framesInFlight;
+    params.framesInFlight   = HEADLESS_FRAMES_IN_FLIGHT;
     params.applicationName  = "pyxis (headless)";
 
     const Resolution             backbuffer{ config.render.width, config.render.height };
