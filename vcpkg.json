@@ -74,6 +74,12 @@
     }
   ],
 
+  "$imgui-comment": [
+    "ImGui (docking branch) is pulled via FetchContent in _cmake/Thirdparty.cmake instead of vcpkg.",
+    "vcpkg's imgui[vulkan-binding] feature transitively pulls vulkan-loader, whose source archive on GitHub returns 502 intermittently.",
+    "Source-tree fetch lets us compile the backends (imgui_impl_vulkan.cpp + imgui_impl_glfw.cpp) directly against our system Vulkan SDK + the vcpkg glfw3."
+  ],
+
   "features": {},
 
   "overrides": []

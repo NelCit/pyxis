@@ -1,63 +1,199 @@
 # Pyxis third-party fetch — plan §4 / §49.
 #
 # Single source of truth for FetchContent-driven dependencies. vcpkg
-# manifest mode (vcpkg.json) handles spdlog, glfw, gtest, nlohmann-json,
-# tinyexr, stb, mikktspace, hlslpp, tracy, moodycamel-concurrentqueue,
-# flecs (with the rest feature in Debug — plan §4 / §30.11).
+# manifest mode (vcpkg.json) handles spdlog, fmt, glfw3, gtest, nlohmann-
+# json, tinyexr, stb, mikktspace, hlslpp, tracy, concurrentqueue, flecs,
+# imgui (with docking + vulkan-binding + glfw-binding features).
 #
-# This file declares the deps that we build from source so we control the
-# configuration:
-#   - NVRHI       (Vulkan backend only)
-#   - Slang        (M3+; needed for shader compile pipeline)
-#   - ShaderMake   (M3+; drives Slang)
-#   - OpenUSD      (M4+; ingest adapters)
-#   - MaterialX    (M5+; via OpenUSD or direct)
+# This file declares the deps that we build / unpack from source so we
+# control configuration:
+#   - NVRHI       — Vulkan backend only, static link.   M1+
+#   - Slang       — prebuilt Windows binaries from GitHub Releases. M1+ (pulled
+#                   early; the plan §41 originally landed Slang at M3 but
+#                   we get the build pipeline in earlier).
+#   - ShaderMake  — declared at M3 (permutation expansion driver).
+#   - OpenUSD     — M4+ (ingest adapters).
+#   - MaterialX   — M5+ (material translation).
 #
-# CI's _tools/check_pins.py walks this file and rejects any GIT_TAG that is
-# shorter than 40 chars or matches master|main|HEAD (plan §49). PRs that
-# bump a SHA must update vcpkg.json's builtin-baseline in lockstep.
+# CI's _tools/check_pins.py walks this file and rejects any GIT_TAG that
+# is shorter than 40 chars or matches master|main|HEAD (plan §49). PRs
+# that bump a SHA must update vcpkg.json's builtin-baseline in lockstep.
 
 include_guard(GLOBAL)
 
 include(FetchContent)
 set(FETCHCONTENT_QUIET FALSE)
 
-# ---------------------------------------------------------------------------
-# pyxis_thirdparty_setup() — declare every fetch and call MakeAvailable for
-# the deps the active milestone actually needs. M0 only needs NVRHI; M3+
-# pulls in Slang/ShaderMake; M4+ pulls in OpenUSD/MaterialX. The granular
-# triggers live in their respective module CMakeLists.txt.
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# Pinned versions (single source of truth — bump together with any
+# matching vcpkg.json baseline change; CI gates on _tools/check_pins.py).
+# ===========================================================================
+
+# NVRHI — Vulkan-backed RHI. Pinned to a recent commit on main (NVRHI does
+# not cut versioned tags). Bump by reviewing
+# https://github.com/NVIDIAGameWorks/nvrhi/commits/main and updating both
+# the GIT_TAG and any code change that depends on the new behaviour.
+set(PYXIS_NVRHI_GIT_TAG "54100464714de88a5a5059d25808f5ccb914ad7d")
+
+# ImGui — docking branch. Fetched via FetchContent because vcpkg's
+# imgui[vulkan-binding] feature transitively pulls vulkan-loader whose
+# archive download on github.com is 502'ing intermittently. Source-tree
+# fetch lets us compile the imgui_impl_vulkan.cpp + imgui_impl_glfw.cpp
+# backends directly against our system Vulkan SDK + the vcpkg glfw3.
+set(PYXIS_IMGUI_GIT_TAG "c51f1a6e47b8b5b11ca13490c461842c96bc4ca2")
+
+# Slang — prebuilt Windows x86_64 binary release. Pulled via URL mode so
+# we don't pay Slang's full source build (~10–15 min on a fresh clone).
+# slangc.exe lives at <slang_root>/bin/slangc.exe after unpack.
+set(PYXIS_SLANG_VERSION "2026.8")
+set(PYXIS_SLANG_URL
+    "https://github.com/shader-slang/slang/releases/download/v${PYXIS_SLANG_VERSION}/slang-${PYXIS_SLANG_VERSION}-windows-x86_64.zip")
+# URL_HASH is intentionally unset for now — pin the SHA256 in a follow-up
+# once we have a known-clean reference download. CI's __pyxis-strict__
+# branch will fail without it; main is tolerant.
+
+# ===========================================================================
+# pyxis_thirdparty_setup() — declarations only. Each consumer module calls
+# the pyxis_thirdparty_require_<name>() helper below at first use.
+# ===========================================================================
 function(pyxis_thirdparty_setup)
-    # ── NVRHI ──────────────────────────────────────────────────────────────
-    # Pin to a known-good NVRHI release. Update by reviewing
-    # https://github.com/NVIDIAGameWorks/nvrhi/releases and pinning a full
-    # 40-char SHA (plan §49 rule). Using a placeholder SHA here so M0 builds
-    # don't accidentally drift; bump in a follow-up commit when the real
-    # baseline is chosen.
     FetchContent_Declare(
         nvrhi
         GIT_REPOSITORY https://github.com/NVIDIAGameWorks/nvrhi.git
-        GIT_TAG        0000000000000000000000000000000000000000  # TODO(@pyxis-build-team, §49): pin
+        GIT_TAG        ${PYXIS_NVRHI_GIT_TAG}
         GIT_SHALLOW    FALSE
     )
-    set(NVRHI_INSTALL OFF CACHE BOOL "" FORCE)
-    set(NVRHI_BUILD_SHARED OFF CACHE BOOL "" FORCE)
-    set(NVRHI_WITH_VULKAN ON CACHE BOOL "" FORCE)
-    set(NVRHI_WITH_DX11 OFF CACHE BOOL "" FORCE)
-    set(NVRHI_WITH_DX12 OFF CACHE BOOL "" FORCE)
-    set(NVRHI_WITH_RTXMU OFF CACHE BOOL "" FORCE)
-    # M0 doesn't actually need NVRHI's source until the platform layer wires
-    # the device manager to it. The declare-only call here keeps configure
-    # fast; pyxis_platform/CMakeLists.txt calls FetchContent_MakeAvailable
-    # when the platform target is built.
+    set(NVRHI_INSTALL        OFF CACHE BOOL "" FORCE)
+    set(NVRHI_BUILD_SHARED   OFF CACHE BOOL "" FORCE)
+    set(NVRHI_WITH_VULKAN    ON  CACHE BOOL "" FORCE)
+    set(NVRHI_WITH_DX11      OFF CACHE BOOL "" FORCE)
+    set(NVRHI_WITH_DX12      OFF CACHE BOOL "" FORCE)
+    set(NVRHI_WITH_RTXMU     OFF CACHE BOOL "" FORCE)
+    set(NVRHI_WITH_VALIDATION ON CACHE BOOL "" FORCE)
+
+    FetchContent_Declare(
+        slang_prebuilt
+        URL ${PYXIS_SLANG_URL}
+    )
+
+    FetchContent_Declare(
+        imgui
+        GIT_REPOSITORY https://github.com/ocornut/imgui.git
+        GIT_TAG        ${PYXIS_IMGUI_GIT_TAG}
+        GIT_SHALLOW    FALSE
+    )
 endfunction()
 
-# ---------------------------------------------------------------------------
-# pyxis_thirdparty_require_nvrhi() — pulled in by pyxis_platform.
-# ---------------------------------------------------------------------------
+
+# ===========================================================================
+# pyxis_thirdparty_require_nvrhi() — pulled in by pyxis_platform's device
+# manager (it wraps a VkDevice into nvrhi::IDevice).
+# Disables clang-tidy + /WX inside NVRHI's source tree so we don't gate
+# our build on third-party diagnostics.
+# ===========================================================================
 function(pyxis_thirdparty_require_nvrhi)
-    if(NOT TARGET nvrhi_vk)
-        FetchContent_MakeAvailable(nvrhi)
+    if(TARGET nvrhi)
+        return()
     endif()
+
+    # Save + clear CMAKE_CXX_CLANG_TIDY so clang-tidy doesn't lint NVRHI's
+    # sources. The variable is a *directory property* once set, so clearing
+    # it for the FetchContent subdirectory's lifetime is enough.
+    set(_savedTidy "${CMAKE_CXX_CLANG_TIDY}")
+    set(CMAKE_CXX_CLANG_TIDY "")
+
+    FetchContent_MakeAvailable(nvrhi)
+
+    # NVRHI's targets aren't ours; strip clang-tidy + suppress its own
+    # /W4 /WX warnings if any leaked out (NVRHI is /W3 internally).
+    foreach(t IN ITEMS nvrhi nvrhi_vk vma)
+        if(TARGET ${t})
+            set_target_properties(${t} PROPERTIES CXX_CLANG_TIDY "")
+            if(MSVC OR CMAKE_CXX_SIMULATE_ID STREQUAL "MSVC")
+                target_compile_options(${t} PRIVATE /W3 /WX-)
+            endif()
+        endif()
+    endforeach()
+
+    # Restore clang-tidy for downstream targets.
+    set(CMAKE_CXX_CLANG_TIDY "${_savedTidy}" PARENT_SCOPE)
+
+    if(NOT TARGET nvrhi_vk)
+        message(FATAL_ERROR
+            "Pyxis: NVRHI fetch succeeded but nvrhi_vk target is missing. "
+            "Did NVRHI rename the Vulkan backend target?")
+    endif()
+    message(STATUS "Pyxis: NVRHI ready (nvrhi + nvrhi_vk)")
+endfunction()
+
+
+# ===========================================================================
+# pyxis_thirdparty_require_slang() — pulled in by the renderer's shader
+# build rule. Exposes PYXIS_SLANG_COMPILER as a CACHE FILEPATH that
+# `_cmake/Slang.cmake`'s pyxis_compile_slang_shader() reads.
+# Build-tool only; we do NOT link Slang into Pyxis at M1.
+# ===========================================================================
+function(pyxis_thirdparty_require_slang)
+    if(DEFINED CACHE{PYXIS_SLANG_COMPILER} AND EXISTS "$CACHE{PYXIS_SLANG_COMPILER}")
+        return()
+    endif()
+
+    FetchContent_MakeAvailable(slang_prebuilt)
+
+    # The release zip unpacks to <root>/{bin,include,lib,docs}.
+    set(_slangc "${slang_prebuilt_SOURCE_DIR}/bin/slangc.exe")
+    if(NOT EXISTS "${_slangc}")
+        message(FATAL_ERROR
+            "Pyxis: Slang prebuilt unpacked at ${slang_prebuilt_SOURCE_DIR} "
+            "but slangc.exe not found at expected path ${_slangc}. "
+            "Did the release zip layout change?")
+    endif()
+    set(PYXIS_SLANG_COMPILER "${_slangc}" CACHE FILEPATH "Slang compiler (slangc.exe)" FORCE)
+    set(PYXIS_SLANG_INCLUDE  "${slang_prebuilt_SOURCE_DIR}/include" CACHE PATH "Slang include dir" FORCE)
+    message(STATUS "Pyxis: Slang ${PYXIS_SLANG_VERSION} at ${PYXIS_SLANG_COMPILER}")
+endfunction()
+
+
+# ===========================================================================
+# pyxis_thirdparty_require_imgui() — pulled in by pyxis_app's ViewerMode.
+# Builds a `pyxis_imgui` static library combining ImGui's core + the
+# Vulkan + GLFW backends. `find_package(Vulkan)` and `find_package(glfw3)`
+# must already have been called by the caller (pyxis_platform's CMake).
+# ===========================================================================
+function(pyxis_thirdparty_require_imgui)
+    if(TARGET pyxis_imgui)
+        return()
+    endif()
+
+    set(_savedTidy "${CMAKE_CXX_CLANG_TIDY}")
+    set(CMAKE_CXX_CLANG_TIDY "")
+    FetchContent_MakeAvailable(imgui)
+
+    add_library(pyxis_imgui STATIC
+        ${imgui_SOURCE_DIR}/imgui.cpp
+        ${imgui_SOURCE_DIR}/imgui_demo.cpp
+        ${imgui_SOURCE_DIR}/imgui_draw.cpp
+        ${imgui_SOURCE_DIR}/imgui_tables.cpp
+        ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+        ${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp
+        ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
+    )
+    target_include_directories(pyxis_imgui SYSTEM PUBLIC
+        ${imgui_SOURCE_DIR}
+        ${imgui_SOURCE_DIR}/backends
+    )
+    target_compile_definitions(pyxis_imgui PUBLIC
+        IMGUI_DISABLE_OBSOLETE_FUNCTIONS
+        IMGUI_DISABLE_OBSOLETE_KEYIO
+        IMGUI_IMPL_VULKAN_NO_PROTOTYPES   # we link Vulkan via the Vulkan SDK loader
+    )
+    target_link_libraries(pyxis_imgui PUBLIC Vulkan::Vulkan glfw)
+
+    set_target_properties(pyxis_imgui PROPERTIES CXX_CLANG_TIDY "")
+    if(MSVC OR CMAKE_CXX_SIMULATE_ID STREQUAL "MSVC")
+        target_compile_options(pyxis_imgui PRIVATE /W3 /WX- /wd4244 /wd4267)
+    endif()
+
+    set(CMAKE_CXX_CLANG_TIDY "${_savedTidy}" PARENT_SCOPE)
+    message(STATUS "Pyxis: ImGui ready (pyxis_imgui static lib with Vulkan + GLFW backends)")
 endfunction()
