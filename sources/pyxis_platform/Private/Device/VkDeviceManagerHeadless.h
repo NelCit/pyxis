@@ -31,17 +31,18 @@ public:
     [[nodiscard]] uint32_t           GetFramesInFlight() const noexcept override;
     [[nodiscard]] bool               IsHeadless()        const noexcept override { return true; }
 
-    // Headless: a single offscreen colour render target stands in for
-    // the swapchain. Same nvrhi::ITexture surface as viewer mode so the
-    // renderer doesn't branch on headless vs windowed.
-    [[nodiscard]] nvrhi::ITexture* GetCurrentBackbuffer() const noexcept override { return _renderTarget.Get(); }
-    [[nodiscard]] uint32_t         GetBackbufferCount()   const noexcept override { return _renderTarget ? 1u : 0u; }
+    // Headless has no swapchain. The IDeviceManager swapchain accessors
+    // contractually return nullptr / 0 here (IDeviceManager.h: "viewer
+    // only — headless returns nullptr / 0"). The render target itself
+    // is owned caller-side by `pyxis::app::AovTextures` per §18.4
+    // ("Renderer never allocates these"); HeadlessMode constructs the
+    // AOV texture set after this manager comes up and binds it via
+    // RenderTargets.
+    [[nodiscard]] nvrhi::ITexture* GetCurrentBackbuffer()      const noexcept override { return nullptr; }
+    [[nodiscard]] uint32_t         GetBackbufferCount()        const noexcept override { return 0; }
     [[nodiscard]] uint32_t         GetCurrentBackbufferIndex() const noexcept override { return 0; }
-    [[nodiscard]] nvrhi::ITexture* GetBackbuffer(uint32_t index) const noexcept override {
-        return index == 0 ? _renderTarget.Get() : nullptr;
-    }
-    // Headless never rebuilds the target — generation stays at 0.
-    [[nodiscard]] uint32_t         GetSwapchainGeneration() const noexcept override { return 0; }
+    [[nodiscard]] nvrhi::ITexture* GetBackbuffer(uint32_t /*index*/) const noexcept override { return nullptr; }
+    [[nodiscard]] uint32_t         GetSwapchainGeneration()    const noexcept override { return 0; }
 
     void BeginFrame() override;
     void EndFrame() override;
@@ -65,18 +66,10 @@ private:
     // path will raise this back to 3 per §33.7 once it actually exercises
     // the multi-frame queueing.
     uint32_t          _framesInFlight = 1;
-    Resolution        _backbuffer{};
 
     // RefCountPtr so the wrapped nvrhi::Device follows the same lifetime
     // discipline as the windowed manager (drops before vkDestroyDevice).
     nvrhi::DeviceHandle _nvrhiDevice;
-
-    // Offscreen colour render target — the headless equivalent of a
-    // swapchain image. Sized to backbuffer dims at Bringup time. Format
-    // is SBGRA8_UNORM to match the viewer swapchain so the renderer's
-    // pass code paths don't branch on headless vs windowed; M3+ may
-    // raise this to RGBA16F when the path tracer wants HDR fidelity.
-    nvrhi::TextureHandle _renderTarget;
 };
 
 }  // namespace pyxis

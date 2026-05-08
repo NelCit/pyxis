@@ -90,7 +90,6 @@ DeviceManagerCreateStatus VkDeviceManagerHeadless::Bringup(
                  std::to_string(MAX_FIF) + ".");
     }
     _framesInFlight = std::clamp<uint32_t>(params.framesInFlight, MIN_FIF, MAX_FIF);
-    _backbuffer     = initialBackbuffer;
 
     VulkanHppInitFromLoader(&vkGetInstanceProcAddr);
 
@@ -284,25 +283,11 @@ DeviceManagerCreateStatus VkDeviceManagerHeadless::Bringup(
         return DeviceManagerCreateStatus::DeviceCreationFailed;
     }
 
-    // Offscreen colour render target — replaces the swapchain image.
-    // SBGRA8_UNORM matches viewer mode so renderer code is mode-agnostic.
-    // initialState=RenderTarget + keepInitialState=true mirrors the
-    // viewer's swapchain wrap so NVRHI tracks transitions identically.
-    nvrhi::TextureDesc rtDesc;
-    rtDesc.format         = nvrhi::Format::SBGRA8_UNORM;
-    rtDesc.width          = initialBackbuffer.width;
-    rtDesc.height         = initialBackbuffer.height;
-    rtDesc.dimension      = nvrhi::TextureDimension::Texture2D;
-    rtDesc.isRenderTarget = true;
-    rtDesc.debugName      = "headless-offscreen-rt";
-    rtDesc.initialState   = nvrhi::ResourceStates::RenderTarget;
-    rtDesc.keepInitialState = true;
-    _renderTarget = _nvrhiDevice->createTexture(rtDesc);
-    if (!_renderTarget) {
-        log.Error(log::PLATFORM, "VkDeviceManagerHeadless: createTexture(offscreen RT) failed");
-        return DeviceManagerCreateStatus::OutOfMemory;
-    }
-
+    // Per §18.4 / pyxis::app::AovTextures the render target is now
+    // caller-allocated; the device manager exposes only the device,
+    // queues, and per-frame plumbing. `initialBackbuffer` is reduced to
+    // a startup-log diagnostic for "what dims does the caller intend to
+    // render at" — useful when scrubbing logs but not load-bearing.
     {
         std::string msg = "Vulkan headless device ready: ";
         msg.append(_adapter.NameView());
@@ -312,7 +297,7 @@ DeviceManagerCreateStatus VkDeviceManagerHeadless::Bringup(
         msg += std::to_string(_adapter.totalDeviceLocalBytes / (1024ull * 1024ull));
         msg += " MiB  framesInFlight=";
         msg += std::to_string(_framesInFlight);
-        msg += "  rt=";
+        msg += "  intended-render-dims=";
         msg += std::to_string(initialBackbuffer.width) + "x" +
                std::to_string(initialBackbuffer.height);
         log.Info(log::PLATFORM, msg);
@@ -325,11 +310,13 @@ void VkDeviceManagerHeadless::Teardown() noexcept {
     if (_device != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(_device);
     }
-    // Drop the offscreen RT first (NVRHI ref), then the device wrapper,
-    // BEFORE vkDestroyDevice — same lifetime discipline as the windowed
-    // manager: NVRHI's deleters walk internal refs that touch the
-    // VkDevice, so the VkDevice must outlive everything NVRHI knows.
-    _renderTarget = nullptr;
+    // The caller (HeadlessMode → AovTextures) owns the offscreen render
+    // target now and must drop its handle before this manager goes
+    // away — RAII in the caller's frame scope guarantees that. We just
+    // drain NVRHI's deferred-destruction queue so anything the caller
+    // already released gets cleaned up before the wrapped nvrhi::Device
+    // dies, which must happen BEFORE vkDestroyDevice — NVRHI's deleters
+    // walk internal refs that touch the VkDevice.
     if (_nvrhiDevice) {
         _nvrhiDevice->runGarbageCollection();
     }

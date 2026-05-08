@@ -5,6 +5,7 @@
 #include "Config/Configuration.h"
 #include "Output/ExrWriter.h"
 #include "Output/TextureReadback.h"
+#include "Render/AovTextures.h"
 #include "ViewerMode.h"
 
 #include <Pyxis/Platform/Device/DeviceCreationParams.h>
@@ -82,7 +83,7 @@ int RunHeadless(const Configuration& config) noexcept {
         log.Info(log::APP, summary);
     }
 
-    // ---- Device manager + offscreen render target ----------------------
+    // ---- Device manager ------------------------------------------------
     DeviceCreationParams params{};
     params.adapterIndex     = -1;     // M3+ wires config.adapter; for now use the discrete-first picker.
     params.enableValidation = config.diagnostics.validationLayer;
@@ -102,11 +103,18 @@ int RunHeadless(const Configuration& config) noexcept {
         log.Error(log::PLATFORM, "headless: nvrhi::IDevice not available");
         return EXIT_DEVICE_INIT_FAIL;
     }
-    nvrhi::ITexture* renderTarget = deviceManager->GetCurrentBackbuffer();
-    if (!renderTarget) {
-        log.Error(log::PLATFORM, "headless: offscreen render target not available");
-        return EXIT_DEVICE_INIT_FAIL;
+
+    // ---- AOV textures (caller-allocated per §18.4) ---------------------
+    // Declared after deviceManager so RAII destroys it BEFORE the device
+    // dies — NVRHI's deferred-destruction queue must drain against a
+    // still-live VkDevice.
+    auto aovsResult = AovTextures::Create(device, config.render.width, config.render.height);
+    if (!aovsResult) {
+        log.Error(log::APP, "headless: " + aovsResult.error());
+        return EXIT_RUNTIME_FAIL;
     }
+    const AovTextures aovs = std::move(*aovsResult);
+    nvrhi::ITexture* const renderTarget = aovs.color.Get();
 
     // ---- SceneWorld + Profiler + Renderer ------------------------------
     SceneWorldFacade scene;
