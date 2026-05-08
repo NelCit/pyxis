@@ -23,6 +23,8 @@ target_sources(pyxis PRIVATE
     Private/HeadlessMode.cpp
     Private/ViewerMode.h
     Private/ViewerMode.cpp
+    Private/ImGuiHost.h
+    Private/ImGuiHost.cpp
     Private/StbImageWrite.cpp
 )
 
@@ -39,9 +41,21 @@ target_include_directories(pyxis PRIVATE
 
 find_package(Stb REQUIRED)
 
+# ImGui (with Vulkan + GLFW backends) — built lazily by the helper in
+# _cmake/Thirdparty.cmake. pyxis_app/ViewerMode is the only consumer
+# in M1; the FPS panel + dockspace land here. The helper assumes
+# find_package(Vulkan) + find_package(glfw3) have already populated
+# the corresponding imported targets (the GLFW include path is what
+# imgui_impl_glfw.cpp needs at compile time, not just link time).
+find_package(Vulkan REQUIRED)
+find_package(glfw3 CONFIG REQUIRED)
+pyxis_thirdparty_require_imgui()
+
 target_link_libraries(pyxis PRIVATE
     Pyxis::Platform
     Pyxis::Renderer
+    pyxis_imgui
+    Vulkan::Vulkan        # vkCmdBeginRendering / vkCmdEndRendering / descriptor-pool calls
 )
 
 # stb_image_write is header-only; vcpkg's `Stb` config exports the

@@ -27,6 +27,7 @@ target_sources(pyxis_platform PUBLIC
         Public/Pyxis/Platform/Device/DeviceCreationParams.h
         Public/Pyxis/Platform/Device/IDeviceManager.h
         Public/Pyxis/Platform/Device/Resolution.h
+        Public/Pyxis/Platform/Device/VulkanContext.h
 
         Public/Pyxis/Platform/Logging/Log.h
         Public/Pyxis/Platform/Logging/LogCategories.h

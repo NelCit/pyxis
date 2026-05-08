@@ -8,6 +8,7 @@
 
 #include <Pyxis/Platform/Device/AdapterInfo.h>
 #include <Pyxis/Platform/Device/Resolution.h>
+#include <Pyxis/Platform/Device/VulkanContext.h>
 #include <Pyxis/Platform/Forward.h>
 #include <Pyxis/Platform/PlatformApi.h>
 
@@ -76,6 +77,14 @@ public:
     // headless mode.
     // -------------------------------------------------------------------
     virtual void WaitIdle() = 0;
+
+    // -------------------------------------------------------------------
+    // Raw Vulkan handles — opaque escape hatch for the ImGui Vulkan
+    // backend (and, post-v1, anything else that needs Vulkan-shaped
+    // interop). The IDeviceManager retains ownership; callers must not
+    // destroy any handle in the returned struct.
+    // -------------------------------------------------------------------
+    [[nodiscard]] virtual VulkanContext GetVulkanContext() const noexcept = 0;
 
 protected:
     IDeviceManager() = default;

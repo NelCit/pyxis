@@ -209,6 +209,16 @@ void VkDeviceManagerHeadless::WaitIdle() {
     if (_device != VK_NULL_HANDLE) vkDeviceWaitIdle(_device);
 }
 
+VulkanContext VkDeviceManagerHeadless::GetVulkanContext() const noexcept {
+    VulkanContext c{};
+    c.instance       = static_cast<void*>(_instance);
+    c.physicalDevice = static_cast<void*>(_physicalDevice);
+    c.device         = static_cast<void*>(_device);
+    c.graphicsQueue  = static_cast<void*>(_graphicsQueue);
+    c.graphicsFamily = _graphicsFamily;
+    return c;
+}
+
 IDeviceManager* CreateHeadlessDeviceManager(const DeviceCreationParams&  params,
                                             const Resolution&            initialBackbuffer,
                                             DeviceManagerCreateStatus*   status) noexcept {

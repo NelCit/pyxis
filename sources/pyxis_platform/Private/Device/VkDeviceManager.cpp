@@ -409,7 +409,14 @@ bool VkDeviceManager::CreateSwapchain(uint32_t width, uint32_t height) noexcept 
     scInfo.imageColorSpace  = chosenFormat.colorSpace;
     scInfo.imageExtent      = extent;
     scInfo.imageArrayLayers = 1;
-    scInfo.imageUsage       = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    // TRANSFER_SRC enables --screenshot's vkCmdCopyImageToBuffer readback.
+    // Most drivers grant it implicitly, but the spec doesn't require that;
+    // validation flags VUID-vkCmdCopyImageToBuffer-srcImage-00186 without
+    // it, and the cost (an extra usage bit on the swapchain images) is
+    // negligible.
+    scInfo.imageUsage       = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
+                            | VK_IMAGE_USAGE_TRANSFER_DST_BIT
+                            | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     scInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     scInfo.preTransform     = caps.currentTransform;
     scInfo.compositeAlpha   = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
@@ -593,6 +600,17 @@ void VkDeviceManager::EndFrame() {
 
 void VkDeviceManager::WaitIdle() {
     if (_device != VK_NULL_HANDLE) vkDeviceWaitIdle(_device);
+}
+
+VulkanContext VkDeviceManager::GetVulkanContext() const noexcept {
+    VulkanContext c{};
+    c.instance       = static_cast<void*>(_instance);
+    c.physicalDevice = static_cast<void*>(_physicalDevice);
+    c.device         = static_cast<void*>(_device);
+    c.graphicsQueue  = static_cast<void*>(_graphicsQueue);
+    c.graphicsFamily = _graphicsFamily;
+    c.colorFormat    = static_cast<uint32_t>(_swapchainFormat);
+    return c;
 }
 
 IDeviceManager::~IDeviceManager() = default;

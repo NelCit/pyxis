@@ -37,6 +37,8 @@ public:
     void EndFrame() override;
     void WaitIdle() override;
 
+    [[nodiscard]] VulkanContext GetVulkanContext() const noexcept override;
+
 private:
     DeviceManagerCreateStatus Bringup(const DeviceCreationParams& params,
                                       const Resolution&           initialBackbuffer) noexcept;

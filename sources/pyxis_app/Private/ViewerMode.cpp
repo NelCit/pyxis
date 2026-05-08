@@ -2,6 +2,8 @@
 
 #include "ViewerMode.h"
 
+#include "ImGuiHost.h"
+
 #include <Pyxis/Platform/Device/DeviceCreationParams.h>
 #include <Pyxis/Platform/Device/IDeviceManager.h>
 #include <Pyxis/Platform/Device/Resolution.h>
@@ -153,6 +155,10 @@ int RunViewerLoop(int adapterIndex, bool enableValidation,
     }
 
     // Hook a close-on-Escape sink alongside the window's own close button.
+    // Note: ImGui_ImplGlfw_InitForVulkan(install_callbacks=true) chains its
+    // own callbacks under whatever was registered before — so we install
+    // *our* GLFW callbacks first (via SetEventSink → GlfwWindow), then
+    // ImGuiHost::Init() chains ImGui's on top. Both fire each frame.
     std::atomic<bool> shouldClose{false};
     window->SetEventSink([&](const InputEvent& e) {
         if (e.kind == InputEventKind::WindowClose) shouldClose.store(true);
@@ -203,7 +209,15 @@ int RunViewerLoop(int adapterIndex, bool enableValidation,
         cl = device->createCommandList();
     }
 
+    // ---- ImGui ----------------------------------------------------------
+    // Init in both modes so --screenshot doubles as a visual proof of the
+    // M1 dockable Performance panel: the captured PNG shows the triangle
+    // plus the panel in its default position.
+    ImGuiHost imguiHost;
     const bool screenshotMode = !screenshotPath.empty();
+    if (!imguiHost.Init(window.get(), dm.get())) {
+        log.Warn(log::APP, "ViewerMode: ImGui init failed; continuing without UI");
+    }
     if (screenshotMode) {
         log.Info(log::APP, "ViewerMode: --screenshot path supplied; capturing one frame after warmup");
     } else {
@@ -224,6 +238,18 @@ int RunViewerLoop(int adapterIndex, bool enableValidation,
         profiler.BeginFrame();
         dm->BeginFrame();
 
+        // Build the ImGui draw data on the CPU side. The Performance panel
+        // pulls from the renderer's FrameProfile snapshot, which the
+        // GpuTimestampPool drained MAX_FRAMES_IN_FLIGHT frames ago — fine
+        // for human-paced FPS readouts. Skipped in screenshot mode so the
+        // captured PNG is the bare triangle.
+        if (imguiHost.IsReady()) {
+            const FrameProfile fp = renderer.LastFrameProfile();
+            imguiHost.BeginFrame();
+            imguiHost.BuildFpsPanel(fp.cpuFrameMs, fp.gpuFrameMs, fp.frameIndex);
+            imguiHost.Render();
+        }
+
         nvrhi::ITexture* backbuffer = dm->GetCurrentBackbuffer();
         if (backbuffer) {
             const uint32_t slot = static_cast<uint32_t>(frameIndex % framesInFlight);
@@ -237,6 +263,22 @@ int RunViewerLoop(int adapterIndex, bool enableValidation,
             settings.height = backbuffer->getDesc().height;
 
             renderer.RenderFrame(cl, settings, targets);
+
+            // ImGui submit: NVRHI just left the backbuffer in
+            // ResourceStates::RenderTarget after the renderer's draw,
+            // which matches VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL — what
+            // ImGuiHost::Submit's vkCmdBeginRendering expects. We ask NVRHI
+            // to commit any pending barriers first so its tracker and the
+            // raw command buffer agree on the layout before we begin our
+            // own dynamic-rendering scope. Done *before* the screenshot
+            // capture so --screenshot also doubles as visual proof of the
+            // dockable Performance panel.
+            if (imguiHost.IsReady()) {
+                cl->setTextureState(backbuffer, nvrhi::AllSubresources,
+                                    nvrhi::ResourceStates::RenderTarget);
+                cl->commitBarriers();
+                imguiHost.Submit(cl, backbuffer);
+            }
 
             // Screenshot path: capture this frame's backbuffer to PNG and
             // exit. CaptureBackbufferToPng owns the close + execute +
@@ -261,6 +303,7 @@ int RunViewerLoop(int adapterIndex, bool enableValidation,
 
     log.Info(log::APP, "ViewerMode: frame loop exited; tearing down");
     dm->WaitIdle();
+    imguiHost.Shutdown();
     return EXIT_OK;
 }
 

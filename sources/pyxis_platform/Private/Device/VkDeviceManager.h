@@ -40,6 +40,7 @@ public:
     [[nodiscard]] uint32_t         GetBackbufferCount()   const noexcept override { return static_cast<uint32_t>(_swapchainTextures.size()); }
     [[nodiscard]] uint32_t         GetCurrentBackbufferIndex() const noexcept override { return _currentImage; }
     [[nodiscard]] nvrhi::ITexture* GetBackbuffer(uint32_t index) const noexcept override;
+    [[nodiscard]] VulkanContext    GetVulkanContext()    const noexcept override;
 
 private:
     DeviceManagerCreateStatus Bringup(const DeviceCreationParams& params,
