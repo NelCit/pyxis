@@ -146,21 +146,31 @@ void ImGuiHost::BeginFrame() noexcept {
     ImGui::NewFrame();
 }
 
-void ImGuiHost::BuildFpsPanel(double cpuFrameMs,
-                              double gpuFrameMs,
-                              uint64_t frameIndex) noexcept {
+void ImGuiHost::BuildFpsPanel(const FrameProfile& fp) noexcept {
     if (!_ready) return;
 
-    // A dockable panel — flagged as dock-friendly via no special flags;
-    // the user can drag it anywhere or dock it against the viewport
-    // edges thanks to ImGuiConfigFlags_DockingEnable.
-    if (ImGui::Begin("Performance")) {
+    // A dockable panel; AlwaysAutoResize keeps the window snug against
+    // the scope tree (which grows when nested passes appear) without
+    // needing manual sizing.
+    if (ImGui::Begin("Performance", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         const ImGuiIO& io  = ImGui::GetIO();
-        ImGui::Text("Frame: %llu", static_cast<unsigned long long>(frameIndex));
+        ImGui::Text("Frame: %llu", static_cast<unsigned long long>(fp.frameIndex));
         ImGui::Text("FPS  : %.1f", static_cast<double>(io.Framerate));
         ImGui::Separator();
-        ImGui::Text("CPU  : %.3f ms", cpuFrameMs);
-        ImGui::Text("GPU  : %.3f ms", gpuFrameMs);
+        ImGui::Text("CPU  : %.3f ms", fp.cpuFrameMs);
+        ImGui::Text("GPU  : %.3f ms", fp.gpuFrameMs);
+        ImGui::Separator();
+        // Pre-order scope tree. Two spaces per nesting level; CPU/GPU
+        // tag in front of the name; durationMs at the trailing column.
+        for (const FrameProfile::PassTiming& t : fp.passes) {
+            const char* kind = (t.kind == FrameProfile::ScopeKind::Cpu) ? "CPU" : "GPU";
+            const std::string_view name = t.name.View();
+            ImGui::Text("%*s%s %.*s  %.3f ms",
+                static_cast<int>(t.depth * 2), "",
+                kind,
+                static_cast<int>(name.size()), name.data(),
+                t.durationMs);
+        }
     }
     ImGui::End();
 }

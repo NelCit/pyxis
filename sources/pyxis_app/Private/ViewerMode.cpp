@@ -228,7 +228,10 @@ int RunViewerLoop(int adapterIndex, bool enableValidation,
     // Capture the backbuffer at frame index = SCREENSHOT_FRAME so the
     // swapchain has settled. 3 frames is enough on FIFO; keeps the
     // smoke fast.
-    constexpr uint64_t SCREENSHOT_FRAME = 3;
+    // Frame 30 is well past the SLOT_COUNT-frame profiler ring warmup
+    // (so the screenshot's Performance panel actually has the scope
+    // tree filled in) and still well before any real-world delay.
+    constexpr uint64_t SCREENSHOT_FRAME = 30;
     // Cadence for the periodic profiler log line. Every 120 frames is
     // ~1 s at 120 FPS — enough samples for the rolling FrameProfile to
     // be representative without spamming stdout.
@@ -263,7 +266,7 @@ int RunViewerLoop(int adapterIndex, bool enableValidation,
             const Profiler::CpuScope imguiCpu(profiler, "app.imgui.cpu");
             const FrameProfile fp = renderer.LastFrameProfile();
             imguiHost.BeginFrame();
-            imguiHost.BuildFpsPanel(fp.cpuFrameMs, fp.gpuFrameMs, fp.frameIndex);
+            imguiHost.BuildFpsPanel(fp);
             imguiHost.Render();
         }
 

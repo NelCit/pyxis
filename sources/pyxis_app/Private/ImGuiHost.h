@@ -8,6 +8,8 @@
 
 #pragma once
 
+#include <Pyxis/Renderer/Descs/FrameProfile.h>
+
 #include <cstdint>
 
 namespace nvrhi {
@@ -47,7 +49,9 @@ public:
     // Submit: encodes ImDrawData into the supplied command list against
     // colorTarget (must already be in nvrhi::ResourceStates::ColorAttachment).
     void BeginFrame() noexcept;
-    void BuildFpsPanel(double cpuFrameMs, double gpuFrameMs, uint64_t frameIndex) noexcept;
+    // Builds the dockable Performance panel. Shows the totals + the
+    // pre-order scope tree from the supplied FrameProfile snapshot.
+    void BuildFpsPanel(const FrameProfile& fp) noexcept;
     void Render() noexcept;
     void Submit(nvrhi::ICommandList* commandList, nvrhi::ITexture* colorTarget) noexcept;
 
