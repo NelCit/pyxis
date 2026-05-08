@@ -322,6 +322,16 @@ int RunViewerLoop(int adapterIndex, bool enableValidation,
             const Profiler::CpuScope present(profiler, "app.dm.present");
             deviceManager->EndFrame();
         }
+        // Drain NVRHI's deferred-destruction queue. nvrhi.h's contract is
+        // explicit: "Call this method at least once per frame." Without
+        // it, every CommandList submission's internal RefCountPtrs on
+        // textures/pipelines/buffers stay alive in the queue tracker
+        // until the queue itself is destroyed — staging textures and
+        // timer queries grow unbounded over a long session.
+        {
+            const Profiler::CpuScope gcScope(profiler, "app.nvrhi.gc");
+            device->runGarbageCollection();
+        }
         profiler.EndFrame();
         ++frameIndex;
 

@@ -377,7 +377,10 @@ DeviceManagerCreateStatus VkDeviceManager::Bringup(const DeviceCreationParams& p
     VkSemaphoreCreateInfo timelineSemInfo{};
     timelineSemInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
     timelineSemInfo.pNext = &timelineInfo;
-    vkCreateSemaphore(_device, &timelineSemInfo, nullptr, &_frameTimeline);
+    if (vkCreateSemaphore(_device, &timelineSemInfo, nullptr, &_frameTimeline) != VK_SUCCESS) {
+        log.Error(log::PLATFORM, "VkDeviceManager: vkCreateSemaphore (timeline) failed");
+        return DeviceManagerCreateStatus::OutOfMemory;
+    }
     _frameValue = 0;
 
     {
@@ -555,6 +558,12 @@ bool VkDeviceManager::CreateSwapchain(uint32_t width, uint32_t height) noexcept 
             tdesc);
         if (!textureHandle) {
             log.Error(log::PLATFORM, "VkDeviceManager: nvrhi createHandleForNativeTexture failed");
+            // Drop the partially populated state so we don't leak the new
+            // swapchain on the failure path.
+            _swapchainTextures.clear();
+            _swapchainImages.clear();
+            vkDestroySwapchainKHR(_device, _swapchain, nullptr);
+            _swapchain = VK_NULL_HANDLE;
             return false;
         }
         _swapchainTextures.push_back(std::move(textureHandle));
@@ -565,8 +574,19 @@ bool VkDeviceManager::CreateSwapchain(uint32_t width, uint32_t height) noexcept 
     // doesn't reuse a semaphore that's still bound to a retired swapchain.
     VkSemaphoreCreateInfo binarySemInfo{};
     binarySemInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-    vkCreateSemaphore(_device, &binarySemInfo, nullptr, &_acquireSem);
-    vkCreateSemaphore(_device, &binarySemInfo, nullptr, &_presentSem);
+    if (vkCreateSemaphore(_device, &binarySemInfo, nullptr, &_acquireSem) != VK_SUCCESS ||
+        vkCreateSemaphore(_device, &binarySemInfo, nullptr, &_presentSem) != VK_SUCCESS) {
+        log.Error(log::PLATFORM, "VkDeviceManager: vkCreateSemaphore (acquire/present) failed");
+        // Drop everything we allocated this CreateSwapchain call so the
+        // device manager doesn't end up half-built.
+        _swapchainTextures.clear();
+        _swapchainImages.clear();
+        if (_swapchain != VK_NULL_HANDLE) {
+            vkDestroySwapchainKHR(_device, _swapchain, nullptr);
+            _swapchain = VK_NULL_HANDLE;
+        }
+        return false;
+    }
     return true;
 }
 
@@ -616,7 +636,12 @@ const AdapterInfo& VkDeviceManager::GetAdapterInfo() const noexcept { return _ad
 uint32_t VkDeviceManager::GetFramesInFlight() const noexcept { return _framesInFlight; }
 
 nvrhi::ITexture* VkDeviceManager::GetCurrentBackbuffer() const noexcept {
-    if (_swapchainTextures.empty()) return nullptr;
+    if (_swapchainTextures.empty() || _currentImage >= _swapchainTextures.size()) {
+        // Sentinel from a failed vkAcquireNextImageKHR (OUT_OF_DATE) —
+        // the renderer should skip its submit until the next BeginFrame
+        // rebuilds the swapchain.
+        return nullptr;
+    }
     return _swapchainTextures[_currentImage].Get();
 }
 
@@ -648,8 +673,14 @@ void VkDeviceManager::BeginFrame() {
     const VkResult acquireResult = vkAcquireNextImageKHR(_device, _swapchain, UINT64_MAX,
                                                          _acquireSem, VK_NULL_HANDLE, &_currentImage);
     if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR) {
-        // The semaphore is *not* signalled in this case. Skip queuing waits
-        // and trigger a swapchain rebuild on the next frame boundary.
+        // The semaphore is *not* signalled in this case AND no submit will
+        // signal _frameTimeline at the value we just incremented to. Roll
+        // _frameValue back so next frame's wait targets a value the
+        // timeline has actually reached, otherwise vkWaitSemaphores
+        // blocks forever. Mark the backbuffer index invalid so the
+        // viewer skips its submit cleanly.
+        --_frameValue;
+        _currentImage = UINT32_MAX;
         _resizePending = true;
         return;
     }
@@ -671,18 +702,24 @@ void VkDeviceManager::BeginFrame() {
 void VkDeviceManager::EndFrame() {
     if (_swapchain == VK_NULL_HANDLE) return;
 
-    // The renderer's executeCommandList already happened with the wait +
-    // signal we pre-queued in BeginFrame. Just present.
-    VkPresentInfoKHR present{};
-    present.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-    present.waitSemaphoreCount = 1;
-    present.pWaitSemaphores    = &_presentSem;
-    present.swapchainCount     = 1;
-    present.pSwapchains        = &_swapchain;
-    present.pImageIndices      = &_currentImage;
-    const VkResult presentResult = vkQueuePresentKHR(_graphicsQueue, &present);
-    if (presentResult == VK_ERROR_OUT_OF_DATE_KHR || presentResult == VK_SUBOPTIMAL_KHR) {
-        _resizePending = true;
+    // Skip present if BeginFrame's vkAcquireNextImageKHR returned
+    // OUT_OF_DATE — there's no image to hand back to the compositor and
+    // _presentSem was never signalled. The resize block below still runs.
+    const bool haveAcquiredImage = _currentImage < _swapchainTextures.size();
+    if (haveAcquiredImage) {
+        // The renderer's executeCommandList already happened with the wait +
+        // signal we pre-queued in BeginFrame. Just present.
+        VkPresentInfoKHR present{};
+        present.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+        present.waitSemaphoreCount = 1;
+        present.pWaitSemaphores    = &_presentSem;
+        present.swapchainCount     = 1;
+        present.pSwapchains        = &_swapchain;
+        present.pImageIndices      = &_currentImage;
+        const VkResult presentResult = vkQueuePresentKHR(_graphicsQueue, &present);
+        if (presentResult == VK_ERROR_OUT_OF_DATE_KHR || presentResult == VK_SUBOPTIMAL_KHR) {
+            _resizePending = true;
+        }
     }
 
     if (_resizePending && _window) {
