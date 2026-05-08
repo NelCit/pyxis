@@ -419,6 +419,15 @@ bool VkDeviceManager::CreateSwapchain(uint32_t width, uint32_t height) noexcept 
             }
         }
     }
+    {
+        const char* presentModeName =
+              chosenPresentMode == VK_PRESENT_MODE_MAILBOX_KHR   ? "MAILBOX (uncapped, no tearing)"
+            : chosenPresentMode == VK_PRESENT_MODE_IMMEDIATE_KHR ? "IMMEDIATE (uncapped, may tear)"
+            :                                                       "FIFO (refresh-rate capped)";
+        std::string msg = "VkDeviceManager: present mode = ";
+        msg += presentModeName;
+        Logging::Get().Info(log::PLATFORM, msg);
+    }
 
     VkExtent2D extent = caps.currentExtent;
     if (extent.width == UINT32_MAX) {

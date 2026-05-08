@@ -114,6 +114,19 @@ struct Profiler::Impl {
         resolved.reserve(slot.records.size());
         double gpuSumMs = 0.0;
 
+        // gpuFrameMs sums GPU scopes at the *top of the GPU hierarchy*.
+        // The Profiler shares one depth counter across CPU + GPU scopes,
+        // so a GpuScope nested inside a CpuScope (e.g. RenderGraph passes
+        // sit inside "render.frame.cpu") doesn't have CPU depth 0. We
+        // track minGpuDepth in the slot and sum only the records that
+        // match it — that's the GPU-side root for this frame.
+        uint32_t minGpuDepth = UINT32_MAX;
+        for (const ScopeRecord& r : slot.records) {
+            if (r.kind == FrameProfile::ScopeKind::Gpu && r.depth < minGpuDepth) {
+                minGpuDepth = r.depth;
+            }
+        }
+
         for (ScopeRecord& r : slot.records) {
             if (r.queryIdx >= 0 && device) {
                 nvrhi::ITimerQuery* q = queryPool[static_cast<std::size_t>(r.queryIdx)].Get();
@@ -123,7 +136,9 @@ struct Profiler::Impl {
                 // no-op here.
                 const float seconds = device->getTimerQueryTime(q);
                 r.durationMs = static_cast<double>(seconds) * 1000.0;
-                if (r.depth == 0) gpuSumMs += r.durationMs;
+                if (r.kind == FrameProfile::ScopeKind::Gpu && r.depth == minGpuDepth) {
+                    gpuSumMs += r.durationMs;
+                }
                 ReleaseQuery(r.queryIdx);
                 r.queryIdx = -1;
             }

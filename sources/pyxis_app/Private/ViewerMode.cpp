@@ -25,6 +25,7 @@
 #include <stb_image_write.h>
 
 #include <atomic>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -228,6 +229,10 @@ int RunViewerLoop(int adapterIndex, bool enableValidation,
     // swapchain has settled. 3 frames is enough on FIFO; keeps the
     // smoke fast.
     constexpr uint64_t SCREENSHOT_FRAME = 3;
+    // Cadence for the periodic profiler log line. Every 120 frames is
+    // ~1 s at 120 FPS — enough samples for the rolling FrameProfile to
+    // be representative without spamming stdout.
+    constexpr uint64_t PROFILER_LOG_INTERVAL = 120;
 
     // ---- Frame loop ------------------------------------------------------
     uint64_t frameIndex = 0;
@@ -296,6 +301,21 @@ int RunViewerLoop(int adapterIndex, bool enableValidation,
         deviceManager->EndFrame();
         profiler.EndFrame();
         ++frameIndex;
+
+        // Periodic profiler dump: cheap, log-only, no allocations beyond
+        // the snprintf'd line. With FIF=1 the cpu number includes the
+        // CPU-side wait on the previous frame's GPU completion, so it's
+        // a good proxy for the wall-clock frame time (and fps = 1000/cpu).
+        if (frameIndex > 0 && frameIndex % PROFILER_LOG_INTERVAL == 0) {
+            const FrameProfile fp = renderer.LastFrameProfile();
+            const double fps = fp.cpuFrameMs > 0.0 ? 1000.0 / fp.cpuFrameMs : 0.0;
+            char buf[160];
+            std::snprintf(buf, sizeof(buf),
+                "profiler: frame %llu  cpu %.3f ms  gpu %.3f ms  fps %.1f",
+                static_cast<unsigned long long>(fp.frameIndex),
+                fp.cpuFrameMs, fp.gpuFrameMs, fps);
+            log.Info(log::APP, buf);
+        }
     }
 
     log.Info(log::APP, "ViewerMode: frame loop exited; tearing down");
