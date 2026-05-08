@@ -44,9 +44,13 @@ public:
     private:
         Profiler*        _profiler = nullptr;
         std::int64_t     _startNs  = 0;
-        // Index into the active slot's records vector. The scope pushes
-        // its record at construction time (pre-order) and back-fills the
-        // durationMs at destruction.
+        // Slot the scope opened against, captured in the ctor so the dtor
+        // back-fills the right slot even if a misuse opens the scope
+        // across a Profiler::BeginFrame() rotation.
+        std::uint32_t    _slotIndex   = 0;
+        // Index into _slotIndex's records vector. The scope pushes its
+        // record at construction (pre-order) and back-fills durationMs
+        // at destruction.
         std::size_t      _recordIndex = 0;
     };
 
@@ -71,8 +75,9 @@ public:
         // (CPU-only profiler, or null command list). The query slot is
         // owned by the pool — GpuScope never sees the raw handle.
         int                  _queryIdx    = -1;
-        // Index into the active slot's records vector — same pre-order
-        // bookkeeping as CpuScope.
+        // Same slot-capture rationale as CpuScope.
+        std::uint32_t        _slotIndex   = 0;
+        // Index into _slotIndex's records vector.
         std::size_t          _recordIndex = 0;
     };
 

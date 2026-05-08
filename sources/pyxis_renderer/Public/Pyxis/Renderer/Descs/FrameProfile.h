@@ -40,9 +40,15 @@ struct FrameProfile {
         uint32_t  depth      = 0;
     };
 
-    // Borrowed view onto the Profiler's frame-timing ring. Valid until
-    // the next Profiler::EndFrame(). Callers that need the data past
-    // the next frame copy what they need.
+    // Borrowed view onto the Profiler's just-drained slot. Valid until
+    // the next Profiler::BeginFrame(), where the next slot rotation
+    // moves a different vector into Impl::lastFrame. Callers that need
+    // the data past that boundary copy what they need.
+    //
+    // frameIndex below identifies the frame that produced these passes
+    // (i.e. the slot we just drained), NOT the live frame the consumer
+    // is in. With FIF=1 + SLOT_COUNT=4 that's typically 3 frames behind
+    // the live counter — fine for human-paced FPS readouts.
     std::span<const PassTiming> passes;
 
     double   cpuFrameMs = 0.0;

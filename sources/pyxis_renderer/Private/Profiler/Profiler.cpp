@@ -61,6 +61,10 @@ struct Profiler::Impl {
     static constexpr uint32_t SLOT_COUNT = MAX_FRAMES_IN_FLIGHT + 1;
     struct Slot {
         std::vector<ScopeRecord> records;
+        // The frame index we stamped this slot with at EndFrame time.
+        // Surfaced to LastFrameProfile() so consumers see the index of
+        // the frame that produced the data, not the live frame counter.
+        uint64_t                 frameIndex = 0;
         double                   cpuFrameMs = 0.0;
         bool                     inFlight   = false;
     };
@@ -81,8 +85,9 @@ struct Profiler::Impl {
     // LastFrameProfile()). Held by value here so the std::span we hand
     // out is valid until the next BeginFrame() drain rotation.
     std::vector<FrameProfile::PassTiming> lastFrame;
-    double                                lastCpuFrameMs = 0.0;
-    double                                lastGpuFrameMs = 0.0;
+    double                                lastCpuFrameMs    = 0.0;
+    double                                lastGpuFrameMs    = 0.0;
+    uint64_t                              lastFrameIndex    = 0;
 
     int AcquireQuery() noexcept {
         if (!device) return -1;
@@ -154,6 +159,7 @@ struct Profiler::Impl {
         lastFrame      = std::move(resolved);
         lastCpuFrameMs = slot.cpuFrameMs;
         lastGpuFrameMs = gpuSumMs;
+        lastFrameIndex = slot.frameIndex;
 
         slot.records.clear();
         slot.cpuFrameMs = 0.0;
@@ -180,6 +186,7 @@ void Profiler::BeginFrame() {
 void Profiler::EndFrame() {
     Impl::Slot& slot = _impl->slots[_impl->currentSlot];
     slot.cpuFrameMs  = static_cast<double>(NowNs() - _impl->frameStart) / 1.0e6;
+    slot.frameIndex  = _impl->frameIndex;
     slot.inFlight    = true;
     ++_impl->frameIndex;
 }
@@ -189,7 +196,10 @@ FrameProfile Profiler::LastFrameProfile() const {
     profile.passes     = std::span<const FrameProfile::PassTiming>(_impl->lastFrame);
     profile.cpuFrameMs = _impl->lastCpuFrameMs;
     profile.gpuFrameMs = _impl->lastGpuFrameMs;
-    profile.frameIndex = _impl->frameIndex;
+    // Index of the frame that produced these passes — see the comment on
+    // FrameProfile::frameIndex. Defaults to 0 before the ring has drained
+    // its first slot.
+    profile.frameIndex = _impl->lastFrameIndex;
     return profile;
 }
 
@@ -200,8 +210,9 @@ FrameProfile Profiler::LastFrameProfile() const {
 // ---------------------------------------------------------------------------
 
 Profiler::CpuScope::CpuScope(Profiler& profiler, std::string_view name)
-    : _profiler(&profiler), _startNs(NowNs()) {
-    auto& records = _profiler->_impl->slots[_profiler->_impl->currentSlot].records;
+    : _profiler(&profiler), _startNs(NowNs()),
+      _slotIndex(_profiler->_impl->currentSlot) {
+    auto& records = _profiler->_impl->slots[_slotIndex].records;
     Impl::ScopeRecord record{};
     record.name     = MakeScopeName(name);
     record.kind     = FrameProfile::ScopeKind::Cpu;
@@ -216,7 +227,9 @@ Profiler::CpuScope::~CpuScope() {
     if (!_profiler) return;
     const int64_t end = NowNs();
     --_profiler->_impl->depth;
-    auto& records = _profiler->_impl->slots[_profiler->_impl->currentSlot].records;
+    // Use the captured _slotIndex, not currentSlot — robust against
+    // misuse that opens the scope across a Profiler::BeginFrame() call.
+    auto& records = _profiler->_impl->slots[_slotIndex].records;
     if (_recordIndex < records.size()) {
         records[_recordIndex].durationMs = static_cast<double>(end - _startNs) / 1.0e6;
     }
@@ -229,7 +242,8 @@ Profiler::CpuScope::~CpuScope() {
 // ---------------------------------------------------------------------------
 
 Profiler::GpuScope::GpuScope(Profiler& profiler, nvrhi::ICommandList* commandList, std::string_view name)
-    : _profiler(&profiler), _commandList(commandList) {
+    : _profiler(&profiler), _commandList(commandList),
+      _slotIndex(_profiler->_impl->currentSlot) {
     const FrameProfile::ScopeName scopeName = MakeScopeName(name);
     if (_commandList) _commandList->beginMarker(scopeName.data.data());
 
@@ -241,7 +255,9 @@ Profiler::GpuScope::GpuScope(Profiler& profiler, nvrhi::ICommandList* commandLis
         }
     }
 
-    auto& records = _profiler->_impl->slots[_profiler->_impl->currentSlot].records;
+    // Records pushed against the captured slot, not currentSlot — same
+    // robustness rationale as CpuScope.
+    auto& records = _profiler->_impl->slots[_slotIndex].records;
     Impl::ScopeRecord record{};
     record.name     = scopeName;
     record.kind     = FrameProfile::ScopeKind::Gpu;
