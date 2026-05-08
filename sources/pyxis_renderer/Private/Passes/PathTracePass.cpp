@@ -10,6 +10,13 @@
 #include <Pyxis/Renderer/GpuScene.h>
 #include <Pyxis/Renderer/Profiler.h>
 
+// The dual-language ShaderInterop header is on the renderer's
+// private include path (resources/shaders/). It declares
+// `pyxis::shaderinterop::CameraUniforms` (and `HitInfo`) for the
+// C++ side and the same structs at file scope for slangc — same
+// definitions, kept in lockstep by construction.
+#include "ShaderInterop.slang"
+
 #include <hlsl++.h>
 
 #include <cstdint>
@@ -22,19 +29,16 @@ namespace pyxis {
 
 namespace {
 
-// CameraUniforms layout matches resources/shaders/ShaderInterop.slang
-// — two float4x4 matrices, 128 bytes total. We don't reach for the
-// shared header here because including a Slang file from C++ requires
-// jumping through hoops; the layout is a hard contract anyway, so a
-// local shadow of the struct + a static_assert against the expected
-// size is the simplest enforcement.
-struct CameraUniformsCpu {
-    hlslpp::float4x4 worldFromView;
-    hlslpp::float4x4 viewFromClip;
-};
-static_assert(sizeof(CameraUniformsCpu) == 128,
-              "CameraUniforms is two row-major float4x4s = 128 bytes "
-              "(must match resources/shaders/ShaderInterop.slang).");
+// CameraUniforms comes straight from the shared ShaderInterop header,
+// keeping the C++ side and the SPIR-V side guaranteed-in-lockstep by
+// construction. The static_assert remains as a tripwire: if someone
+// adds a field to the shader-side struct without bumping the cbuffer
+// size on the C++ allocator below, the build fails here rather than
+// at runtime via a confusing validation error.
+using shaderinterop::CameraUniforms;
+static_assert(sizeof(CameraUniforms) == 128,
+              "CameraUniforms is two float4x4s = 128 bytes "
+              "(see resources/shaders/ShaderInterop.slang).");
 
 std::vector<char> ReadBinaryFile(std::string_view path) noexcept {
     std::ifstream stream(std::string{path}, std::ios::binary | std::ios::ate);
@@ -164,7 +168,7 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
     // struct; rewritten every frame from GpuScene's CameraDesc via
     // commandList->writeBuffer (non-volatile path).
     nvrhi::BufferDesc cbDesc;
-    cbDesc.byteSize           = sizeof(CameraUniformsCpu);
+    cbDesc.byteSize           = sizeof(CameraUniforms);
     cbDesc.debugName          = "PathTrace.CameraUniforms";
     cbDesc.isConstantBuffer   = true;
     cbDesc.initialState       = nvrhi::ResourceStates::ConstantBuffer;
@@ -229,7 +233,7 @@ void PathTracePass::Execute(nvrhi::ICommandList* commandList, const PassContext&
     // operation that doesn't care about row-vector vs column-vector
     // semantics.
     const CameraDesc& camera = _scene->GetCamera();
-    CameraUniformsCpu cameraUniforms{};
+    CameraUniforms cameraUniforms{};
     cameraUniforms.worldFromView = hlslpp::inverse(camera.viewFromWorld);
     cameraUniforms.viewFromClip  = hlslpp::inverse(camera.projFromView);
     commandList->writeBuffer(_cameraUniformsBuffer.Get(),

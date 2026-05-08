@@ -130,6 +130,17 @@ pyxis_thirdparty_require_hlslpp()
 
 # Flecs is PRIVATE — never propagated to dependents (plan §49). hlslpp
 # is PUBLIC — it leaks through Public/Descs/* and consumers must see it.
+# resources/shaders/ is on the private include path so C++ TUs can
+# `#include "ShaderInterop.slang"` and pick up the shared structs
+# (CameraUniforms, HitInfo, ...) directly. The Slang file branches on
+# __cplusplus, so the same header satisfies both the slangc shader
+# build and the renderer's C++ side without a hand-maintained C++
+# shadow.
+target_include_directories(pyxis_renderer
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/resources/shaders
+)
+
 target_link_libraries(pyxis_renderer
     PUBLIC
         Pyxis::Platform

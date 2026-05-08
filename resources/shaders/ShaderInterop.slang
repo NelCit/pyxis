@@ -33,14 +33,23 @@
     using uint     = uint32_t;
 #endif
 
+#ifndef __cplusplus
 // HitInfo — payload struct passed between raygen / closesthit / miss
-// shaders via TraceRay. M3 carries one float3 colour + a hitT
-// distance; expands later as path tracing arrives (radiance, RNG
-// state, throughput, etc.).
+// shaders via TraceRay. Shader-only: Slang's `float3` is 12 bytes
+// (tight) but the C++ `hlslpp::float3` is 16 bytes (SIMD-padded), so
+// a dual-language `{ float3 color; float hitT; }` would have
+// different `sizeof` on the two sides. Since HitInfo never crosses
+// the C++/SPIR-V boundary as a memory blob (it lives only in shader
+// registers between TraceRay and its callees), we simply omit it
+// from the C++ view of this header.
+//
+// M3 carries one float3 colour + a hitT distance; expands later as
+// path tracing arrives (radiance, RNG state, throughput, etc.).
 struct HitInfo {
     float3 color;
     float  hitT;     // ray-distance at hit; -1.0 sentinel from miss shader.
 };
+#endif
 
 // CameraUniforms — uploaded per-frame to a constant buffer the raygen
 // shader reads to build primary rays. M3 ships pinhole-only (no DOF,
@@ -64,10 +73,14 @@ struct CameraUniforms {
 };
 
 #ifdef __cplusplus
-    static_assert(sizeof(HitInfo) == 16,
-                  "HitInfo must stay 16 bytes (float3 + float fits exactly).");
-    static_assert(sizeof(HitInfo) % 16 == 0,
-                  "ShaderInterop structs must be 16-byte aligned (§23).");
+    // HitInfo is shader-only (see the `#ifndef __cplusplus` guard
+    // above), so its size assert lives shader-side only too. Below
+    // we lock the layout of the structs that *do* cross the C++ /
+    // SPIR-V boundary as memory blobs (currently just CameraUniforms,
+    // uploaded via cbuffer).
+    static_assert(sizeof(CameraUniforms) == 128,
+                  "CameraUniforms must be 128 bytes — two 64-byte float4x4s "
+                  "(see resources/shaders/ShaderInterop.slang).");
     static_assert(sizeof(CameraUniforms) % 16 == 0,
                   "CameraUniforms must be 16-byte aligned (cbuffer std140 rule).");
 
