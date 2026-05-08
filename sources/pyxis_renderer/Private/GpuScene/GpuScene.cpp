@@ -26,6 +26,8 @@
 #include <Pyxis/Renderer/Forward.h>
 #include <Pyxis/Renderer/Profiler.h>
 
+#include <nvrhi/nvrhi.h>
+
 #include <cstdint>
 #include <string>
 #include <utility>
@@ -60,9 +62,10 @@ struct GpuScene::Impl {
     // slots are reused via a bumped generation until they hit 255 and
     // get quarantined.
     struct MeshEntry {
-        bool                            live       = false;
-        bool                            quarantined = false;
-        uint8_t                         generation = 0;
+        bool                            live           = false;
+        bool                            quarantined    = false;
+        bool                            needsGpuUpload = false;   // true between CreateMesh and the next CommitResources.
+        uint8_t                         generation     = 0;
         // CPU-side copies of the input MeshDesc spans. The renderer
         // owns these from CreateMesh until DestroyMesh.
         std::vector<hlslpp::float3>     positions;
@@ -71,6 +74,17 @@ struct GpuScene::Impl {
         std::vector<hlslpp::float4>     tangents;
         std::vector<hlslpp::float2>     uv0;
         std::string                     debugName;
+        // GPU-side state populated by CommitResources via NVRHI's
+        // writeBuffer staging path. Both buffers are tagged
+        // `isAccelStructBuildInput` so the next M3 commit can build a
+        // BLAS straight from them without re-uploading. Vertex stride
+        // is sizeof(hlslpp::float3) = 16 bytes (12 floats + 4 padding);
+        // VK_FORMAT_R32G32B32_SFLOAT with a 16-byte stride is valid
+        // ray-tracing geometry input under VK_KHR_ray_tracing_pipeline.
+        nvrhi::BufferHandle             vertexBuffer;
+        nvrhi::BufferHandle             indexBuffer;
+        uint32_t                        vertexCount = 0;
+        uint32_t                        indexCount  = 0;
     };
 
     nvrhi::IDevice*    device   = nullptr;   // borrowed; outlives this scene.
@@ -171,7 +185,10 @@ Expected<MeshHandle> GpuScene::CreateMesh(const MeshDesc& meshDesc) {
 
     // ---- Populate entry ----------------------------------------------------
     Impl::MeshEntry& entry = _impl->meshes[slot];
-    entry.live = true;
+    entry.live           = true;
+    entry.needsGpuUpload = true;     // drained on the next CommitResources.
+    entry.vertexCount    = static_cast<uint32_t>(meshDesc.positions.size());
+    entry.indexCount     = static_cast<uint32_t>(meshDesc.indices.size());
     entry.positions.assign(meshDesc.positions.begin(), meshDesc.positions.end());
     entry.indices.assign  (meshDesc.indices  .begin(), meshDesc.indices  .end());
     entry.normals.assign  (meshDesc.normals  .begin(), meshDesc.normals  .end());
@@ -283,10 +300,88 @@ void GpuScene::UpdateLight(LightHandle /*lightHandle*/, const LightDesc& /*light
 void GpuScene::RemoveLight(LightHandle /*lightHandle*/) {}
 
 // ---- Frame boundary --------------------------------------------------------
-Expected<void> GpuScene::CommitResources(nvrhi::ICommandList* /*commandList*/) {
-    // Stub: no GPU upload yet. Real impl arrives once the mesh upload
-    // path lands (next M3 commit) and the Flecs phase pipeline drives
-    // System_UploadDirtyMeshes / BuildDirtyBlas / RebuildTlas.
+Expected<void> GpuScene::CommitResources(nvrhi::ICommandList* commandList) {
+    if (commandList == nullptr) {
+        return std::unexpected{
+            PYXIS_ERROR(ErrorKind::InvalidArgument,
+                        "GpuScene::CommitResources: commandList is null")};
+    }
+    if (_impl->device == nullptr) {
+        return std::unexpected{
+            PYXIS_ERROR(ErrorKind::InvalidState,
+                        "GpuScene::CommitResources: scene has no device "
+                        "(constructed in CPU-only test mode)")};
+    }
+
+    const Profiler::CpuScope commitScope(*_impl->profiler, "render.commitResources");
+
+    // ---- Upload pending meshes ----------------------------------------
+    // Iterate the mesh table once and upload every live entry whose
+    // CPU-side buffers haven't reached the GPU yet. NVRHI's
+    // `writeBuffer` manages staging internally — it allocates from an
+    // upload heap, memcpys the source bytes, and inserts the GPU-side
+    // copy on the supplied (open) command list. Both buffers carry
+    // `isAccelStructBuildInput=true` so the next M3 commit can hand
+    // them to a BLAS build without re-uploading.
+    //
+    // Errors abort the commit; the partially-built entry's
+    // `needsGpuUpload` stays true so the next commit retries.
+    for (Impl::MeshEntry& entry : _impl->meshes) {
+        if (!entry.live || !entry.needsGpuUpload) continue;
+
+        // Vertex buffer — hlslpp::float3 stride (16 bytes / vertex) on
+        // x86_64 SSE. VK_FORMAT_R32G32B32_SFLOAT with that stride is
+        // valid ray-tracing geometry input under
+        // VK_KHR_ray_tracing_pipeline.
+        const std::size_t vertexBytes = entry.positions.size() * sizeof(hlslpp::float3);
+        nvrhi::BufferDesc vertexDesc;
+        vertexDesc.byteSize                = vertexBytes;
+        vertexDesc.debugName               = entry.debugName.empty()
+                                              ? std::string{"mesh.vertex"}
+                                              : entry.debugName + ".vertex";
+        vertexDesc.isVertexBuffer          = true;
+        vertexDesc.isAccelStructBuildInput = true;
+        vertexDesc.initialState            = nvrhi::ResourceStates::CopyDest;
+        vertexDesc.keepInitialState        = true;
+        entry.vertexBuffer = _impl->device->createBuffer(vertexDesc);
+        if (!entry.vertexBuffer) {
+            return std::unexpected{
+                PYXIS_ERROR(ErrorKind::OutOfMemoryGpu,
+                            "CommitResources: createBuffer(vertex, %zu bytes) failed for '%s'",
+                            vertexBytes, entry.debugName.c_str())};
+        }
+
+        // Index buffer — uint32 indices are the M3 default; M5+ might
+        // bump to uint16 on tiny meshes, but `MeshDesc::indices` is
+        // span<uint32_t> so v1 stays uint32 throughout.
+        const std::size_t indexBytes = entry.indices.size() * sizeof(uint32_t);
+        nvrhi::BufferDesc indexDesc;
+        indexDesc.byteSize                = indexBytes;
+        indexDesc.debugName               = entry.debugName.empty()
+                                             ? std::string{"mesh.index"}
+                                             : entry.debugName + ".index";
+        indexDesc.isIndexBuffer           = true;
+        indexDesc.isAccelStructBuildInput = true;
+        indexDesc.format                  = nvrhi::Format::R32_UINT;
+        indexDesc.initialState            = nvrhi::ResourceStates::CopyDest;
+        indexDesc.keepInitialState        = true;
+        entry.indexBuffer = _impl->device->createBuffer(indexDesc);
+        if (!entry.indexBuffer) {
+            entry.vertexBuffer = nullptr;   // drop the partially-built upload.
+            return std::unexpected{
+                PYXIS_ERROR(ErrorKind::OutOfMemoryGpu,
+                            "CommitResources: createBuffer(index, %zu bytes) failed for '%s'",
+                            indexBytes, entry.debugName.c_str())};
+        }
+
+        commandList->writeBuffer(entry.vertexBuffer.Get(), entry.positions.data(), vertexBytes);
+        commandList->writeBuffer(entry.indexBuffer.Get(),  entry.indices.data(),   indexBytes);
+        entry.needsGpuUpload = false;
+    }
+
+    // BLAS build / TLAS rebuild / camera + light upload land in
+    // subsequent M3 commits. Until then CommitResources only services
+    // the mesh-upload path.
     return {};
 }
 
