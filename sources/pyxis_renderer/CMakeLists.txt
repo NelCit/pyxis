@@ -47,6 +47,11 @@ target_sources(pyxis_renderer PUBLIC
         Public/Pyxis/Renderer/Descs/TextureKey.h
         Public/Pyxis/Renderer/Descs/GpuSceneCreateDesc.h
         Public/Pyxis/Renderer/Descs/FrameStats.h
+
+        # M3 GpuScene — canonical scene-mutation API. Stub impl in
+        # Private/GpuScene/GpuScene.cpp; real bodies land in subsequent
+        # M3 commits.
+        Public/Pyxis/Renderer/GpuScene.h
 )
 
 # ----------------------------------------------------------------------------
@@ -55,6 +60,10 @@ target_sources(pyxis_renderer PUBLIC
 target_sources(pyxis_renderer PRIVATE
     # M3 — Error / PYXIS_ERROR implementation (foundation for Expected<T>).
     Private/Errors/Error.cpp
+
+    # M3 — GpuScene PIMPL stub. Real bodies arrive in subsequent
+    # M3 commits (mesh upload, BLAS, TLAS, materials, ...).
+    Private/GpuScene/GpuScene.cpp
 
     # M1 — RenderGraph + Passes + Profiler + Renderer.
     Private/Diagnostics/CommandListMarker.h

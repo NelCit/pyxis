@@ -12,6 +12,7 @@
 
 #include <Pyxis/Platform/Logging/Log.h>
 #include <Pyxis/Platform/Logging/LogCategories.h>
+#include <Pyxis/Renderer/GpuScene.h>
 #include <Pyxis/Renderer/Profiler.h>
 
 #include <nvrhi/nvrhi.h>
@@ -19,10 +20,17 @@
 namespace pyxis {
 
 PyxisRenderer::PyxisRenderer(nvrhi::IDevice*           device,
+                             GpuScene&                 scene,
                              Profiler&                 profiler,
                              const RendererCreateDesc& /*desc*/)
     : _profiler(&profiler),
       _graph(std::make_unique<RenderGraph>(device, &profiler)) {
+    // `scene` parameter is held by the renderer once PathTracePass
+    // arrives at M3; for now the M1 TrianglePass ignores it and we
+    // suppress the unused-parameter diagnostic with a void-cast so
+    // the public §18.6 signature is fully populated from this point
+    // forward.
+    (void)scene;
     _graph->AddPass(std::make_unique<TrianglePass>(device));
     Logging::Get().Info(log::RENDER, "PyxisRenderer: initialised (TrianglePass registered)");
 }

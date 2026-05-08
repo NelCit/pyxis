@@ -1,10 +1,12 @@
 // Pyxis renderer — frame rendering API.
 //
-// Plan §18.6 (M1 subset). M1 surface: ctor takes (device, profiler,
-// create-desc); RenderFrame populates a command list with a clear +
-// triangle draw into RenderTargets::color; Resize / ResetAccumulation
-// / LastFrameProfile follow §18.6 verbatim. GpuScene is M3+; M1's
-// renderer renders the hard-coded triangle without consuming a scene.
+// Plan §18.6. The renderer takes a `GpuScene&` as the canonical scene
+// input; the M1 hard-coded triangle path is preserved for now and
+// continues to ignore the scene argument until M3's PathTracePass
+// replaces TrianglePass with the real RT-pipeline dispatch. The
+// signature change here lands the §18.6 final shape so consumers
+// (pyxis_app, future pyxis_hydra / pyxis_usd_ingest) compile against
+// it from M3 onward without further churn.
 
 #pragma once
 
@@ -33,6 +35,7 @@ class RenderGraph;
 class PYXIS_RENDERER_API PyxisRenderer final {
 public:
     PyxisRenderer(nvrhi::IDevice*            device,
+                  GpuScene&                  scene,
                   Profiler&                  profiler,
                   const RendererCreateDesc&  desc);
     ~PyxisRenderer();

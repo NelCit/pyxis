@@ -12,9 +12,11 @@
 #include <Pyxis/Platform/Logging/Log.h>
 #include <Pyxis/Platform/Logging/LogCategories.h>
 #include <Pyxis/Platform/Window/IWindow.h>
+#include <Pyxis/Renderer/Descs/GpuSceneCreateDesc.h>
 #include <Pyxis/Renderer/Descs/RenderSettings.h>
 #include <Pyxis/Renderer/Descs/RenderTargets.h>
 #include <Pyxis/Renderer/Descs/RendererCreateDesc.h>
+#include <Pyxis/Renderer/GpuScene.h>
 #include <Pyxis/Renderer/Profiler.h>
 #include <Pyxis/Renderer/PyxisRenderer.h>
 #include <Pyxis/Renderer/SceneWorldFacade.h>
@@ -192,12 +194,17 @@ int RunViewerLoop(const Configuration& config,
         return EXIT_DEVICE_INIT_FAIL;
     }
 
-    // ---- Profiler + Renderer --------------------------------------------
+    // ---- Profiler + GpuScene + Renderer ---------------------------------
+    // GpuScene is the canonical scene-mutation API (§18.5). M3
+    // foundation lands the class with a PIMPL stub; the renderer's
+    // constructor takes it per §18.6 even though the M1 TrianglePass
+    // path doesn't yet read from it.
     Profiler profiler{ device };
+    GpuScene gpuScene{ device, profiler, GpuSceneCreateDesc{} };
     RendererCreateDesc rendererDesc{};
     rendererDesc.initialWidth  = winDesc.width;
     rendererDesc.initialHeight = winDesc.height;
-    PyxisRenderer renderer{ device, profiler, rendererDesc };
+    PyxisRenderer renderer{ device, gpuScene, profiler, rendererDesc };
 
     // ---- Single command list --------------------------------------------
     // M1 pins framesInFlight = 1, so one command list reused across frames

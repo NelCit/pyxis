@@ -13,10 +13,12 @@
 #include <Pyxis/Platform/Device/Resolution.h>
 #include <Pyxis/Platform/Logging/Log.h>
 #include <Pyxis/Platform/Logging/LogCategories.h>
+#include <Pyxis/Renderer/Descs/GpuSceneCreateDesc.h>
 #include <Pyxis/Renderer/Descs/RenderSettings.h>
 #include <Pyxis/Renderer/Descs/RenderTargets.h>
 #include <Pyxis/Renderer/Descs/RendererCreateDesc.h>
 #include <Pyxis/Renderer/Forward.h>          // MAX_FRAMES_IN_FLIGHT (§33.1).
+#include <Pyxis/Renderer/GpuScene.h>
 #include <Pyxis/Renderer/Profiler.h>
 #include <Pyxis/Renderer/PyxisRenderer.h>
 #include <Pyxis/Renderer/SceneWorldFacade.h>
@@ -116,17 +118,25 @@ int RunHeadless(const Configuration& config) noexcept {
     const AovTextures aovs = std::move(*aovsResult);
     nvrhi::ITexture* const renderTarget = aovs.color.Get();
 
-    // ---- SceneWorld + Profiler + Renderer ------------------------------
+    // ---- SceneWorld + Profiler + GpuScene + Renderer -------------------
+    // GpuScene is the canonical scene-mutation API (§18.5). M3
+    // foundation lands the class with a PIMPL stub; PyxisRenderer's
+    // ctor takes it per §18.6 even though M1's TrianglePass path
+    // doesn't yet read from it. Headless raises framesInFlight to the
+    // §33.7 byte-equal pin (MAX_FRAMES_IN_FLIGHT == 3).
     SceneWorldFacade scene;
     if (scene.Init() != SceneWorldStatus::Ok) {
         log.Error(log::RENDER, "SceneWorldFacade::Init failed");
         return EXIT_RUNTIME_FAIL;
     }
     Profiler              profiler{ device };
+    GpuSceneCreateDesc    gpuSceneDesc{};
+    gpuSceneDesc.framesInFlight = HEADLESS_FRAMES_IN_FLIGHT;
+    GpuScene              gpuScene{ device, profiler, gpuSceneDesc };
     RendererCreateDesc    rendererDesc{};
     rendererDesc.initialWidth  = config.render.width;
     rendererDesc.initialHeight = config.render.height;
-    PyxisRenderer         renderer{ device, profiler, rendererDesc };
+    PyxisRenderer         renderer{ device, gpuScene, profiler, rendererDesc };
 
     const nvrhi::CommandListHandle commandListHandle = device->createCommandList();
     nvrhi::ICommandList* const     commandList       = commandListHandle.Get();
