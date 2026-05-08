@@ -57,8 +57,7 @@ option(PYXIS_BUILD_TESTS              "Build pyxis_unit_tests"            ON)
 option(PYXIS_BUILD_HYDRA_DELEGATE     "Build pyxis_hydra ingest adapter"  OFF)
 option(PYXIS_BUILD_USD_INGEST         "Build pyxis_usd_ingest adapter"    OFF)
 option(PYXIS_BUILD_VIEWER             "Build viewer-mode UI (ImGui)"      OFF)
-option(PYXIS_DEBUG_TOOLS              "Enable debug tools (Flecs Explorer, hot-reload, etc.)"
-       $<IF:$<CONFIG:Debug>,ON,OFF>)
+option(PYXIS_DEBUG_TOOLS              "Enable debug tools (Flecs Explorer, hot-reload, etc.)" OFF)
 option(PYXIS_ENABLE_AFTERMATH         "Enable NVIDIA Aftermath (Debug-only crash dumps)" OFF)
 option(PYXIS_ENABLE_TRACY             "Enable Tracy CPU/GPU profiling client" OFF)
 
