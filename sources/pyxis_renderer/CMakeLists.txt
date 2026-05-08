@@ -22,6 +22,14 @@ target_sources(pyxis_renderer PUBLIC
         Public/Pyxis/Renderer/RendererApi.h
         Public/Pyxis/Renderer/Forward.h
         Public/Pyxis/Renderer/SceneWorldFacade.h
+
+        # M1 public surface.
+        Public/Pyxis/Renderer/Profiler.h
+        Public/Pyxis/Renderer/PyxisRenderer.h
+        Public/Pyxis/Renderer/Descs/FrameProfile.h
+        Public/Pyxis/Renderer/Descs/RendererCreateDesc.h
+        Public/Pyxis/Renderer/Descs/RenderSettings.h
+        Public/Pyxis/Renderer/Descs/RenderTargets.h
 )
 
 # ----------------------------------------------------------------------------
