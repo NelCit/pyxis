@@ -30,12 +30,18 @@ target_sources(pyxis_renderer PUBLIC
         Public/Pyxis/Renderer/Descs/RendererCreateDesc.h
         Public/Pyxis/Renderer/Descs/RenderSettings.h
         Public/Pyxis/Renderer/Descs/RenderTargets.h
+
+        # M3 public surface — foundation for Expected<T>-returning verbs.
+        Public/Pyxis/Renderer/Error.h
 )
 
 # ----------------------------------------------------------------------------
 # Private — SceneWorld and the Flecs phase pipeline (§8 / §30.11).
 # ----------------------------------------------------------------------------
 target_sources(pyxis_renderer PRIVATE
+    # M3 — Error / PYXIS_ERROR implementation (foundation for Expected<T>).
+    Private/Errors/Error.cpp
+
     # M1 — RenderGraph + Passes + Profiler + Renderer.
     Private/Diagnostics/CommandListMarker.h
 
