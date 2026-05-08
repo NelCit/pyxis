@@ -36,6 +36,8 @@ public:
     [[nodiscard]] uint32_t         GetBackbufferCount()   const noexcept override { return 0; }
     [[nodiscard]] uint32_t         GetCurrentBackbufferIndex() const noexcept override { return 0; }
     [[nodiscard]] nvrhi::ITexture* GetBackbuffer(uint32_t)      const noexcept override { return nullptr; }
+    // Headless never rebuilds anything — generation stays at 0.
+    [[nodiscard]] uint32_t         GetSwapchainGeneration() const noexcept override { return 0; }
 
     void BeginFrame() override;
     void EndFrame() override;

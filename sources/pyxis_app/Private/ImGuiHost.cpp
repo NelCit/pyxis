@@ -147,6 +147,14 @@ void ImGuiHost::BeginFrame() noexcept {
     ImGui::NewFrame();
 }
 
+void ImGuiHost::OnSwapchainRebuilt(uint32_t imageCount) noexcept {
+    if (!_ready || imageCount == 0) return;
+    // ImGui_ImplVulkan_SetMinImageCount asserts that the GPU is idle —
+    // the caller (VkDeviceManager::EndFrame's resize block, via
+    // ViewerMode) just did a vkDeviceWaitIdle, so we're safe.
+    ImGui_ImplVulkan_SetMinImageCount(imageCount);
+}
+
 void ImGuiHost::BuildFpsPanel(const FrameProfile& frameProfile) noexcept {
     if (!_ready) return;
 

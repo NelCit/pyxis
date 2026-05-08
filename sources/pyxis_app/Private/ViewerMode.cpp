@@ -239,6 +239,10 @@ int RunViewerLoop(int adapterIndex, bool enableValidation,
 
     // ---- Frame loop ------------------------------------------------------
     uint64_t frameIndex = 0;
+    // Track the swapchain generation we last initialised consumers for.
+    // 0 means "never seen one yet"; the very first BeginFrame after
+    // device manager bringup will report 1, and we'll notify ImGuiHost.
+    uint32_t lastSeenSwapchainGeneration = 0;
     while (!window->ShouldClose() && !shouldClose.load()) {
         profiler.BeginFrame();
         {
@@ -256,6 +260,18 @@ int RunViewerLoop(int adapterIndex, bool enableValidation,
             // release a swapchain image, regardless of the present mode.
             const Profiler::CpuScope acquire(profiler, "app.dm.acquire");
             deviceManager->BeginFrame();
+        }
+
+        // Notify ImGui when the swapchain was rebuilt (resize, fullscreen
+        // toggle). vkDeviceWaitIdle has already happened inside
+        // CreateSwapchain so it's safe to call ImGui_ImplVulkan_
+        // SetMinImageCount here.
+        const uint32_t currentSwapchainGeneration = deviceManager->GetSwapchainGeneration();
+        if (currentSwapchainGeneration != lastSeenSwapchainGeneration) {
+            if (imguiHost.IsReady()) {
+                imguiHost.OnSwapchainRebuilt(deviceManager->GetBackbufferCount());
+            }
+            lastSeenSwapchainGeneration = currentSwapchainGeneration;
         }
 
         // Build the ImGui draw data on the CPU side. The Performance panel

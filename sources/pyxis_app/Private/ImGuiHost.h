@@ -53,6 +53,13 @@ public:
     // pre-order scope tree from the supplied FrameProfile snapshot.
     void BuildFpsPanel(const FrameProfile& frameProfile) noexcept;
     void Render() noexcept;
+
+    // Notify the ImGui Vulkan backend that the swapchain was recreated
+    // (resize, fullscreen toggle, etc.). Must be called whenever the
+    // backbuffer image count changes — without this, ImGui's internal
+    // frame ring keeps believing the old count and stalls one frame
+    // after every rebuild. Caller must ensure the GPU is idle.
+    void OnSwapchainRebuilt(uint32_t imageCount) noexcept;
     void Submit(nvrhi::ICommandList* commandList, nvrhi::ITexture* colorTarget) noexcept;
 
 private:

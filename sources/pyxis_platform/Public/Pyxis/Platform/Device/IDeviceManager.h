@@ -72,6 +72,14 @@ public:
     [[nodiscard]] virtual uint32_t         GetCurrentBackbufferIndex() const noexcept = 0;
     [[nodiscard]] virtual nvrhi::ITexture* GetBackbuffer(uint32_t index) const noexcept = 0;
 
+    // Monotonic counter incremented every time the swapchain is rebuilt
+    // (resize, fullscreen toggle, mode-lost recovery). Consumers that
+    // cache per-swapchain state (ImGui's image count, M3+ pass
+    // framebuffers, …) compare this against a stored value to detect
+    // they need to re-init. Starts at 0 before the first swapchain
+    // exists; goes to 1 once Bringup completes.
+    [[nodiscard]] virtual uint32_t         GetSwapchainGeneration() const noexcept = 0;
+
     // -------------------------------------------------------------------
     // Synchronous wait for the GPU. Used at shutdown and for readback in
     // headless mode.

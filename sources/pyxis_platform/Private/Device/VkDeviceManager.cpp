@@ -567,6 +567,10 @@ bool VkDeviceManager::CreateSwapchain(uint32_t width, uint32_t height) noexcept 
         }
         return false;
     }
+
+    // Successful build — bump the generation so consumers (ImGuiHost,
+    // pass-local caches) can spot the rebuild and re-init.
+    ++_swapchainGeneration;
     return true;
 }
 

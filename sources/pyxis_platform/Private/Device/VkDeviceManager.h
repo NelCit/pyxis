@@ -40,6 +40,7 @@ public:
     [[nodiscard]] uint32_t         GetBackbufferCount()   const noexcept override { return static_cast<uint32_t>(_swapchainTextures.size()); }
     [[nodiscard]] uint32_t         GetCurrentBackbufferIndex() const noexcept override { return _currentImage; }
     [[nodiscard]] nvrhi::ITexture* GetBackbuffer(uint32_t index) const noexcept override;
+    [[nodiscard]] uint32_t         GetSwapchainGeneration() const noexcept override { return _swapchainGeneration; }
     [[nodiscard]] VulkanContext    GetVulkanContext()    const noexcept override;
 
 private:
@@ -91,6 +92,12 @@ private:
 
     uint32_t          _currentImage     = 0;     // last vkAcquireNextImageKHR result
     bool              _resizePending    = false;
+
+    // Monotonic counter — bumped on every successful CreateSwapchain
+    // (initial bringup + every resize). Consumers (ImGuiHost, future
+    // pass-local framebuffer caches) compare against a stored value to
+    // detect they need to re-init.
+    uint32_t          _swapchainGeneration = 0;
 
     // ---- NVRHI -----------------------------------------------------------
     nvrhi::DeviceHandle      _nvrhiDevice;
