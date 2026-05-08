@@ -149,9 +149,18 @@ void ImGuiHost::BeginFrame() noexcept {
 void ImGuiHost::BuildFpsPanel(const FrameProfile& fp) noexcept {
     if (!_ready) return;
 
-    // A dockable panel; AlwaysAutoResize keeps the window snug against
-    // the scope tree (which grows when nested passes appear) without
-    // needing manual sizing.
+    // M1 panel — §41 ships only "FPS shows". The §29.3 Performance panel
+    // proper (240-frame rolling history, sparklines, min/avg/p99,
+    // TLAS/BLAS-build ms, upload-queue bytes, RenderGraph compile-cache
+    // hit/miss, Tracy connect button, Copy-CSV button) lands at M11
+    // alongside the §34 history ring and the M3+ subsystems those rows
+    // depend on. What we render here is the latest drained FrameProfile
+    // snapshot only.
+    //
+    // AlwaysAutoResize keeps the window snug against the scope tree
+    // (which grows when nested passes appear) without needing manual
+    // sizing — sufficient for the M1 scope tree, replaced by an explicit
+    // multi-column layout at M11.
     if (ImGui::Begin("Performance", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         const ImGuiIO& io  = ImGui::GetIO();
         ImGui::Text("Frame: %llu", static_cast<unsigned long long>(fp.frameIndex));
