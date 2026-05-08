@@ -65,6 +65,10 @@ public:
         Profiler*            _profiler    = nullptr;
         nvrhi::ICommandList* _commandList = nullptr;
         FrameProfile::ScopeName _name{};
+        // Index into Profiler::Impl::queryPool, or -1 for "no GPU query"
+        // (CPU-only profiler, or null command list). The query slot is
+        // owned by the pool — GpuScope never sees the raw handle.
+        int                  _queryIdx    = -1;
     };
 
     // Frame boundary — called by the Application once per frame.
