@@ -16,6 +16,7 @@
 #include <Pyxis/Renderer/RendererApi.h>
 
 #include <cstdint>
+#include <memory>
 
 namespace nvrhi {
 class IDevice;
@@ -23,6 +24,11 @@ class ICommandList;
 }  // namespace nvrhi
 
 namespace pyxis {
+
+// RenderGraph lives in Private/. Forward-declared here so PyxisRenderer
+// can hold one by unique_ptr without exposing the definition publicly —
+// the dtor is defined in PyxisRenderer.cpp where the type is complete.
+class RenderGraph;
 
 class PYXIS_RENDERER_API PyxisRenderer final {
 public:
@@ -54,8 +60,9 @@ public:
     [[nodiscard]] FrameProfile LastFrameProfile() const;
 
 private:
-    struct Impl;
-    Impl* _impl = nullptr;
+    Profiler*                    _profiler   = nullptr;
+    std::unique_ptr<RenderGraph> _graph;
+    uint64_t                     _frameIndex = 0;
 };
 
 }  // namespace pyxis

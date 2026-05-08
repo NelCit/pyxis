@@ -16,43 +16,37 @@
 
 #include <nvrhi/nvrhi.h>
 
-#include <memory>
-
 namespace pyxis {
-
-struct PyxisRenderer::Impl {
-    Profiler*                    profiler = nullptr;
-    std::unique_ptr<RenderGraph> graph;
-    uint64_t                     frameIndex = 0;
-};
 
 PyxisRenderer::PyxisRenderer(nvrhi::IDevice*           device,
                              Profiler&                 profiler,
                              const RendererCreateDesc& /*desc*/)
-    : _impl(new Impl()) {
-    _impl->profiler = &profiler;
-    _impl->graph    = std::make_unique<RenderGraph>(device, &profiler);
-    _impl->graph->AddPass(std::make_unique<TrianglePass>(device));
+    : _profiler(&profiler),
+      _graph(std::make_unique<RenderGraph>(device, &profiler)) {
+    _graph->AddPass(std::make_unique<TrianglePass>(device));
     Logging::Get().Info(log::RENDER, "PyxisRenderer: initialised (TrianglePass registered)");
 }
 
-PyxisRenderer::~PyxisRenderer() { delete _impl; }
+// Out-of-line dtor lives here so unique_ptr<RenderGraph>'s deleter sees
+// the complete RenderGraph type (the public header only forward-declares
+// it). Same reason `=default` works here but wouldn't in the header.
+PyxisRenderer::~PyxisRenderer() = default;
 
 void PyxisRenderer::RenderFrame(nvrhi::ICommandList*  commandList,
                                 const RenderSettings& settings,
                                 const RenderTargets&  targets) {
-    if (!_impl || !_impl->graph || !commandList) return;
+    if (!_graph || !commandList) return;
     PassContext context{};
     context.commandList    = commandList;
-    context.profiler       = _impl->profiler;
+    context.profiler       = _profiler;
     context.settings       = &settings;
     context.targets        = &targets;
-    context.frameIndex     = _impl->frameIndex++;
+    context.frameIndex     = _frameIndex++;
     // M1 active runtime: 1 frame in flight (cap = MAX_FRAMES_IN_FLIGHT = 3).
     context.framesInFlight = 1;
 
-    const Profiler::CpuScope frameScope(*_impl->profiler, "render.frame.cpu");
-    _impl->graph->Execute(commandList, context);
+    const Profiler::CpuScope frameScope(*_profiler, "render.frame.cpu");
+    _graph->Execute(commandList, context);
 }
 
 void PyxisRenderer::Resize(uint32_t /*width*/, uint32_t /*height*/) {
@@ -67,6 +61,8 @@ void PyxisRenderer::ResetAccumulation() {
     // frame starts from sample 0. No-op until the buffer exists.
 }
 
-FrameProfile PyxisRenderer::LastFrameProfile() const               { return _impl->profiler->LastFrameProfile(); }
+FrameProfile PyxisRenderer::LastFrameProfile() const {
+    return _profiler->LastFrameProfile();
+}
 
 }  // namespace pyxis
