@@ -50,14 +50,23 @@
 #include <Pyxis/Renderer/Descs/OpenPBRMaterialDesc.h>
 #include <Pyxis/Renderer/Descs/TextureKey.h>
 
+// GpuScene's private members hold owning NVRHI handles
+// (BufferHandle / TextureHandle / rt::AccelStructHandle) plus the
+// CPU-side mesh / instance / light tables (std::vector + std::string).
+// The PIMPL indirection that §18.5 originally specified to keep these
+// out of the public header has been relaxed for v1 — see commit
+// `chore: drop PIMPL` and the corresponding plan §18.9 edit. The
+// trade-off: pyxis_renderer.dll consumers (pyxis_app, pyxis_hydra,
+// pyxis_usd_ingest) are required to compile with the same vcpkg + clang-
+// cl + `_HAS_EXCEPTIONS=0` flags as the renderer DLL itself, which
+// the build presets enforce.
+#include <nvrhi/nvrhi.h>
+
 #include <hlsl++.h>
 
-#include <memory>
-
-namespace nvrhi {
-class IDevice;
-class ICommandList;
-}  // namespace nvrhi
+#include <cstdint>
+#include <string>
+#include <vector>
 
 namespace pyxis {
 
@@ -68,8 +77,8 @@ public:
 
     GpuScene(const GpuScene&)            = delete;
     GpuScene& operator=(const GpuScene&) = delete;
-    GpuScene(GpuScene&&) noexcept;
-    GpuScene& operator=(GpuScene&&) noexcept;
+    GpuScene(GpuScene&&) noexcept            = default;
+    GpuScene& operator=(GpuScene&&) noexcept = default;
 
     // ---- Mesh ----------------------------------------------------------
     [[nodiscard]] Expected<MeshHandle> CreateMesh(const MeshDesc& meshDesc);
@@ -124,8 +133,76 @@ public:
     [[nodiscard]] FrameStats           LastFrameStats() const;
 
 private:
-    struct Impl;
-    std::unique_ptr<Impl> _impl;
+    // ---- Handle-table entry types --------------------------------------
+    // Inner nested structs hold the per-entity bookkeeping (live /
+    // generation / quarantined flags) plus the CPU- and GPU-side data.
+    // §19.7 packing rules apply to the slot+generation encoding;
+    // helpers in GpuScene.cpp do the encoding.
+
+    struct MeshEntry {
+        bool                            live           = false;
+        bool                            quarantined    = false;
+        bool                            needsGpuUpload = false;
+        bool                            needsBlasBuild = false;
+        std::uint8_t                    generation     = 0;
+
+        std::vector<hlslpp::float3>     positions;
+        std::vector<std::uint32_t>      indices;
+        std::vector<hlslpp::float3>     normals;
+        std::vector<hlslpp::float4>     tangents;
+        std::vector<hlslpp::float2>     uv0;
+        std::string                     debugName;
+
+        nvrhi::BufferHandle             vertexBuffer;
+        nvrhi::BufferHandle             indexBuffer;
+        std::uint32_t                   vertexCount = 0;
+        std::uint32_t                   indexCount  = 0;
+        nvrhi::rt::AccelStructHandle    blas;
+    };
+
+    struct InstanceEntry {
+        bool             live        = false;
+        bool             quarantined = false;
+        std::uint8_t     generation  = 0;
+        MeshHandle       mesh        = MeshHandle::Invalid;
+        MaterialHandle   material    = MaterialHandle::Invalid;
+        hlslpp::float4x4 worldFromLocal{};
+        bool             visible     = true;
+        std::string      debugName;
+    };
+
+    struct LightEntry {
+        bool         live        = false;
+        bool         quarantined = false;
+        std::uint8_t generation  = 0;
+        LightDesc    descCopy{};
+    };
+
+    // ---- Resolver helpers ----------------------------------------------
+    // Centralise the §18.5 stale-handle policy for void-returning
+    // Update* / Destroy* verbs. Invalid silently no-ops with no
+    // counter bump; recycled / out-of-range handles bump
+    // FrameStats::staleHandleDrops and return nullptr.
+    [[nodiscard]] InstanceEntry* ResolveInstance(InstanceHandle handle) noexcept;
+    [[nodiscard]] LightEntry*    ResolveLight   (LightHandle    handle) noexcept;
+
+    // ---- Data ----------------------------------------------------------
+    nvrhi::IDevice*    _device   = nullptr;   // borrowed; outlives this scene.
+    Profiler*          _profiler = nullptr;   // borrowed.
+    GpuSceneCreateDesc _desc{};
+    FrameStats         _lastFrameStats{};
+
+    std::vector<MeshEntry>     _meshes;
+    std::vector<InstanceEntry> _instances;
+    std::vector<LightEntry>    _lights;
+
+    bool       _hasCamera = false;
+    CameraDesc _cameraDesc{};
+
+    // Top-level acceleration structure. Allocated lazily on the first
+    // TLAS rebuild so an empty scene doesn't pay for it.
+    nvrhi::rt::AccelStructHandle _tlas;
+    bool                         _tlasNeedsRebuild = false;
 };
 
 }  // namespace pyxis
