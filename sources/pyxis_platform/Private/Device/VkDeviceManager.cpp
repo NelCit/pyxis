@@ -395,6 +395,31 @@ bool VkDeviceManager::CreateSwapchain(uint32_t width, uint32_t height) noexcept 
     uint32_t imageCount = caps.minImageCount + 1;
     if (caps.maxImageCount > 0 && imageCount > caps.maxImageCount) imageCount = caps.maxImageCount;
 
+    // Present mode: §28 schedules FIFO for M1 and mailbox/immediate for
+    // M2+. We pull mailbox/immediate forward so M1 isn't refresh-rate-
+    // capped — useful for the GpuTimestampPool numbers and the
+    // Performance panel's FPS readout. FIFO is the spec-guaranteed
+    // fallback. Order: MAILBOX > IMMEDIATE > FIFO.
+    uint32_t presentModeCount = 0;
+    vkGetPhysicalDeviceSurfacePresentModesKHR(_physicalDevice, _surface, &presentModeCount, nullptr);
+    std::vector<VkPresentModeKHR> presentModes(presentModeCount);
+    vkGetPhysicalDeviceSurfacePresentModesKHR(_physicalDevice, _surface, &presentModeCount, presentModes.data());
+    VkPresentModeKHR chosenPresentMode = VK_PRESENT_MODE_FIFO_KHR;
+    for (const VkPresentModeKHR mode : presentModes) {
+        if (mode == VK_PRESENT_MODE_MAILBOX_KHR) {
+            chosenPresentMode = mode;
+            break;
+        }
+    }
+    if (chosenPresentMode == VK_PRESENT_MODE_FIFO_KHR) {
+        for (const VkPresentModeKHR mode : presentModes) {
+            if (mode == VK_PRESENT_MODE_IMMEDIATE_KHR) {
+                chosenPresentMode = mode;
+                break;
+            }
+        }
+    }
+
     VkExtent2D extent = caps.currentExtent;
     if (extent.width == UINT32_MAX) {
         extent.width  = std::clamp(width,  caps.minImageExtent.width,  caps.maxImageExtent.width);
@@ -420,7 +445,7 @@ bool VkDeviceManager::CreateSwapchain(uint32_t width, uint32_t height) noexcept 
     scInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     scInfo.preTransform     = caps.currentTransform;
     scInfo.compositeAlpha   = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-    scInfo.presentMode      = VK_PRESENT_MODE_FIFO_KHR;     // §28 default; mailbox/immediate are M2+
+    scInfo.presentMode      = chosenPresentMode;
     scInfo.clipped          = VK_TRUE;
     scInfo.oldSwapchain     = VK_NULL_HANDLE;
 
