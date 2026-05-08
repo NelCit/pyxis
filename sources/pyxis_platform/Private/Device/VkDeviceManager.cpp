@@ -9,6 +9,7 @@
 
 #include "Device/VkDeviceManager.h"
 
+#include "Device/NvrhiCallback.h"
 #include "Device/VulkanFeatureCheck.h"
 
 #include <Pyxis/Platform/Logging/Log.h>
@@ -86,27 +87,6 @@ VkInstance CreateInstance(bool enableValidation,
         return VK_NULL_HANDLE;
     }
     return instance;
-}
-
-// nvrhi MessageCallback adapter — routes NVRHI diagnostics through the
-// §33.10 cross-DLL Logger.
-class NvrhiMessageCallback final : public nvrhi::IMessageCallback {
-public:
-    void message(nvrhi::MessageSeverity severity, const char* messageText) override {
-        auto& log = Logging::Get();
-        const std::string_view msg{ messageText ? messageText : "" };
-        switch (severity) {
-            case nvrhi::MessageSeverity::Info:    log.Info   (log::PLATFORM, msg); break;
-            case nvrhi::MessageSeverity::Warning: log.Warn   (log::PLATFORM, msg); break;
-            case nvrhi::MessageSeverity::Error:   log.Error  (log::PLATFORM, msg); break;
-            case nvrhi::MessageSeverity::Fatal:   log.Critical(log::PLATFORM, msg); break;
-        }
-    }
-};
-
-NvrhiMessageCallback& NvrhiCallback() {
-    static NvrhiMessageCallback callback;
-    return callback;
 }
 
 }  // namespace

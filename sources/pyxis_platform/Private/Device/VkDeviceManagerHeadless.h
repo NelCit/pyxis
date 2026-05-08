@@ -1,15 +1,19 @@
 // Pyxis platform — headless VkDeviceManager.
 //
-// Plan §5.c. No GLFW, no swapchain, no surface. Pinned to framesInFlight = 3
-// for byte-identical EXR output (§33.7). Same VkInstance/VkDevice
-// machinery as the windowed variant — kept as a separate class so the
-// no-display invariant is *physically* true (no GLFW symbol is reachable
-// from --headless).
+// Plan §5.c. No GLFW, no swapchain, no surface. M1 pins framesInFlight
+// to 1 like the windowed manager; M2's --config EXR path raises it back
+// to 3 per §33.7 once the multi-frame queueing is actually exercised.
+// Same VkInstance/VkDevice/nvrhi::IDevice machinery as the windowed
+// variant — kept as a separate class so the no-display invariant is
+// *physically* true (no GLFW symbol is reachable from --headless).
 
 #pragma once
 
 #include <Pyxis/Platform/Device/DeviceCreationParams.h>
 #include <Pyxis/Platform/Device/IDeviceManager.h>
+
+#include <nvrhi/nvrhi.h>
+#include <nvrhi/vulkan.h>
 
 #include <vulkan/vulkan.h>
 
@@ -57,7 +61,9 @@ private:
     uint32_t          _framesInFlight = 1;
     Resolution        _backbuffer{};
 
-    nvrhi::IDevice*   _nvrhiDevice = nullptr;
+    // RefCountPtr so the wrapped nvrhi::Device follows the same lifetime
+    // discipline as the windowed manager (drops before vkDestroyDevice).
+    nvrhi::DeviceHandle _nvrhiDevice;
 };
 
 }  // namespace pyxis

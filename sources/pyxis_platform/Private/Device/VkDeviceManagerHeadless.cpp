@@ -2,6 +2,7 @@
 
 #include "Device/VkDeviceManagerHeadless.h"
 
+#include "Device/NvrhiCallback.h"
 #include "Device/VulkanFeatureCheck.h"
 
 #include <Pyxis/Platform/Logging/Log.h>
@@ -168,9 +169,14 @@ DeviceManagerCreateStatus VkDeviceManagerHeadless::Bringup(
     qInfo.queueCount       = 1;
     qInfo.pQueuePriorities = &qPriority;
 
-    // Headless explicitly DOES NOT request VK_KHR_swapchain (§5.c) so it can
-    // run on stripped-down driver stacks (Windows Server 2022 containers).
-    std::array<const char*, 7> requiredExt{
+    // Headless explicitly DOES NOT request VK_KHR_swapchain (§5.c) so it
+    // can run on stripped-down driver stacks (Windows Server 2022
+    // containers). Same single-source pattern as the windowed manager:
+    // one array fed to vkCreateDevice + nvrhi::DeviceDesc::deviceExtensions
+    // so NVRHI's capability flags stay in lockstep with what we actually
+    // requested. NOLINT'd for the same reason as the windowed sibling
+    // (NVRHI's deviceExtensions is `const char**`).
+    static const char* deviceExtensions[] = {  // NOLINT(misc-const-correctness)
         VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
         VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
         VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
@@ -188,8 +194,8 @@ DeviceManagerCreateStatus VkDeviceManagerHeadless::Bringup(
     dInfo.sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     dInfo.queueCreateInfoCount    = 1;
     dInfo.pQueueCreateInfos       = &qInfo;
-    dInfo.enabledExtensionCount   = static_cast<uint32_t>(requiredExt.size());
-    dInfo.ppEnabledExtensionNames = requiredExt.data();
+    dInfo.enabledExtensionCount   = static_cast<uint32_t>(std::size(deviceExtensions));
+    dInfo.ppEnabledExtensionNames = deviceExtensions;
     dInfo.pEnabledFeatures        = &coreFeatures;
 
     if (vkCreateDevice(_physicalDevice, &dInfo, nullptr, &_device) != VK_SUCCESS) {
@@ -198,6 +204,27 @@ DeviceManagerCreateStatus VkDeviceManagerHeadless::Bringup(
     }
     vkGetDeviceQueue(_device, _graphicsFamily, 0, &_graphicsQueue);
     VulkanHppInitFromDevice(_device);
+
+    // Wrap the VkDevice in nvrhi::IDevice so the renderer can issue
+    // command lists exactly the same way it does in viewer mode. Without
+    // this, GetDevice() returns nullptr and any renderer-driven path
+    // (M2's --config EXR) crashes on the first createCommandList.
+    nvrhi::vulkan::DeviceDesc nvrhiDesc{};
+    nvrhiDesc.errorCB             = &NvrhiCallback();
+    nvrhiDesc.instance            = _instance;
+    nvrhiDesc.physicalDevice      = _physicalDevice;
+    nvrhiDesc.device              = _device;
+    nvrhiDesc.graphicsQueue       = _graphicsQueue;
+    nvrhiDesc.graphicsQueueIndex  = _graphicsFamily;
+    nvrhiDesc.bufferDeviceAddressSupported = true;
+    nvrhiDesc.deviceExtensions    = deviceExtensions;
+    nvrhiDesc.numDeviceExtensions = std::size(deviceExtensions);
+
+    _nvrhiDevice = nvrhi::vulkan::createDevice(nvrhiDesc);
+    if (!_nvrhiDevice) {
+        log.Error(log::PLATFORM, "VkDeviceManagerHeadless: nvrhi::vulkan::createDevice failed");
+        return DeviceManagerCreateStatus::DeviceCreationFailed;
+    }
 
     {
         std::string msg = "Vulkan headless device ready: ";
@@ -217,6 +244,13 @@ DeviceManagerCreateStatus VkDeviceManagerHeadless::Bringup(
 void VkDeviceManagerHeadless::Teardown() noexcept {
     if (_device != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(_device);
+    }
+    // Drop the NVRHI device wrapper BEFORE vkDestroyDevice — its dtor
+    // walks internal refs that touch the VkDevice, so the wrapped device
+    // must outlive everything NVRHI knows about. Same discipline as the
+    // windowed manager.
+    _nvrhiDevice = nullptr;
+    if (_device != VK_NULL_HANDLE) {
         vkDestroyDevice(_device, nullptr);
         _device = VK_NULL_HANDLE;
     }
@@ -226,12 +260,14 @@ void VkDeviceManagerHeadless::Teardown() noexcept {
     }
 }
 
-nvrhi::IDevice*    VkDeviceManagerHeadless::GetDevice()         const noexcept { return _nvrhiDevice; }
+nvrhi::IDevice*    VkDeviceManagerHeadless::GetDevice()         const noexcept { return _nvrhiDevice.Get(); }
 const AdapterInfo& VkDeviceManagerHeadless::GetAdapterInfo()    const noexcept { return _adapter; }
 uint32_t           VkDeviceManagerHeadless::GetFramesInFlight() const noexcept { return _framesInFlight; }
 
-void VkDeviceManagerHeadless::BeginFrame() {}  // M0: no-op (no acquire).
-void VkDeviceManagerHeadless::EndFrame()   {}  // M0: no-op (no present, no readback yet).
+// Headless has no swapchain to acquire from / present to; M2 wires
+// per-frame readback into a writable target via --config.
+void VkDeviceManagerHeadless::BeginFrame() {}  // TODO(M2): readback target acquire.
+void VkDeviceManagerHeadless::EndFrame()   {}  // TODO(M2): per-frame EXR write.
 
 void VkDeviceManagerHeadless::WaitIdle() {
     if (_device != VK_NULL_HANDLE) vkDeviceWaitIdle(_device);

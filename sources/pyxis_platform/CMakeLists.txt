@@ -45,6 +45,8 @@ target_sources(pyxis_platform PUBLIC
 # Private implementation.
 # ----------------------------------------------------------------------------
 target_sources(pyxis_platform PRIVATE
+    Private/Device/NvrhiCallback.h
+    Private/Device/NvrhiCallback.cpp
     Private/Device/VkDeviceManager.h
     Private/Device/VkDeviceManager.cpp
     Private/Device/VkDeviceManagerHeadless.h
