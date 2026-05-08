@@ -24,8 +24,8 @@ int RunCommon(IDeviceManager* deviceManager) noexcept {
     auto& log = Logging::Get();
 
     SceneWorldFacade scene;
-    const SceneWorldStatus s = scene.Init();
-    if (s != SceneWorldStatus::Ok) {
+    const SceneWorldStatus initStatus = scene.Init();
+    if (initStatus != SceneWorldStatus::Ok) {
         log.Error(log::RENDER, "SceneWorldFacade::Init failed");
         return EXIT_DEVICE_INIT_FAIL;
     }

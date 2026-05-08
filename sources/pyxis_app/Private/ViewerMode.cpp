@@ -90,29 +90,29 @@ bool CaptureBackbufferToPng(nvrhi::IDevice*       device,
     }
 
     // BGRA8 → RGBA8 swizzle, contiguous row pitch for stb_image_write.
-    const std::size_t w = tdesc.width;
-    const std::size_t h = tdesc.height;
-    std::vector<uint8_t> rgba(w * h * 4);
+    const std::size_t imageWidth  = tdesc.width;
+    const std::size_t imageHeight = tdesc.height;
+    std::vector<uint8_t> rgba(imageWidth * imageHeight * 4);
     const auto* src = static_cast<const uint8_t*>(mapped);
-    for (std::size_t y = 0; y < h; ++y) {
-        const uint8_t* srcRow = src + y * rowPitch;
-        uint8_t*       dstRow = rgba.data() + (y * w * 4);
-        for (std::size_t x = 0; x < w; ++x) {
-            dstRow[x * 4 + 0] = srcRow[x * 4 + 2];   // R ← B
-            dstRow[x * 4 + 1] = srcRow[x * 4 + 1];   // G ← G
-            dstRow[x * 4 + 2] = srcRow[x * 4 + 0];   // B ← R
-            dstRow[x * 4 + 3] = srcRow[x * 4 + 3];   // A ← A
+    for (std::size_t row = 0; row < imageHeight; ++row) {
+        const uint8_t* srcRow = src + row * rowPitch;
+        uint8_t*       dstRow = rgba.data() + (row * imageWidth * 4);
+        for (std::size_t col = 0; col < imageWidth; ++col) {
+            dstRow[col * 4 + 0] = srcRow[col * 4 + 2];   // R ← B
+            dstRow[col * 4 + 1] = srcRow[col * 4 + 1];   // G ← G
+            dstRow[col * 4 + 2] = srcRow[col * 4 + 0];   // B ← R
+            dstRow[col * 4 + 3] = srcRow[col * 4 + 3];   // A ← A
         }
     }
     device->unmapStagingTexture(staging.Get());
 
     const std::string path{ pngPath };
     const int wrote = stbi_write_png(path.c_str(),
-                                     static_cast<int>(w),
-                                     static_cast<int>(h),
+                                     static_cast<int>(imageWidth),
+                                     static_cast<int>(imageHeight),
                                      4,
                                      rgba.data(),
-                                     static_cast<int>(w * 4));
+                                     static_cast<int>(imageWidth * 4));
     if (wrote == 0) {
         log.Error(log::APP, "screenshot: stbi_write_png failed");
         return false;
@@ -121,14 +121,14 @@ bool CaptureBackbufferToPng(nvrhi::IDevice*       device,
     // Quick sanity: any pixel non-black? Lets the caller assert "the
     // triangle actually rendered" without a separate harness.
     bool anyNonBlack = false;
-    for (std::size_t i = 0; i + 2 < rgba.size(); i += 4) {
-        if (rgba[i] != 0 || rgba[i + 1] != 0 || rgba[i + 2] != 0) {
+    for (std::size_t pix = 0; pix + 2 < rgba.size(); pix += 4) {
+        if (rgba[pix] != 0 || rgba[pix + 1] != 0 || rgba[pix + 2] != 0) {
             anyNonBlack = true;
             break;
         }
     }
     std::string msg = "screenshot: wrote ";
-    msg += std::to_string(w) + "x" + std::to_string(h);
+    msg += std::to_string(imageWidth) + "x" + std::to_string(imageHeight);
     msg += " PNG to ";
     msg.append(pngPath);
     msg += anyNonBlack ? "  (non-black pixels present — render OK)"
@@ -161,9 +161,9 @@ int RunViewerLoop(int adapterIndex, bool enableValidation,
     // *our* GLFW callbacks first (via SetEventSink → GlfwWindow), then
     // ImGuiHost::Init() chains ImGui's on top. Both fire each frame.
     std::atomic<bool> shouldClose{false};
-    window->SetEventSink([&](const InputEvent& e) {
-        if (e.kind == InputEventKind::WindowClose) shouldClose.store(true);
-        if (e.kind == InputEventKind::KeyDown && e.key == GLFW_ESCAPE_KEY_CODE) {
+    window->SetEventSink([&](const InputEvent& event) {
+        if (event.kind == InputEventKind::WindowClose) shouldClose.store(true);
+        if (event.kind == InputEventKind::KeyDown && event.key == GLFW_ESCAPE_KEY_CODE) {
             shouldClose.store(true);
         }
     });
@@ -264,9 +264,9 @@ int RunViewerLoop(int adapterIndex, bool enableValidation,
         // retired — fine for human-paced FPS readouts.
         if (imguiHost.IsReady()) {
             const Profiler::CpuScope imguiCpu(profiler, "app.imgui.cpu");
-            const FrameProfile fp = renderer.LastFrameProfile();
+            const FrameProfile frameProfile = renderer.LastFrameProfile();
             imguiHost.BeginFrame();
-            imguiHost.BuildFpsPanel(fp);
+            imguiHost.BuildFpsPanel(frameProfile);
             imguiHost.Render();
         }
 
@@ -329,25 +329,25 @@ int RunViewerLoop(int adapterIndex, bool enableValidation,
         // pre-order scope tree, indented by depth. With FIF=1 the cpu
         // number tracks wall-clock frame time and fps = 1000 / cpu.
         if (frameIndex > 0 && frameIndex % PROFILER_LOG_INTERVAL == 0) {
-            const FrameProfile fp = renderer.LastFrameProfile();
-            const double fps = fp.cpuFrameMs > 0.0 ? 1000.0 / fp.cpuFrameMs : 0.0;
+            const FrameProfile frameProfile = renderer.LastFrameProfile();
+            const double fps = frameProfile.cpuFrameMs > 0.0 ? 1000.0 / frameProfile.cpuFrameMs : 0.0;
             char buf[256];
             std::snprintf(buf, sizeof(buf),
                 "profiler: frame %llu  cpu %.3f ms  gpu %.3f ms  fps %.1f",
-                static_cast<unsigned long long>(fp.frameIndex),
-                fp.cpuFrameMs, fp.gpuFrameMs, fps);
+                static_cast<unsigned long long>(frameProfile.frameIndex),
+                frameProfile.cpuFrameMs, frameProfile.gpuFrameMs, fps);
             log.Info(log::APP, buf);
-            for (const FrameProfile::PassTiming& t : fp.passes) {
-                const char* kind = (t.kind == FrameProfile::ScopeKind::Cpu) ? "CPU" : "GPU";
-                const std::string_view name = t.name.View();
+            for (const FrameProfile::PassTiming& timing : frameProfile.passes) {
+                const char* kind = (timing.kind == FrameProfile::ScopeKind::Cpu) ? "CPU" : "GPU";
+                const std::string_view name = timing.name.View();
                 // Two spaces per depth level, "  CPU "/"  GPU " column.
                 char line[256];
                 std::snprintf(line, sizeof(line),
                     "profiler:   %*s%s %.*s  %.3f ms",
-                    static_cast<int>(t.depth * 2), "",
+                    static_cast<int>(timing.depth * 2), "",
                     kind,
                     static_cast<int>(name.size()), name.data(),
-                    t.durationMs);
+                    timing.durationMs);
                 log.Info(log::APP, line);
             }
         }

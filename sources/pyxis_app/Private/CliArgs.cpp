@@ -13,15 +13,15 @@ namespace pyxis::app {
 
 namespace {
 
-bool Equals(const char* a, const char* b) noexcept {
-    return std::strcmp(a, b) == 0;
+bool Equals(const char* lhs, const char* rhs) noexcept {
+    return std::strcmp(lhs, rhs) == 0;
 }
 
-bool ParseInt(const char* s, int32_t& out) noexcept {
-    if (s == nullptr || *s == '\0') return false;
+bool ParseInt(const char* str, int32_t& out) noexcept {
+    if (str == nullptr || *str == '\0') return false;
     char*    end   = nullptr;
-    const long val = std::strtol(s, &end, 10);
-    if (end == s || *end != '\0') return false;
+    const long val = std::strtol(str, &end, 10);
+    if (end == str || *end != '\0') return false;
     out = static_cast<int32_t>(val);
     return true;
 }

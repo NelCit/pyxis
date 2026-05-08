@@ -28,12 +28,12 @@ namespace pyxis {
 
 namespace {
 
-FrameProfile::ScopeName MakeScopeName(std::string_view sv) noexcept {
-    FrameProfile::ScopeName n{};
-    const std::size_t copy = std::min(sv.size(), FrameProfile::ScopeName::CAPACITY);
-    std::memcpy(n.data.data(), sv.data(), copy);
-    n.size = static_cast<uint8_t>(copy);
-    return n;
+FrameProfile::ScopeName MakeScopeName(std::string_view source) noexcept {
+    FrameProfile::ScopeName name{};
+    const std::size_t copy = std::min(source.size(), FrameProfile::ScopeName::CAPACITY);
+    std::memcpy(name.data.data(), source.data(), copy);
+    name.size = static_cast<uint8_t>(copy);
+    return name;
 }
 
 int64_t NowNs() noexcept {
@@ -92,10 +92,10 @@ struct Profiler::Impl {
             device->resetTimerQuery(queryPool[static_cast<std::size_t>(idx)].Get());
             return idx;
         }
-        nvrhi::TimerQueryHandle h = device->createTimerQuery();
-        if (!h) return -1;
+        nvrhi::TimerQueryHandle queryHandle = device->createTimerQuery();
+        if (!queryHandle) return -1;
         const int idx = static_cast<int>(queryPool.size());
-        queryPool.push_back(std::move(h));
+        queryPool.push_back(std::move(queryHandle));
         return idx;
     }
 
@@ -121,34 +121,34 @@ struct Profiler::Impl {
         // track minGpuDepth in the slot and sum only the records that
         // match it — that's the GPU-side root for this frame.
         uint32_t minGpuDepth = UINT32_MAX;
-        for (const ScopeRecord& r : slot.records) {
-            if (r.kind == FrameProfile::ScopeKind::Gpu && r.depth < minGpuDepth) {
-                minGpuDepth = r.depth;
+        for (const ScopeRecord& record : slot.records) {
+            if (record.kind == FrameProfile::ScopeKind::Gpu && record.depth < minGpuDepth) {
+                minGpuDepth = record.depth;
             }
         }
 
-        for (ScopeRecord& r : slot.records) {
-            if (r.queryIdx >= 0 && device) {
-                nvrhi::ITimerQuery* q = queryPool[static_cast<std::size_t>(r.queryIdx)].Get();
+        for (ScopeRecord& record : slot.records) {
+            if (record.queryIdx >= 0 && device) {
+                nvrhi::ITimerQuery* query = queryPool[static_cast<std::size_t>(record.queryIdx)].Get();
                 // SLOT_COUNT = MAX_FRAMES_IN_FLIGHT + 1, so we're past the
                 // last frame the GPU could still be touching this query.
                 // getTimerQueryTime busy-polls if not ready — should be a
                 // no-op here.
-                const float seconds = device->getTimerQueryTime(q);
-                r.durationMs = static_cast<double>(seconds) * 1000.0;
-                if (r.kind == FrameProfile::ScopeKind::Gpu && r.depth == minGpuDepth) {
-                    gpuSumMs += r.durationMs;
+                const float seconds = device->getTimerQueryTime(query);
+                record.durationMs = static_cast<double>(seconds) * 1000.0;
+                if (record.kind == FrameProfile::ScopeKind::Gpu && record.depth == minGpuDepth) {
+                    gpuSumMs += record.durationMs;
                 }
-                ReleaseQuery(r.queryIdx);
-                r.queryIdx = -1;
+                ReleaseQuery(record.queryIdx);
+                record.queryIdx = -1;
             }
 
-            FrameProfile::PassTiming t{};
-            t.name       = r.name;
-            t.kind       = r.kind;
-            t.durationMs = r.durationMs;
-            t.depth      = r.depth;
-            resolved.push_back(t);
+            FrameProfile::PassTiming timing{};
+            timing.name       = record.name;
+            timing.kind       = record.kind;
+            timing.durationMs = record.durationMs;
+            timing.depth      = record.depth;
+            resolved.push_back(timing);
         }
 
         lastFrame      = std::move(resolved);
@@ -185,12 +185,12 @@ void Profiler::EndFrame() {
 }
 
 FrameProfile Profiler::LastFrameProfile() const {
-    FrameProfile p{};
-    p.passes     = std::span<const FrameProfile::PassTiming>(_impl->lastFrame);
-    p.cpuFrameMs = _impl->lastCpuFrameMs;
-    p.gpuFrameMs = _impl->lastGpuFrameMs;
-    p.frameIndex = _impl->frameIndex;
-    return p;
+    FrameProfile profile{};
+    profile.passes     = std::span<const FrameProfile::PassTiming>(_impl->lastFrame);
+    profile.cpuFrameMs = _impl->lastCpuFrameMs;
+    profile.gpuFrameMs = _impl->lastGpuFrameMs;
+    profile.frameIndex = _impl->frameIndex;
+    return profile;
 }
 
 // ---------------------------------------------------------------------------
@@ -202,13 +202,13 @@ FrameProfile Profiler::LastFrameProfile() const {
 Profiler::CpuScope::CpuScope(Profiler& profiler, std::string_view name)
     : _profiler(&profiler), _startNs(NowNs()) {
     auto& records = _profiler->_impl->slots[_profiler->_impl->currentSlot].records;
-    Impl::ScopeRecord r{};
-    r.name     = MakeScopeName(name);
-    r.kind     = FrameProfile::ScopeKind::Cpu;
-    r.depth    = _profiler->_impl->depth;
-    r.queryIdx = -1;
+    Impl::ScopeRecord record{};
+    record.name     = MakeScopeName(name);
+    record.kind     = FrameProfile::ScopeKind::Cpu;
+    record.depth    = _profiler->_impl->depth;
+    record.queryIdx = -1;
     _recordIndex = records.size();
-    records.push_back(r);
+    records.push_back(record);
     ++_profiler->_impl->depth;
 }
 
@@ -242,13 +242,13 @@ Profiler::GpuScope::GpuScope(Profiler& profiler, nvrhi::ICommandList* commandLis
     }
 
     auto& records = _profiler->_impl->slots[_profiler->_impl->currentSlot].records;
-    Impl::ScopeRecord r{};
-    r.name     = scopeName;
-    r.kind     = FrameProfile::ScopeKind::Gpu;
-    r.depth    = _profiler->_impl->depth;
-    r.queryIdx = _queryIdx;
+    Impl::ScopeRecord record{};
+    record.name     = scopeName;
+    record.kind     = FrameProfile::ScopeKind::Gpu;
+    record.depth    = _profiler->_impl->depth;
+    record.queryIdx = _queryIdx;
     _recordIndex = records.size();
-    records.push_back(r);
+    records.push_back(record);
     ++_profiler->_impl->depth;
 }
 

@@ -23,9 +23,9 @@ public:
             // beginMarker takes const char*; std::string_view::data() is
             // not guaranteed null-terminated, so we materialise a small
             // bounded copy.
-            const std::size_t n = std::min(name.size(), _name.size() - 1);
-            std::memcpy(_name.data(), name.data(), n);
-            _name[n] = '\0';
+            const std::size_t copyLen = std::min(name.size(), _name.size() - 1);
+            std::memcpy(_name.data(), name.data(), copyLen);
+            _name[copyLen] = '\0';
             _commandList->beginMarker(_name.data());
         }
     }

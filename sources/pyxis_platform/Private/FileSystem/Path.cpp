@@ -15,10 +15,10 @@ Path::Path(std::string_view utf8) {
 }
 
 void Path::Assign(std::string_view utf8) noexcept {
-    const std::size_t n = (utf8.size() < CAPACITY - 1) ? utf8.size() : CAPACITY - 1;
-    std::memcpy(_buf.data(), utf8.data(), n);
-    _buf[n] = '\0';
-    _size   = static_cast<uint16_t>(n);
+    const std::size_t copyLen = (utf8.size() < CAPACITY - 1) ? utf8.size() : CAPACITY - 1;
+    std::memcpy(_buf.data(), utf8.data(), copyLen);
+    _buf[copyLen] = '\0';
+    _size         = static_cast<uint16_t>(copyLen);
 }
 
 std::string_view Path::View() const noexcept {
@@ -27,14 +27,14 @@ std::string_view Path::View() const noexcept {
 
 bool Path::Exists() const noexcept {
     if (_size == 0) return false;
-    std::error_code ec;
-    return fs::exists(fs::path(View()), ec);
+    std::error_code errorCode;
+    return fs::exists(fs::path(View()), errorCode);
 }
 
 bool Path::IsDirectory() const noexcept {
     if (_size == 0) return false;
-    std::error_code ec;
-    return fs::is_directory(fs::path(View()), ec);
+    std::error_code errorCode;
+    return fs::is_directory(fs::path(View()), errorCode);
 }
 
 bool Path::IsAbsolute() const noexcept {
@@ -43,24 +43,24 @@ bool Path::IsAbsolute() const noexcept {
 }
 
 Path Path::Join(std::string_view child) const noexcept {
-    const fs::path p = fs::path(View()) / fs::path(child);
+    const fs::path joined = fs::path(View()) / fs::path(child);
     Path out;
-    out.Assign(p.generic_string());
+    out.Assign(joined.generic_string());
     return out;
 }
 
 Path Path::Parent() const noexcept {
-    const fs::path p = fs::path(View()).parent_path();
+    const fs::path parent = fs::path(View()).parent_path();
     Path out;
-    out.Assign(p.generic_string());
+    out.Assign(parent.generic_string());
     return out;
 }
 
 bool Path::EnsureDirectoryExists() const noexcept {
     if (_size == 0) return false;
-    std::error_code ec;
-    fs::create_directories(fs::path(View()), ec);
-    return !ec;
+    std::error_code errorCode;
+    fs::create_directories(fs::path(View()), errorCode);
+    return !errorCode;
 }
 
 }  // namespace pyxis

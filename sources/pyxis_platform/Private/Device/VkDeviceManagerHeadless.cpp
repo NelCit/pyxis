@@ -97,8 +97,8 @@ DeviceManagerCreateStatus VkDeviceManagerHeadless::Bringup(
 
     // Same discrete-first ranking as VkDeviceManager: an Intel UMA iGPU
     // would otherwise out-rank a discrete RTX on raw deviceLocalBytes.
-    auto adapterRank = [](const AdapterInfo& a) -> int {
-        return a.type == AdapterType::Discrete ? 1 : 0;
+    auto adapterRank = [](const AdapterInfo& adapter) -> int {
+        return adapter.type == AdapterType::Discrete ? 1 : 0;
     };
 
     int32_t      bestIndex = -1;
@@ -127,10 +127,10 @@ DeviceManagerCreateStatus VkDeviceManagerHeadless::Bringup(
         const bool isExplicit = (params.adapterIndex == static_cast<int32_t>(i));
         if (isExplicit) { bestIndex = static_cast<int32_t>(i); bestAdapter = info; break; }
 
-        const int r = adapterRank(info);
-        if (r > bestRank ||
-            (r == bestRank && info.totalDeviceLocalBytes > bestVram)) {
-            bestRank    = r;
+        const int rank = adapterRank(info);
+        if (rank > bestRank ||
+            (rank == bestRank && info.totalDeviceLocalBytes > bestVram)) {
+            bestRank    = rank;
             bestVram    = info.totalDeviceLocalBytes;
             bestIndex   = static_cast<int32_t>(i);
             bestAdapter = info;
@@ -238,13 +238,13 @@ void VkDeviceManagerHeadless::WaitIdle() {
 }
 
 VulkanContext VkDeviceManagerHeadless::GetVulkanContext() const noexcept {
-    VulkanContext c{};
-    c.instance       = static_cast<void*>(_instance);
-    c.physicalDevice = static_cast<void*>(_physicalDevice);
-    c.device         = static_cast<void*>(_device);
-    c.graphicsQueue  = static_cast<void*>(_graphicsQueue);
-    c.graphicsFamily = _graphicsFamily;
-    return c;
+    VulkanContext context{};
+    context.instance       = static_cast<void*>(_instance);
+    context.physicalDevice = static_cast<void*>(_physicalDevice);
+    context.device         = static_cast<void*>(_device);
+    context.graphicsQueue  = static_cast<void*>(_graphicsQueue);
+    context.graphicsFamily = _graphicsFamily;
+    return context;
 }
 
 IDeviceManager* CreateHeadlessDeviceManager(const DeviceCreationParams&  params,

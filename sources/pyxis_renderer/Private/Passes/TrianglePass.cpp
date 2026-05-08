@@ -20,13 +20,13 @@ namespace pyxis {
 namespace {
 
 std::vector<char> ReadBinaryFile(std::string_view path) noexcept {
-    std::ifstream f(std::string{path}, std::ios::binary | std::ios::ate);
-    if (!f.is_open()) return {};
-    const auto sz = f.tellg();
-    if (sz <= 0) return {};
-    std::vector<char> bytes(static_cast<std::size_t>(sz));
-    f.seekg(0, std::ios::beg);
-    f.read(bytes.data(), sz);
+    std::ifstream stream(std::string{path}, std::ios::binary | std::ios::ate);
+    if (!stream.is_open()) return {};
+    const auto fileSize = stream.tellg();
+    if (fileSize <= 0) return {};
+    std::vector<char> bytes(static_cast<std::size_t>(fileSize));
+    stream.seekg(0, std::ios::beg);
+    stream.read(bytes.data(), fileSize);
     return bytes;
 }
 
@@ -40,11 +40,11 @@ nvrhi::ShaderHandle LoadSpirv(nvrhi::IDevice* device, std::string_view path,
         log.Error(log::RENDER, msg);
         return nullptr;
     }
-    nvrhi::ShaderDesc sd{};
-    sd.shaderType = stage;
-    sd.entryName  = entry;
-    sd.debugName  = std::string{path};
-    return device->createShader(sd, bytes.data(), bytes.size());
+    nvrhi::ShaderDesc shaderDesc{};
+    shaderDesc.shaderType = stage;
+    shaderDesc.entryName  = entry;
+    shaderDesc.debugName  = std::string{path};
+    return device->createShader(shaderDesc, bytes.data(), bytes.size());
 }
 
 }  // namespace
@@ -61,12 +61,12 @@ TrianglePass::TrianglePass(nvrhi::IDevice* device) : _device(device) {
         return;
     }
 
-    nvrhi::BindingLayoutDesc bl{};
-    bl.visibility = nvrhi::ShaderType::All;
-    _bindingLayout = _device->createBindingLayout(bl);
+    nvrhi::BindingLayoutDesc layoutDesc{};
+    layoutDesc.visibility = nvrhi::ShaderType::All;
+    _bindingLayout = _device->createBindingLayout(layoutDesc);
 
-    const nvrhi::BindingSetDesc bs{};
-    _bindingSet = _device->createBindingSet(bs, _bindingLayout);
+    const nvrhi::BindingSetDesc bindingSetDesc{};
+    _bindingSet = _device->createBindingSet(bindingSetDesc, _bindingLayout);
 
     _shadersOk = true;
 }
@@ -74,8 +74,8 @@ TrianglePass::TrianglePass(nvrhi::IDevice* device) : _device(device) {
 TrianglePass::~TrianglePass() = default;
 
 nvrhi::FramebufferHandle TrianglePass::GetOrCreateFramebuffer(nvrhi::ITexture* color) {
-    if (auto it = _framebufferCache.find(color); it != _framebufferCache.end()) {
-        return it->second;
+    if (auto cached = _framebufferCache.find(color); cached != _framebufferCache.end()) {
+        return cached->second;
     }
     // Bounded-size cache: after a swapchain rebuild the prior swapchain
     // images are released by NVRHI's RefCountPtr but stale `nvrhi::ITexture*`
@@ -89,24 +89,24 @@ nvrhi::FramebufferHandle TrianglePass::GetOrCreateFramebuffer(nvrhi::ITexture* c
     }
     nvrhi::FramebufferDesc fbDesc;
     fbDesc.addColorAttachment(color);
-    const nvrhi::FramebufferHandle fb = _device->createFramebuffer(fbDesc);
-    _framebufferCache[color] = fb;
+    const nvrhi::FramebufferHandle framebuffer = _device->createFramebuffer(fbDesc);
+    _framebufferCache[color] = framebuffer;
 
-    nvrhi::GraphicsPipelineDesc pipDesc;
-    pipDesc.VS                                     = _vs;
-    pipDesc.PS                                     = _fs;
-    pipDesc.primType                               = nvrhi::PrimitiveType::TriangleList;
-    pipDesc.bindingLayouts                         = { _bindingLayout };
-    pipDesc.renderState.depthStencilState.depthTestEnable    = false;
-    pipDesc.renderState.depthStencilState.depthWriteEnable   = false;
-    pipDesc.renderState.depthStencilState.stencilEnable      = false;
-    pipDesc.renderState.rasterState.cullMode                 = nvrhi::RasterCullMode::None;
+    nvrhi::GraphicsPipelineDesc pipelineDesc;
+    pipelineDesc.VS                                     = _vs;
+    pipelineDesc.PS                                     = _fs;
+    pipelineDesc.primType                               = nvrhi::PrimitiveType::TriangleList;
+    pipelineDesc.bindingLayouts                         = { _bindingLayout };
+    pipelineDesc.renderState.depthStencilState.depthTestEnable    = false;
+    pipelineDesc.renderState.depthStencilState.depthWriteEnable   = false;
+    pipelineDesc.renderState.depthStencilState.stencilEnable      = false;
+    pipelineDesc.renderState.rasterState.cullMode                 = nvrhi::RasterCullMode::None;
     // Newer NVRHI deprecated the (desc, framebuffer) overload; the
     // (desc, framebuffer-info) form is the supported path.
-    const nvrhi::GraphicsPipelineHandle pipe =
-        _device->createGraphicsPipeline(pipDesc, fb->getFramebufferInfo());
-    _pipelineCache[color] = pipe;
-    return fb;
+    const nvrhi::GraphicsPipelineHandle pipeline =
+        _device->createGraphicsPipeline(pipelineDesc, framebuffer->getFramebufferInfo());
+    _pipelineCache[color] = pipeline;
+    return framebuffer;
 }
 
 void TrianglePass::Execute(nvrhi::ICommandList* commandList, const PassContext& ctx) {
@@ -116,8 +116,8 @@ void TrianglePass::Execute(nvrhi::ICommandList* commandList, const PassContext& 
 
     // Clear the color target to the settings-provided clear colour.
     if (ctx.settings) {
-        const auto& c = ctx.settings->clearColor;
-        const nvrhi::Color clearColor(c[0], c[1], c[2], c[3]);
+        const auto& clearRgba = ctx.settings->clearColor;
+        const nvrhi::Color clearColor(clearRgba[0], clearRgba[1], clearRgba[2], clearRgba[3]);
         commandList->clearTextureFloat(colorTex, nvrhi::AllSubresources, clearColor);
     }
 

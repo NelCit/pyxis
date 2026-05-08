@@ -22,13 +22,13 @@ public:
     [[nodiscard]] void*    NativeHandle() const override;
 
 private:
-    static GlfwWindow* From(GLFWwindow* w) noexcept;
-    static void OnSize(GLFWwindow* w, int width, int height);
-    static void OnKey(GLFWwindow* w, int key, int scancode, int action, int mods);
-    static void OnMouseButton(GLFWwindow* w, int button, int action, int mods);
-    static void OnCursorPos(GLFWwindow* w, double x, double y);
-    static void OnScroll(GLFWwindow* w, double dx, double dy);
-    static void OnClose(GLFWwindow* w);
+    static GlfwWindow* From(GLFWwindow* window) noexcept;
+    static void OnSize(GLFWwindow* window, int width, int height);
+    static void OnKey(GLFWwindow* window, int key, int scancode, int action, int mods);
+    static void OnMouseButton(GLFWwindow* window, int button, int action, int mods);
+    static void OnCursorPos(GLFWwindow* window, double posX, double posY);
+    static void OnScroll(GLFWwindow* window, double deltaX, double deltaY);
+    static void OnClose(GLFWwindow* window);
 
     GLFWwindow*    _handle = nullptr;
     InputEventSink _sink;

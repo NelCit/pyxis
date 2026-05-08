@@ -34,8 +34,8 @@ namespace {
 
 constexpr uint32_t VULKAN_API_VERSION = VK_API_VERSION_1_3;
 
-const char* StatusName(DeviceManagerCreateStatus s) noexcept {
-    switch (s) {
+const char* StatusName(DeviceManagerCreateStatus status) noexcept {
+    switch (status) {
         case DeviceManagerCreateStatus::Ok:                       return "Ok";
         case DeviceManagerCreateStatus::NoVulkanDriver:           return "NoVulkanDriver";
         case DeviceManagerCreateStatus::NoCompatibleAdapter:      return "NoCompatibleAdapter";
@@ -105,8 +105,8 @@ public:
 };
 
 NvrhiMessageCallback& NvrhiCallback() {
-    static NvrhiMessageCallback cb;
-    return cb;
+    static NvrhiMessageCallback callback;
+    return callback;
 }
 
 }  // namespace
@@ -178,8 +178,8 @@ DeviceManagerCreateStatus VkDeviceManager::Bringup(const DeviceCreationParams& p
     // the discrete-first preference, an Intel UMA iGPU with 16 GB of
     // shared system RAM (which it reports as device-local) out-ranks a
     // discrete RTX with 8/12 GB of real VRAM.
-    auto adapterRank = [](const AdapterInfo& a) -> int {
-        return a.type == AdapterType::Discrete ? 1 : 0;
+    auto adapterRank = [](const AdapterInfo& adapter) -> int {
+        return adapter.type == AdapterType::Discrete ? 1 : 0;
     };
 
     int32_t bestIndex = -1;
@@ -210,10 +210,10 @@ DeviceManagerCreateStatus VkDeviceManager::Bringup(const DeviceCreationParams& p
         const bool isExplicit = (params.adapterIndex == static_cast<int32_t>(i));
         if (isExplicit) { bestIndex = static_cast<int32_t>(i); bestAdapter = info; break; }
 
-        const int r = adapterRank(info);
-        if (r > bestRank ||
-            (r == bestRank && info.totalDeviceLocalBytes > bestVram)) {
-            bestRank    = r;
+        const int rank = adapterRank(info);
+        if (rank > bestRank ||
+            (rank == bestRank && info.totalDeviceLocalBytes > bestVram)) {
+            bestRank    = rank;
             bestVram    = info.totalDeviceLocalBytes;
             bestIndex   = static_cast<int32_t>(i);
             bestAdapter = info;
@@ -444,9 +444,9 @@ bool VkDeviceManager::CreateSwapchain(uint32_t width, uint32_t height) noexcept 
     vkGetPhysicalDeviceSurfaceFormatsKHR(_physicalDevice, _surface, &formatCount, formats.data());
     // §5: pin to BGRA8_UNORM_SRGB.
     VkSurfaceFormatKHR chosenFormat = formats[0];
-    for (const auto& f : formats) {
-        if (f.format == VK_FORMAT_B8G8R8A8_SRGB && f.colorSpace == VK_COLORSPACE_SRGB_NONLINEAR_KHR) {
-            chosenFormat = f;
+    for (const auto& format : formats) {
+        if (format.format == VK_FORMAT_B8G8R8A8_SRGB && format.colorSpace == VK_COLORSPACE_SRGB_NONLINEAR_KHR) {
+            chosenFormat = format;
             break;
         }
     }
@@ -551,15 +551,15 @@ bool VkDeviceManager::CreateSwapchain(uint32_t width, uint32_t height) noexcept 
         tdesc.debugName  = "swapchain-image-" + std::to_string(i);
         tdesc.initialState     = nvrhi::ResourceStates::Present;
         tdesc.keepInitialState = true;
-        nvrhi::TextureHandle h = _nvrhiVulkan->createHandleForNativeTexture(
+        nvrhi::TextureHandle textureHandle = _nvrhiVulkan->createHandleForNativeTexture(
             nvrhi::ObjectTypes::VK_Image,
             nvrhi::Object(_swapchainImages[i]),
             tdesc);
-        if (!h) {
+        if (!textureHandle) {
             log.Error(log::PLATFORM, "VkDeviceManager: nvrhi createHandleForNativeTexture failed");
             return false;
         }
-        _swapchainTextures.push_back(std::move(h));
+        _swapchainTextures.push_back(std::move(textureHandle));
     }
 
     // Recreate the binary acquire / present semaphores for this swapchain.
@@ -647,15 +647,15 @@ void VkDeviceManager::BeginFrame() {
 
     ++_frameValue;
 
-    const VkResult r = vkAcquireNextImageKHR(_device, _swapchain, UINT64_MAX,
-                                             _acquireSem, VK_NULL_HANDLE, &_currentImage);
-    if (r == VK_ERROR_OUT_OF_DATE_KHR) {
+    const VkResult acquireResult = vkAcquireNextImageKHR(_device, _swapchain, UINT64_MAX,
+                                                         _acquireSem, VK_NULL_HANDLE, &_currentImage);
+    if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR) {
         // The semaphore is *not* signalled in this case. Skip queuing waits
         // and trigger a swapchain rebuild on the next frame boundary.
         _resizePending = true;
         return;
     }
-    if (r == VK_SUBOPTIMAL_KHR) {
+    if (acquireResult == VK_SUBOPTIMAL_KHR) {
         // Suboptimal: image is usable, but we'll rebuild after EndFrame.
         _resizePending = true;
     }
@@ -682,21 +682,21 @@ void VkDeviceManager::EndFrame() {
     present.swapchainCount     = 1;
     present.pSwapchains        = &_swapchain;
     present.pImageIndices      = &_currentImage;
-    const VkResult r = vkQueuePresentKHR(_graphicsQueue, &present);
-    if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) {
+    const VkResult presentResult = vkQueuePresentKHR(_graphicsQueue, &present);
+    if (presentResult == VK_ERROR_OUT_OF_DATE_KHR || presentResult == VK_SUBOPTIMAL_KHR) {
         _resizePending = true;
     }
 
     if (_resizePending && _window) {
-        const uint32_t w = _window->Width();
-        const uint32_t h = _window->Height();
-        if (w > 0 && h > 0) {
+        const uint32_t width  = _window->Width();
+        const uint32_t height = _window->Height();
+        if (width > 0 && height > 0) {
             // CreateSwapchain handles oldSwapchain chaining + per-swapchain
             // semaphore + texture lifetime, including NVRHI's deferred-
             // destruction queue. The timeline persists across rebuilds —
             // no reset needed.
             vkDeviceWaitIdle(_device);
-            CreateSwapchain(w, h);
+            CreateSwapchain(width, height);
             _resizePending = false;
         }
     }
@@ -707,14 +707,14 @@ void VkDeviceManager::WaitIdle() {
 }
 
 VulkanContext VkDeviceManager::GetVulkanContext() const noexcept {
-    VulkanContext c{};
-    c.instance       = static_cast<void*>(_instance);
-    c.physicalDevice = static_cast<void*>(_physicalDevice);
-    c.device         = static_cast<void*>(_device);
-    c.graphicsQueue  = static_cast<void*>(_graphicsQueue);
-    c.graphicsFamily = _graphicsFamily;
-    c.colorFormat    = static_cast<uint32_t>(_swapchainFormat);
-    return c;
+    VulkanContext context{};
+    context.instance       = static_cast<void*>(_instance);
+    context.physicalDevice = static_cast<void*>(_physicalDevice);
+    context.device         = static_cast<void*>(_device);
+    context.graphicsQueue  = static_cast<void*>(_graphicsQueue);
+    context.graphicsFamily = _graphicsFamily;
+    context.colorFormat    = static_cast<uint32_t>(_swapchainFormat);
+    return context;
 }
 
 IDeviceManager::~IDeviceManager() = default;

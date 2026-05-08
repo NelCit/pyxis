@@ -17,8 +17,8 @@ namespace {
 bool HasExtension(const std::vector<VkExtensionProperties>& props,
                   const char*                               name) noexcept {
     return std::any_of(props.begin(), props.end(),
-                       [&](const VkExtensionProperties& p) {
-                           return std::strcmp(p.extensionName, name) == 0;
+                       [&](const VkExtensionProperties& prop) {
+                           return std::strcmp(prop.extensionName, name) == 0;
                        });
 }
 
@@ -102,10 +102,10 @@ bool QueryAdapterFeatures(VkPhysicalDevice device, AdapterInfo& outInfo) noexcep
     outInfo.supportsShaderInt64 = features.shaderInt64 != 0;
 
     // ---- Validate required set -------------------------------------------
-    bool ok = true;
+    bool allRequiredPresent = true;
     auto& log = Logging::Get();
     auto missing = [&](const char* name) {
-        ok = false;
+        allRequiredPresent = false;
         std::string msg = "missing required feature/extension: ";
         msg += name;
         log.Error(log::PLATFORM, msg);
@@ -122,7 +122,7 @@ bool QueryAdapterFeatures(VkPhysicalDevice device, AdapterInfo& outInfo) noexcep
     if (!outInfo.supportsShaderInt64)            missing("shaderInt64");
     if (!outInfo.supportsSync2)                  missing("Vulkan 1.3 core (synchronization2)");
 
-    return ok;
+    return allRequiredPresent;
 }
 
 }  // namespace pyxis

@@ -16,12 +16,12 @@ namespace pyxis {
 
 namespace {
 
-std::string Wide2Utf8(const wchar_t* w) {
-    const int needed = ::WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0, nullptr, nullptr);
+std::string Wide2Utf8(const wchar_t* wide) {
+    const int needed = ::WideCharToMultiByte(CP_UTF8, 0, wide, -1, nullptr, 0, nullptr, nullptr);
     if (needed <= 1) return {};
     std::string out;
     out.resize(static_cast<std::size_t>(needed - 1));
-    ::WideCharToMultiByte(CP_UTF8, 0, w, -1, out.data(), needed, nullptr, nullptr);
+    ::WideCharToMultiByte(CP_UTF8, 0, wide, -1, out.data(), needed, nullptr, nullptr);
     // Normalise to forward slashes for cross-API friendliness.
     std::replace(out.begin(), out.end(), '\\', '/');
     return out;
@@ -56,9 +56,9 @@ Path AssetLocator::Resources() const noexcept {
 // `FindResource` member name collided with the macro.  See AssetLocator.h
 // where the macro-safe spelling lives.
 Path AssetLocator::LocateResource(std::string_view relative) const noexcept {
-    Path p = Resources().Join(relative);
-    if (!p.Exists()) return {};
-    return p;
+    Path resolved = Resources().Join(relative);
+    if (!resolved.Exists()) return {};
+    return resolved;
 }
 
 Path AssetLocator::LocalAppData() const noexcept {

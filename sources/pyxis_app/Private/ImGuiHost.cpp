@@ -59,25 +59,26 @@ bool ImGuiHost::Init(IWindow* window, IDeviceManager* deviceManager) noexcept {
         return false;
     }
 
-    const VulkanContext vk = deviceManager->GetVulkanContext();
-    if (!vk.instance || !vk.physicalDevice || !vk.device || !vk.graphicsQueue) {
+    const VulkanContext vulkanContext = deviceManager->GetVulkanContext();
+    if (!vulkanContext.instance || !vulkanContext.physicalDevice ||
+        !vulkanContext.device   || !vulkanContext.graphicsQueue) {
         log.Error(log::APP, "ImGuiHost::Init: device manager surfaced null Vulkan handles");
         return false;
     }
 
-    _instance = vk.instance;
-    auto vkInstance = static_cast<VkInstance>(vk.instance);
-    auto vkPhys     = static_cast<VkPhysicalDevice>(vk.physicalDevice);
-    auto vkDevice   = static_cast<VkDevice>(vk.device);
-    auto vkQueue    = static_cast<VkQueue>(vk.graphicsQueue);
+    _instance = vulkanContext.instance;
+    auto vkInstance = static_cast<VkInstance>(vulkanContext.instance);
+    auto vkPhys     = static_cast<VkPhysicalDevice>(vulkanContext.physicalDevice);
+    auto vkDevice   = static_cast<VkDevice>(vulkanContext.device);
+    auto vkQueue    = static_cast<VkQueue>(vulkanContext.graphicsQueue);
 
     // -- ImGui context ----------------------------------------------------
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
-    ImGuiIO& io = ImGui::GetIO();
-    io.IniFilename = nullptr;                                  // no imgui.ini side-files
-    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    ImGuiIO& imguiIO = ImGui::GetIO();
+    imguiIO.IniFilename = nullptr;                              // no imgui.ini side-files
+    imguiIO.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+    imguiIO.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 
     ImGui::StyleColorsDark();
 
@@ -96,14 +97,14 @@ bool ImGuiHost::Init(IWindow* window, IDeviceManager* deviceManager) noexcept {
         return false;
     }
 
-    const auto colorFormat = static_cast<VkFormat>(vk.colorFormat);
+    const auto colorFormat = static_cast<VkFormat>(vulkanContext.colorFormat);
 
     ImGui_ImplVulkan_InitInfo init{};
     init.ApiVersion        = VK_API_VERSION_1_3;
     init.Instance          = vkInstance;
     init.PhysicalDevice    = vkPhys;
     init.Device            = vkDevice;
-    init.QueueFamily       = vk.graphicsFamily;
+    init.QueueFamily       = vulkanContext.graphicsFamily;
     init.Queue             = vkQueue;
     init.DescriptorPool     = VK_NULL_HANDLE;
     init.DescriptorPoolSize = IMGUI_DESCRIPTOR_POOL_SIZE;   // ImGui builds its own pool with the right types.
@@ -146,7 +147,7 @@ void ImGuiHost::BeginFrame() noexcept {
     ImGui::NewFrame();
 }
 
-void ImGuiHost::BuildFpsPanel(const FrameProfile& fp) noexcept {
+void ImGuiHost::BuildFpsPanel(const FrameProfile& frameProfile) noexcept {
     if (!_ready) return;
 
     // M1 panel — §41 ships only "FPS shows". The §29.3 Performance panel
@@ -162,23 +163,23 @@ void ImGuiHost::BuildFpsPanel(const FrameProfile& fp) noexcept {
     // sizing — sufficient for the M1 scope tree, replaced by an explicit
     // multi-column layout at M11.
     if (ImGui::Begin("Performance", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        const ImGuiIO& io  = ImGui::GetIO();
-        ImGui::Text("Frame: %llu", static_cast<unsigned long long>(fp.frameIndex));
-        ImGui::Text("FPS  : %.1f", static_cast<double>(io.Framerate));
+        const ImGuiIO& imguiIO = ImGui::GetIO();
+        ImGui::Text("Frame: %llu", static_cast<unsigned long long>(frameProfile.frameIndex));
+        ImGui::Text("FPS  : %.1f", static_cast<double>(imguiIO.Framerate));
         ImGui::Separator();
-        ImGui::Text("CPU  : %.3f ms", fp.cpuFrameMs);
-        ImGui::Text("GPU  : %.3f ms", fp.gpuFrameMs);
+        ImGui::Text("CPU  : %.3f ms", frameProfile.cpuFrameMs);
+        ImGui::Text("GPU  : %.3f ms", frameProfile.gpuFrameMs);
         ImGui::Separator();
         // Pre-order scope tree. Two spaces per nesting level; CPU/GPU
         // tag in front of the name; durationMs at the trailing column.
-        for (const FrameProfile::PassTiming& t : fp.passes) {
-            const char* kind = (t.kind == FrameProfile::ScopeKind::Cpu) ? "CPU" : "GPU";
-            const std::string_view name = t.name.View();
+        for (const FrameProfile::PassTiming& timing : frameProfile.passes) {
+            const char* kind = (timing.kind == FrameProfile::ScopeKind::Cpu) ? "CPU" : "GPU";
+            const std::string_view name = timing.name.View();
             ImGui::Text("%*s%s %.*s  %.3f ms",
-                static_cast<int>(t.depth * 2), "",
+                static_cast<int>(timing.depth * 2), "",
                 kind,
                 static_cast<int>(name.size()), name.data(),
-                t.durationMs);
+                timing.durationMs);
         }
     }
     ImGui::End();
@@ -220,15 +221,15 @@ void ImGuiHost::Submit(nvrhi::ICommandList* commandList, nvrhi::ITexture* colorT
     color.loadOp      = VK_ATTACHMENT_LOAD_OP_LOAD;     // preserve renderer's content
     color.storeOp     = VK_ATTACHMENT_STORE_OP_STORE;
 
-    VkRenderingInfo ri{};
-    ri.sType                = VK_STRUCTURE_TYPE_RENDERING_INFO;
-    ri.renderArea.offset    = { 0, 0 };
-    ri.renderArea.extent    = { tdesc.width, tdesc.height };
-    ri.layerCount           = 1;
-    ri.colorAttachmentCount = 1;
-    ri.pColorAttachments    = &color;
+    VkRenderingInfo renderingInfo{};
+    renderingInfo.sType                = VK_STRUCTURE_TYPE_RENDERING_INFO;
+    renderingInfo.renderArea.offset    = { 0, 0 };
+    renderingInfo.renderArea.extent    = { tdesc.width, tdesc.height };
+    renderingInfo.layerCount           = 1;
+    renderingInfo.colorAttachmentCount = 1;
+    renderingInfo.pColorAttachments    = &color;
 
-    vkCmdBeginRendering(vkCmd, &ri);
+    vkCmdBeginRendering(vkCmd, &renderingInfo);
     ImGui_ImplVulkan_RenderDrawData(drawData, vkCmd);
     vkCmdEndRendering(vkCmd);
 }

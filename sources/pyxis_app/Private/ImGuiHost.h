@@ -51,7 +51,7 @@ public:
     void BeginFrame() noexcept;
     // Builds the dockable Performance panel. Shows the totals + the
     // pre-order scope tree from the supplied FrameProfile snapshot.
-    void BuildFpsPanel(const FrameProfile& fp) noexcept;
+    void BuildFpsPanel(const FrameProfile& frameProfile) noexcept;
     void Render() noexcept;
     void Submit(nvrhi::ICommandList* commandList, nvrhi::ITexture* colorTarget) noexcept;
 

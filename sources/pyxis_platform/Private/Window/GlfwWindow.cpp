@@ -32,8 +32,8 @@ bool EnsureGlfwInit() noexcept {
         return false;
     }
     glfwSetErrorCallback([](int code, const char* msg) {
-        const std::string m = "GLFW error " + std::to_string(code) + ": " + (msg ? msg : "?");
-        Logging::Get().Error(log::PLATFORM, m);
+        const std::string formatted = "GLFW error " + std::to_string(code) + ": " + (msg ? msg : "?");
+        Logging::Get().Error(log::PLATFORM, formatted);
     });
     return true;
 }
@@ -96,16 +96,16 @@ bool GlfwWindow::ShouldClose() const {
 
 uint32_t GlfwWindow::Width() const {
     if (!_handle) return 0;
-    int w = 0, h = 0;
-    glfwGetFramebufferSize(_handle, &w, &h);
-    return static_cast<uint32_t>(w);
+    int width = 0, height = 0;
+    glfwGetFramebufferSize(_handle, &width, &height);
+    return static_cast<uint32_t>(width);
 }
 
 uint32_t GlfwWindow::Height() const {
     if (!_handle) return 0;
-    int w = 0, h = 0;
-    glfwGetFramebufferSize(_handle, &w, &h);
-    return static_cast<uint32_t>(h);
+    int width = 0, height = 0;
+    glfwGetFramebufferSize(_handle, &width, &height);
+    return static_cast<uint32_t>(height);
 }
 
 void GlfwWindow::SetEventSink(InputEventSink sink) {
@@ -115,8 +115,8 @@ void GlfwWindow::SetEventSink(InputEventSink sink) {
 VkSurfaceKHR GlfwWindow::CreateVulkanSurface(VkInstance instance) {
     if (!_handle) return VK_NULL_HANDLE;
     VkSurfaceKHR surface = VK_NULL_HANDLE;
-    const VkResult r = glfwCreateWindowSurface(instance, _handle, nullptr, &surface);
-    if (r != VK_SUCCESS) {
+    const VkResult result = glfwCreateWindowSurface(instance, _handle, nullptr, &surface);
+    if (result != VK_SUCCESS) {
         Logging::Get().Error(log::PLATFORM, "glfwCreateWindowSurface failed");
         return VK_NULL_HANDLE;
     }
@@ -127,66 +127,66 @@ void* GlfwWindow::NativeHandle() const {
     return _handle;
 }
 
-GlfwWindow* GlfwWindow::From(GLFWwindow* w) noexcept {
-    return static_cast<GlfwWindow*>(glfwGetWindowUserPointer(w));
+GlfwWindow* GlfwWindow::From(GLFWwindow* window) noexcept {
+    return static_cast<GlfwWindow*>(glfwGetWindowUserPointer(window));
 }
 
-void GlfwWindow::OnSize(GLFWwindow* w, int width, int height) {
-    auto* self = From(w);
+void GlfwWindow::OnSize(GLFWwindow* window, int width, int height) {
+    auto* self = From(window);
     if (!self || !self->_sink) return;
-    InputEvent e{};
-    e.kind   = InputEventKind::WindowResize;
-    e.width  = static_cast<uint32_t>(width  > 0 ? width  : 0);
-    e.height = static_cast<uint32_t>(height > 0 ? height : 0);
-    self->_sink(e);
+    InputEvent event{};
+    event.kind   = InputEventKind::WindowResize;
+    event.width  = static_cast<uint32_t>(width  > 0 ? width  : 0);
+    event.height = static_cast<uint32_t>(height > 0 ? height : 0);
+    self->_sink(event);
 }
 
-void GlfwWindow::OnKey(GLFWwindow* w, int key, int /*scancode*/, int action, int mods) {
-    auto* self = From(w);
+void GlfwWindow::OnKey(GLFWwindow* window, int key, int /*scancode*/, int action, int mods) {
+    auto* self = From(window);
     if (!self || !self->_sink) return;
-    InputEvent e{};
-    e.kind = (action == GLFW_RELEASE) ? InputEventKind::KeyUp : InputEventKind::KeyDown;
-    e.key  = key;
-    e.mods = static_cast<uint32_t>(mods);
-    self->_sink(e);
+    InputEvent event{};
+    event.kind = (action == GLFW_RELEASE) ? InputEventKind::KeyUp : InputEventKind::KeyDown;
+    event.key  = key;
+    event.mods = static_cast<uint32_t>(mods);
+    self->_sink(event);
 }
 
-void GlfwWindow::OnMouseButton(GLFWwindow* w, int button, int /*action*/, int mods) {
-    auto* self = From(w);
+void GlfwWindow::OnMouseButton(GLFWwindow* window, int button, int /*action*/, int mods) {
+    auto* self = From(window);
     if (!self || !self->_sink) return;
-    InputEvent e{};
-    e.kind = InputEventKind::MouseButton;
-    e.key  = button;
-    e.mods = static_cast<uint32_t>(mods);
-    self->_sink(e);
+    InputEvent event{};
+    event.kind = InputEventKind::MouseButton;
+    event.key  = button;
+    event.mods = static_cast<uint32_t>(mods);
+    self->_sink(event);
 }
 
-void GlfwWindow::OnCursorPos(GLFWwindow* w, double x, double y) {
-    auto* self = From(w);
+void GlfwWindow::OnCursorPos(GLFWwindow* window, double posX, double posY) {
+    auto* self = From(window);
     if (!self || !self->_sink) return;
-    InputEvent e{};
-    e.kind   = InputEventKind::MouseMove;
-    e.mouseX = x;
-    e.mouseY = y;
-    self->_sink(e);
+    InputEvent event{};
+    event.kind   = InputEventKind::MouseMove;
+    event.mouseX = posX;
+    event.mouseY = posY;
+    self->_sink(event);
 }
 
-void GlfwWindow::OnScroll(GLFWwindow* w, double dx, double dy) {
-    auto* self = From(w);
+void GlfwWindow::OnScroll(GLFWwindow* window, double deltaX, double deltaY) {
+    auto* self = From(window);
     if (!self || !self->_sink) return;
-    InputEvent e{};
-    e.kind     = InputEventKind::MouseScroll;
-    e.scrollDx = dx;
-    e.scrollDy = dy;
-    self->_sink(e);
+    InputEvent event{};
+    event.kind     = InputEventKind::MouseScroll;
+    event.scrollDx = deltaX;
+    event.scrollDy = deltaY;
+    self->_sink(event);
 }
 
-void GlfwWindow::OnClose(GLFWwindow* w) {
-    auto* self = From(w);
+void GlfwWindow::OnClose(GLFWwindow* window) {
+    auto* self = From(window);
     if (!self || !self->_sink) return;
-    InputEvent e{};
-    e.kind = InputEventKind::WindowClose;
-    self->_sink(e);
+    InputEvent event{};
+    event.kind = InputEventKind::WindowClose;
+    self->_sink(event);
 }
 
 // ---------------------------------------------------------------------------
@@ -194,9 +194,9 @@ void GlfwWindow::OnClose(GLFWwindow* w) {
 // ---------------------------------------------------------------------------
 
 IWindow* CreateGlfwWindow(const WindowDesc& desc) noexcept {
-    auto* w = new GlfwWindow(desc);
-    if (w->NativeHandle() == nullptr) { delete w; return nullptr; }
-    return w;
+    auto* window = new GlfwWindow(desc);
+    if (window->NativeHandle() == nullptr) { delete window; return nullptr; }
+    return window;
 }
 
 }  // namespace pyxis
