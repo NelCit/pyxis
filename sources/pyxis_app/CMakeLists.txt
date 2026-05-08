@@ -21,16 +21,48 @@ target_sources(pyxis PRIVATE
     Private/CliArgs.cpp
     Private/HeadlessMode.h
     Private/HeadlessMode.cpp
+    Private/ViewerMode.h
+    Private/ViewerMode.cpp
+    Private/ImGuiHost.h
+    Private/ImGuiHost.cpp
+    Private/StbImageWrite.cpp
 )
+
+# stb_image_write's IMPLEMENTATION TU has missing-field-initializer
+# patterns inside the third-party header. Disable the warning + clang-
+# tidy on that single file rather than relax it project-wide.
+set_source_files_properties(Private/StbImageWrite.cpp PROPERTIES
+    COMPILE_OPTIONS    "-Wno-missing-field-initializers"
+    SKIP_LINTING       ON)
 
 target_include_directories(pyxis PRIVATE
     Private
 )
 
+find_package(Stb REQUIRED)
+
+# ImGui (with Vulkan + GLFW backends) — built lazily by the helper in
+# _cmake/Thirdparty.cmake. pyxis_app/ViewerMode is the only consumer
+# in M1; the FPS panel + dockspace land here. The helper assumes
+# find_package(Vulkan) + find_package(glfw3) have already populated
+# the corresponding imported targets (the GLFW include path is what
+# imgui_impl_glfw.cpp needs at compile time, not just link time).
+find_package(Vulkan REQUIRED)
+find_package(glfw3 CONFIG REQUIRED)
+pyxis_thirdparty_require_imgui()
+
 target_link_libraries(pyxis PRIVATE
     Pyxis::Platform
     Pyxis::Renderer
+    pyxis_imgui
+    Vulkan::Vulkan        # vkCmdBeginRendering / vkCmdEndRendering / descriptor-pool calls
 )
+
+# stb_image_write is header-only; vcpkg's `Stb` config exports the
+# include dir as Stb_INCLUDE_DIR but no link target. ViewerMode.cpp's
+# --screenshot path #defines STB_IMAGE_WRITE_IMPLEMENTATION in exactly
+# one TU and writes PNGs.
+target_include_directories(pyxis PRIVATE ${Stb_INCLUDE_DIR})
 
 # WIN32 + the standard /SUBSYSTEM:CONSOLE for our CLI tool. The WIN32 flag
 # above defaults to /SUBSYSTEM:WINDOWS, which we override here so headless

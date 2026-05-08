@@ -22,12 +22,35 @@ target_sources(pyxis_renderer PUBLIC
         Public/Pyxis/Renderer/RendererApi.h
         Public/Pyxis/Renderer/Forward.h
         Public/Pyxis/Renderer/SceneWorldFacade.h
+
+        # M1 public surface.
+        Public/Pyxis/Renderer/Profiler.h
+        Public/Pyxis/Renderer/PyxisRenderer.h
+        Public/Pyxis/Renderer/Descs/FrameProfile.h
+        Public/Pyxis/Renderer/Descs/RendererCreateDesc.h
+        Public/Pyxis/Renderer/Descs/RenderSettings.h
+        Public/Pyxis/Renderer/Descs/RenderTargets.h
 )
 
 # ----------------------------------------------------------------------------
 # Private — SceneWorld and the Flecs phase pipeline (§8 / §30.11).
 # ----------------------------------------------------------------------------
 target_sources(pyxis_renderer PRIVATE
+    # M1 — RenderGraph + Passes + Profiler + Renderer.
+    Private/Diagnostics/CommandListMarker.h
+
+    Private/RenderGraph/IRenderPass.h
+    Private/RenderGraph/PassContext.h
+    Private/RenderGraph/RenderGraph.h
+    Private/RenderGraph/RenderGraph.cpp
+
+    Private/Passes/TrianglePass.h
+    Private/Passes/TrianglePass.cpp
+
+    Private/Profiler/Profiler.cpp
+
+    Private/Renderers/PyxisRenderer.cpp
+
     # Scene/.
     Private/Scene/World.h
     Private/Scene/World.cpp
@@ -88,3 +111,21 @@ target_compile_definitions(pyxis_renderer PRIVATE
 include(Version)
 pyxis_generate_version_header(pyxis_renderer)
 pyxis_generate_version_source(pyxis_renderer)
+
+# Shaders — M1 triangle vert + frag compiled by Slang at build time
+# (plan §10 / §23).
+include(Slang)
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/triangle.vert.slang
+    ENTRY_POINT main
+    STAGE       vertex
+    OUTPUT      triangle.vert.spv
+)
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/triangle.frag.slang
+    ENTRY_POINT main
+    STAGE       fragment
+    OUTPUT      triangle.frag.spv
+)

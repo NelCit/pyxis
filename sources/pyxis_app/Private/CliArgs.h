@@ -24,6 +24,12 @@ struct CliArgs {
     bool        showHelp        = false;
     bool        showVersion     = false;
 
+    // --screenshot <path>: run the viewer for a few warmup frames, copy
+    // the backbuffer to PNG at the given path, then exit. Plan §35
+    // image-regression artefact (M1 single-frame; the full headless EXR
+    // pipeline lands at M2). Empty = no screenshot.
+    std::string_view screenshotPath;
+
     // True if `parse` saw an unknown flag. Application maps to exit 3.
     bool        invalid         = false;
     std::string_view invalidArg;

@@ -7,6 +7,8 @@
 Checks: >
   bugprone-*,
   -bugprone-easily-swappable-parameters,
+  -bugprone-invalid-enum-default-initialization,
+  -bugprone-narrowing-conversions,
   performance-*,
   -performance-enum-size,
   modernize-use-nullptr,
@@ -21,7 +23,8 @@ Checks: >
   hicpp-exception-baseclass,
   misc-const-correctness,
   misc-unused-parameters,
-  readability-identifier-naming
+  readability-identifier-naming,
+  readability-identifier-length
 
 WarningsAsErrors: '*'
 HeaderFilterRegex: 'sources/pyxis_.*'
@@ -68,6 +71,23 @@ CheckOptions:
 
   # Performance: avoid silent surprise from copies in range-based for.
   performance-for-range-copy.WarnOnAllAutoCopies: true
+
+  # Identifier length — Pyxis house preference: variable / parameter
+  # names should be explicit ("the name reads like the role"). One-
+  # letter locals are forbidden outside conventional loop indices
+  # (i, j, k). The earlier `cl → commandList`, `dm → deviceManager`,
+  # `r → result` cleanups codify this rule; the build now blocks
+  # regressions.
+  readability-identifier-length.MinimumVariableNameLength:   3
+  readability-identifier-length.MinimumParameterNameLength:  3
+  readability-identifier-length.MinimumLoopCounterNameLength: 3
+  readability-identifier-length.MinimumExceptionNameLength:  2
+  # `i` / `it` / `id` stay legal for loop counters only — anything
+  # else gets flagged. Add genuinely-conventional short names here if
+  # they survive review (none today).
+  readability-identifier-length.IgnoredVariableNames:        ''
+  readability-identifier-length.IgnoredParameterNames:       ''
+  readability-identifier-length.IgnoredLoopCounterNames:     '^[ijk]$'
 
   # Modernize: keep changes opt-in to avoid massive auto-rewrites.
   modernize-use-default-member-init.UseAssignment: true

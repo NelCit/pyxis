@@ -71,7 +71,7 @@ int Run(int argc, char** argv) noexcept {
     if (cli.headless) {
         return RunHeadless(cli.adapterIndex, cli.enableValidation);
     }
-    return RunViewer(cli.adapterIndex, cli.enableValidation);
+    return RunViewer(cli.adapterIndex, cli.enableValidation, cli.screenshotPath);
 }
 
 }  // namespace pyxis::app

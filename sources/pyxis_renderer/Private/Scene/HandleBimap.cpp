@@ -21,23 +21,23 @@ uint8_t HandleBimap::Generation(uint32_t encoded) noexcept {
 uint32_t HandleBimap::Allocate(flecs::entity entity) noexcept {
     // Try to reuse a retired slot first.
     for (uint32_t i = 0; i < _slots.size(); ++i) {
-        Slot& s = _slots[i];
-        if (!s.live && !s.quarantined) {
-            s.entity     = entity;
-            s.live       = true;
-            const uint32_t encoded = Encode(i, s.generation);
+        Slot& slot = _slots[i];
+        if (!slot.live && !slot.quarantined) {
+            slot.entity = entity;
+            slot.live   = true;
+            const uint32_t encoded = Encode(i, slot.generation);
             ++_live;
             return encoded;
         }
     }
 
     // Otherwise, append.
-    Slot s{};
-    s.entity     = entity;
-    s.generation = 0;
-    s.live       = true;
-    s.quarantined = false;
-    _slots.push_back(s);
+    Slot fresh{};
+    fresh.entity      = entity;
+    fresh.generation  = 0;
+    fresh.live        = true;
+    fresh.quarantined = false;
+    _slots.push_back(fresh);
     ++_live;
     return Encode(static_cast<uint32_t>(_slots.size() - 1), 0);
 }
@@ -46,26 +46,26 @@ flecs::entity HandleBimap::Resolve(uint32_t encoded) const noexcept {
     if (encoded == 0u) return flecs::entity{};
     const uint32_t idx = SlotIndex(encoded);
     if (idx >= _slots.size()) return flecs::entity{};
-    const Slot& s = _slots[idx];
-    if (!s.live || s.quarantined) return flecs::entity{};
-    if (s.generation != Generation(encoded)) return flecs::entity{};
-    return s.entity;
+    const Slot& slot = _slots[idx];
+    if (!slot.live || slot.quarantined) return flecs::entity{};
+    if (slot.generation != Generation(encoded)) return flecs::entity{};
+    return slot.entity;
 }
 
 void HandleBimap::Free(uint32_t encoded) noexcept {
     if (encoded == 0u) return;
     const uint32_t idx = SlotIndex(encoded);
     if (idx >= _slots.size()) return;
-    Slot& s = _slots[idx];
-    if (!s.live) return;
+    Slot& slot = _slots[idx];
+    if (!slot.live) return;
 
-    s.live   = false;
-    s.entity = flecs::entity{};
-    if (s.generation == 0xFFu) {
+    slot.live   = false;
+    slot.entity = flecs::entity{};
+    if (slot.generation == 0xFFu) {
         // §19.7 — quarantine the slot; never reuse.
-        s.quarantined = true;
+        slot.quarantined = true;
     } else {
-        ++s.generation;
+        ++slot.generation;
     }
     --_live;
 }

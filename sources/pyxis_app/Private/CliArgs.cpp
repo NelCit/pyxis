@@ -13,15 +13,15 @@ namespace pyxis::app {
 
 namespace {
 
-bool Equals(const char* a, const char* b) noexcept {
-    return std::strcmp(a, b) == 0;
+bool Equals(const char* lhs, const char* rhs) noexcept {
+    return std::strcmp(lhs, rhs) == 0;
 }
 
-bool ParseInt(const char* s, int32_t& out) noexcept {
-    if (s == nullptr || *s == '\0') return false;
+bool ParseInt(const char* str, int32_t& out) noexcept {
+    if (str == nullptr || *str == '\0') return false;
     char*    end   = nullptr;
-    const long val = std::strtol(s, &end, 10);
-    if (end == s || *end != '\0') return false;
+    const long val = std::strtol(str, &end, 10);
+    if (end == str || *end != '\0') return false;
     out = static_cast<int32_t>(val);
     return true;
 }
@@ -42,6 +42,14 @@ CliArgs Parse(int argc, char** argv) noexcept {
                 out.invalidArg = arg;
                 return out;
             }
+            ++i;
+        } else if (Equals(arg, "--screenshot")) {
+            if (i + 1 >= argc) {
+                out.invalid    = true;
+                out.invalidArg = arg;
+                return out;
+            }
+            out.screenshotPath = argv[i + 1];
             ++i;
         } else if (Equals(arg, "--help") || Equals(arg, "-h")) {
             out.showHelp = true;
@@ -64,6 +72,8 @@ void PrintUsage() noexcept {
         "  --headless              Run with VkDeviceManagerHeadless (no window).\n"
         "  --adapter <i>           Force adapter index (default: highest-VRAM RT-capable).\n"
         "  --vk-validation         Enable Vulkan validation layers.\n"
+        "  --screenshot <path>     Run the viewer briefly, write the backbuffer\n"
+        "                          as PNG to <path>, then exit.\n"
         "  --version               Print version and exit.\n"
         "  -h, --help              Show this help and exit.\n"
         "\n"

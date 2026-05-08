@@ -17,8 +17,8 @@ namespace {
 bool HasExtension(const std::vector<VkExtensionProperties>& props,
                   const char*                               name) noexcept {
     return std::any_of(props.begin(), props.end(),
-                       [&](const VkExtensionProperties& p) {
-                           return std::strcmp(p.extensionName, name) == 0;
+                       [&](const VkExtensionProperties& prop) {
+                           return std::strcmp(prop.extensionName, name) == 0;
                        });
 }
 
@@ -41,6 +41,14 @@ bool QueryAdapterFeatures(VkPhysicalDevice device, AdapterInfo& outInfo) noexcep
         case 0x8086: outInfo.vendor = AdapterVendor::Intel;    break;
         case 0x5143: outInfo.vendor = AdapterVendor::Qualcomm; break;
         default:     outInfo.vendor = AdapterVendor::Unknown;  break;
+    }
+
+    switch (props.deviceType) {
+        case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:   outInfo.type = AdapterType::Discrete;   break;
+        case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: outInfo.type = AdapterType::Integrated; break;
+        case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:    outInfo.type = AdapterType::Virtual;    break;
+        case VK_PHYSICAL_DEVICE_TYPE_CPU:            outInfo.type = AdapterType::Cpu;        break;
+        default:                                     outInfo.type = AdapterType::Other;      break;
     }
 
     const std::size_t nameLen =
@@ -94,10 +102,10 @@ bool QueryAdapterFeatures(VkPhysicalDevice device, AdapterInfo& outInfo) noexcep
     outInfo.supportsShaderInt64 = features.shaderInt64 != 0;
 
     // ---- Validate required set -------------------------------------------
-    bool ok = true;
+    bool allRequiredPresent = true;
     auto& log = Logging::Get();
     auto missing = [&](const char* name) {
-        ok = false;
+        allRequiredPresent = false;
         std::string msg = "missing required feature/extension: ";
         msg += name;
         log.Error(log::PLATFORM, msg);
@@ -114,7 +122,7 @@ bool QueryAdapterFeatures(VkPhysicalDevice device, AdapterInfo& outInfo) noexcep
     if (!outInfo.supportsShaderInt64)            missing("shaderInt64");
     if (!outInfo.supportsSync2)                  missing("Vulkan 1.3 core (synchronization2)");
 
-    return ok;
+    return allRequiredPresent;
 }
 
 }  // namespace pyxis

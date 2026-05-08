@@ -3692,6 +3692,19 @@ convention and matches the SPIR-V tooling expectations.
 - **Acronyms count as words**: `BlasCache` not `BLASCache`, `GpuScene` not `GPUScene`,
   `aovId` not `AOVId`. Exception: 2-letter acronyms keep both letters cased (`UI`, `IO`).
 - One primary type per header; matching `.cpp`. Helpers get `*Internal.h` if unavoidable.
+- **No short / abbreviated identifiers.** Variables, parameters, and loop counters
+  must be at least 3 characters. The role should read off the name —
+  `commandList`, `deviceManager`, `result`, `width`, `height`, `event`, `iter` —
+  not `cl`, `dm`, `r`, `w`, `h`, `e`, `it`. The build enforces this via
+  clang-tidy's `readability-identifier-length` check; PRs reintroducing
+  short names fail the gate.
+  - **Sole exemption: `i` / `j` / `k` for loop indices.** Universal C-family
+    convention; encoded as `IgnoredLoopCounterNames: '^[ijk]$'` in `.clang-tidy`.
+  - Where a name would have been a 1- or 2-letter abbreviation tied to a
+    type (e.g. `nvrhi::ICommandList* cl`), prefer the type's natural noun
+    (`commandList`); when the type itself is a handle, pair them as
+    `commandListHandle` (the `nvrhi::CommandListHandle`) plus `commandList`
+    (the borrowed pointer obtained via `.Get()`).
 
 ### 30.3 Headers and includes
 - **The public surface is deliberately narrow.** A header is `Public/` only if a consumer

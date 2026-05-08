@@ -21,8 +21,8 @@ namespace pyxis {
 
 namespace {
 
-spdlog::level::level_enum ToSpdlog(LogLevel l) noexcept {
-    switch (l) {
+spdlog::level::level_enum ToSpdlog(LogLevel level) noexcept {
+    switch (level) {
         case LogLevel::Trace:    return spdlog::level::trace;
         case LogLevel::Debug:    return spdlog::level::debug;
         case LogLevel::Info:     return spdlog::level::info;
@@ -45,13 +45,13 @@ std::string LogFileName(std::string_view directory) {
     using namespace std::chrono;
     auto    now      = system_clock::now();
     auto    nowTimeT = system_clock::to_time_t(now);
-    std::tm tm{};
-    localtime_s(&tm, &nowTimeT);
+    std::tm calendar{};
+    localtime_s(&calendar, &nowTimeT);
 
     char fname[64];
     std::snprintf(fname, sizeof(fname), "pyxis-%lu-%04d%02d%02d.log",
                   static_cast<unsigned long>(_getpid()),
-                  tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday);
+                  calendar.tm_year + 1900, calendar.tm_mon + 1, calendar.tm_mday);
     std::string out{ directory };
     if (!out.empty() && out.back() != '\\' && out.back() != '/') {
         out.push_back('/');

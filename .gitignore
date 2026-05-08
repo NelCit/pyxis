@@ -23,8 +23,18 @@ NOTICE.generated
 
 # IDE / editor
 .vs/
-.vscode/
 .idea/
+
+# VSCode: share the curated workspace files (launch/tasks/settings/extensions)
+# so new contributors get F5-debug, build tasks, and the Test Explorer wired
+# up out of the box. Personal overrides go in *.code-workspace or local
+# user-scope settings, both of which stay ignored.
+.vscode/*
+!.vscode/launch.json
+!.vscode/tasks.json
+!.vscode/settings.json
+!.vscode/extensions.json
+*.code-workspace
 *.user
 *.suo
 *.sln.docstates

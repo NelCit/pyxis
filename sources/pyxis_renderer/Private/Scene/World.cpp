@@ -73,25 +73,25 @@ void SceneWorld::Tick() noexcept {
 }
 
 void SceneWorld::RegisterComponents() noexcept {
-    auto& w = *_world;
-    w.component<Geom>();
-    w.component<Transform>();
-    w.component<Visibility>();
-    w.component<MaterialOf>();
-    w.component<MeshOf>();
-    w.component<BlasRef>();
-    w.component<MaterialGpu>();
-    w.component<TextureGpu>();
-    w.component<LightParams>();
+    auto& world = *_world;
+    world.component<Geom>();
+    world.component<Transform>();
+    world.component<Visibility>();
+    world.component<MaterialOf>();
+    world.component<MeshOf>();
+    world.component<BlasRef>();
+    world.component<MaterialGpu>();
+    world.component<TextureGpu>();
+    world.component<LightParams>();
 
     // Dirty tags.
-    w.component<DirtyTopology>();
-    w.component<DirtyTransform>();
-    w.component<DirtyMaterial>();
-    w.component<DirtyVisibility>();
-    w.component<DirtyTexture>();
-    w.component<DirtyLight>();
-    w.component<DirtyTextureGpu>();
+    world.component<DirtyTopology>();
+    world.component<DirtyTransform>();
+    world.component<DirtyMaterial>();
+    world.component<DirtyVisibility>();
+    world.component<DirtyTexture>();
+    world.component<DirtyLight>();
+    world.component<DirtyTextureGpu>();
 }
 
 void SceneWorld::RegisterPhasesAndSystems() noexcept {

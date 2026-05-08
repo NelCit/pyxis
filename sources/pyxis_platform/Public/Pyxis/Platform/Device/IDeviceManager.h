@@ -8,12 +8,19 @@
 
 #include <Pyxis/Platform/Device/AdapterInfo.h>
 #include <Pyxis/Platform/Device/Resolution.h>
+#include <Pyxis/Platform/Device/VulkanContext.h>
 #include <Pyxis/Platform/Forward.h>
 #include <Pyxis/Platform/PlatformApi.h>
 
 #include <cstdint>
 
+namespace nvrhi {
+class ITexture;
+}
+
 namespace pyxis {
+
+class IWindow;
 
 // Result of a device-manager creation attempt. We do not throw across the
 // DLL boundary (§30.6) — failure is reported as a value with a kind. Full
@@ -56,10 +63,36 @@ public:
     virtual void EndFrame()   = 0;
 
     // -------------------------------------------------------------------
+    // Swapchain accessors (viewer only — headless returns nullptr / 0).
+    // The current backbuffer is the texture the renderer writes its final
+    // present blit into; the index rotates per-frame after BeginFrame.
+    // -------------------------------------------------------------------
+    [[nodiscard]] virtual nvrhi::ITexture* GetCurrentBackbuffer() const noexcept = 0;
+    [[nodiscard]] virtual uint32_t         GetBackbufferCount()   const noexcept = 0;
+    [[nodiscard]] virtual uint32_t         GetCurrentBackbufferIndex() const noexcept = 0;
+    [[nodiscard]] virtual nvrhi::ITexture* GetBackbuffer(uint32_t index) const noexcept = 0;
+
+    // Monotonic counter incremented every time the swapchain is rebuilt
+    // (resize, fullscreen toggle, mode-lost recovery). Consumers that
+    // cache per-swapchain state (ImGui's image count, M3+ pass
+    // framebuffers, …) compare this against a stored value to detect
+    // they need to re-init. Starts at 0 before the first swapchain
+    // exists; goes to 1 once Bringup completes.
+    [[nodiscard]] virtual uint32_t         GetSwapchainGeneration() const noexcept = 0;
+
+    // -------------------------------------------------------------------
     // Synchronous wait for the GPU. Used at shutdown and for readback in
     // headless mode.
     // -------------------------------------------------------------------
     virtual void WaitIdle() = 0;
+
+    // -------------------------------------------------------------------
+    // Raw Vulkan handles — opaque escape hatch for the ImGui Vulkan
+    // backend (and, post-v1, anything else that needs Vulkan-shaped
+    // interop). The IDeviceManager retains ownership; callers must not
+    // destroy any handle in the returned struct.
+    // -------------------------------------------------------------------
+    [[nodiscard]] virtual VulkanContext GetVulkanContext() const noexcept = 0;
 
 protected:
     IDeviceManager() = default;
@@ -71,6 +104,7 @@ protected:
 // -----------------------------------------------------------------------
 [[nodiscard]] PYXIS_PLATFORM_API IDeviceManager* CreateWindowedDeviceManager(
     const DeviceCreationParams&  params,
+    IWindow*                     window,        // borrowed; outlives the device manager
     const Resolution&            initialBackbuffer,
     DeviceManagerCreateStatus*   status) noexcept;
 

@@ -1,15 +1,19 @@
 // Pyxis platform — headless VkDeviceManager.
 //
-// Plan §5.c. No GLFW, no swapchain, no surface. Pinned to framesInFlight = 3
-// for byte-identical EXR output (§33.7). Same VkInstance/VkDevice
-// machinery as the windowed variant — kept as a separate class so the
-// no-display invariant is *physically* true (no GLFW symbol is reachable
-// from --headless).
+// Plan §5.c. No GLFW, no swapchain, no surface. M1 pins framesInFlight
+// to 1 like the windowed manager; M2's --config EXR path raises it back
+// to 3 per §33.7 once the multi-frame queueing is actually exercised.
+// Same VkInstance/VkDevice/nvrhi::IDevice machinery as the windowed
+// variant — kept as a separate class so the no-display invariant is
+// *physically* true (no GLFW symbol is reachable from --headless).
 
 #pragma once
 
 #include <Pyxis/Platform/Device/DeviceCreationParams.h>
 #include <Pyxis/Platform/Device/IDeviceManager.h>
+
+#include <nvrhi/nvrhi.h>
+#include <nvrhi/vulkan.h>
 
 #include <vulkan/vulkan.h>
 
@@ -27,9 +31,19 @@ public:
     [[nodiscard]] uint32_t           GetFramesInFlight() const noexcept override;
     [[nodiscard]] bool               IsHeadless()        const noexcept override { return true; }
 
+    // Headless: no swapchain. M2 will wire a writeable readback target.
+    [[nodiscard]] nvrhi::ITexture* GetCurrentBackbuffer() const noexcept override { return nullptr; }
+    [[nodiscard]] uint32_t         GetBackbufferCount()   const noexcept override { return 0; }
+    [[nodiscard]] uint32_t         GetCurrentBackbufferIndex() const noexcept override { return 0; }
+    [[nodiscard]] nvrhi::ITexture* GetBackbuffer(uint32_t)      const noexcept override { return nullptr; }
+    // Headless never rebuilds anything — generation stays at 0.
+    [[nodiscard]] uint32_t         GetSwapchainGeneration() const noexcept override { return 0; }
+
     void BeginFrame() override;
     void EndFrame() override;
     void WaitIdle() override;
+
+    [[nodiscard]] VulkanContext GetVulkanContext() const noexcept override;
 
 private:
     DeviceManagerCreateStatus Bringup(const DeviceCreationParams& params,
@@ -43,10 +57,15 @@ private:
     uint32_t          _graphicsFamily = 0;
 
     AdapterInfo       _adapter{};
-    uint32_t          _framesInFlight = 3;   // pinned per §33.7.
+    // M1 pins both viewer and headless to 1 frame in flight; M2's EXR
+    // path will raise this back to 3 per §33.7 once it actually exercises
+    // the multi-frame queueing.
+    uint32_t          _framesInFlight = 1;
     Resolution        _backbuffer{};
 
-    nvrhi::IDevice*   _nvrhiDevice = nullptr;
+    // RefCountPtr so the wrapped nvrhi::Device follows the same lifetime
+    // discipline as the windowed manager (drops before vkDestroyDevice).
+    nvrhi::DeviceHandle _nvrhiDevice;
 };
 
 }  // namespace pyxis
