@@ -43,6 +43,14 @@ CliArgs Parse(int argc, char** argv) noexcept {
                 return out;
             }
             ++i;
+        } else if (Equals(arg, "--screenshot")) {
+            if (i + 1 >= argc) {
+                out.invalid    = true;
+                out.invalidArg = arg;
+                return out;
+            }
+            out.screenshotPath = argv[i + 1];
+            ++i;
         } else if (Equals(arg, "--help") || Equals(arg, "-h")) {
             out.showHelp = true;
         } else if (Equals(arg, "--version")) {
@@ -64,6 +72,8 @@ void PrintUsage() noexcept {
         "  --headless              Run with VkDeviceManagerHeadless (no window).\n"
         "  --adapter <i>           Force adapter index (default: highest-VRAM RT-capable).\n"
         "  --vk-validation         Enable Vulkan validation layers.\n"
+        "  --screenshot <path>     Run the viewer briefly, write the backbuffer\n"
+        "                          as PNG to <path>, then exit.\n"
         "  --version               Print version and exit.\n"
         "  -h, --help              Show this help and exit.\n"
         "\n"

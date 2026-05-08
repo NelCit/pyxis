@@ -17,8 +17,16 @@
 
 #include <nvrhi/nvrhi.h>
 
+// stb_image_write's IMPLEMENTATION lives in its own TU
+// (Private/StbImageWrite.cpp) — see the comment there. Here we only
+// need the header API.
+#include <stb_image_write.h>
+
 #include <atomic>
+#include <cstring>
 #include <memory>
+#include <string>
+#include <vector>
 
 namespace pyxis::app {
 
@@ -35,7 +43,101 @@ constexpr int GLFW_ESCAPE_KEY_CODE  = 256;
 
 }  // namespace
 
-int RunViewerLoop(int adapterIndex, bool enableValidation) noexcept {
+namespace {
+
+// Capture the current backbuffer to PNG via an NVRHI staging texture +
+// stb_image_write. BGRA → RGBA swizzle on the CPU side. Plan §35
+// image-regression artefact for M1.
+bool CaptureBackbufferToPng(nvrhi::IDevice*       device,
+                            nvrhi::ICommandList*  cl,
+                            nvrhi::ITexture*      backbuffer,
+                            std::string_view      pngPath) noexcept {
+    auto& log = Logging::Get();
+    if (!device || !cl || !backbuffer || pngPath.empty()) return false;
+
+    const auto& tdesc = backbuffer->getDesc();
+
+    nvrhi::TextureDesc stagingDesc;
+    stagingDesc.format     = tdesc.format;
+    stagingDesc.width      = tdesc.width;
+    stagingDesc.height     = tdesc.height;
+    stagingDesc.dimension  = nvrhi::TextureDimension::Texture2D;
+    stagingDesc.debugName  = "screenshot-staging";
+    const nvrhi::StagingTextureHandle staging =
+        device->createStagingTexture(stagingDesc, nvrhi::CpuAccessMode::Read);
+    if (!staging) {
+        log.Error(log::APP, "screenshot: createStagingTexture failed");
+        return false;
+    }
+
+    cl->copyTexture(staging.Get(),    nvrhi::TextureSlice{},
+                    backbuffer,        nvrhi::TextureSlice{});
+    cl->setTextureState(backbuffer, nvrhi::AllSubresources, nvrhi::ResourceStates::Present);
+    cl->commitBarriers();
+    cl->close();
+    device->executeCommandList(cl);
+    device->waitForIdle();
+
+    std::size_t rowPitch = 0;
+    const void* mapped = device->mapStagingTexture(staging.Get(), nvrhi::TextureSlice{},
+                                                   nvrhi::CpuAccessMode::Read, &rowPitch);
+    if (!mapped) {
+        log.Error(log::APP, "screenshot: mapStagingTexture failed");
+        return false;
+    }
+
+    // BGRA8 → RGBA8 swizzle, contiguous row pitch for stb_image_write.
+    const std::size_t w = tdesc.width;
+    const std::size_t h = tdesc.height;
+    std::vector<uint8_t> rgba(w * h * 4);
+    const auto* src = static_cast<const uint8_t*>(mapped);
+    for (std::size_t y = 0; y < h; ++y) {
+        const uint8_t* srcRow = src + y * rowPitch;
+        uint8_t*       dstRow = rgba.data() + (y * w * 4);
+        for (std::size_t x = 0; x < w; ++x) {
+            dstRow[x * 4 + 0] = srcRow[x * 4 + 2];   // R ← B
+            dstRow[x * 4 + 1] = srcRow[x * 4 + 1];   // G ← G
+            dstRow[x * 4 + 2] = srcRow[x * 4 + 0];   // B ← R
+            dstRow[x * 4 + 3] = srcRow[x * 4 + 3];   // A ← A
+        }
+    }
+    device->unmapStagingTexture(staging.Get());
+
+    const std::string path{ pngPath };
+    const int wrote = stbi_write_png(path.c_str(),
+                                     static_cast<int>(w),
+                                     static_cast<int>(h),
+                                     4,
+                                     rgba.data(),
+                                     static_cast<int>(w * 4));
+    if (wrote == 0) {
+        log.Error(log::APP, "screenshot: stbi_write_png failed");
+        return false;
+    }
+
+    // Quick sanity: any pixel non-black? Lets the caller assert "the
+    // triangle actually rendered" without a separate harness.
+    bool anyNonBlack = false;
+    for (std::size_t i = 0; i + 2 < rgba.size(); i += 4) {
+        if (rgba[i] != 0 || rgba[i + 1] != 0 || rgba[i + 2] != 0) {
+            anyNonBlack = true;
+            break;
+        }
+    }
+    std::string msg = "screenshot: wrote ";
+    msg += std::to_string(w) + "x" + std::to_string(h);
+    msg += " PNG to ";
+    msg.append(pngPath);
+    msg += anyNonBlack ? "  (non-black pixels present — render OK)"
+                       : "  (image is fully black — render likely broken)";
+    log.Info(log::APP, msg);
+    return true;
+}
+
+}  // namespace
+
+int RunViewerLoop(int adapterIndex, bool enableValidation,
+                  std::string_view screenshotPath) noexcept {
     auto& log = Logging::Get();
 
     // ---- Window ----------------------------------------------------------
@@ -101,7 +203,17 @@ int RunViewerLoop(int adapterIndex, bool enableValidation) noexcept {
         cl = device->createCommandList();
     }
 
-    log.Info(log::APP, "ViewerMode: entering frame loop");
+    const bool screenshotMode = !screenshotPath.empty();
+    if (screenshotMode) {
+        log.Info(log::APP, "ViewerMode: --screenshot path supplied; capturing one frame after warmup");
+    } else {
+        log.Info(log::APP, "ViewerMode: entering frame loop");
+    }
+
+    // Capture the backbuffer at frame index = SCREENSHOT_FRAME so the
+    // swapchain has settled. 3 frames is enough on FIFO; keeps the
+    // smoke fast.
+    constexpr uint64_t SCREENSHOT_FRAME = 3;
 
     // ---- Frame loop ------------------------------------------------------
     uint64_t frameIndex = 0;
@@ -125,6 +237,15 @@ int RunViewerLoop(int adapterIndex, bool enableValidation) noexcept {
             settings.height = backbuffer->getDesc().height;
 
             renderer.RenderFrame(cl, settings, targets);
+
+            // Screenshot path: capture this frame's backbuffer to PNG and
+            // exit. CaptureBackbufferToPng owns the close + execute +
+            // waitForIdle, so we skip the regular Present below.
+            if (screenshotMode && frameIndex == SCREENSHOT_FRAME) {
+                CaptureBackbufferToPng(device, cl, backbuffer, screenshotPath);
+                dm->WaitIdle();
+                return EXIT_OK;
+            }
 
             // Transition back to Present for the swapchain.
             cl->setTextureState(backbuffer, nvrhi::AllSubresources, nvrhi::ResourceStates::Present);

@@ -16,12 +16,21 @@
 //        profiler.EndFrame.
 //   5. Wait idle, tear down.
 //
+// When `screenshotPath` is non-empty, the loop runs a small fixed number
+// of warmup frames, copies the backbuffer to a host-mapped staging
+// texture, swizzles BGRA→RGBA, writes a PNG to <path> via stb_image_write,
+// and exits with code 0. This is the §35 image-regression artefact for
+// M1's hard-coded triangle.
+//
 // Returns the process exit code (0 ok / 2 device init fail).
 
 #pragma once
 
+#include <string_view>
+
 namespace pyxis::app {
 
-int RunViewerLoop(int adapterIndex, bool enableValidation) noexcept;
+int RunViewerLoop(int adapterIndex, bool enableValidation,
+                  std::string_view screenshotPath) noexcept;
 
 }  // namespace pyxis::app

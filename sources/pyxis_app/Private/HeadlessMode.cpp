@@ -61,8 +61,9 @@ int RunHeadless(int adapterIndex, bool enableValidation) noexcept {
     return RunCommon(dm);
 }
 
-int RunViewer(int adapterIndex, bool enableValidation) noexcept {
-    return RunViewerLoop(adapterIndex, enableValidation);
+int RunViewer(int adapterIndex, bool enableValidation,
+              std::string_view screenshotPath) noexcept {
+    return RunViewerLoop(adapterIndex, enableValidation, screenshotPath);
 }
 
 }  // namespace pyxis::app
