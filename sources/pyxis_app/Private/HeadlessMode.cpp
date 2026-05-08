@@ -4,6 +4,7 @@
 
 #include "Config/Configuration.h"
 #include "Output/ExrWriter.h"
+#include "Output/TextureReadback.h"
 #include "ViewerMode.h"
 
 #include <Pyxis/Platform/Device/DeviceCreationParams.h>
@@ -158,48 +159,36 @@ int RunHeadless(const Configuration& config) noexcept {
     profiler.EndFrame();
     device->runGarbageCollection();
 
-    // ---- Readback to a host-mapped staging texture ---------------------
-    // Same pattern as ViewerMode::CaptureBackbufferToPng — copy the
-    // offscreen RT into a CpuAccessMode::Read staging texture, wait
-    // idle, map, hand `mapped` to the EXR writer.
-    const auto& rtDesc = renderTarget->getDesc();
-    nvrhi::TextureDesc stagingDesc;
-    stagingDesc.format    = rtDesc.format;
-    stagingDesc.width     = rtDesc.width;
-    stagingDesc.height    = rtDesc.height;
-    stagingDesc.dimension = nvrhi::TextureDimension::Texture2D;
-    stagingDesc.debugName = "headless-readback-staging";
-    const nvrhi::StagingTextureHandle staging =
-        device->createStagingTexture(stagingDesc, nvrhi::CpuAccessMode::Read);
-    if (!staging) {
-        log.Error(log::APP, "headless: createStagingTexture failed");
+    // ---- Readback + EXR write ------------------------------------------
+    // TextureReadback is the shared helper — same pattern is used by
+    // ViewerMode::CaptureBackbufferToPng. Phase 1 (RecordCopy) records
+    // the staging-texture allocation + copy on a fresh command list;
+    // we then close + execute + waitForIdle so the GPU has retired the
+    // copy before Phase 2 (Map) hands us the host pointer. The handle
+    // unmaps on scope exit.
+    commandList->open();
+    auto readback = TextureReadback::RecordCopy(device, commandList, renderTarget,
+                                                "headless-readback-staging");
+    if (!readback) {
+        log.Error(log::APP, "headless: " + readback.error());
         scene.Shutdown();
         return EXIT_RUNTIME_FAIL;
     }
-
-    {
-        commandList->open();
-        commandList->copyTexture(staging.Get(),  nvrhi::TextureSlice{},
-                                 renderTarget,    nvrhi::TextureSlice{});
-        commandList->close();
-        device->executeCommandList(commandList);
-    }
+    commandList->close();
+    device->executeCommandList(commandList);
     device->waitForIdle();
     device->runGarbageCollection();
 
-    std::size_t rowPitch = 0;
-    const void* mapped = device->mapStagingTexture(staging.Get(), nvrhi::TextureSlice{},
-                                                   nvrhi::CpuAccessMode::Read, &rowPitch);
-    if (!mapped) {
-        log.Error(log::APP, "headless: mapStagingTexture failed");
+    if (auto mapResult = readback->Map(); !mapResult) {
+        log.Error(log::APP, "headless: " + mapResult.error());
         scene.Shutdown();
         return EXIT_RUNTIME_FAIL;
     }
-    // ---- EXR write -----------------------------------------------------
     auto writeResult = WriteExrBgra8(config.output.image,
-                                     rtDesc.width, rtDesc.height,
-                                     mapped, rowPitch);
-    device->unmapStagingTexture(staging.Get());
+                                     readback->Width(),
+                                     readback->Height(),
+                                     readback->Data(),
+                                     readback->RowPitch());
     if (!writeResult) {
         log.Error(log::APP, "headless: " + writeResult.error());
         scene.Shutdown();

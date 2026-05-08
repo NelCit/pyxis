@@ -23,6 +23,8 @@ target_sources(pyxis PRIVATE
     Private/Config/Configuration.cpp
     Private/Output/ExrWriter.h
     Private/Output/ExrWriter.cpp
+    Private/Output/TextureReadback.h
+    Private/Output/TextureReadback.cpp
     Private/HeadlessMode.h
     Private/HeadlessMode.cpp
     Private/ViewerMode.h

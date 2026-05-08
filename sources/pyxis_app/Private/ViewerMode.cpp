@@ -4,6 +4,7 @@
 
 #include "Config/Configuration.h"
 #include "ImGuiHost.h"
+#include "Output/TextureReadback.h"
 
 #include <Pyxis/Platform/Device/DeviceCreationParams.h>
 #include <Pyxis/Platform/Device/IDeviceManager.h>
@@ -49,9 +50,12 @@ constexpr int GLFW_ESCAPE_KEY_CODE  = 256;
 
 namespace {
 
-// Capture the current backbuffer to PNG via an NVRHI staging texture +
+// Capture the current backbuffer to PNG via TextureReadback +
 // stb_image_write. BGRA → RGBA swizzle on the CPU side. Plan §35
-// image-regression artefact for M1.
+// image-regression artefact for M1. Caller passes an already-open
+// command list — we record the readback copy onto it, restore the
+// backbuffer to Present state (so the next swapchain acquire sees a
+// sane layout), close + execute + wait, then map and write the PNG.
 bool CaptureBackbufferToPng(nvrhi::IDevice*       device,
                             nvrhi::ICommandList*  commandList,
                             nvrhi::ITexture*      backbuffer,
@@ -59,42 +63,30 @@ bool CaptureBackbufferToPng(nvrhi::IDevice*       device,
     auto& log = Logging::Get();
     if (!device || !commandList || !backbuffer || pngPath.empty()) return false;
 
-    const auto& tdesc = backbuffer->getDesc();
-
-    nvrhi::TextureDesc stagingDesc;
-    stagingDesc.format     = tdesc.format;
-    stagingDesc.width      = tdesc.width;
-    stagingDesc.height     = tdesc.height;
-    stagingDesc.dimension  = nvrhi::TextureDimension::Texture2D;
-    stagingDesc.debugName  = "screenshot-staging";
-    const nvrhi::StagingTextureHandle staging =
-        device->createStagingTexture(stagingDesc, nvrhi::CpuAccessMode::Read);
-    if (!staging) {
-        log.Error(log::APP, "screenshot: createStagingTexture failed");
+    auto readback = TextureReadback::RecordCopy(device, commandList, backbuffer,
+                                                "screenshot-staging");
+    if (!readback) {
+        log.Error(log::APP, "screenshot: " + readback.error());
         return false;
     }
 
-    commandList->copyTexture(staging.Get(),    nvrhi::TextureSlice{},
-                             backbuffer,        nvrhi::TextureSlice{});
     commandList->setTextureState(backbuffer, nvrhi::AllSubresources, nvrhi::ResourceStates::Present);
     commandList->commitBarriers();
     commandList->close();
     device->executeCommandList(commandList);
     device->waitForIdle();
 
-    std::size_t rowPitch = 0;
-    const void* mapped = device->mapStagingTexture(staging.Get(), nvrhi::TextureSlice{},
-                                                   nvrhi::CpuAccessMode::Read, &rowPitch);
-    if (!mapped) {
-        log.Error(log::APP, "screenshot: mapStagingTexture failed");
+    if (auto mapResult = readback->Map(); !mapResult) {
+        log.Error(log::APP, "screenshot: " + mapResult.error());
         return false;
     }
 
     // BGRA8 → RGBA8 swizzle, contiguous row pitch for stb_image_write.
-    const std::size_t imageWidth  = tdesc.width;
-    const std::size_t imageHeight = tdesc.height;
+    const std::size_t imageWidth  = readback->Width();
+    const std::size_t imageHeight = readback->Height();
+    const std::size_t rowPitch    = readback->RowPitch();
     std::vector<uint8_t> rgba(imageWidth * imageHeight * 4);
-    const auto* src = static_cast<const uint8_t*>(mapped);
+    const auto* src = static_cast<const uint8_t*>(readback->Data());
     for (std::size_t row = 0; row < imageHeight; ++row) {
         const uint8_t* srcRow = src + row * rowPitch;
         uint8_t*       dstRow = rgba.data() + (row * imageWidth * 4);
@@ -105,7 +97,6 @@ bool CaptureBackbufferToPng(nvrhi::IDevice*       device,
             dstRow[col * 4 + 3] = srcRow[col * 4 + 3];   // A ← A
         }
     }
-    device->unmapStagingTexture(staging.Get());
 
     const std::string path{ pngPath };
     const int wrote = stbi_write_png(path.c_str(),
