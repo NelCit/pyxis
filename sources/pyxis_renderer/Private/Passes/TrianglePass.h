@@ -24,7 +24,7 @@ public:
     ~TrianglePass() override;
 
     [[nodiscard]] std::string_view Name() const override { return "pass.Triangle"; }
-    void Execute(nvrhi::ICommandList* commandList, const PassContext& ctx) override;
+    void Execute(nvrhi::ICommandList* commandList, const PassContext& context) override;
 
 private:
     nvrhi::FramebufferHandle GetOrCreateFramebuffer(nvrhi::ITexture* color);

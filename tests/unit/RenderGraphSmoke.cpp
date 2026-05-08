@@ -36,7 +36,7 @@ public:
         : _name(name), _global(globalCounter), _lastOrder(lastOrder), _runCount(runCount) {}
 
     std::string_view Name() const override { return _name; }
-    void Execute(nvrhi::ICommandList* /*commandList*/, const pyxis::PassContext& /*ctx*/) override {
+    void Execute(nvrhi::ICommandList* /*commandList*/, const pyxis::PassContext& /*context*/) override {
         _lastOrder = _global.fetch_add(1);
         ++_runCount;
     }
@@ -53,8 +53,8 @@ private:
 TEST(RenderGraphSmoke, EmptyGraphExecuteIsNoOp) {
     pyxis::Profiler profiler{ nullptr };  // CPU-only — §18.7
     pyxis::RenderGraph graph{ /*device=*/nullptr, &profiler };
-    const pyxis::PassContext ctx{};
-    graph.Execute(/*commandList=*/nullptr, ctx);
+    const pyxis::PassContext context{};
+    graph.Execute(/*commandList=*/nullptr, context);
     SUCCEED();
 }
 
@@ -70,8 +70,8 @@ TEST(RenderGraphSmoke, AddPassExecutesInRegistrationOrder) {
     graph.AddPass(std::make_unique<CountingPass>("pass.B", globalCounter, orderB, runsB));
     graph.AddPass(std::make_unique<CountingPass>("pass.C", globalCounter, orderC, runsC));
 
-    const pyxis::PassContext ctx{};
-    graph.Execute(nullptr, ctx);
+    const pyxis::PassContext context{};
+    graph.Execute(nullptr, context);
 
     EXPECT_EQ(runsA, 1);
     EXPECT_EQ(runsB, 1);
@@ -90,10 +90,10 @@ TEST(RenderGraphSmoke, ExecuteIsRepeatable) {
     int runs  = 0;
     graph.AddPass(std::make_unique<CountingPass>("pass.X", globalCounter, order, runs));
 
-    const pyxis::PassContext ctx{};
-    graph.Execute(nullptr, ctx);
-    graph.Execute(nullptr, ctx);
-    graph.Execute(nullptr, ctx);
+    const pyxis::PassContext context{};
+    graph.Execute(nullptr, context);
+    graph.Execute(nullptr, context);
+    graph.Execute(nullptr, context);
 
     EXPECT_EQ(runs, 3);
 }
@@ -103,7 +103,7 @@ TEST(RenderGraphSmoke, NullPassIsRejectedQuietly) {
     pyxis::RenderGraph graph{ /*device=*/nullptr, &profiler };
 
     graph.AddPass(nullptr);  // §30.6: silent rejection, no crash
-    const pyxis::PassContext ctx{};
-    graph.Execute(nullptr, ctx);
+    const pyxis::PassContext context{};
+    graph.Execute(nullptr, context);
     SUCCEED();
 }

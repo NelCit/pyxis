@@ -17,7 +17,7 @@ void RenderGraph::AddPass(std::unique_ptr<IRenderPass> pass) {
     if (pass) _passes.push_back(std::move(pass));
 }
 
-void RenderGraph::Execute(nvrhi::ICommandList* commandList, const PassContext& ctx) {
+void RenderGraph::Execute(nvrhi::ICommandList* commandList, const PassContext& context) {
     // Profiler::GpuScope already brackets the command list with NVRHI's
     // beginMarker/endMarker (Profiler.cpp), so RenderDoc / Aftermath get
     // exactly one named region per pass — no need to wrap a second
@@ -26,9 +26,9 @@ void RenderGraph::Execute(nvrhi::ICommandList* commandList, const PassContext& c
         const std::string_view name = pass->Name();
         if (_profiler) {
             const Profiler::GpuScope gpuScope(*_profiler, commandList, name);
-            pass->Execute(commandList, ctx);
+            pass->Execute(commandList, context);
         } else {
-            pass->Execute(commandList, ctx);
+            pass->Execute(commandList, context);
         }
     }
 }

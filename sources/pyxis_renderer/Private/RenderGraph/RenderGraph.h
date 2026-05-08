@@ -36,7 +36,7 @@ public:
     void AddPass(std::unique_ptr<IRenderPass> pass);
 
     // Per-frame execute (called from PyxisRenderer::RenderFrame).
-    void Execute(nvrhi::ICommandList* commandList, const PassContext& ctx);
+    void Execute(nvrhi::ICommandList* commandList, const PassContext& context);
 
 private:
     // _device is used by M3+'s RenderGraph::Compile to allocate barriers /

@@ -42,17 +42,17 @@ void PyxisRenderer::RenderFrame(nvrhi::ICommandList*  commandList,
                                 const RenderSettings& settings,
                                 const RenderTargets&  targets) {
     if (!_impl || !_impl->graph || !commandList) return;
-    PassContext ctx{};
-    ctx.commandList    = commandList;
-    ctx.profiler       = _impl->profiler;
-    ctx.settings       = &settings;
-    ctx.targets        = &targets;
-    ctx.frameIndex     = _impl->frameIndex++;
+    PassContext context{};
+    context.commandList    = commandList;
+    context.profiler       = _impl->profiler;
+    context.settings       = &settings;
+    context.targets        = &targets;
+    context.frameIndex     = _impl->frameIndex++;
     // M1 active runtime: 1 frame in flight (cap = MAX_FRAMES_IN_FLIGHT = 3).
-    ctx.framesInFlight = 1;
+    context.framesInFlight = 1;
 
     const Profiler::CpuScope frameScope(*_impl->profiler, "render.frame.cpu");
-    _impl->graph->Execute(commandList, ctx);
+    _impl->graph->Execute(commandList, context);
 }
 
 void PyxisRenderer::Resize(uint32_t /*width*/, uint32_t /*height*/) {

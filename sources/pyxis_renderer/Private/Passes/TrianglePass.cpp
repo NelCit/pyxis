@@ -109,14 +109,14 @@ nvrhi::FramebufferHandle TrianglePass::GetOrCreateFramebuffer(nvrhi::ITexture* c
     return framebuffer;
 }
 
-void TrianglePass::Execute(nvrhi::ICommandList* commandList, const PassContext& ctx) {
-    if (!_shadersOk || !ctx.targets || !ctx.targets->color) return;
+void TrianglePass::Execute(nvrhi::ICommandList* commandList, const PassContext& context) {
+    if (!_shadersOk || !context.targets || !context.targets->color) return;
 
-    nvrhi::ITexture* colorTex = ctx.targets->color;
+    nvrhi::ITexture* colorTex = context.targets->color;
 
     // Clear the color target to the settings-provided clear colour.
-    if (ctx.settings) {
-        const auto& clearRgba = ctx.settings->clearColor;
+    if (context.settings) {
+        const auto& clearRgba = context.settings->clearColor;
         const nvrhi::Color clearColor(clearRgba[0], clearRgba[1], clearRgba[2], clearRgba[3]);
         commandList->clearTextureFloat(colorTex, nvrhi::AllSubresources, clearColor);
     }
