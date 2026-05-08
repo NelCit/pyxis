@@ -1191,11 +1191,18 @@ Every line above is an RFC trigger, not a v1 milestone (§44).
   written and read as row-major; no per-shader `column_major` qualifiers anywhere.
 - C++ side: `hlslpp::float4x4` rows are stored as `float4` rows; uploaded byte-for-byte to
   constant/structured buffers; consumed in shaders as row-major `float4x4`.
-- Multiplication convention is **row-vector**: `pos_clip = mul(pos_world, viewProjMatrix)`
-  (HLSL/Slang default with row-major layout). Camera/instance code, the `ShaderInterop`
-  header and any debug viz must follow this; do not mix `mul(M, v)` and `mul(v, M)` styles.
+- Multiplication convention is **column-vector** (textbook math, `v' = M·v`):
+  `pos_clip = mul(viewProjMatrix, pos_world)` — matrix on the left, vector on the right.
+  Translation lives in the **last column** of every transform matrix. Camera / instance
+  code, the `ShaderInterop` header and any debug viz must follow this; do not mix
+  `mul(M, v)` and `mul(v, M)` styles. (Earlier drafts of this plan specified
+  row-vector convention; the M3 cube-render commit flipped to column-vector across the
+  codebase because it matches the standard linear-algebra notation used in
+  graphics literature, GLSL's default `mat * vec`, and what most contributors
+  reach for first.)
 - BLAS/TLAS instance transforms are `3x4` row-major affine (`VkTransformMatrixKHR` is
-  natively row-major, so we copy without transpose).
+  natively row-major with translation in the last column — same shape as our
+  column-vector matrices, dropped to 3 rows since the bottom `[0,0,0,1]` is implicit).
 - Compile-time guard in `Compiler.cmake`: a unit test asserts a known transform matches
   byte-for-byte between a C++-built `hlslpp::float4x4` and a Slang-side reference, to
   catch any accidental column-major regression.
@@ -2214,7 +2221,19 @@ NVRHI-private headers escape through the public surface.
   `std::span<const T>` (borrowed). Outputs that need to own a string
   (`Error::message`, `Error::source`) use `pyxis::ErrorMessage` — a fixed-size,
   `std::array`-backed POD. This is the ABI-safety lock; reviewers reject any PR that
-  adds an STL container to `Public/`.
+  adds an STL container to a public POD or method signature.
+- **STL containers in public *class* private members are permitted** (relaxed at
+  M3). `GpuScene` and `Profiler` hold their `std::vector<Entry>` tables and
+  per-frame ring slots directly as private members rather than behind a PIMPL
+  `unique_ptr<Impl>`; the original §18.9 spec required PIMPL on every public
+  class for the cross-DLL ABI reason above. The relaxation is a deliberate
+  v1 trade-off: Pyxis is a single-tree Windows-x64 build where every
+  consumer DLL (`pyxis_app.exe`, future `pyxis_hydra.dll`,
+  `pyxis_usd_ingest.dll`) compiles against the renderer with the same
+  vcpkg + clang-cl + `_HAS_EXCEPTIONS=0` flags. The build presets enforce
+  this. Reviewers accept STL members in `Public/` class private sections;
+  the lock still holds for public PODs and method signatures (where the
+  ABI risk is real because consumers see them by value).
 - Public POD descriptors are **frozen at the byte level**: `sizeof`, `alignof`, member
   offsets and padding are part of the contract. Adding a member — even at the end —
   changes `sizeof` and is therefore a major-version break unless the type carries an

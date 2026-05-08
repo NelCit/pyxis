@@ -1,9 +1,18 @@
 // Pyxis renderer — Profiler facade.
 //
-// Plan §18.7. Public surface only — concrete impl in
+// Plan §18.7. Public surface only — implementation lives in
 // Private/Profiler/. M1 ships the skeleton: CpuScope + GpuScope +
-// BeginFrame/EndFrame + LastFrameProfile. The 240-frame rolling ring,
-// JSON/CSV/Tracy backends, and the §29.3 Performance panel land at M11.
+// BeginFrame/EndFrame + LastFrameProfile. The 240-frame rolling
+// ring, JSON/CSV/Tracy backends, and the §29.3 Performance panel
+// land at M11.
+//
+// PIMPL was relaxed for Profiler in the same commit that dropped it
+// for GpuScene — see plan §18.9 for the cross-DLL ABI rationale.
+// The Profiler's inner ScopeRecord / Slot types and the per-frame
+// query pool are now nested directly on the class, with the same
+// trade-off: pyxis_renderer.dll consumers must compile with the
+// matching vcpkg + clang-cl + EH/RTTI flags as the renderer DLL.
+// The build presets enforce this.
 
 #pragma once
 
@@ -11,12 +20,12 @@
 #include <Pyxis/Renderer/Forward.h>
 #include <Pyxis/Renderer/RendererApi.h>
 
-#include <string_view>
+#include <nvrhi/nvrhi.h>
 
-namespace nvrhi {
-class IDevice;
-class ICommandList;
-}  // namespace nvrhi
+#include <array>
+#include <cstdint>
+#include <string_view>
+#include <vector>
 
 namespace pyxis {
 
@@ -44,23 +53,13 @@ public:
     private:
         Profiler*        _profiler = nullptr;
         std::int64_t     _startNs  = 0;
-        // Slot the scope opened against, captured in the ctor so the dtor
-        // back-fills the right slot even if a misuse opens the scope
-        // across a Profiler::BeginFrame() rotation.
         std::uint32_t    _slotIndex   = 0;
-        // Index into _slotIndex's records vector. The scope pushes its
-        // record at construction (pre-order) and back-fills durationMs
-        // at destruction.
         std::size_t      _recordIndex = 0;
     };
 
     // ------------------------------------------------------------------
     // RAII GPU scope. Brackets a region on the supplied command list
-    // with begin/end timestamp queries and an NVRHI debug marker. The
-    // renderer uses this primitive internally for every render-graph
-    // pass; the public type lets ingest / app code add their own GPU
-    // regions that show up alongside engine passes in
-    // FrameProfile::passes.
+    // with begin/end timestamp queries and an NVRHI debug marker.
     // ------------------------------------------------------------------
     class PYXIS_RENDERER_API GpuScope final {
     public:
@@ -71,13 +70,8 @@ public:
     private:
         Profiler*            _profiler    = nullptr;
         nvrhi::ICommandList* _commandList = nullptr;
-        // Index into Profiler::Impl::queryPool, or -1 for "no GPU query"
-        // (CPU-only profiler, or null command list). The query slot is
-        // owned by the pool — GpuScope never sees the raw handle.
         int                  _queryIdx    = -1;
-        // Same slot-capture rationale as CpuScope.
         std::uint32_t        _slotIndex   = 0;
-        // Index into _slotIndex's records vector.
         std::size_t          _recordIndex = 0;
     };
 
@@ -89,8 +83,62 @@ public:
     [[nodiscard]] FrameProfile LastFrameProfile() const;
 
 private:
-    struct Impl;
-    Impl* _impl = nullptr;
+    // ---- Inner scope-record types --------------------------------------
+    // ScopeRecord is one entry in a slot's records vector. queryIdx = -1
+    // for CPU scopes (durationMs filled at scope close); GPU scopes carry
+    // an index into _queryPool with durationMs resolved when the slot is
+    // drained.
+    struct ScopeRecord {
+        FrameProfile::ScopeName name{};
+        FrameProfile::ScopeKind kind = FrameProfile::ScopeKind::Cpu;
+        std::uint32_t           depth = 0;
+        double                  durationMs = 0.0;
+        int                     queryIdx = -1;
+    };
+
+    // SLOT_COUNT = MAX_FRAMES_IN_FLIGHT + 1 so by the time we rotate
+    // back to a slot, every command list that wrote into its timer
+    // queries has been retired by the GPU.
+    static constexpr std::uint32_t SLOT_COUNT = MAX_FRAMES_IN_FLIGHT + 1;
+
+    struct Slot {
+        std::vector<ScopeRecord> records;
+        std::uint64_t            frameIndex = 0;
+        double                   cpuFrameMs = 0.0;
+        bool                     inFlight   = false;
+    };
+
+    // ---- Internal helpers ----------------------------------------------
+    [[nodiscard]] int  AcquireQuery() noexcept;
+    void               ReleaseQuery(int idx) noexcept;
+    void               DrainSlot(std::uint32_t slotIdx) noexcept;
+
+    // ---- Data ----------------------------------------------------------
+    nvrhi::IDevice* _device     = nullptr;
+    std::int64_t    _frameStart = 0;
+    std::uint64_t   _frameIndex = 0;
+    std::uint32_t   _depth      = 0;
+
+    std::array<Slot, SLOT_COUNT> _slots{};
+    std::uint32_t                _currentSlot = 0;
+
+    // Lazily-grown query pool. ScopeRecord::queryIdx indexes here.
+    std::vector<nvrhi::TimerQueryHandle> _queryPool;
+    std::vector<int>                     _freeQueries;
+
+    // Stable snapshot of the most recently drained slot (returned by
+    // LastFrameProfile()). Held by value so the std::span we hand out
+    // is valid until the next BeginFrame() drain rotation.
+    std::vector<FrameProfile::PassTiming> _lastFrame;
+    double                                _lastCpuFrameMs = 0.0;
+    double                                _lastGpuFrameMs = 0.0;
+    std::uint64_t                         _lastFrameIndex = 0;
+
+    // Friend the scope classes so they can reach private members
+    // without going through accessors. They live on the Profiler
+    // class so the friend declaration is just a pair of names.
+    friend class CpuScope;
+    friend class GpuScope;
 };
 
 }  // namespace pyxis

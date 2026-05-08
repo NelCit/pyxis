@@ -135,7 +135,7 @@ All inputs (UsdPreviewSurface, MaterialX `open_pbr_surface` / `standard_surface`
 ## Slang interop (§10, §23)
 
 - `ShaderInterop.slang` is the only file shared between C++ and shaders. `PYXIS_INTEROP_STRUCT` macro; `#ifdef __cplusplus` swaps `hlslpp::float4`/`float4x4`/etc. aliases.
-- **Row-major matrices everywhere**. Multiplication is row-vector: `pos_clip = mul(pos_world, viewProj)`.
+- **Row-major storage, column-vector math** (textbook, `v' = M·v`): `pos_clip = mul(viewProj, pos_world)`. Translation lives in the **last column** of every transform matrix. (Earlier drafts said row-vector; flipped at M3 — see plan §10.)
 - Default cbuffer layout (16-byte vector alignment, `std140`-equivalent). `static_assert(sizeof(...) % 16 == 0)` mandatory.
 - ShaderMake driven; permutations via `-D NAME={0,1}`; `-matrix-layout-row-major -O3 -profile sm_6_6 -target spirv -emit-spirv-directly`.
 
