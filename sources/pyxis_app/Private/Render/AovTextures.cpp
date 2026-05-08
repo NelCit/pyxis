@@ -25,6 +25,7 @@ AovTextures::Create(nvrhi::IDevice* device, uint32_t width, uint32_t height) noe
     desc.height            = height;
     desc.dimension         = nvrhi::TextureDimension::Texture2D;
     desc.isRenderTarget    = true;
+    desc.isUAV             = true;     // M3 PathTracePass writes via RWTexture2D<float4>.
     desc.debugName         = "aov.color";
     desc.initialState      = nvrhi::ResourceStates::RenderTarget;
     desc.keepInitialState  = true;

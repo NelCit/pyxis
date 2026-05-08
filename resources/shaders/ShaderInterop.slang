@@ -2,28 +2,20 @@
 //
 // Plan §10 + §23. The single file that defines structs, constants,
 // and binding indices used by both the C++ side and the Slang
-// shaders. Built against:
+// shaders.
 //
-//   * On the C++ side `__cplusplus` is set; we alias `float2 / float3 /
-//     float4 / float4x4 / uint` to their hlslpp / standard
-//     counterparts inside `namespace pyxis::shaderinterop`. Every
-//     struct defined below lives in that namespace.
-//   * On the Slang side `__cplusplus` is unset; the structs land at
-//     file scope and use Slang's built-in HLSL vector / matrix types.
+// Branches on `__cplusplus`: on the C++ side the file declares
+// `namespace pyxis::shaderinterop` and aliases `float2 / float3 /
+// float4 / float4x4 / uint` to their hlslpp / standard counterparts,
+// then the struct definitions land inside the namespace. On the
+// Slang side `__cplusplus` is unset, the namespace block is skipped,
+// and the structs sit at file scope using Slang's built-in HLSL
+// vector / matrix types.
 //
-// Layout rule (§23): every struct that lands in a constant buffer or
-// shader-binding-table record must be a multiple of 16 bytes. We
-// static_assert that on the C++ side; the Slang compiler enforces
-// std140-equivalent layout via `-matrix-layout-row-major` already
-// (§10).
-//
-// Adding a struct here:
-//   1. Declare it between the `#ifdef __cplusplus namespace pyxis::
-//      shaderinterop {` opening and the corresponding closing
-//      `#endif` so the C++ namespace wraps it.
-//   2. Pad to a 16-byte multiple.
-//   3. Add a `static_assert(sizeof(Foo) % 16 == 0, "...")` line in
-//      the matching #ifdef block at the bottom of this file.
+// Layout rule (§23): every struct that lands in a constant buffer
+// must be a multiple of 16 bytes; static_asserted on the C++ side.
+// Slang's `-matrix-layout-row-major` + std140-equivalent layout
+// gives the same guarantee on the shader side.
 
 #ifndef PYXIS_SHADER_INTEROP_SLANG
 #define PYXIS_SHADER_INTEROP_SLANG
@@ -41,15 +33,34 @@
     using uint     = uint32_t;
 #endif
 
-// -----------------------------------------------------------------------------
 // HitInfo — payload struct passed between raygen / closesthit / miss
-// shaders via TraceRay. M3 stub carries one float3 colour + a hitT
+// shaders via TraceRay. M3 carries one float3 colour + a hitT
 // distance; expands later as path tracing arrives (radiance, RNG
 // state, throughput, etc.).
-// -----------------------------------------------------------------------------
 struct HitInfo {
     float3 color;
     float  hitT;     // ray-distance at hit; -1.0 sentinel from miss shader.
+};
+
+// CameraUniforms — uploaded per-frame to a constant buffer the raygen
+// shader reads to build primary rays. M3 ships pinhole-only (no DOF,
+// no jitter); the §43.3 reservation for `apertureFStop` lives on
+// CameraDesc and gets wired into the shader at M9+.
+//
+// Layout: 128 bytes (two 64-byte float4x4s). Both matrices are
+// row-major + row-vector convention (§10):
+//   pos_view  = mul(pos_world, viewFromWorld)
+//   pos_clip  = mul(pos_view,  projFromView)
+// The raygen shader uses the *inverses* — `worldFromView`
+// (= inverse(viewFromWorld)) to translate ray origin into world,
+// and `viewFromClip` (= inverse(projFromView)) to translate NDC
+// pixel coordinates into a view-space direction. We pass the
+// inverses pre-computed by the C++ side rather than computing them
+// in shader; M3 ships static cameras so this is one matrix-inverse
+// per frame at most.
+struct CameraUniforms {
+    float4x4 worldFromView;     // inverse of CameraDesc::viewFromWorld
+    float4x4 viewFromClip;      // inverse of CameraDesc::projFromView
 };
 
 #ifdef __cplusplus
@@ -57,6 +68,8 @@ struct HitInfo {
                   "HitInfo must stay 16 bytes (float3 + float fits exactly).");
     static_assert(sizeof(HitInfo) % 16 == 0,
                   "ShaderInterop structs must be 16-byte aligned (§23).");
+    static_assert(sizeof(CameraUniforms) % 16 == 0,
+                  "CameraUniforms must be 16-byte aligned (cbuffer std140 rule).");
 
     }  // namespace pyxis::shaderinterop
 #endif

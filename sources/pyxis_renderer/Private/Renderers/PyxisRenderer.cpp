@@ -6,7 +6,7 @@
 
 #include <Pyxis/Renderer/PyxisRenderer.h>
 
-#include "Passes/TrianglePass.h"
+#include "Passes/PathTracePass.h"
 #include "RenderGraph/PassContext.h"
 #include "RenderGraph/RenderGraph.h"
 
@@ -25,14 +25,14 @@ PyxisRenderer::PyxisRenderer(nvrhi::IDevice*           device,
                              const RendererCreateDesc& /*desc*/)
     : _profiler(&profiler),
       _graph(std::make_unique<RenderGraph>(device, &profiler)) {
-    // `scene` parameter is held by the renderer once PathTracePass
-    // arrives at M3; for now the M1 TrianglePass ignores it and we
-    // suppress the unused-parameter diagnostic with a void-cast so
-    // the public §18.6 signature is fully populated from this point
-    // forward.
-    (void)scene;
-    _graph->AddPass(std::make_unique<TrianglePass>(device));
-    Logging::Get().Info(log::RENDER, "PyxisRenderer: initialised (TrianglePass registered)");
+    // M3: the RenderGraph is just `PathTrace` for now. Later
+    // milestones will add Accumulation → ToneMap → AOV-resolve →
+    // Present in front of and behind it (§9 v1 graph). PathTracePass
+    // runs only when the supplied scene has a TLAS + camera; before
+    // that (e.g. an empty scene), the pass early-outs and the output
+    // buffer is left untouched.
+    _graph->AddPass(std::make_unique<PathTracePass>(device, scene));
+    Logging::Get().Info(log::RENDER, "PyxisRenderer: initialised (PathTracePass registered)");
 }
 
 // Out-of-line dtor lives here so unique_ptr<RenderGraph>'s deleter sees

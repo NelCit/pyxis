@@ -75,6 +75,8 @@ target_sources(pyxis_renderer PRIVATE
 
     Private/Passes/TrianglePass.h
     Private/Passes/TrianglePass.cpp
+    Private/Passes/PathTracePass.h
+    Private/Passes/PathTracePass.cpp
 
     Private/Profiler/Profiler.cpp
 

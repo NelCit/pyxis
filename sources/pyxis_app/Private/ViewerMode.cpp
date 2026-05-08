@@ -5,6 +5,7 @@
 #include "Config/Configuration.h"
 #include "ImGuiHost.h"
 #include "Output/TextureReadback.h"
+#include "Render/HardcodedCubeScene.h"
 
 #include <Pyxis/Platform/Device/DeviceCreationParams.h>
 #include <Pyxis/Platform/Device/IDeviceManager.h>
@@ -201,6 +202,16 @@ int RunViewerLoop(const Configuration& config,
     // path doesn't yet read from it.
     Profiler profiler{ device };
     GpuScene gpuScene{ device, profiler, GpuSceneCreateDesc{} };
+
+    // M3 hardcoded cube + camera + distant light, identical to the
+    // headless fixture. M3.5 + M4 replace this with the USD-loaded
+    // scene chain.
+    if (auto cubeResult = BuildHardcodedCubeScene(gpuScene, winDesc.width, winDesc.height);
+        !cubeResult) {
+        log.Error(log::APP, "ViewerMode: " + cubeResult.error());
+        return EXIT_DEVICE_INIT_FAIL;
+    }
+
     RendererCreateDesc rendererDesc{};
     rendererDesc.initialWidth  = winDesc.width;
     rendererDesc.initialHeight = winDesc.height;
@@ -296,6 +307,18 @@ int RunViewerLoop(const Configuration& config,
             nvrhi::ICommandList* commandList = commandListHandle.Get();
 
             commandList->open();
+
+            // Drain pending GpuScene mutations (mesh upload + BLAS
+            // build + TLAS rebuild) onto the open command list before
+            // RenderFrame consumes the TLAS via PathTracePass. After
+            // the M3 startup tick the scene is static, so all
+            // subsequent frames find nothing dirty and CommitResources
+            // is effectively a no-op.
+            if (auto commitResult = gpuScene.CommitResources(commandList); !commitResult) {
+                log.Error(log::APP, "ViewerMode: "
+                          + std::string{commitResult.error().message.View()});
+            }
+
             RenderTargets targets{};
             targets.color = backbuffer;
             RenderSettings settings{};

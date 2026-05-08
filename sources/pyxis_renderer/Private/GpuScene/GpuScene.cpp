@@ -633,6 +633,10 @@ Expected<void> GpuScene::CommitResources(nvrhi::ICommandList* commandList) {
     return {};
 }
 
+nvrhi::rt::IAccelStruct* GpuScene::GetTlas() const noexcept {
+    return _tlas.Get();
+}
+
 // ---- Introspection ---------------------------------------------------------
 FrameStats GpuScene::LastFrameStats() const {
     FrameStats stats = _lastFrameStats;

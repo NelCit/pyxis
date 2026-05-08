@@ -132,6 +132,18 @@ public:
     // ---- Introspection -------------------------------------------------
     [[nodiscard]] FrameStats           LastFrameStats() const;
 
+    // ---- Render-side accessors -----------------------------------------
+    // Borrowed pointers / refs valid for the lifetime of the scene
+    // (the TLAS is alive after the first CommitResources that
+    // observed at least one instance; nullptr before that). These
+    // exist so render passes inside pyxis_renderer (and future
+    // pyxis_hydra) can bind the scene's TLAS + camera into their
+    // descriptor sets without GpuScene having to know which passes
+    // exist.
+    [[nodiscard]] nvrhi::rt::IAccelStruct* GetTlas()    const noexcept;
+    [[nodiscard]] const CameraDesc&        GetCamera()  const noexcept { return _cameraDesc; }
+    [[nodiscard]] bool                     HasCamera()  const noexcept { return _hasCamera; }
+
 private:
     // ---- Handle-table entry types --------------------------------------
     // Inner nested structs hold the per-entity bookkeeping (live /

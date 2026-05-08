@@ -6,6 +6,7 @@
 #include "Output/ExrWriter.h"
 #include "Output/TextureReadback.h"
 #include "Render/AovTextures.h"
+#include "Render/HardcodedCubeScene.h"
 #include "ViewerMode.h"
 
 #include <Pyxis/Platform/Device/DeviceCreationParams.h>
@@ -133,6 +134,17 @@ int RunHeadless(const Configuration& config) noexcept {
     GpuSceneCreateDesc    gpuSceneDesc{};
     gpuSceneDesc.framesInFlight = HEADLESS_FRAMES_IN_FLIGHT;
     GpuScene              gpuScene{ device, profiler, gpuSceneDesc };
+
+    // M3 hardcoded cube + camera + distant light. M3.5 + M4 replace
+    // this with USD-loaded scene content; until then it's the only
+    // thing that gets rendered.
+    if (auto cubeResult = BuildHardcodedCubeScene(gpuScene, config.render.width, config.render.height);
+        !cubeResult) {
+        log.Error(log::APP, "headless: " + cubeResult.error());
+        scene.Shutdown();
+        return EXIT_RUNTIME_FAIL;
+    }
+
     RendererCreateDesc    rendererDesc{};
     rendererDesc.initialWidth  = config.render.width;
     rendererDesc.initialHeight = config.render.height;
@@ -153,6 +165,18 @@ int RunHeadless(const Configuration& config) noexcept {
         const Profiler::CpuScope frameScope(profiler, "headless.frame");
 
         commandList->open();
+
+        // Drain pending GpuScene mutations onto the open command list
+        // (mesh upload, BLAS build, TLAS rebuild). Failure aborts the
+        // frame; partial state stays dirty so the next CommitResources
+        // retries.
+        if (auto commitResult = gpuScene.CommitResources(commandList); !commitResult) {
+            log.Error(log::APP, "headless: " + std::string{commitResult.error().message.View()});
+            commandList->close();
+            scene.Shutdown();
+            return EXIT_RUNTIME_FAIL;
+        }
+
         RenderTargets targets{};
         targets.color = renderTarget;
         RenderSettings settings{};
