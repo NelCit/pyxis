@@ -14,6 +14,7 @@
 #include <Pyxis/Renderer/Descs/RenderSettings.h>
 #include <Pyxis/Renderer/Descs/RenderTargets.h>
 #include <Pyxis/Renderer/Descs/RendererCreateDesc.h>
+#include <Pyxis/Renderer/Forward.h>          // MAX_FRAMES_IN_FLIGHT (§33.1).
 #include <Pyxis/Renderer/Profiler.h>
 #include <Pyxis/Renderer/PyxisRenderer.h>
 #include <Pyxis/Renderer/SceneWorldFacade.h>
@@ -46,14 +47,24 @@ int RunHeadless(const Configuration& config) noexcept {
     }
 
     // ---- §33.7 determinism pinning -------------------------------------
-    // Headless raises framesInFlight to 3 regardless of config.
-    // Rationale: M3+'s samplesPerFrame * accumulationFrameLimit loop
-    // submits work in flight, and the byte-identical EXR contract
-    // requires consistent FIF across runs (different FIF changes the
-    // submission interleaving + thus floating-point reduction order
-    // for accumulation). Sized to cap = §33.1 MAX_FRAMES_IN_FLIGHT.
-    // RNG seed != 0 + non-empty output.image were already validated.
-    constexpr uint32_t HEADLESS_FRAMES_IN_FLIGHT = 3;
+    // Headless raises framesInFlight to the §33.1 compile-time cap
+    // regardless of config. Rationale: M3+'s samplesPerFrame *
+    // accumulationFrameLimit loop submits work in flight, and the
+    // byte-identical EXR contract requires consistent FIF across runs
+    // (different FIF changes the submission interleaving + thus
+    // floating-point reduction order for accumulation). RNG seed != 0
+    // + non-empty output.image were already validated.
+    //
+    // The static_assert below ties the headless determinism pin to the
+    // renderer's compile-time cap: if a future RFC bumps
+    // MAX_FRAMES_IN_FLIGHT, this site fails to compile and forces the
+    // author to reconsider whether headless determinism is still
+    // satisfied at the new cap. Without it the two constants could
+    // silently drift.
+    constexpr uint32_t HEADLESS_FRAMES_IN_FLIGHT = MAX_FRAMES_IN_FLIGHT;
+    static_assert(HEADLESS_FRAMES_IN_FLIGHT == 3,
+                  "Headless §33.7 determinism pin assumes a 3-deep ring; "
+                  "revisit before changing MAX_FRAMES_IN_FLIGHT.");
     if (config.limits.framesInFlight != HEADLESS_FRAMES_IN_FLIGHT) {
         log.Info(log::APP, "headless: §33.7 pinning framesInFlight=" +
                            std::to_string(HEADLESS_FRAMES_IN_FLIGHT) +

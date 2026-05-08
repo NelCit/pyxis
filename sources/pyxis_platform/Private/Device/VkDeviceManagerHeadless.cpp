@@ -74,10 +74,22 @@ DeviceManagerCreateStatus VkDeviceManagerHeadless::Bringup(
 
     // §33.7 byte-identical EXR pin lands here at M2: headless honours the
     // params.framesInFlight value the caller supplies (HeadlessMode pins
-    // it to 3, the §33.1 cap) instead of forcing 1 like M1 did. Falling
-    // back to a clamped range so a future RFC could revisit the cap
-    // without re-touching this clamp.
-    _framesInFlight = std::clamp<uint32_t>(params.framesInFlight, 1u, 3u);
+    // it to 3, the §33.1 cap) instead of forcing 1 like M1 did. The
+    // caller is expected to be in-range; we still clamp as a safety net
+    // (this is a public-ish DLL boundary) but log a Warning so misuse
+    // surfaces rather than getting silently rewritten.
+    constexpr uint32_t MIN_FIF = 1u;
+    constexpr uint32_t MAX_FIF = 3u;        // == MAX_FRAMES_IN_FLIGHT (§33.1).
+    if (params.framesInFlight < MIN_FIF || params.framesInFlight > MAX_FIF) {
+        log.Warn(log::PLATFORM,
+                 std::string{"VkDeviceManagerHeadless: framesInFlight="} +
+                 std::to_string(params.framesInFlight) +
+                 " out of range [" + std::to_string(MIN_FIF) + ", " +
+                 std::to_string(MAX_FIF) + "]; clamping. Determinism" +
+                 " (§33.7) requires the caller to supply " +
+                 std::to_string(MAX_FIF) + ".");
+    }
+    _framesInFlight = std::clamp<uint32_t>(params.framesInFlight, MIN_FIF, MAX_FIF);
     _backbuffer     = initialBackbuffer;
 
     VulkanHppInitFromLoader(&vkGetInstanceProcAddr);
@@ -336,10 +348,14 @@ nvrhi::IDevice*    VkDeviceManagerHeadless::GetDevice()         const noexcept {
 const AdapterInfo& VkDeviceManagerHeadless::GetAdapterInfo()    const noexcept { return _adapter; }
 uint32_t           VkDeviceManagerHeadless::GetFramesInFlight() const noexcept { return _framesInFlight; }
 
-// Headless has no swapchain to acquire from / present to; M2 wires
-// per-frame readback into a writable target via --config.
-void VkDeviceManagerHeadless::BeginFrame() {}  // TODO(M2): readback target acquire.
-void VkDeviceManagerHeadless::EndFrame()   {}  // TODO(M2): per-frame EXR write.
+// Headless has no swapchain to acquire from / present to. The offscreen
+// render target is created once at device-init and lives for the
+// lifetime of the manager; readback + EXR write are the caller's job
+// (HeadlessMode owns that path — see RunHeadless), so BeginFrame /
+// EndFrame are intentional no-ops and stay no-ops at M3+ as long as
+// the backbuffer remains a single persistent target.
+void VkDeviceManagerHeadless::BeginFrame() {}
+void VkDeviceManagerHeadless::EndFrame()   {}
 
 void VkDeviceManagerHeadless::WaitIdle() {
     if (_device != VK_NULL_HANDLE) vkDeviceWaitIdle(_device);

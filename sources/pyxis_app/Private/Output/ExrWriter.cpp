@@ -18,13 +18,25 @@ namespace {
 
 namespace fs = std::filesystem;
 
-// BGRA8 -> RGBA float, normalising 0..255 to 0..1. The underlying
-// surface is SBGRA8_UNORM (per VkDeviceManagerHeadless's
-// _renderTarget); we treat the bytes as straight unorm and write them
-// as linear float for now. M3+'s real colour-management work will
-// promote to RGBA16F / OCIO once the path tracer is producing HDR
-// values; for the M2 hardcoded triangle the shipped colours are the
-// shader's interpolated vertex colours and look correct as-is.
+// BGRA8 -> RGBA float, normalising 0..255 to 0..1.
+//
+// Colourspace caveat — read carefully before changing.
+// The source surface format is `SBGRA8_UNORM` (Vulkan's
+// `VK_FORMAT_B8G8R8A8_UNORM`, *not* `_SRGB`); per
+// VkDeviceManagerHeadless::CreateRenderTarget the offscreen RT is
+// straight UNORM, so the bytes the GPU wrote are already in *linear*
+// space and a simple `byte / 255.0` produces a linear float — exactly
+// what tinyexr expects for an OpenEXR scanline. No sRGB EOTF needed.
+//
+// If a future change flips the RT format to an `_SRGB` variant (likely
+// once a real tone-mapper lands at M3+), the bytes are gamma-encoded
+// and this loop becomes wrong: it would write gamma-encoded values
+// into a "linear" EXR. The fix at that point is to either decode
+// (`pow((c + 0.055) / 1.055, 2.4)` with the linear-segment cutoff at
+// 0.04045) or to keep the RT linear and tone-map into RGBA16F. The
+// canonical answer is the latter — promote to RGBA16F + OCIO once the
+// path tracer produces HDR values. Until then the M2 hardcoded
+// triangle ships shader-interpolated linear colours and looks correct.
 void Bgra8ToRgbaFloat(uint32_t          width,
                       uint32_t          height,
                       const void*       bgra8Pixels,

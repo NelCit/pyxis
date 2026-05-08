@@ -279,7 +279,17 @@ WriteEffectiveConfig(const Configuration& config) noexcept {
         return std::unexpected{
             "WriteEffectiveConfig: could not open " + config.output.effectiveConfig};
     }
-    const std::string text = document.dump(2);
+    // Pin every dump argument explicitly so the on-disk effective-config
+    // is byte-stable across runs and across nlohmann versions: indent=2,
+    // ASCII space (not tab), ensure_ascii=false (UTF-8 passthrough), and
+    // error_handler=replace (no exceptions across our /EHs-c- boundary).
+    // Keys are written in insertion order — nlohmann::json's underlying
+    // ordered_map preserves that — so the layout above is the layout on
+    // disk.
+    const std::string text = document.dump(/*indent*/        2,
+                                           /*indent_char*/   ' ',
+                                           /*ensure_ascii*/  false,
+                                           nlohmann::json::error_handler_t::replace);
     stream.write(text.data(), static_cast<std::streamsize>(text.size()));
     if (!stream.good()) {
         return std::unexpected{
