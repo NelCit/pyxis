@@ -43,6 +43,14 @@ bool QueryAdapterFeatures(VkPhysicalDevice device, AdapterInfo& outInfo) noexcep
         default:     outInfo.vendor = AdapterVendor::Unknown;  break;
     }
 
+    switch (props.deviceType) {
+        case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:   outInfo.type = AdapterType::Discrete;   break;
+        case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: outInfo.type = AdapterType::Integrated; break;
+        case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:    outInfo.type = AdapterType::Virtual;    break;
+        case VK_PHYSICAL_DEVICE_TYPE_CPU:            outInfo.type = AdapterType::Cpu;        break;
+        default:                                     outInfo.type = AdapterType::Other;      break;
+    }
+
     const std::size_t nameLen =
         std::min<std::size_t>(std::strlen(props.deviceName), AdapterInfo::NAME_CAPACITY - 1);
     std::memcpy(outInfo.name.data(), props.deviceName, nameLen);

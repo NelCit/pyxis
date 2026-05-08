@@ -27,11 +27,26 @@ enum class AdapterVendor : uint32_t {
     Qualcomm  = 0x5143,
 };
 
+// Mirrors VkPhysicalDeviceType. Used by the windowed/headless device
+// managers to prefer a discrete GPU over an integrated one when the
+// caller hasn't pinned --adapter explicitly. Required because UMA
+// integrated GPUs (Intel iGPUs, AMD APUs) report system RAM as
+// device-local, which would otherwise out-rank a discrete card on the
+// "largest device-local heap" heuristic.
+enum class AdapterType : uint32_t {
+    Other      = 0,
+    Integrated = 1,
+    Discrete   = 2,
+    Virtual    = 3,
+    Cpu        = 4,
+};
+
 struct AdapterInfo {
     static constexpr std::size_t NAME_CAPACITY = 192;
 
     // ---- Identity --------------------------------------------------------
     AdapterVendor vendor       = AdapterVendor::Unknown;
+    AdapterType   type         = AdapterType::Other;
     uint32_t      vendorId     = 0;
     uint32_t      deviceId     = 0;
     uint32_t      driverVersionRaw = 0;       // VkPhysicalDeviceProperties::driverVersion

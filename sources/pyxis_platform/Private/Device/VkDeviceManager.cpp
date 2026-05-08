@@ -174,15 +174,46 @@ DeviceManagerCreateStatus VkDeviceManager::Bringup(const DeviceCreationParams& p
     std::vector<VkPhysicalDevice> physicalDevices(deviceCount);
     vkEnumeratePhysicalDevices(_instance, &deviceCount, physicalDevices.data());
 
+    // Rank discrete GPUs above everything else; tiebreak by VRAM. Without
+    // the discrete-first preference, an Intel UMA iGPU with 16 GB of
+    // shared system RAM (which it reports as device-local) out-ranks a
+    // discrete RTX with 8/12 GB of real VRAM.
+    auto adapterRank = [](const AdapterInfo& a) -> int {
+        return a.type == AdapterType::Discrete ? 1 : 0;
+    };
+
     int32_t bestIndex = -1;
+    int     bestRank  = -1;
     uint64_t bestVram = 0;
     AdapterInfo bestAdapter{};
     for (uint32_t i = 0; i < deviceCount; ++i) {
         AdapterInfo info{};
         if (!QueryAdapterFeatures(physicalDevices[i], info)) continue;
+
+        // Surface every enumerated GPU into the log so the user can see
+        // what was considered and why the picker chose what it did.
+        const char* typeName =
+              info.type == AdapterType::Discrete   ? "discrete"
+            : info.type == AdapterType::Integrated ? "integrated"
+            : info.type == AdapterType::Virtual    ? "virtual"
+            : info.type == AdapterType::Cpu        ? "cpu"
+            :                                        "other";
+        std::string adapterMsg = "  [" + std::to_string(i) + "] ";
+        adapterMsg.append(info.NameView());
+        adapterMsg += "  ";
+        adapterMsg += typeName;
+        adapterMsg += "  vram=";
+        adapterMsg += std::to_string(info.totalDeviceLocalBytes / (1024ull * 1024ull));
+        adapterMsg += " MiB";
+        log.Info(log::PLATFORM, adapterMsg);
+
         const bool isExplicit = (params.adapterIndex == static_cast<int32_t>(i));
         if (isExplicit) { bestIndex = static_cast<int32_t>(i); bestAdapter = info; break; }
-        if (info.totalDeviceLocalBytes > bestVram) {
+
+        const int r = adapterRank(info);
+        if (r > bestRank ||
+            (r == bestRank && info.totalDeviceLocalBytes > bestVram)) {
+            bestRank    = r;
             bestVram    = info.totalDeviceLocalBytes;
             bestIndex   = static_cast<int32_t>(i);
             bestAdapter = info;
