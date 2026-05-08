@@ -1,0 +1,12 @@
+{
+  "recommendations": [
+    "ms-vscode.cmake-tools",
+    "llvm-vs-code-extensions.vscode-clangd",
+    "ms-vscode.cpptools",
+    "twxs.cmake",
+    "shader-slang.slang-language-extension"
+  ],
+  "unwantedRecommendations": [
+    "ms-vscode.cpptools-extension-pack"
+  ]
+}

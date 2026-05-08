@@ -1,0 +1,26 @@
+{
+  "cmake.useCMakePresets": "always",
+  "cmake.configureOnOpen": true,
+  "cmake.ctest.testExplorerIntegrationEnabled": true,
+  "cmake.ctest.allowParallelJobs": true,
+  "cmake.parallelJobs": 0,
+  "testExplorer.useNativeTesting": true,
+  "C_Cpp.intelliSenseEngine": "disabled",
+  "clangd.arguments": [
+    "--compile-commands-dir=build/dev",
+    "--background-index",
+    "--clang-tidy",
+    "--header-insertion=never",
+    "--completion-style=detailed",
+    "--pch-storage=memory"
+  ],
+  "files.associations": {
+    "*.slang": "hlsl",
+    "*.slangh": "hlsl"
+  },
+  "search.exclude": {
+    "build/**": true,
+    "vcpkg_installed/**": true,
+    "**/_deps/**": true
+  }
+}

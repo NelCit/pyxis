@@ -1,0 +1,73 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "pyxis (viewer)",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/dev/bin/Debug/pyxis.exe",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "preLaunchTask": "build:dev"
+    },
+    {
+      "name": "pyxis (viewer + validation)",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/dev/bin/Debug/pyxis.exe",
+      "args": ["--vk-validation"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "preLaunchTask": "build:dev"
+    },
+    {
+      "name": "pyxis (--headless)",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/dev/bin/Debug/pyxis.exe",
+      "args": ["--headless"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "preLaunchTask": "build:dev"
+    },
+    {
+      "name": "pyxis (--screenshot test_triangle.png)",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/dev/bin/Debug/pyxis.exe",
+      "args": ["--screenshot", "test_triangle.png"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "preLaunchTask": "build:dev"
+    },
+    {
+      "name": "pyxis_unit_tests (all)",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/dev/bin/Debug/pyxis_unit_tests.exe",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "preLaunchTask": "build:dev"
+    },
+    {
+      "name": "pyxis_unit_tests (gtest_filter prompt)",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/dev/bin/Debug/pyxis_unit_tests.exe",
+      "args": ["--gtest_filter=${input:gtestFilter}", "--gtest_color=yes"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "preLaunchTask": "build:dev"
+    }
+  ],
+  "inputs": [
+    {
+      "id": "gtestFilter",
+      "type": "promptString",
+      "description": "gtest filter (e.g. RenderGraphSmoke.* or *EmptyGraph*)",
+      "default": "*"
+    }
+  ]
+}
