@@ -1,14 +1,13 @@
-// Pyxis app — minimal CLI parsing for M0.
+// Pyxis app — CLI parsing.
 //
-// Plan §26 enumerates the eventual CLI surface (--config, --headless,
-// --scene, --camera, ...). M0 only needs:
-//   --headless           run with VkDeviceManagerHeadless instead of VkDeviceManager
-//   --adapter <i>        force a specific adapter index
-//   --vk-validation      enable validation layers
-//   --version            print PYXIS_VERSION_STRING + git SHA and exit 0
-//   --help / -h          print usage and exit 0
+// Plan §26 enumerates the full CLI surface; this struct grows in
+// lockstep. Each new flag wires through Application::Run → the
+// Configuration loader's CLI-overlay path (§27 "applied after parse,
+// before validate"), which is the only place CLI values reach the
+// rendering code.
 //
-// Anything else is rejected with exit code 3 (config fail per §41 M0).
+// Anything not listed below is rejected with exit code 3 (config fail
+// per §41 exit codes).
 
 #pragma once
 
@@ -18,20 +17,39 @@
 namespace pyxis::app {
 
 struct CliArgs {
-    bool        headless        = false;
-    bool        enableValidation = false;
-    int32_t     adapterIndex    = -1;        // -1 = pick highest-VRAM RT-capable.
-    bool        showHelp        = false;
-    bool        showVersion     = false;
+    // ---- Mode + adapter -------------------------------------------------
+    bool        headless         = false;
+    bool        enableValidation = false;     // --vk-validation
+    int32_t     adapterIndex     = -1;        // -1 = pick highest-VRAM RT-capable.
 
+    // ---- Help / version -------------------------------------------------
+    bool        showHelp         = false;
+    bool        showVersion      = false;
+
+    // ---- §26 config + scene --------------------------------------------
+    std::string_view configPath;               // --config <path>
+    std::string_view scenePath;                // --scene <path>  (M2: stored, M4 wires)
+    std::string_view cameraSdfPath;            // --camera <sdfPath>  (M2: stored)
+
+    // ---- §26 render / output overrides ---------------------------------
+    // Zero means "no override; defer to JSON or default". Non-zero
+    // overrides the corresponding parameters.json field at validate time.
+    uint32_t    width            = 0;          // --width <int>
+    uint32_t    height           = 0;          // --height <int>
+    uint32_t    samples          = 0;          // --samples <int>
+    uint32_t    seed             = 0;          // --seed <int>
+    std::string_view outputPath;               // --output <path>  (overrides output.image)
+    std::string_view profilePath;              // --profile <path>  (M11+ wires)
+
+    // ---- M1 viewer extras ----------------------------------------------
     // --screenshot <path>: run the viewer for a few warmup frames, copy
     // the backbuffer to PNG at the given path, then exit. Plan §35
-    // image-regression artefact (M1 single-frame; the full headless EXR
-    // pipeline lands at M2). Empty = no screenshot.
+    // image-regression artefact for the M1 viewer (M2's --headless
+    // --output is the proper EXR pipeline). Empty = no screenshot.
     std::string_view screenshotPath;
 
-    // True if `parse` saw an unknown flag. Application maps to exit 3.
-    bool        invalid         = false;
+    // ---- Parse error reporting -----------------------------------------
+    bool        invalid          = false;      // True if `parse` saw an unknown flag.
     std::string_view invalidArg;
 };
 

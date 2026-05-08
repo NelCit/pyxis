@@ -19,6 +19,8 @@ target_sources(pyxis PRIVATE
     Private/Application.cpp
     Private/CliArgs.h
     Private/CliArgs.cpp
+    Private/Config/Configuration.h
+    Private/Config/Configuration.cpp
     Private/HeadlessMode.h
     Private/HeadlessMode.cpp
     Private/ViewerMode.h
@@ -40,6 +42,7 @@ target_include_directories(pyxis PRIVATE
 )
 
 find_package(Stb REQUIRED)
+find_package(nlohmann_json CONFIG REQUIRED)
 
 # ImGui (with Vulkan + GLFW backends) — built lazily by the helper in
 # _cmake/Thirdparty.cmake. pyxis_app/ViewerMode is the only consumer
@@ -56,6 +59,7 @@ target_link_libraries(pyxis PRIVATE
     Pyxis::Renderer
     pyxis_imgui
     Vulkan::Vulkan        # vkCmdBeginRendering / vkCmdEndRendering / descriptor-pool calls
+    nlohmann_json::nlohmann_json   # parameters.json + effective-config writer (§26 / §27)
 )
 
 # stb_image_write is header-only; vcpkg's `Stb` config exports the
