@@ -27,8 +27,10 @@ namespace pyxis::app {
 namespace {
 
 constexpr int EXIT_OK               = 0;
-constexpr int EXIT_DEVICE_INIT_FAIL = 2;
-constexpr int EXIT_CONFIG_FAIL      = 3;
+constexpr int EXIT_DEVICE_INIT_FAIL = 2;   // Vulkan / NVRHI init failure.
+constexpr int EXIT_CONFIG_FAIL      = 3;   // ValidateForHeadless rejected the config.
+constexpr int EXIT_RUNTIME_FAIL     = 4;   // Render-time failure: scene init, staging,
+                                            // mapping, or EXR write.
 
 }  // namespace
 
@@ -98,7 +100,7 @@ int RunHeadless(const Configuration& config) noexcept {
     SceneWorldFacade scene;
     if (scene.Init() != SceneWorldStatus::Ok) {
         log.Error(log::RENDER, "SceneWorldFacade::Init failed");
-        return EXIT_DEVICE_INIT_FAIL;
+        return EXIT_RUNTIME_FAIL;
     }
     Profiler              profiler{ device };
     RendererCreateDesc    rendererDesc{};
@@ -127,6 +129,16 @@ int RunHeadless(const Configuration& config) noexcept {
         settings.width  = renderTarget->getDesc().width;
         settings.height = renderTarget->getDesc().height;
         renderer.RenderFrame(commandList, settings, targets);
+        // Force the offscreen RT into CopySource before we close the
+        // command list. Without this we relied on NVRHI's auto-barrier
+        // logic spanning two separate executeCommandList submissions —
+        // technically fine today (NVRHI tracks state across submits) but
+        // brittle: a future refactor that takes the readback path through
+        // a separate command-list pool would lose that tracking and we'd
+        // get UB on the copy. Explicit is cheaper than mysterious.
+        commandList->setTextureState(renderTarget, nvrhi::AllSubresources,
+                                     nvrhi::ResourceStates::CopySource);
+        commandList->commitBarriers();
         commandList->close();
         device->executeCommandList(commandList);
     }
@@ -138,7 +150,7 @@ int RunHeadless(const Configuration& config) noexcept {
     // ---- Readback to a host-mapped staging texture ---------------------
     // Same pattern as ViewerMode::CaptureBackbufferToPng — copy the
     // offscreen RT into a CpuAccessMode::Read staging texture, wait
-    // idle, map. The next M2 commit hands `mapped` to the EXR writer.
+    // idle, map, hand `mapped` to the EXR writer.
     const auto& rtDesc = renderTarget->getDesc();
     nvrhi::TextureDesc stagingDesc;
     stagingDesc.format    = rtDesc.format;
@@ -150,7 +162,8 @@ int RunHeadless(const Configuration& config) noexcept {
         device->createStagingTexture(stagingDesc, nvrhi::CpuAccessMode::Read);
     if (!staging) {
         log.Error(log::APP, "headless: createStagingTexture failed");
-        return EXIT_DEVICE_INIT_FAIL;
+        scene.Shutdown();
+        return EXIT_RUNTIME_FAIL;
     }
 
     {
@@ -168,7 +181,8 @@ int RunHeadless(const Configuration& config) noexcept {
                                                    nvrhi::CpuAccessMode::Read, &rowPitch);
     if (!mapped) {
         log.Error(log::APP, "headless: mapStagingTexture failed");
-        return EXIT_DEVICE_INIT_FAIL;
+        scene.Shutdown();
+        return EXIT_RUNTIME_FAIL;
     }
     // ---- EXR write -----------------------------------------------------
     auto writeResult = WriteExrBgra8(config.output.image,
@@ -178,12 +192,17 @@ int RunHeadless(const Configuration& config) noexcept {
     if (!writeResult) {
         log.Error(log::APP, "headless: " + writeResult.error());
         scene.Shutdown();
-        return EXIT_DEVICE_INIT_FAIL;
+        return EXIT_RUNTIME_FAIL;
     }
 
     // ---- Effective-config dump + teardown ------------------------------
+    // The EXR is the primary artefact and is already on disk; a failure
+    // to write the sidecar effective-config is logged but does not fail
+    // the run.
     if (!config.output.effectiveConfig.empty()) {
-        (void)WriteEffectiveConfig(config);
+        if (auto effectiveResult = WriteEffectiveConfig(config); !effectiveResult) {
+            log.Warn(log::APP, "headless: " + effectiveResult.error());
+        }
     }
     scene.Shutdown();
     return EXIT_OK;

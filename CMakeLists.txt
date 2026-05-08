@@ -106,9 +106,12 @@ if(PYXIS_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests/unit)
     # Integration tests (CMake-driven, spawn pyxis.exe). Gated on the
-    # viewer/headless executable being built; PYXIS_BUILD_VIEWER is the
-    # right umbrella because pyxis.exe ships both modes.
-    if(PYXIS_BUILD_VIEWER)
+    # pyxis executable being built — the M2 byte-equal-EXR test is an
+    # exit-criterion (§41 M2) and must not silently disappear when
+    # PYXIS_BUILD_VIEWER is OFF (its default). pyxis.exe ships both
+    # viewer and headless modes; presence of the target is the right
+    # signal here.
+    if(TARGET pyxis)
         add_subdirectory(tests/integration)
     endif()
 endif()

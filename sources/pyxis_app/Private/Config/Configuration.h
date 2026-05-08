@@ -100,8 +100,11 @@ void ApplyCliOverrides(Configuration& config, const CliArgs& cli) noexcept;
 ValidateForHeadless(const Configuration& config) noexcept;
 
 // Write the resolved Configuration back to disk at
-// output.effectiveConfig. The parent directory is created first; failure
-// is non-fatal (logged, returns false).
-[[nodiscard]] bool WriteEffectiveConfig(const Configuration& config) noexcept;
+// output.effectiveConfig. The parent directory is created first.
+// Returns the unexpected branch with a human-readable reason on
+// failure (call sites typically log it and continue — the EXR is the
+// primary artefact, the effective-config dump is a sidecar).
+[[nodiscard]] std::expected<void, std::string>
+WriteEffectiveConfig(const Configuration& config) noexcept;
 
 }  // namespace pyxis::app

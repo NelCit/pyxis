@@ -46,6 +46,20 @@ std::string ReadField(const nlohmann::json& parent, const char* key, T& out) {
         if (!found->is_number_unsigned() && !found->is_number_integer()) {
             return std::string{key} + ": expected number";
         }
+        if constexpr (std::is_unsigned_v<T>) {
+            // nlohmann distinguishes is_number_unsigned (literal had no
+            // sign) from is_number_integer (any integer, signed or not).
+            // For an unsigned destination, a literal like -42 is_integer
+            // but not is_unsigned, and `get<uint32_t>()` would silently
+            // wrap to 0xFFFFFFD6. Reject negatives with a precise error
+            // instead so the user sees the real cause.
+            if (!found->is_number_unsigned()) {
+                const auto signedValue = found->get<int64_t>();
+                if (signedValue < 0) {
+                    return std::string{key} + ": negative value not allowed";
+                }
+            }
+        }
         out = found->get<T>();
     }
     return {};
@@ -181,10 +195,13 @@ ResolveConfiguration(const CliArgs& cli) noexcept {
 }
 
 void ApplyCliOverrides(Configuration& config, const CliArgs& cli) noexcept {
+    auto& log = Logging::Get();
     // CLI args win over JSON per §27 "CLI overrides: each CLI arg maps
     // to a JSON pointer; applied after parse, before validate."
     if (cli.adapterIndex >= 0) {
         // M3+ wires adapter into config.adapter; no-op for now.
+        log.Info(log::APP,
+                 "--adapter parsed but not yet applied (M3+ scene config wires it).");
     }
     if (cli.enableValidation) {
         config.diagnostics.validationLayer = true;
@@ -194,6 +211,22 @@ void ApplyCliOverrides(Configuration& config, const CliArgs& cli) noexcept {
     if (cli.samples != 0) config.render.samplesPerFrame = cli.samples;
     if (cli.seed   != 0) config.render.seed = cli.seed;
     if (!cli.outputPath.empty()) config.output.image = std::string{cli.outputPath};
+    // Surface CLI flags that we accept syntactically but don't yet
+    // apply, so users aren't silently confused when --scene seems to do
+    // nothing. M2 only renders the hardcoded triangle; M3 (path-trace
+    // box / default scene) and M4 (ingest adapters) consume these.
+    if (!cli.scenePath.empty()) {
+        log.Info(log::APP, std::string{"--scene "} + std::string{cli.scenePath} +
+                           " parsed but ignored (M3.5 default-scene + M4 ingest).");
+    }
+    if (!cli.cameraSdfPath.empty()) {
+        log.Info(log::APP, std::string{"--camera "} + std::string{cli.cameraSdfPath} +
+                           " parsed but ignored (M3+ scene.camera).");
+    }
+    if (!cli.profilePath.empty()) {
+        log.Info(log::APP, std::string{"--profile "} + std::string{cli.profilePath} +
+                           " parsed but ignored (M11 profiling polish).");
+    }
 }
 
 std::expected<void, std::string>
@@ -213,16 +246,19 @@ ValidateForHeadless(const Configuration& config) noexcept {
     return {};
 }
 
-bool WriteEffectiveConfig(const Configuration& config) noexcept {
-    if (config.output.effectiveConfig.empty()) return false;
-    auto& log = Logging::Get();
+std::expected<void, std::string>
+WriteEffectiveConfig(const Configuration& config) noexcept {
+    if (config.output.effectiveConfig.empty()) {
+        return std::unexpected{
+            std::string{"WriteEffectiveConfig: output.effectiveConfig is empty"}};
+    }
 
     // mkdir -p the parent dir per §27 ("missing directories must never
-    // abort a 30-minute Moana render"). Failure logged, non-fatal.
-    const fs::path imagePath{config.output.effectiveConfig};
-    if (imagePath.has_parent_path()) {
+    // abort a 30-minute Moana render").
+    const fs::path effectivePath{config.output.effectiveConfig};
+    if (effectivePath.has_parent_path()) {
         std::error_code errorCode;
-        fs::create_directories(imagePath.parent_path(), errorCode);
+        fs::create_directories(effectivePath.parent_path(), errorCode);
         // Ignore errorCode — directory may already exist.
     }
 
@@ -240,12 +276,16 @@ bool WriteEffectiveConfig(const Configuration& config) noexcept {
 
     std::ofstream stream(config.output.effectiveConfig, std::ios::binary | std::ios::trunc);
     if (!stream.is_open()) {
-        log.Warn(log::APP, "WriteEffectiveConfig: could not open " + config.output.effectiveConfig);
-        return false;
+        return std::unexpected{
+            "WriteEffectiveConfig: could not open " + config.output.effectiveConfig};
     }
     const std::string text = document.dump(2);
     stream.write(text.data(), static_cast<std::streamsize>(text.size()));
-    return stream.good();
+    if (!stream.good()) {
+        return std::unexpected{
+            "WriteEffectiveConfig: write failed for " + config.output.effectiveConfig};
+    }
+    return {};
 }
 
 }  // namespace pyxis::app

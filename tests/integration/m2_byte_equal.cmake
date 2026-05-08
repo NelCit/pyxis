@@ -80,4 +80,16 @@ if(NOT _rcCmp EQUAL 0)
 endif()
 
 file(SIZE "${_runA_exr}" _szA)
+
+# Sanity floor: a 640x360 ZIP-compressed RGBA EXR is on the order of
+# 80 KB. If both runs wrote a tiny / empty file the byte-equal compare
+# above would still trivially pass — guard against that by rejecting
+# anything implausibly small.
+set(_min_plausible_bytes 1024)
+if(_szA LESS _min_plausible_bytes)
+    message(FATAL_ERROR
+        "m2_byte_equal: EXR is implausibly small (${_szA} bytes < ${_min_plausible_bytes}); "
+        "byte-equal compare passed but the file is almost certainly empty / a header-only stub.")
+endif()
+
 message(STATUS "m2_byte_equal OK: pyxis re-runs produced byte-identical ${_szA}-byte EXR")
