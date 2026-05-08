@@ -13,6 +13,19 @@ add_executable(Pyxis::UnitTests ALIAS pyxis_unit_tests)
 # real renderer process, never against a faked-up shim.
 target_sources(pyxis_unit_tests PRIVATE
     SceneWorldInit.cpp
+    RenderGraphSmoke.cpp
+
+    # The §9.2 RenderGraph + IRenderPass live in pyxis_renderer/Private
+    # and don't cross the SHARED-DLL boundary. The unit-test harness is
+    # the documented §35 exception allowed to peek into Private/; we
+    # compile the .cpp directly into the test executable so the linker
+    # resolves the symbols locally instead of trying to import them
+    # from pyxis_renderer.dll.
+    ${CMAKE_SOURCE_DIR}/sources/pyxis_renderer/Private/RenderGraph/RenderGraph.cpp
+)
+
+target_include_directories(pyxis_unit_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/sources/pyxis_renderer/Private
 )
 
 # pyxis_unit_tests is the one place we *do* allow exceptions — gtest
