@@ -171,7 +171,7 @@ int RunViewerLoop(int adapterIndex, bool enableValidation,
     DeviceCreationParams params{};
     params.adapterIndex     = adapterIndex;
     params.enableValidation = enableValidation;
-    params.framesInFlight   = 2;
+    params.framesInFlight   = 1;
     params.applicationName  = "pyxis";
 
     const Resolution backbuffer{ winDesc.width, winDesc.height };
@@ -202,12 +202,12 @@ int RunViewerLoop(int adapterIndex, bool enableValidation,
     rendererDesc.initialHeight = winDesc.height;
     PyxisRenderer renderer{ device, profiler, rendererDesc };
 
-    // ---- Per-frame command-list ring -------------------------------------
-    constexpr uint32_t MAX_FRAMES_IN_FLIGHT = 3;
-    std::array<nvrhi::CommandListHandle, MAX_FRAMES_IN_FLIGHT> commandLists;
-    for (auto& cl : commandLists) {
-        cl = device->createCommandList();
-    }
+    // ---- Single command list --------------------------------------------
+    // M1 pins framesInFlight = 1, so one command list reused across frames
+    // is enough — VkDeviceManager::BeginFrame waits on its timeline so the
+    // GPU has retired our last submit before we re-open this list. M2+
+    // grows this back to a per-slot ring when active framesInFlight rises.
+    const nvrhi::CommandListHandle commandList = device->createCommandList();
 
     // ---- ImGui ----------------------------------------------------------
     // Init in both modes so --screenshot doubles as a visual proof of the
@@ -231,7 +231,6 @@ int RunViewerLoop(int adapterIndex, bool enableValidation,
 
     // ---- Frame loop ------------------------------------------------------
     uint64_t frameIndex = 0;
-    const uint32_t framesInFlight = dm->GetFramesInFlight();
     while (!window->ShouldClose() && !shouldClose.load()) {
         window->PollEvents();
         scene.Tick();
@@ -240,9 +239,8 @@ int RunViewerLoop(int adapterIndex, bool enableValidation,
 
         // Build the ImGui draw data on the CPU side. The Performance panel
         // pulls from the renderer's FrameProfile snapshot, which the
-        // GpuTimestampPool drained MAX_FRAMES_IN_FLIGHT frames ago — fine
-        // for human-paced FPS readouts. Skipped in screenshot mode so the
-        // captured PNG is the bare triangle.
+        // GpuTimestampPool drained from a slot the GPU has already
+        // retired — fine for human-paced FPS readouts.
         if (imguiHost.IsReady()) {
             const FrameProfile fp = renderer.LastFrameProfile();
             imguiHost.BeginFrame();
@@ -252,8 +250,7 @@ int RunViewerLoop(int adapterIndex, bool enableValidation,
 
         nvrhi::ITexture* backbuffer = dm->GetCurrentBackbuffer();
         if (backbuffer) {
-            const uint32_t slot = static_cast<uint32_t>(frameIndex % framesInFlight);
-            nvrhi::ICommandList* cl = commandLists[slot].Get();
+            nvrhi::ICommandList* cl = commandList.Get();
 
             cl->open();
             RenderTargets targets{};

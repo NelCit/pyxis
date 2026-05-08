@@ -48,7 +48,8 @@ void PyxisRenderer::RenderFrame(nvrhi::ICommandList*  cl,
     ctx.settings       = &settings;
     ctx.targets        = &targets;
     ctx.frameIndex     = _impl->frameIndex++;
-    ctx.framesInFlight = 2;
+    // M1 active runtime: 1 frame in flight (cap = MAX_FRAMES_IN_FLIGHT = 3).
+    ctx.framesInFlight = 1;
 
     const Profiler::CpuScope frameScope(*_impl->profiler, "render.frame.cpu");
     _impl->graph->Execute(cl, ctx);

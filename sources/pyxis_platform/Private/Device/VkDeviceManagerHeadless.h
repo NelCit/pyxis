@@ -51,7 +51,10 @@ private:
     uint32_t          _graphicsFamily = 0;
 
     AdapterInfo       _adapter{};
-    uint32_t          _framesInFlight = 3;   // pinned per §33.7.
+    // M1 pins both viewer and headless to 1 frame in flight; M2's EXR
+    // path will raise this back to 3 per §33.7 once it actually exercises
+    // the multi-frame queueing.
+    uint32_t          _framesInFlight = 1;
     Resolution        _backbuffer{};
 
     nvrhi::IDevice*   _nvrhiDevice = nullptr;

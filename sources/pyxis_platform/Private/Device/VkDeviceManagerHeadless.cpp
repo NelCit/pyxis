@@ -71,8 +71,9 @@ DeviceManagerCreateStatus VkDeviceManagerHeadless::Bringup(
 
     auto& log = Logging::Get();
 
-    // Headless pins 3 frames in flight (§33.7).
-    _framesInFlight = 3;
+    // M1 pins 1 frame in flight in both modes — headless's §33.7 ramp to 3
+    // for byte-identical EXR lands with M2's --config + EXR output path.
+    _framesInFlight = 1;
     _backbuffer     = initialBackbuffer;
 
     VulkanHppInitFromLoader(&vkGetInstanceProcAddr);

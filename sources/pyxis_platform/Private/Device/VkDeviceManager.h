@@ -66,29 +66,30 @@ private:
     std::vector<VkImage>                _swapchainImages;
     std::vector<nvrhi::TextureHandle>   _swapchainTextures;
 
-    // Swapchain sync: the canonical "acquire keyed by frame slot, present
-    // keyed by image index" pattern.
+    // Swapchain sync — M1 ships with framesInFlight = 1, so the canonical
+    // "acquire keyed by frame slot" pattern collapses to a single binary
+    // semaphore: only one frame is ever in flight, and the timeline below
+    // forces the CPU to wait for that frame's GPU work before we reuse
+    // it. When M2+ raises framesInFlight, this grows back to a per-slot
+    // ring (acquire) + per-image ring (present).
     //
-    // - _acquireSems[framesInFlight]: signalled by vkAcquireNextImageKHR;
-    //   indexed by _frameSlot. Frame slot rotates 0..framesInFlight-1.
-    // - _presentSems[imageCount]: waited on by vkQueuePresentKHR; indexed
-    //   by _currentImage (the swapchain image index returned by acquire).
-    //   One per swapchain image so a present on image N is fully retired
-    //   before we'd next reuse the same sem.
-    // - _frameTimeline + _frameValue: timeline semaphore used as a
-    //   per-frame CPU throttle. We signal _frameTimeline with the current
-    //   frame value alongside the swapchain submit; a frame later we
-    //   wait on (_frameValue - framesInFlight) before we reuse the slot.
-    //   This keeps validation's VUID-vkAcquireNextImageKHR-semaphore-01779
-    //   clean — the prior use of _acquireSems[_frameSlot] is GPU-retired
-    //   before we hand it back to vkAcquireNextImageKHR.
-    std::vector<VkSemaphore>            _acquireSems;
-    std::vector<VkSemaphore>            _presentSems;
+    // - _acquireSem: signalled by vkAcquireNextImageKHR, waited on by the
+    //   renderer's submit. Reused each frame after the timeline wait
+    //   below retires the previous use.
+    // - _presentSem: signalled by the renderer's submit, waited on by
+    //   vkQueuePresentKHR. Same single-instance reasoning as acquire.
+    // - _frameTimeline + _frameValue: per-frame CPU throttle. We signal
+    //   _frameTimeline alongside the swapchain submit and wait on
+    //   (_frameValue - 1) at the start of the next BeginFrame so the
+    //   prior use of _acquireSem is GPU-retired before we hand it back
+    //   to vkAcquireNextImageKHR (VUID-vkAcquireNextImageKHR-semaphore-
+    //   01779).
+    VkSemaphore                         _acquireSem    = VK_NULL_HANDLE;
+    VkSemaphore                         _presentSem    = VK_NULL_HANDLE;
     VkSemaphore                         _frameTimeline = VK_NULL_HANDLE;
     uint64_t                            _frameValue    = 0;
 
     uint32_t          _currentImage     = 0;     // last vkAcquireNextImageKHR result
-    uint32_t          _frameSlot        = 0;     // 0..framesInFlight - 1
     bool              _resizePending    = false;
 
     // ---- NVRHI -----------------------------------------------------------
@@ -97,7 +98,10 @@ private:
 
     // ---- Misc state ------------------------------------------------------
     AdapterInfo       _adapter{};
-    uint32_t          _framesInFlight   = 2;
+    // Active frames-in-flight. Pinned to 1 in M1 — the multi-frame
+    // pipelining lives behind the §33.1 cap (MAX_FRAMES_IN_FLIGHT = 3)
+    // and grows when M2+ needs it (e.g. headless EXR per §33.7).
+    uint32_t          _framesInFlight   = 1;
     Resolution        _backbuffer{};
     bool              _ready            = false;
 };

@@ -129,7 +129,10 @@ DeviceManagerCreateStatus VkDeviceManager::Bringup(const DeviceCreationParams& p
                                                    const Resolution&           initialBackbuffer) noexcept {
     auto& log = Logging::Get();
     _backbuffer     = initialBackbuffer;
-    _framesInFlight = std::clamp<uint32_t>(params.framesInFlight, 1, 3);
+    // M1 pins the active runtime to 1 frame in flight — see VkDeviceManager.h.
+    // The §33.1 compile-time cap of 3 still bounds future growth.
+    _framesInFlight = 1;
+    (void)params.framesInFlight;
     _window         = window;
 
     if (!window) {
@@ -334,20 +337,17 @@ DeviceManagerCreateStatus VkDeviceManager::Bringup(const DeviceCreationParams& p
     }
 
     // ---- Swapchain sync semaphores --------------------------------------
-    // Acquire ring is keyed by frame slot (sized to framesInFlight) since
-    // the image index isn't known until acquire returns. Present ring is
-    // keyed by image index (sized to swapchainImages) so a present
-    // operation on image N is fully retired before sem N is reused.
-    _acquireSems.resize(_framesInFlight, VK_NULL_HANDLE);
-    _presentSems.resize(_swapchainTextures.size(), VK_NULL_HANDLE);
+    // framesInFlight = 1, so a single binary acquire/present pair is
+    // enough — the timeline below makes sure each is GPU-retired before
+    // its next reuse.
     VkSemaphoreCreateInfo binarySemInfo{};
     binarySemInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-    for (auto& s : _acquireSems) vkCreateSemaphore(_device, &binarySemInfo, nullptr, &s);
-    for (auto& s : _presentSems) vkCreateSemaphore(_device, &binarySemInfo, nullptr, &s);
+    vkCreateSemaphore(_device, &binarySemInfo, nullptr, &_acquireSem);
+    vkCreateSemaphore(_device, &binarySemInfo, nullptr, &_presentSem);
 
     // CPU-throttle timeline. Initial value 0; signalled to _frameValue
-    // alongside each frame's swapchain submit. BeginFrame waits for value
-    // (_frameValue - framesInFlight) before reusing _acquireSems[slot].
+    // alongside each frame's swapchain submit. BeginFrame waits on
+    // (_frameValue - 1) before reusing _acquireSem.
     VkSemaphoreTypeCreateInfo timelineInfo{};
     timelineInfo.sType         = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
     timelineInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
@@ -465,10 +465,14 @@ bool VkDeviceManager::CreateSwapchain(uint32_t width, uint32_t height) noexcept 
 
 void VkDeviceManager::DestroySwapchain() noexcept {
     if (_device == VK_NULL_HANDLE) return;
-    for (auto& s : _acquireSems) if (s) vkDestroySemaphore(_device, s, nullptr);
-    for (auto& s : _presentSems) if (s) vkDestroySemaphore(_device, s, nullptr);
-    _acquireSems.clear();
-    _presentSems.clear();
+    if (_acquireSem != VK_NULL_HANDLE) {
+        vkDestroySemaphore(_device, _acquireSem, nullptr);
+        _acquireSem = VK_NULL_HANDLE;
+    }
+    if (_presentSem != VK_NULL_HANDLE) {
+        vkDestroySemaphore(_device, _presentSem, nullptr);
+        _presentSem = VK_NULL_HANDLE;
+    }
     _swapchainTextures.clear();
     _swapchainImages.clear();
     if (_swapchain != VK_NULL_HANDLE) {
@@ -517,13 +521,13 @@ nvrhi::ITexture* VkDeviceManager::GetBackbuffer(uint32_t index) const noexcept {
 void VkDeviceManager::BeginFrame() {
     if (_swapchain == VK_NULL_HANDLE) return;
 
-    // CPU-side throttle. After framesInFlight frames have been submitted,
-    // wait for the slot's prior work to retire on the GPU before reusing
-    // its acquire semaphore. This is what keeps validation's
-    // VUID-vkAcquireNextImageKHR-semaphore-01779 ("semaphore must not have
-    // pending operations") clean.
-    if (_frameValue >= _framesInFlight) {
-        const uint64_t targetValue = _frameValue - _framesInFlight + 1;
+    // CPU-side throttle: wait for the previous frame's GPU submission to
+    // retire before reusing _acquireSem. With framesInFlight = 1 this
+    // serialises CPU and GPU per-frame, which is exactly the M1 contract.
+    // Keeps validation's VUID-vkAcquireNextImageKHR-semaphore-01779
+    // ("semaphore must not have pending operations") clean.
+    if (_frameValue >= 1) {
+        const uint64_t targetValue = _frameValue;
         VkSemaphoreWaitInfo wait{};
         wait.sType          = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
         wait.semaphoreCount = 1;
@@ -533,11 +537,9 @@ void VkDeviceManager::BeginFrame() {
     }
 
     ++_frameValue;
-    _frameSlot = static_cast<uint32_t>((_frameValue - 1) % _framesInFlight);
 
-    VkSemaphore acquireSem = _acquireSems[_frameSlot];
     const VkResult r = vkAcquireNextImageKHR(_device, _swapchain, UINT64_MAX,
-                                             acquireSem, VK_NULL_HANDLE, &_currentImage);
+                                             _acquireSem, VK_NULL_HANDLE, &_currentImage);
     if (r == VK_ERROR_OUT_OF_DATE_KHR) {
         // The semaphore is *not* signalled in this case. Skip queuing waits
         // and trigger a swapchain rebuild on the next frame boundary.
@@ -553,9 +555,9 @@ void VkDeviceManager::BeginFrame() {
         // Pre-queue everything the renderer's executeCommandList will pick
         // up: wait on the acquire, signal the present sem (binary, used by
         // vkQueuePresentKHR), and signal the timeline (CPU throttle).
-        _nvrhiVulkan->queueWaitForSemaphore  (nvrhi::CommandQueue::Graphics, acquireSem,                       0);
-        _nvrhiVulkan->queueSignalSemaphore   (nvrhi::CommandQueue::Graphics, _presentSems[_currentImage],      0);
-        _nvrhiVulkan->queueSignalSemaphore   (nvrhi::CommandQueue::Graphics, _frameTimeline,                   _frameValue);
+        _nvrhiVulkan->queueWaitForSemaphore  (nvrhi::CommandQueue::Graphics, _acquireSem,    0);
+        _nvrhiVulkan->queueSignalSemaphore   (nvrhi::CommandQueue::Graphics, _presentSem,    0);
+        _nvrhiVulkan->queueSignalSemaphore   (nvrhi::CommandQueue::Graphics, _frameTimeline, _frameValue);
     }
 }
 
@@ -564,12 +566,10 @@ void VkDeviceManager::EndFrame() {
 
     // The renderer's executeCommandList already happened with the wait +
     // signal we pre-queued in BeginFrame. Just present.
-    VkSemaphore renderSem = _presentSems[_currentImage];
-
     VkPresentInfoKHR present{};
     present.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     present.waitSemaphoreCount = 1;
-    present.pWaitSemaphores    = &renderSem;
+    present.pWaitSemaphores    = &_presentSem;
     present.swapchainCount     = 1;
     present.pSwapchains        = &_swapchain;
     present.pImageIndices      = &_currentImage;
@@ -585,14 +585,12 @@ void VkDeviceManager::EndFrame() {
             vkDeviceWaitIdle(_device);
             DestroySwapchain();
             CreateSwapchain(w, h);
-            _acquireSems.resize(_framesInFlight,           VK_NULL_HANDLE);
-            _presentSems.resize(_swapchainTextures.size(), VK_NULL_HANDLE);
+            // Sem pair was destroyed by DestroySwapchain — recreate.
             VkSemaphoreCreateInfo semInfo{};
             semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-            for (auto& s : _acquireSems) if (s == VK_NULL_HANDLE) vkCreateSemaphore(_device, &semInfo, nullptr, &s);
-            for (auto& s : _presentSems) if (s == VK_NULL_HANDLE) vkCreateSemaphore(_device, &semInfo, nullptr, &s);
+            vkCreateSemaphore(_device, &semInfo, nullptr, &_acquireSem);
+            vkCreateSemaphore(_device, &semInfo, nullptr, &_presentSem);
             _resizePending = false;
-            _frameSlot     = 0;
             // The timeline persists across rebuilds; no reset needed.
         }
     }

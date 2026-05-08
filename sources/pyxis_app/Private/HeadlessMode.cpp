@@ -48,7 +48,7 @@ int RunHeadless(int adapterIndex, bool enableValidation) noexcept {
     DeviceCreationParams params{};
     params.adapterIndex     = adapterIndex;
     params.enableValidation = enableValidation;
-    params.framesInFlight   = 3;
+    params.framesInFlight   = 1;
     params.applicationName  = "pyxis (headless)";
 
     const Resolution              backbuffer{ 1920, 1080 };
