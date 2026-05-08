@@ -216,13 +216,16 @@ int RunViewerLoop(const Configuration& config,
     const nvrhi::CommandListHandle commandListHandle = device->createCommandList();
 
     // ---- ImGui ----------------------------------------------------------
-    // Init in both modes so --screenshot doubles as a visual proof of the
-    // M1 dockable Performance panel: the captured PNG shows the triangle
-    // plus the panel in its default position.
+    // Skipped in screenshot mode: the captured PNG is a clean
+    // regression artefact (just the triangle on the clear colour) so
+    // the §35 image-diff fixture isn't perturbed by FPS / scope-tree
+    // text. The interactive viewer keeps ImGui as normal.
     ImGuiHost imguiHost;
     const bool screenshotMode = !screenshotPath.empty();
-    if (!imguiHost.Init(window.get(), deviceManager.get())) {
-        log.Warn(log::APP, "ViewerMode: ImGui init failed; continuing without UI");
+    if (!screenshotMode) {
+        if (!imguiHost.Init(window.get(), deviceManager.get())) {
+            log.Warn(log::APP, "ViewerMode: ImGui init failed; continuing without UI");
+        }
     }
     if (screenshotMode) {
         log.Info(log::APP, "ViewerMode: --screenshot path supplied; capturing one frame after warmup");
@@ -230,13 +233,12 @@ int RunViewerLoop(const Configuration& config,
         log.Info(log::APP, "ViewerMode: entering frame loop");
     }
 
-    // Capture the backbuffer at frame index = SCREENSHOT_FRAME so the
-    // swapchain has settled. 3 frames is enough on FIFO; keeps the
-    // smoke fast.
-    // Frame 30 is well past the SLOT_COUNT-frame profiler ring warmup
-    // (so the screenshot's Performance panel actually has the scope
-    // tree filled in) and still well before any real-world delay.
-    constexpr uint64_t SCREENSHOT_FRAME = 30;
+    // Frame 3 is the original M1 capture point — far enough past frame 0
+    // that the swapchain has rotated through every image at least once
+    // (FIFO + 3-image swapchain), short enough to keep the screenshot
+    // smoke under a second. The profiler ring drain doesn't matter for
+    // the screenshot itself (we don't draw timing text any more).
+    constexpr uint64_t SCREENSHOT_FRAME = 3;
     // Cadence for the periodic profiler log line. Every 120 frames is
     // ~1 s at 120 FPS — enough samples for the rolling FrameProfile to
     // be representative without spamming stdout.
