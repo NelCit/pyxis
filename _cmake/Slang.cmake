@@ -30,11 +30,21 @@ function(pyxis_compile_slang_shader)
     set(multiValueArgs DEFINES)
     cmake_parse_arguments(SHADER "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
 
-    if(NOT SHADER_TARGET)        message(FATAL_ERROR "pyxis_compile_slang_shader: TARGET required") endif()
-    if(NOT SHADER_SOURCE)        message(FATAL_ERROR "pyxis_compile_slang_shader: SOURCE required") endif()
-    if(NOT SHADER_ENTRY_POINT)   message(FATAL_ERROR "pyxis_compile_slang_shader: ENTRY_POINT required") endif()
-    if(NOT SHADER_STAGE)         message(FATAL_ERROR "pyxis_compile_slang_shader: STAGE required") endif()
-    if(NOT SHADER_OUTPUT)        message(FATAL_ERROR "pyxis_compile_slang_shader: OUTPUT required") endif()
+    if(NOT SHADER_TARGET)
+        message(FATAL_ERROR "pyxis_compile_slang_shader: TARGET required")
+    endif()
+    if(NOT SHADER_SOURCE)
+        message(FATAL_ERROR "pyxis_compile_slang_shader: SOURCE required")
+    endif()
+    if(NOT SHADER_ENTRY_POINT)
+        message(FATAL_ERROR "pyxis_compile_slang_shader: ENTRY_POINT required")
+    endif()
+    if(NOT SHADER_STAGE)
+        message(FATAL_ERROR "pyxis_compile_slang_shader: STAGE required")
+    endif()
+    if(NOT SHADER_OUTPUT)
+        message(FATAL_ERROR "pyxis_compile_slang_shader: OUTPUT required")
+    endif()
 
     pyxis_thirdparty_require_slang()
     if(NOT EXISTS "${PYXIS_SLANG_COMPILER}")
@@ -56,32 +66,34 @@ function(pyxis_compile_slang_shader)
         set(_out "${SHADER_OUTPUT}")
     endif()
 
-    # Build the slangc command line. The flags mirror §23.
-    set(_slangcArgs
-        "${_src}"
-        -profile sm_6_6
-        -target spirv
-        -emit-spirv-directly
-        -matrix-layout-row-major
-        -entry "${SHADER_ENTRY_POINT}"
-        -stage "${_slangStage}"
-        -o "${_out}"
-    )
+    # The optimisation-level flag is the only thing that differs between
+    # Debug (-g -O0) and Release (-O3). Mixing list-valued args with
+    # `$<IF:...,A,B>` fails because the comma separates the IF branches;
+    # we just generator-expression the optimisation flags individually.
+    set(_optDebug   -g -O0)
+    set(_optRelease -O3)
+    set(_optFlag    "$<IF:$<CONFIG:Debug>,$<JOIN:${_optDebug}, >,$<JOIN:${_optRelease}, >>")
+
+    set(_defineArgs)
     foreach(d ${SHADER_DEFINES})
-        list(APPEND _slangcArgs -D "${d}")
+        list(APPEND _defineArgs -D "${d}")
     endforeach()
 
-    # Debug shaders get -g -O0; Release gets -O3.
-    set(_slangcArgsDebug   ${_slangcArgs} -g -O0)
-    set(_slangcArgsRelease ${_slangcArgs} -O3)
-
-    # Make sure the output directory exists at build time (the directory
-    # is per-config, so we touch it inside the custom command).
     add_custom_command(
         OUTPUT  "${_out}"
         COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/$<CONFIG>/Resources/shaders"
         COMMAND "${PYXIS_SLANG_COMPILER}"
-                $<IF:$<CONFIG:Debug>,${_slangcArgsDebug},${_slangcArgsRelease}>
+                "${_src}"
+                -profile sm_6_6
+                -target spirv
+                -emit-spirv-directly
+                -matrix-layout-row-major
+                -entry "${SHADER_ENTRY_POINT}"
+                -stage "${_slangStage}"
+                ${_defineArgs}
+                -O$<IF:$<CONFIG:Debug>,0,3>
+                $<$<CONFIG:Debug>:-g>
+                -o "${_out}"
         DEPENDS "${_src}"
         COMMENT "Compiling Slang shader ${SHADER_SOURCE} (${SHADER_STAGE}/${SHADER_ENTRY_POINT})"
         VERBATIM
