@@ -332,18 +332,11 @@ DeviceManagerCreateStatus VkDeviceManager::Bringup(const DeviceCreationParams& p
     _nvrhiVulkan = static_cast<nvrhi::vulkan::IDevice*>(_nvrhiDevice.Get());
 
     // ---- Swapchain -------------------------------------------------------
+    // CreateSwapchain owns the per-swapchain binary semaphores too —
+    // re-entered on every resize via the oldSwapchain chain.
     if (!CreateSwapchain(_backbuffer.width, _backbuffer.height)) {
         return DeviceManagerCreateStatus::SwapchainCreationFailed;
     }
-
-    // ---- Swapchain sync semaphores --------------------------------------
-    // framesInFlight = 1, so a single binary acquire/present pair is
-    // enough — the timeline below makes sure each is GPU-retired before
-    // its next reuse.
-    VkSemaphoreCreateInfo binarySemInfo{};
-    binarySemInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-    vkCreateSemaphore(_device, &binarySemInfo, nullptr, &_acquireSem);
-    vkCreateSemaphore(_device, &binarySemInfo, nullptr, &_presentSem);
 
     // CPU-throttle timeline. Initial value 0; signalled to _frameValue
     // alongside each frame's swapchain submit. BeginFrame waits on
@@ -375,6 +368,41 @@ DeviceManagerCreateStatus VkDeviceManager::Bringup(const DeviceCreationParams& p
 
 bool VkDeviceManager::CreateSwapchain(uint32_t width, uint32_t height) noexcept {
     auto& log = Logging::Get();
+
+    // Resize flow follows the spec's oldSwapchain chain so the driver can
+    // reuse internal allocations across recreations. Without it, rapidly
+    // dragging the window edge — which fires SUBOPTIMAL/OUT_OF_DATE on
+    // every present and triggers a fresh swapchain each frame — leaks
+    // host memory inside the driver and eventually returns
+    // VK_ERROR_OUT_OF_HOST_MEMORY.
+    //
+    //   1. cache the existing _swapchain as oldSwapchain (may be VK_NULL_HANDLE
+    //      on initial create)
+    //   2. release per-swapchain Vulkan resources we own (semaphores +
+    //      NVRHI texture wrappers) BEFORE issuing the new vkCreateSwapchainKHR
+    //   3. drain NVRHI's deferred-destruction queue so the texture wrappers
+    //      we just dropped are actually freed (otherwise NVRHI's pending
+    //      garbage piles up across resizes)
+    //   4. pass oldSwapchain in scInfo.oldSwapchain so the driver can hand
+    //      reusable internals over
+    //   5. destroy oldSwapchain only after the new one has been created
+    //      (per spec, vkCreateSwapchainKHR retires it but does not destroy)
+    const VkSwapchainKHR oldSwapchain = _swapchain;
+    _swapchain = VK_NULL_HANDLE;
+
+    if (_acquireSem != VK_NULL_HANDLE) {
+        vkDestroySemaphore(_device, _acquireSem, nullptr);
+        _acquireSem = VK_NULL_HANDLE;
+    }
+    if (_presentSem != VK_NULL_HANDLE) {
+        vkDestroySemaphore(_device, _presentSem, nullptr);
+        _presentSem = VK_NULL_HANDLE;
+    }
+    _swapchainTextures.clear();
+    _swapchainImages.clear();
+    if (_nvrhiDevice) {
+        _nvrhiDevice->runGarbageCollection();
+    }
 
     VkSurfaceCapabilitiesKHR caps{};
     vkGetPhysicalDeviceSurfaceCapabilitiesKHR(_physicalDevice, _surface, &caps);
@@ -456,11 +484,19 @@ bool VkDeviceManager::CreateSwapchain(uint32_t width, uint32_t height) noexcept 
     scInfo.compositeAlpha   = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     scInfo.presentMode      = chosenPresentMode;
     scInfo.clipped          = VK_TRUE;
-    scInfo.oldSwapchain     = VK_NULL_HANDLE;
+    scInfo.oldSwapchain     = oldSwapchain;
 
     if (vkCreateSwapchainKHR(_device, &scInfo, nullptr, &_swapchain) != VK_SUCCESS) {
         log.Error(log::PLATFORM, "VkDeviceManager: vkCreateSwapchainKHR failed");
+        // The driver retired oldSwapchain regardless of failure (per spec);
+        // free it so we don't leak it.
+        if (oldSwapchain != VK_NULL_HANDLE) {
+            vkDestroySwapchainKHR(_device, oldSwapchain, nullptr);
+        }
         return false;
+    }
+    if (oldSwapchain != VK_NULL_HANDLE) {
+        vkDestroySwapchainKHR(_device, oldSwapchain, nullptr);
     }
     _swapchainFormat = chosenFormat.format;
     _swapchainExtent = extent;
@@ -494,6 +530,14 @@ bool VkDeviceManager::CreateSwapchain(uint32_t width, uint32_t height) noexcept 
         }
         _swapchainTextures.push_back(std::move(h));
     }
+
+    // Recreate the binary acquire / present semaphores for this swapchain.
+    // We tore the old ones down in the prelude above so the driver
+    // doesn't reuse a semaphore that's still bound to a retired swapchain.
+    VkSemaphoreCreateInfo binarySemInfo{};
+    binarySemInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    vkCreateSemaphore(_device, &binarySemInfo, nullptr, &_acquireSem);
+    vkCreateSemaphore(_device, &binarySemInfo, nullptr, &_presentSem);
     return true;
 }
 
@@ -616,16 +660,13 @@ void VkDeviceManager::EndFrame() {
         const uint32_t w = _window->Width();
         const uint32_t h = _window->Height();
         if (w > 0 && h > 0) {
+            // CreateSwapchain handles oldSwapchain chaining + per-swapchain
+            // semaphore + texture lifetime, including NVRHI's deferred-
+            // destruction queue. The timeline persists across rebuilds —
+            // no reset needed.
             vkDeviceWaitIdle(_device);
-            DestroySwapchain();
             CreateSwapchain(w, h);
-            // Sem pair was destroyed by DestroySwapchain — recreate.
-            VkSemaphoreCreateInfo semInfo{};
-            semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-            vkCreateSemaphore(_device, &semInfo, nullptr, &_acquireSem);
-            vkCreateSemaphore(_device, &semInfo, nullptr, &_presentSem);
             _resizePending = false;
-            // The timeline persists across rebuilds; no reset needed.
         }
     }
 }
