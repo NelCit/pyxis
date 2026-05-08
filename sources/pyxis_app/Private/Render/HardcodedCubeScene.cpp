@@ -50,53 +50,42 @@ constexpr std::array<std::uint32_t, 36> CUBE_INDICES = {
     3, 2, 6,  3, 6, 7,
 };
 
-// Build a row-major + row-vector view-matrix for a camera placed at
-// (0, 0, 3) looking down the -Z axis with up = +Y. In row-vector
-// convention with translation in the last row, that's:
-//   [ 1  0  0  0 ]
-//   [ 0  1  0  0 ]
-//   [ 0  0  1  0 ]
-//   [ 0  0 -3  1 ]
-// because pos_view = pos_world * V puts a world point at (0,0,0) at
-// view-space (0, 0, -3) — i.e. 3 units in front of the camera along
-// the camera's -Z forward axis.
+// Build a row-major + column-vector view-matrix for a camera placed
+// at (0, 0, 3) looking down the -Z axis with up = +Y. Column-vector
+// convention (`v' = M·v`, like in textbook math) puts the translation
+// in the last *column*:
+//   [ 1  0  0   0 ]
+//   [ 0  1  0   0 ]
+//   [ 0  0  1  -3 ]   <- translation Z = -3 in the last column
+//   [ 0  0  0   1 ]
+// Verify: V · (0, 0, 0, 1)ᵀ = (0, 0, -3, 1)ᵀ — world origin lands at
+// view-space z = -3, i.e. 3 units in front of the camera along the
+// -Z forward axis.
 hlslpp::float4x4 BuildViewMatrix() noexcept {
     return hlslpp::float4x4(
-        hlslpp::float4(1.0f, 0.0f, 0.0f, 0.0f),
-        hlslpp::float4(0.0f, 1.0f, 0.0f, 0.0f),
-        hlslpp::float4(0.0f, 0.0f, 1.0f, 0.0f),
-        hlslpp::float4(0.0f, 0.0f, -3.0f, 1.0f));
+        hlslpp::float4(1.0f, 0.0f, 0.0f,  0.0f),
+        hlslpp::float4(0.0f, 1.0f, 0.0f,  0.0f),
+        hlslpp::float4(0.0f, 0.0f, 1.0f, -3.0f),
+        hlslpp::float4(0.0f, 0.0f, 0.0f,  1.0f));
 }
 
-// Build a row-major + row-vector Vulkan perspective projection. Y is
-// flipped (pre-multiplied -1 in the second row) so the M3 image is
+// Build a row-major + column-vector Vulkan perspective projection.
+// Y is flipped (negated `f` in the second row) so the M3 image is
 // upright; Vulkan's NDC has Y-down by default.
 //
-// Derivation (right-handed view space, depth [0,1] Vulkan):
-//   col-vec P (multiply on the left, p_clip = P * p_view):
-//     [ f/aspect 0  0                  0                  ]
-//     [ 0       -f  0                  0                  ]   (-f flips Y)
-//     [ 0        0  far/(near-far)     near*far/(near-far) ]
-//     [ 0        0 -1                  0                  ]
-//   row-vec form is the transpose (multiply on the right, p_clip =
-//   p_view * P):
-//     [ f/aspect 0  0                   0 ]
-//     [ 0       -f  0                   0 ]
-//     [ 0        0  far/(near-far)     -1 ]
-//     [ 0        0  near*far/(near-far) 0 ]
+// Right-handed view space, depth [0, 1] (Vulkan), `v_clip = P · v_view`:
+//   [ f/aspect  0      0                  0                   ]
+//   [ 0        -f      0                  0                   ]   (-f flips Y)
+//   [ 0         0      far/(near-far)     near*far/(near-far) ]
+//   [ 0         0     -1                  0                   ]
 //
-// Verification for view = (0, 0, -3, 1) with near=0.1, far=100:
-//   p.z = -3 * far/(near-far) + 1 * near*far/(near-far)
-//       = -3 * (100/-99.9) + 10/-99.9
-//       = 3.003 - 0.1
-//       = 2.903
-//   p.w = -3 * (-1) + 1 * 0 = 3
-//   NDC.z = 2.903 / 3 = 0.967  -- well within [0, 1] (close to far).
-//
-// (An earlier draft used `far/zSpan` and `+1` here; that flipped two
-// signs, projecting the cube to NDC.z = 1.034 — outside the clip
-// range, so every primary ray missed and the screen showed only
-// sky.)
+// Verification for v_view = (0, 0, -3, 1)ᵀ with near=0.1, far=100:
+//   v_clip.z = far/(near-far) · -3 + near·far/(near-far) · 1
+//            = (100/-99.9) · -3 + 10/-99.9
+//            = 3.003 - 0.1
+//            = 2.903
+//   v_clip.w = -1 · -3 + 0 · 1 = 3
+//   NDC.z = 2.903 / 3 = 0.967  — well within [0, 1] (close to far).
 hlslpp::float4x4 BuildProjMatrix(std::uint32_t renderWidth,
                                  std::uint32_t renderHeight) noexcept {
     const float fovY   = 1.0472f;   // 60 degrees in radians.
@@ -109,10 +98,10 @@ hlslpp::float4x4 BuildProjMatrix(std::uint32_t renderWidth,
     const float nearMinusFar = nearZ - farZ;   // negative.
 
     return hlslpp::float4x4(
-        hlslpp::float4(focal / aspect, 0.0f,   0.0f,                            0.0f),
-        hlslpp::float4(0.0f,           -focal, 0.0f,                            0.0f),
-        hlslpp::float4(0.0f,           0.0f,   farZ / nearMinusFar,             -1.0f),
-        hlslpp::float4(0.0f,           0.0f,   nearZ * farZ / nearMinusFar,     0.0f));
+        hlslpp::float4(focal / aspect, 0.0f,   0.0f,                          0.0f),
+        hlslpp::float4(0.0f,           -focal, 0.0f,                          0.0f),
+        hlslpp::float4(0.0f,           0.0f,   farZ / nearMinusFar,           nearZ * farZ / nearMinusFar),
+        hlslpp::float4(0.0f,           0.0f,  -1.0f,                          0.0f));
 }
 
 }  // namespace

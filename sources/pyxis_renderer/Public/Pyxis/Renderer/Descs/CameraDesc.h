@@ -1,8 +1,8 @@
 // Pyxis renderer — public camera descriptor.
 //
 // Plan §18.4. Input to GpuScene::SetCamera. Both matrices are
-// row-major (§10): `posView = mul(posWorld, viewFromWorld)`,
-// `posClip = mul(posView, projFromView)`.
+// row-major + column-vector (§10): `posView = mul(viewFromWorld, posWorld)`,
+// `posClip = mul(projFromView, posView)`.
 //
 // `apertureFStop = 0.0f` is the pinhole sentinel — DOF stays off (§43.3
 // reserves the runtime path for M9+). `focusDistance` is in scene

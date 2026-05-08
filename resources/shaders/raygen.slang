@@ -45,19 +45,21 @@ void main() {
         -((pixelCenter.y / float(launchDim.y)) * 2.0f - 1.0f));
 
     // Build a view-space ray direction from the inverse projection.
-    // The clip-space point at depth +1 in row-vector convention is
-    // (ndc.x, ndc.y, 1, 1); multiplying by viewFromClip puts it in
-    // view space, and then dividing out w gives the actual point.
-    // Subtracting the view-space origin (0, 0, 0) from that point is
-    // just the point itself, so we normalise its xyz directly.
+    // Column-vector convention everywhere: `v' = M·v`, matrix on the
+    // left. The clip-space point at depth +1 is (ndc.x, ndc.y, 1, 1);
+    // applying viewFromClip puts it in view space, dividing out w
+    // gives the actual point. Subtracting the view-space origin
+    // (0, 0, 0) from that point is just the point itself, so we
+    // normalise its xyz directly.
     const float4 ndcPos       = float4(ndc.x, ndc.y, 1.0f, 1.0f);
-    const float4 viewPos4     = mul(ndcPos, gCamera.viewFromClip);
+    const float4 viewPos4     = mul(gCamera.viewFromClip, ndcPos);
     const float3 viewDir      = normalize(viewPos4.xyz / viewPos4.w);
 
     // Translate the view-space origin + direction to world space via
-    // the inverse view matrix.
-    const float4 worldOrigin4 = mul(float4(0, 0, 0, 1), gCamera.worldFromView);
-    const float4 worldDir4    = mul(float4(viewDir, 0), gCamera.worldFromView);
+    // the inverse view matrix. Direction has w=0 so the translation
+    // column doesn't contribute (= proper basis-vector transform).
+    const float4 worldOrigin4 = mul(gCamera.worldFromView, float4(0, 0, 0, 1));
+    const float4 worldDir4    = mul(gCamera.worldFromView, float4(viewDir, 0));
 
     RayDesc ray;
     ray.Origin    = worldOrigin4.xyz;

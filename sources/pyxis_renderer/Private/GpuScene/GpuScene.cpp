@@ -599,12 +599,16 @@ Expected<void> GpuScene::CommitResources(nvrhi::ICommandList* commandList) {
             if (!mesh.live || !mesh.blas) continue;
 
             nvrhi::rt::InstanceDesc desc;
-            // M5+ converts inst.worldFromLocal (pyxis row-vector
-            // float4x4) to NVRHI's column-vector 3x4 affine. M3 ships
-            // identity for the cube fixture; the helper for non-
-            // identity transforms lands when AppendInstance is
-            // exercised by real ingest. NVRHI's AffineTransform is
-            // `float[12]` so we memcpy rather than assign.
+            // M5+ converts inst.worldFromLocal (column-vector
+            // float4x4 with translation in last column) to NVRHI's
+            // 3x4 affine layout. The two layouts are nearly
+            // identical — drop pyxis row 3 (the [0,0,0,1] homogenous
+            // padding) and you get NVRHI's 12-float layout — but the
+            // packing helper lands when AppendInstance is exercised
+            // by real ingest. M3 ships identity for the cube fixture
+            // so the memcpy of the c_IdentityTransform is correct
+            // unconditionally. NVRHI's AffineTransform is `float[12]`
+            // so we memcpy rather than assign.
             std::memcpy(&desc.transform,
                         &nvrhi::rt::c_IdentityTransform,
                         sizeof(nvrhi::rt::AffineTransform));

@@ -48,9 +48,9 @@ struct HitInfo {
 // CameraDesc and gets wired into the shader at M9+.
 //
 // Layout: 128 bytes (two 64-byte float4x4s). Both matrices are
-// row-major + row-vector convention (§10):
-//   pos_view  = mul(pos_world, viewFromWorld)
-//   pos_clip  = mul(pos_view,  projFromView)
+// row-major + column-vector convention (§10):
+//   pos_view  = mul(viewFromWorld, pos_world)
+//   pos_clip  = mul(projFromView,  pos_view)
 // The raygen shader uses the *inverses* — `worldFromView`
 // (= inverse(viewFromWorld)) to translate ray origin into world,
 // and `viewFromClip` (= inverse(projFromView)) to translate NDC
