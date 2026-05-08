@@ -25,7 +25,11 @@ struct PassContext {
     const RenderSettings* settings       = nullptr;
     const RenderTargets*  targets        = nullptr;
     uint64_t              frameIndex     = 0;
-    uint32_t              framesInFlight = 2;
+    // Default 0 to flush out anyone who forgot to wire it through —
+    // PyxisRenderer::RenderFrame always sets the real value. A pass
+    // that depends on this should assert framesInFlight > 0 in its
+    // Execute().
+    uint32_t              framesInFlight = 0;
 };
 
 }  // namespace pyxis

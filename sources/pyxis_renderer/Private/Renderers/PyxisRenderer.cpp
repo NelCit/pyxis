@@ -55,8 +55,18 @@ void PyxisRenderer::RenderFrame(nvrhi::ICommandList*  commandList,
     _impl->graph->Execute(commandList, ctx);
 }
 
-void PyxisRenderer::Resize(uint32_t /*w*/, uint32_t /*h*/)        { /* M1 no-op */ }
-void PyxisRenderer::ResetAccumulation()                            { /* M1 no-op */ }
+void PyxisRenderer::Resize(uint32_t /*width*/, uint32_t /*height*/) {
+    // TODO(M3): forward to RenderGraph for pass-local target resize +
+    // accumulation reset. M1's TrianglePass keys its framebuffer cache
+    // on nvrhi::ITexture* identity, so a swapchain rebuild already
+    // invalidates the cached entries naturally.
+}
+
+void PyxisRenderer::ResetAccumulation() {
+    // TODO(M3): clear PathTracePass's accumulation buffer so the next
+    // frame starts from sample 0. No-op until the buffer exists.
+}
+
 FrameProfile PyxisRenderer::LastFrameProfile() const               { return _impl->profiler->LastFrameProfile(); }
 
 }  // namespace pyxis

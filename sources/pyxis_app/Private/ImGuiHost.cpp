@@ -108,7 +108,12 @@ bool ImGuiHost::Init(IWindow* window, IDeviceManager* deviceManager) noexcept {
     init.Queue             = vkQueue;
     init.DescriptorPool     = VK_NULL_HANDLE;
     init.DescriptorPoolSize = IMGUI_DESCRIPTOR_POOL_SIZE;   // ImGui builds its own pool with the right types.
-    init.MinImageCount      = 2;
+    // Both image-count knobs match the actual swapchain count. Critically
+    // MinImageCount must equal the count we'd ever pass to
+    // ImGui_ImplVulkan_SetMinImageCount, otherwise that function trips
+    // its own IM_ASSERT(0) marked "FIXME-VIEWPORT: Unsupported" — it
+    // can't actually change MinImageCount post-init in this release.
+    init.MinImageCount      = deviceManager->GetBackbufferCount();
     init.ImageCount         = deviceManager->GetBackbufferCount();
     init.UseDynamicRendering = true;
     init.CheckVkResultFn   = &ImGuiVulkanCheckResult;
@@ -147,12 +152,18 @@ void ImGuiHost::BeginFrame() noexcept {
     ImGui::NewFrame();
 }
 
-void ImGuiHost::OnSwapchainRebuilt(uint32_t imageCount) noexcept {
-    if (!_ready || imageCount == 0) return;
-    // ImGui_ImplVulkan_SetMinImageCount asserts that the GPU is idle —
-    // the caller (VkDeviceManager::EndFrame's resize block, via
-    // ViewerMode) just did a vkDeviceWaitIdle, so we're safe.
-    ImGui_ImplVulkan_SetMinImageCount(imageCount);
+void ImGuiHost::OnSwapchainRebuilt(uint32_t /*imageCount*/) noexcept {
+    if (!_ready) return;
+    // No-op for M1. We'd love to call ImGui_ImplVulkan_SetMinImageCount
+    // here so ImGui's per-frame ring matches the new swapchain, but the
+    // ImGui release we're pinned to (docking-branch c51f1a6e, see
+    // _cmake/Thirdparty.cmake) has IM_ASSERT(0) inside that function
+    // marked "FIXME-VIEWPORT: Unsupported. Need to recreate all swap
+    // chains!" — calling it with a count different from the init-time
+    // count crashes the app. Init now matches the swapchain count
+    // exactly (see Init), and on Windows the count is stable across
+    // resizes (Intel/NVidia drivers don't change it), so this hook
+    // stays for the future when ImGui upstream fixes the FIXME.
 }
 
 void ImGuiHost::BuildFpsPanel(const FrameProfile& frameProfile) noexcept {
