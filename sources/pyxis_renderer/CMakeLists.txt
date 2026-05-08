@@ -150,7 +150,10 @@ pyxis_generate_version_header(pyxis_renderer)
 pyxis_generate_version_source(pyxis_renderer)
 
 # Shaders — M1 triangle vert + frag compiled by Slang at build time
-# (plan §10 / §23).
+# (plan §10 / §23). M3 adds the ray-tracing skeleton (raygen / miss /
+# closesthit) compiled but not yet consumed; the PathTracePass commit
+# (next M3 step) builds the RT pipeline state and the shader binding
+# table that wires them in.
 include(Slang)
 pyxis_compile_slang_shader(
     TARGET      pyxis_renderer
@@ -165,4 +168,27 @@ pyxis_compile_slang_shader(
     ENTRY_POINT main
     STAGE       fragment
     OUTPUT      triangle.frag.spv
+)
+# M3 RT-pipeline shader skeleton. The .spv is generated and lives at
+# <bin>/Resources/shaders/, ready for the M3 PathTracePass commit.
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/raygen.slang
+    ENTRY_POINT RayGenMain
+    STAGE       raygen
+    OUTPUT      raygen.spv
+)
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/miss.slang
+    ENTRY_POINT MissMain
+    STAGE       miss
+    OUTPUT      miss.spv
+)
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/closesthit.slang
+    ENTRY_POINT ClosestHitMain
+    STAGE       closesthit
+    OUTPUT      closesthit.spv
 )
