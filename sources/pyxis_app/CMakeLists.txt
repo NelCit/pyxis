@@ -21,6 +21,8 @@ target_sources(pyxis PRIVATE
     Private/CliArgs.cpp
     Private/HeadlessMode.h
     Private/HeadlessMode.cpp
+    Private/ViewerMode.h
+    Private/ViewerMode.cpp
 )
 
 target_include_directories(pyxis PRIVATE

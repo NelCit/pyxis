@@ -2,12 +2,13 @@
 
 #include "HeadlessMode.h"
 
+#include "ViewerMode.h"
+
 #include <Pyxis/Platform/Device/DeviceCreationParams.h>
 #include <Pyxis/Platform/Device/IDeviceManager.h>
 #include <Pyxis/Platform/Device/Resolution.h>
 #include <Pyxis/Platform/Logging/Log.h>
 #include <Pyxis/Platform/Logging/LogCategories.h>
-#include <Pyxis/Platform/Window/IWindow.h>
 #include <Pyxis/Renderer/SceneWorldFacade.h>
 
 #include <memory>
@@ -61,40 +62,7 @@ int RunHeadless(int adapterIndex, bool enableValidation) noexcept {
 }
 
 int RunViewer(int adapterIndex, bool enableValidation) noexcept {
-    auto& log = Logging::Get();
-
-    // M1 commit 2: open a real window + swapchain. The frame loop with
-    // TrianglePass + ImGui FPS panel lands at commit 5; for now we open,
-    // tick SceneWorld once (smoke), and tear down cleanly.
-    WindowDesc winDesc{};
-    winDesc.width  = 1920;
-    winDesc.height = 1080;
-    winDesc.title  = "Pyxis";
-
-    IWindow* window = CreateGlfwWindow(winDesc);
-    if (!window) {
-        log.Error(log::PLATFORM, "CreateGlfwWindow failed");
-        return EXIT_DEVICE_INIT_FAIL;
-    }
-
-    DeviceCreationParams params{};
-    params.adapterIndex     = adapterIndex;
-    params.enableValidation = enableValidation;
-    params.framesInFlight   = 2;
-    params.applicationName  = "pyxis";
-
-    const Resolution              backbuffer{ 1920, 1080 };
-    DeviceManagerCreateStatus     status = DeviceManagerCreateStatus::Unknown;
-    IDeviceManager* dm = CreateWindowedDeviceManager(params, window, backbuffer, &status);
-    if (dm == nullptr) {
-        log.Error(log::PLATFORM, "CreateWindowedDeviceManager failed");
-        delete window;
-        return EXIT_DEVICE_INIT_FAIL;
-    }
-
-    const int rc = RunCommon(dm);
-    delete window;
-    return rc;
+    return RunViewerLoop(adapterIndex, enableValidation);
 }
 
 }  // namespace pyxis::app
