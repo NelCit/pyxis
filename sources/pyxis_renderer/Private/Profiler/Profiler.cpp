@@ -194,11 +194,21 @@ FrameProfile Profiler::LastFrameProfile() const {
 }
 
 // ---------------------------------------------------------------------------
-// CpuScope
+// CpuScope — pushes the record at ctor (pre-order), back-fills durationMs
+// at dtor. This produces a parent-before-children record list that's
+// natural to print as an indented tree.
 // ---------------------------------------------------------------------------
 
 Profiler::CpuScope::CpuScope(Profiler& profiler, std::string_view name)
-    : _profiler(&profiler), _startNs(NowNs()), _name(MakeScopeName(name)) {
+    : _profiler(&profiler), _startNs(NowNs()) {
+    auto& records = _profiler->_impl->slots[_profiler->_impl->currentSlot].records;
+    Impl::ScopeRecord r{};
+    r.name     = MakeScopeName(name);
+    r.kind     = FrameProfile::ScopeKind::Cpu;
+    r.depth    = _profiler->_impl->depth;
+    r.queryIdx = -1;
+    _recordIndex = records.size();
+    records.push_back(r);
     ++_profiler->_impl->depth;
 }
 
@@ -206,24 +216,22 @@ Profiler::CpuScope::~CpuScope() {
     if (!_profiler) return;
     const int64_t end = NowNs();
     --_profiler->_impl->depth;
-
-    Impl::ScopeRecord r{};
-    r.name       = _name;
-    r.kind       = FrameProfile::ScopeKind::Cpu;
-    r.durationMs = static_cast<double>(end - _startNs) / 1.0e6;
-    r.depth      = _profiler->_impl->depth;
-    r.queryIdx   = -1;
-    _profiler->_impl->slots[_profiler->_impl->currentSlot].records.push_back(r);
+    auto& records = _profiler->_impl->slots[_profiler->_impl->currentSlot].records;
+    if (_recordIndex < records.size()) {
+        records[_recordIndex].durationMs = static_cast<double>(end - _startNs) / 1.0e6;
+    }
 }
 
 // ---------------------------------------------------------------------------
-// GpuScope — bracket the command list with NVRHI's timer query and the
-// debug marker. Resolution is deferred to the slot drain in BeginFrame().
+// GpuScope — same pre-order push + late-fill pattern. The CPU-side
+// durationMs stays 0 here; the GPU duration is back-filled when the slot
+// is drained (Impl::DrainSlot) and the timer query has resolved.
 // ---------------------------------------------------------------------------
 
 Profiler::GpuScope::GpuScope(Profiler& profiler, nvrhi::ICommandList* commandList, std::string_view name)
-    : _profiler(&profiler), _commandList(commandList), _name(MakeScopeName(name)) {
-    if (_commandList) _commandList->beginMarker(_name.data.data());
+    : _profiler(&profiler), _commandList(commandList) {
+    const FrameProfile::ScopeName scopeName = MakeScopeName(name);
+    if (_commandList) _commandList->beginMarker(scopeName.data.data());
 
     if (_commandList && _profiler->_impl->device) {
         _queryIdx = _profiler->_impl->AcquireQuery();
@@ -232,6 +240,15 @@ Profiler::GpuScope::GpuScope(Profiler& profiler, nvrhi::ICommandList* commandLis
                 _profiler->_impl->queryPool[static_cast<std::size_t>(_queryIdx)].Get());
         }
     }
+
+    auto& records = _profiler->_impl->slots[_profiler->_impl->currentSlot].records;
+    Impl::ScopeRecord r{};
+    r.name     = scopeName;
+    r.kind     = FrameProfile::ScopeKind::Gpu;
+    r.depth    = _profiler->_impl->depth;
+    r.queryIdx = _queryIdx;
+    _recordIndex = records.size();
+    records.push_back(r);
     ++_profiler->_impl->depth;
 }
 
@@ -244,14 +261,8 @@ Profiler::GpuScope::~GpuScope() {
 
     if (!_profiler) return;
     --_profiler->_impl->depth;
-
-    Impl::ScopeRecord r{};
-    r.name       = _name;
-    r.kind       = FrameProfile::ScopeKind::Gpu;
-    r.durationMs = 0.0;       // resolved when this slot is drained.
-    r.depth      = _profiler->_impl->depth;
-    r.queryIdx   = _queryIdx;
-    _profiler->_impl->slots[_profiler->_impl->currentSlot].records.push_back(r);
+    // GPU durationMs is filled in DrainSlot once the timer query resolves
+    // — nothing to back-fill from CPU here.
 }
 
 }  // namespace pyxis

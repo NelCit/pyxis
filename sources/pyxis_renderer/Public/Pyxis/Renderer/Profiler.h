@@ -44,7 +44,10 @@ public:
     private:
         Profiler*        _profiler = nullptr;
         std::int64_t     _startNs  = 0;
-        FrameProfile::ScopeName _name{};
+        // Index into the active slot's records vector. The scope pushes
+        // its record at construction time (pre-order) and back-fills the
+        // durationMs at destruction.
+        std::size_t      _recordIndex = 0;
     };
 
     // ------------------------------------------------------------------
@@ -64,11 +67,13 @@ public:
     private:
         Profiler*            _profiler    = nullptr;
         nvrhi::ICommandList* _commandList = nullptr;
-        FrameProfile::ScopeName _name{};
         // Index into Profiler::Impl::queryPool, or -1 for "no GPU query"
         // (CPU-only profiler, or null command list). The query slot is
         // owned by the pool — GpuScope never sees the raw handle.
         int                  _queryIdx    = -1;
+        // Index into the active slot's records vector — same pre-order
+        // bookkeeping as CpuScope.
+        std::size_t          _recordIndex = 0;
     };
 
     // Frame boundary — called by the Application once per frame.

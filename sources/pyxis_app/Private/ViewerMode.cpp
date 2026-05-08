@@ -237,16 +237,30 @@ int RunViewerLoop(int adapterIndex, bool enableValidation,
     // ---- Frame loop ------------------------------------------------------
     uint64_t frameIndex = 0;
     while (!window->ShouldClose() && !shouldClose.load()) {
-        window->PollEvents();
-        scene.Tick();
         profiler.BeginFrame();
-        deviceManager->BeginFrame();
+        {
+            const Profiler::CpuScope poll(profiler, "app.poll");
+            window->PollEvents();
+        }
+        {
+            const Profiler::CpuScope tick(profiler, "app.scene.tick");
+            scene.Tick();
+        }
+        {
+            // app.dm.acquire is the prime suspect for any "uncapped FPS
+            // is still capped" — vkAcquireNextImageKHR will block waiting
+            // for the compositor (DWM in Windows windowed mode) to
+            // release a swapchain image, regardless of the present mode.
+            const Profiler::CpuScope acquire(profiler, "app.dm.acquire");
+            deviceManager->BeginFrame();
+        }
 
         // Build the ImGui draw data on the CPU side. The Performance panel
         // pulls from the renderer's FrameProfile snapshot, which the
         // GpuTimestampPool drained from a slot the GPU has already
         // retired — fine for human-paced FPS readouts.
         if (imguiHost.IsReady()) {
+            const Profiler::CpuScope imguiCpu(profiler, "app.imgui.cpu");
             const FrameProfile fp = renderer.LastFrameProfile();
             imguiHost.BeginFrame();
             imguiHost.BuildFpsPanel(fp.cpuFrameMs, fp.gpuFrameMs, fp.frameIndex);
@@ -276,9 +290,11 @@ int RunViewerLoop(int adapterIndex, bool enableValidation,
             // capture so --screenshot also doubles as visual proof of the
             // dockable Performance panel.
             if (imguiHost.IsReady()) {
+                const Profiler::CpuScope imguiSubmitCpu(profiler, "app.imgui.submit");
                 commandList->setTextureState(backbuffer, nvrhi::AllSubresources,
                                              nvrhi::ResourceStates::RenderTarget);
                 commandList->commitBarriers();
+                const Profiler::GpuScope imguiSubmitGpu(profiler, commandList, "pass.ImGui");
                 imguiHost.Submit(commandList, backbuffer);
             }
 
@@ -292,29 +308,45 @@ int RunViewerLoop(int adapterIndex, bool enableValidation,
             }
 
             // Transition back to Present for the swapchain.
+            const Profiler::CpuScope submit(profiler, "app.cmd.submit");
             commandList->setTextureState(backbuffer, nvrhi::AllSubresources, nvrhi::ResourceStates::Present);
             commandList->commitBarriers();
             commandList->close();
             device->executeCommandList(commandList);
         }
 
-        deviceManager->EndFrame();
+        {
+            const Profiler::CpuScope present(profiler, "app.dm.present");
+            deviceManager->EndFrame();
+        }
         profiler.EndFrame();
         ++frameIndex;
 
-        // Periodic profiler dump: cheap, log-only, no allocations beyond
-        // the snprintf'd line. With FIF=1 the cpu number includes the
-        // CPU-side wait on the previous frame's GPU completion, so it's
-        // a good proxy for the wall-clock frame time (and fps = 1000/cpu).
+        // Periodic profiler dump: prints the rolling totals plus the
+        // pre-order scope tree, indented by depth. With FIF=1 the cpu
+        // number tracks wall-clock frame time and fps = 1000 / cpu.
         if (frameIndex > 0 && frameIndex % PROFILER_LOG_INTERVAL == 0) {
             const FrameProfile fp = renderer.LastFrameProfile();
             const double fps = fp.cpuFrameMs > 0.0 ? 1000.0 / fp.cpuFrameMs : 0.0;
-            char buf[160];
+            char buf[256];
             std::snprintf(buf, sizeof(buf),
                 "profiler: frame %llu  cpu %.3f ms  gpu %.3f ms  fps %.1f",
                 static_cast<unsigned long long>(fp.frameIndex),
                 fp.cpuFrameMs, fp.gpuFrameMs, fps);
             log.Info(log::APP, buf);
+            for (const FrameProfile::PassTiming& t : fp.passes) {
+                const char* kind = (t.kind == FrameProfile::ScopeKind::Cpu) ? "CPU" : "GPU";
+                const std::string_view name = t.name.View();
+                // Two spaces per depth level, "  CPU "/"  GPU " column.
+                char line[256];
+                std::snprintf(line, sizeof(line),
+                    "profiler:   %*s%s %.*s  %.3f ms",
+                    static_cast<int>(t.depth * 2), "",
+                    kind,
+                    static_cast<int>(name.size()), name.data(),
+                    t.durationMs);
+                log.Info(log::APP, line);
+            }
         }
     }
 
