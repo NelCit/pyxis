@@ -10,7 +10,14 @@
 #include <Pyxis/Platform/Device/Resolution.h>
 #include <Pyxis/Platform/Logging/Log.h>
 #include <Pyxis/Platform/Logging/LogCategories.h>
+#include <Pyxis/Renderer/Descs/RenderSettings.h>
+#include <Pyxis/Renderer/Descs/RenderTargets.h>
+#include <Pyxis/Renderer/Descs/RendererCreateDesc.h>
+#include <Pyxis/Renderer/Profiler.h>
+#include <Pyxis/Renderer/PyxisRenderer.h>
 #include <Pyxis/Renderer/SceneWorldFacade.h>
+
+#include <nvrhi/nvrhi.h>
 
 #include <memory>
 
@@ -35,49 +42,122 @@ int RunHeadless(const Configuration& config) noexcept {
         return EXIT_CONFIG_FAIL;
     }
 
+    // ---- Device manager + offscreen render target ----------------------
     DeviceCreationParams params{};
     params.adapterIndex     = -1;     // M3+ wires config.adapter; for now use the discrete-first picker.
     params.enableValidation = config.diagnostics.validationLayer;
     params.framesInFlight   = config.limits.framesInFlight;
     params.applicationName  = "pyxis (headless)";
 
-    const Resolution              backbuffer{ config.render.width, config.render.height };
-    DeviceManagerCreateStatus     status = DeviceManagerCreateStatus::Unknown;
-    // The pointee will be mutated in the next M2 commit (BeginFrame /
-    // EndFrame / createCommandList for the offscreen render). Until
-    // then, take the IDeviceManager* and delete-cleanup-on-error
-    // pattern below; the const-correctness fix lands with that commit.
-    IDeviceManager* deviceManager = CreateHeadlessDeviceManager(params, backbuffer, &status);  // NOLINT(misc-const-correctness)
-    if (deviceManager == nullptr) {
+    const Resolution             backbuffer{ config.render.width, config.render.height };
+    DeviceManagerCreateStatus    status = DeviceManagerCreateStatus::Unknown;
+    const std::unique_ptr<IDeviceManager> deviceManager{
+        CreateHeadlessDeviceManager(params, backbuffer, &status) };
+    if (!deviceManager) {
         log.Error(log::PLATFORM, "CreateHeadlessDeviceManager failed");
         return EXIT_DEVICE_INIT_FAIL;
     }
-
-    SceneWorldFacade scene;
-    const SceneWorldStatus initStatus = scene.Init();
-    if (initStatus != SceneWorldStatus::Ok) {
-        log.Error(log::RENDER, "SceneWorldFacade::Init failed");
-        delete deviceManager;
+    nvrhi::IDevice* device = deviceManager->GetDevice();
+    if (!device) {
+        log.Error(log::PLATFORM, "headless: nvrhi::IDevice not available");
+        return EXIT_DEVICE_INIT_FAIL;
+    }
+    nvrhi::ITexture* renderTarget = deviceManager->GetCurrentBackbuffer();
+    if (!renderTarget) {
+        log.Error(log::PLATFORM, "headless: offscreen render target not available");
         return EXIT_DEVICE_INIT_FAIL;
     }
 
-    // Tick once so the M0 phase pipeline runs at least one round-trip
-    // (the SceneWorldInit unit test asserts the same in isolation; this
-    // is the whole-process variant). M2's render-to-EXR path lands in
-    // the next commit on this branch — for now this matches the M0
-    // behaviour with the new Configuration plumbing in place.
-    scene.Tick();
+    // ---- SceneWorld + Profiler + Renderer ------------------------------
+    SceneWorldFacade scene;
+    if (scene.Init() != SceneWorldStatus::Ok) {
+        log.Error(log::RENDER, "SceneWorldFacade::Init failed");
+        return EXIT_DEVICE_INIT_FAIL;
+    }
+    Profiler              profiler{ device };
+    RendererCreateDesc    rendererDesc{};
+    rendererDesc.initialWidth  = config.render.width;
+    rendererDesc.initialHeight = config.render.height;
+    PyxisRenderer         renderer{ device, profiler, rendererDesc };
 
-    // Best-effort: write the resolved config back to disk so callers can
-    // diff their actual run against parameters.json. Non-fatal on
-    // failure (logs a warning).
+    const nvrhi::CommandListHandle commandListHandle = device->createCommandList();
+    nvrhi::ICommandList* const     commandList       = commandListHandle.Get();
+
+    // ---- One render frame ----------------------------------------------
+    // M2 ships a single render. samplesPerFrame > 1 is M3+'s
+    // accumulation territory — for the hardcoded triangle every frame
+    // would paint the same pixels anyway, so iterating buys nothing.
+    scene.Tick();
+    profiler.BeginFrame();
+    deviceManager->BeginFrame();
+
+    {
+        const Profiler::CpuScope frameScope(profiler, "headless.frame");
+
+        commandList->open();
+        RenderTargets targets{};
+        targets.color = renderTarget;
+        RenderSettings settings{};
+        settings.width  = renderTarget->getDesc().width;
+        settings.height = renderTarget->getDesc().height;
+        renderer.RenderFrame(commandList, settings, targets);
+        commandList->close();
+        device->executeCommandList(commandList);
+    }
+
+    deviceManager->EndFrame();
+    profiler.EndFrame();
+    device->runGarbageCollection();
+
+    // ---- Readback to a host-mapped staging texture ---------------------
+    // Same pattern as ViewerMode::CaptureBackbufferToPng — copy the
+    // offscreen RT into a CpuAccessMode::Read staging texture, wait
+    // idle, map. The next M2 commit hands `mapped` to the EXR writer.
+    const auto& rtDesc = renderTarget->getDesc();
+    nvrhi::TextureDesc stagingDesc;
+    stagingDesc.format    = rtDesc.format;
+    stagingDesc.width     = rtDesc.width;
+    stagingDesc.height    = rtDesc.height;
+    stagingDesc.dimension = nvrhi::TextureDimension::Texture2D;
+    stagingDesc.debugName = "headless-readback-staging";
+    const nvrhi::StagingTextureHandle staging =
+        device->createStagingTexture(stagingDesc, nvrhi::CpuAccessMode::Read);
+    if (!staging) {
+        log.Error(log::APP, "headless: createStagingTexture failed");
+        return EXIT_DEVICE_INIT_FAIL;
+    }
+
+    {
+        commandList->open();
+        commandList->copyTexture(staging.Get(),  nvrhi::TextureSlice{},
+                                 renderTarget,    nvrhi::TextureSlice{});
+        commandList->close();
+        device->executeCommandList(commandList);
+    }
+    device->waitForIdle();
+    device->runGarbageCollection();
+
+    std::size_t rowPitch = 0;
+    const void* mapped = device->mapStagingTexture(staging.Get(), nvrhi::TextureSlice{},
+                                                   nvrhi::CpuAccessMode::Read, &rowPitch);
+    if (!mapped) {
+        log.Error(log::APP, "headless: mapStagingTexture failed");
+        return EXIT_DEVICE_INIT_FAIL;
+    }
+    {
+        std::string msg = "headless: rendered ";
+        msg += std::to_string(rtDesc.width) + "x" + std::to_string(rtDesc.height);
+        msg += "  rowPitch=" + std::to_string(rowPitch);
+        msg += "  -> EXR writer wired in next commit (target: " + config.output.image + ")";
+        log.Info(log::APP, msg);
+    }
+    device->unmapStagingTexture(staging.Get());
+
+    // ---- Effective-config dump + teardown ------------------------------
     if (!config.output.effectiveConfig.empty()) {
         (void)WriteEffectiveConfig(config);
     }
-
-    log.Info(log::APP, "headless: M2 config plumbing OK; EXR writer wired in next commit");
     scene.Shutdown();
-    delete deviceManager;
     return EXIT_OK;
 }
 

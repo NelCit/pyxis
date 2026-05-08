@@ -186,9 +186,50 @@ DeviceManagerCreateStatus VkDeviceManagerHeadless::Bringup(
         VK_EXT_HOST_QUERY_RESET_EXTENSION_NAME,
     };
 
-    VkPhysicalDeviceFeatures coreFeatures{};
-    coreFeatures.shaderInt64 = VK_TRUE;
-    coreFeatures.shaderStorageImageReadWithoutFormat = VK_TRUE;
+    // Same Vulkan 1.3 feature chain as VkDeviceManager (§5.b mandatory):
+    // sync2 + dynamicRendering + timelineSemaphore + bufferDeviceAddress
+    // + descriptorIndexing + shaderDrawParameters. NVRHI's renderer code
+    // assumes all of these regardless of mode, and validation fires
+    // VUID-vkCmdPipelineBarrier2-synchronization2-03848 etc. if any are
+    // missing. M1 didn't notice because RunHeadless never actually
+    // exercised the renderer; M2's render-to-EXR path does.
+    VkPhysicalDeviceVulkan13Features v13{};
+    v13.sType            = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+    v13.synchronization2 = VK_TRUE;
+    v13.dynamicRendering = VK_TRUE;
+
+    VkPhysicalDeviceVulkan12Features v12{};
+    v12.sType                                       = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+    v12.timelineSemaphore                           = VK_TRUE;
+    v12.bufferDeviceAddress                         = VK_TRUE;
+    v12.descriptorIndexing                          = VK_TRUE;
+    v12.runtimeDescriptorArray                      = VK_TRUE;
+    v12.descriptorBindingPartiallyBound             = VK_TRUE;
+    v12.shaderSampledImageArrayNonUniformIndexing   = VK_TRUE;
+    v12.shaderStorageBufferArrayNonUniformIndexing  = VK_TRUE;
+    v12.hostQueryReset                              = VK_TRUE;
+    v12.pNext                                       = &v13;
+
+    VkPhysicalDeviceVulkan11Features v11{};
+    v11.sType                = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+    v11.shaderDrawParameters = VK_TRUE;
+    v11.pNext                = &v12;
+
+    VkPhysicalDeviceAccelerationStructureFeaturesKHR asFeats{};
+    asFeats.sType                                   = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
+    asFeats.accelerationStructure                   = VK_TRUE;
+    asFeats.pNext                                   = &v11;
+
+    VkPhysicalDeviceRayTracingPipelineFeaturesKHR rtFeats{};
+    rtFeats.sType                                   = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
+    rtFeats.rayTracingPipeline                      = VK_TRUE;
+    rtFeats.pNext                                   = &asFeats;
+
+    VkPhysicalDeviceFeatures2 features2{};
+    features2.sType                                 = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    features2.features.shaderInt64                  = VK_TRUE;
+    features2.features.shaderStorageImageReadWithoutFormat = VK_TRUE;
+    features2.pNext                                 = &rtFeats;
 
     VkDeviceCreateInfo dInfo{};
     dInfo.sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -196,7 +237,9 @@ DeviceManagerCreateStatus VkDeviceManagerHeadless::Bringup(
     dInfo.pQueueCreateInfos       = &qInfo;
     dInfo.enabledExtensionCount   = static_cast<uint32_t>(std::size(deviceExtensions));
     dInfo.ppEnabledExtensionNames = deviceExtensions;
-    dInfo.pEnabledFeatures        = &coreFeatures;
+    dInfo.pNext                   = &features2;
+    // dInfo.pEnabledFeatures stays null — features come through the
+    // VkPhysicalDeviceFeatures2 chain (Vulkan 1.1+ pattern).
 
     if (vkCreateDevice(_physicalDevice, &dInfo, nullptr, &_device) != VK_SUCCESS) {
         log.Error(log::PLATFORM, "VkDeviceManagerHeadless: vkCreateDevice failed");
@@ -226,6 +269,25 @@ DeviceManagerCreateStatus VkDeviceManagerHeadless::Bringup(
         return DeviceManagerCreateStatus::DeviceCreationFailed;
     }
 
+    // Offscreen colour render target — replaces the swapchain image.
+    // SBGRA8_UNORM matches viewer mode so renderer code is mode-agnostic.
+    // initialState=RenderTarget + keepInitialState=true mirrors the
+    // viewer's swapchain wrap so NVRHI tracks transitions identically.
+    nvrhi::TextureDesc rtDesc;
+    rtDesc.format         = nvrhi::Format::SBGRA8_UNORM;
+    rtDesc.width          = initialBackbuffer.width;
+    rtDesc.height         = initialBackbuffer.height;
+    rtDesc.dimension      = nvrhi::TextureDimension::Texture2D;
+    rtDesc.isRenderTarget = true;
+    rtDesc.debugName      = "headless-offscreen-rt";
+    rtDesc.initialState   = nvrhi::ResourceStates::RenderTarget;
+    rtDesc.keepInitialState = true;
+    _renderTarget = _nvrhiDevice->createTexture(rtDesc);
+    if (!_renderTarget) {
+        log.Error(log::PLATFORM, "VkDeviceManagerHeadless: createTexture(offscreen RT) failed");
+        return DeviceManagerCreateStatus::OutOfMemory;
+    }
+
     {
         std::string msg = "Vulkan headless device ready: ";
         msg.append(_adapter.NameView());
@@ -235,6 +297,9 @@ DeviceManagerCreateStatus VkDeviceManagerHeadless::Bringup(
         msg += std::to_string(_adapter.totalDeviceLocalBytes / (1024ull * 1024ull));
         msg += " MiB  framesInFlight=";
         msg += std::to_string(_framesInFlight);
+        msg += "  rt=";
+        msg += std::to_string(initialBackbuffer.width) + "x" +
+               std::to_string(initialBackbuffer.height);
         log.Info(log::PLATFORM, msg);
     }
 
@@ -245,10 +310,14 @@ void VkDeviceManagerHeadless::Teardown() noexcept {
     if (_device != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(_device);
     }
-    // Drop the NVRHI device wrapper BEFORE vkDestroyDevice — its dtor
-    // walks internal refs that touch the VkDevice, so the wrapped device
-    // must outlive everything NVRHI knows about. Same discipline as the
-    // windowed manager.
+    // Drop the offscreen RT first (NVRHI ref), then the device wrapper,
+    // BEFORE vkDestroyDevice — same lifetime discipline as the windowed
+    // manager: NVRHI's deleters walk internal refs that touch the
+    // VkDevice, so the VkDevice must outlive everything NVRHI knows.
+    _renderTarget = nullptr;
+    if (_nvrhiDevice) {
+        _nvrhiDevice->runGarbageCollection();
+    }
     _nvrhiDevice = nullptr;
     if (_device != VK_NULL_HANDLE) {
         vkDestroyDevice(_device, nullptr);

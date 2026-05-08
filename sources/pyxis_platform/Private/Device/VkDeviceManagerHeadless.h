@@ -31,12 +31,16 @@ public:
     [[nodiscard]] uint32_t           GetFramesInFlight() const noexcept override;
     [[nodiscard]] bool               IsHeadless()        const noexcept override { return true; }
 
-    // Headless: no swapchain. M2 will wire a writeable readback target.
-    [[nodiscard]] nvrhi::ITexture* GetCurrentBackbuffer() const noexcept override { return nullptr; }
-    [[nodiscard]] uint32_t         GetBackbufferCount()   const noexcept override { return 0; }
+    // Headless: a single offscreen colour render target stands in for
+    // the swapchain. Same nvrhi::ITexture surface as viewer mode so the
+    // renderer doesn't branch on headless vs windowed.
+    [[nodiscard]] nvrhi::ITexture* GetCurrentBackbuffer() const noexcept override { return _renderTarget.Get(); }
+    [[nodiscard]] uint32_t         GetBackbufferCount()   const noexcept override { return _renderTarget ? 1u : 0u; }
     [[nodiscard]] uint32_t         GetCurrentBackbufferIndex() const noexcept override { return 0; }
-    [[nodiscard]] nvrhi::ITexture* GetBackbuffer(uint32_t)      const noexcept override { return nullptr; }
-    // Headless never rebuilds anything — generation stays at 0.
+    [[nodiscard]] nvrhi::ITexture* GetBackbuffer(uint32_t index) const noexcept override {
+        return index == 0 ? _renderTarget.Get() : nullptr;
+    }
+    // Headless never rebuilds the target — generation stays at 0.
     [[nodiscard]] uint32_t         GetSwapchainGeneration() const noexcept override { return 0; }
 
     void BeginFrame() override;
@@ -66,6 +70,13 @@ private:
     // RefCountPtr so the wrapped nvrhi::Device follows the same lifetime
     // discipline as the windowed manager (drops before vkDestroyDevice).
     nvrhi::DeviceHandle _nvrhiDevice;
+
+    // Offscreen colour render target — the headless equivalent of a
+    // swapchain image. Sized to backbuffer dims at Bringup time. Format
+    // is SBGRA8_UNORM to match the viewer swapchain so the renderer's
+    // pass code paths don't branch on headless vs windowed; M3+ may
+    // raise this to RGBA16F when the path tracer wants HDR fidelity.
+    nvrhi::TextureHandle _renderTarget;
 };
 
 }  // namespace pyxis
