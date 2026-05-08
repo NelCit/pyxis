@@ -18,15 +18,15 @@ void RenderGraph::AddPass(std::unique_ptr<IRenderPass> pass) {
     if (pass) _passes.push_back(std::move(pass));
 }
 
-void RenderGraph::Execute(nvrhi::ICommandList* cl, const PassContext& ctx) {
+void RenderGraph::Execute(nvrhi::ICommandList* commandList, const PassContext& ctx) {
     for (auto& pass : _passes) {
         const std::string_view name = pass->Name();
-        const CommandListMarker mark(cl, name);
+        const CommandListMarker mark(commandList, name);
         if (_profiler) {
-            const Profiler::GpuScope gpu(*_profiler, cl, name);
-            pass->Execute(cl, ctx);
+            const Profiler::GpuScope gpu(*_profiler, commandList, name);
+            pass->Execute(commandList, ctx);
         } else {
-            pass->Execute(cl, ctx);
+            pass->Execute(commandList, ctx);
         }
     }
 }

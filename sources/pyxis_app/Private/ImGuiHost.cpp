@@ -52,14 +52,14 @@ void ImGuiVulkanCheckResult(VkResult err) {
 
 ImGuiHost::~ImGuiHost() { Shutdown(); }
 
-bool ImGuiHost::Init(IWindow* window, IDeviceManager* dm) noexcept {
+bool ImGuiHost::Init(IWindow* window, IDeviceManager* deviceManager) noexcept {
     auto& log = Logging::Get();
-    if (!window || !dm) {
+    if (!window || !deviceManager) {
         log.Error(log::APP, "ImGuiHost::Init: null window or device manager");
         return false;
     }
 
-    const VulkanContext vk = dm->GetVulkanContext();
+    const VulkanContext vk = deviceManager->GetVulkanContext();
     if (!vk.instance || !vk.physicalDevice || !vk.device || !vk.graphicsQueue) {
         log.Error(log::APP, "ImGuiHost::Init: device manager surfaced null Vulkan handles");
         return false;
@@ -108,7 +108,7 @@ bool ImGuiHost::Init(IWindow* window, IDeviceManager* dm) noexcept {
     init.DescriptorPool     = VK_NULL_HANDLE;
     init.DescriptorPoolSize = IMGUI_DESCRIPTOR_POOL_SIZE;   // ImGui builds its own pool with the right types.
     init.MinImageCount      = 2;
-    init.ImageCount         = dm->GetBackbufferCount();
+    init.ImageCount         = deviceManager->GetBackbufferCount();
     init.UseDynamicRendering = true;
     init.CheckVkResultFn   = &ImGuiVulkanCheckResult;
 
@@ -170,20 +170,20 @@ void ImGuiHost::Render() noexcept {
     ImGui::Render();
 }
 
-void ImGuiHost::Submit(nvrhi::ICommandList* cl, nvrhi::ITexture* colorTarget) noexcept {
-    if (!_ready || !cl || !colorTarget) return;
+void ImGuiHost::Submit(nvrhi::ICommandList* commandList, nvrhi::ITexture* colorTarget) noexcept {
+    if (!_ready || !commandList || !colorTarget) return;
 
     ImDrawData* drawData = ImGui::GetDrawData();
     if (!drawData || drawData->CmdListsCount == 0) return;
 
     // Lift the raw Vulkan handles out of NVRHI. We're inside an open
-    // command list (cl->open() was called by the caller); render-pass
-    // boundaries are NVRHI's responsibility — we begin our own dynamic-
-    // rendering block here on top of NVRHI's command buffer.
+    // command list (commandList->open() was called by the caller);
+    // render-pass boundaries are NVRHI's responsibility — we begin our
+    // own dynamic-rendering block here on top of NVRHI's command buffer.
     // nvrhi::Object has a templated `operator T*()` so the native handle
     // converts directly to its Vulkan pointer-typed alias (VkCommandBuffer
     // is `struct VkCommandBuffer_T*` etc.). No reinterpret_cast needed.
-    VkCommandBuffer vkCmd = cl->getNativeObject(nvrhi::ObjectTypes::VK_CommandBuffer);
+    VkCommandBuffer vkCmd = commandList->getNativeObject(nvrhi::ObjectTypes::VK_CommandBuffer);
     VkImageView     vkView = colorTarget->getNativeView(
         nvrhi::ObjectTypes::VK_ImageView,
         nvrhi::Format::UNKNOWN,

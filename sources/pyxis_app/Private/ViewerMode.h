@@ -8,11 +8,11 @@
 //   4. Frame loop until ShouldClose():
 //        PollEvents →
 //        profiler.BeginFrame →
-//        dm.BeginFrame (vkAcquireNextImageKHR) →
+//        deviceManager.BeginFrame (vkAcquireNextImageKHR) →
 //        open commandList →
-//        renderer.RenderFrame(cl, settings, { color = currentBackbuffer }) →
+//        renderer.RenderFrame(commandList, settings, { color = currentBackbuffer }) →
 //        close + execute commandList →
-//        dm.EndFrame (vkQueuePresentKHR) →
+//        deviceManager.EndFrame (vkQueuePresentKHR) →
 //        profiler.EndFrame.
 //   5. Wait idle, tear down.
 //

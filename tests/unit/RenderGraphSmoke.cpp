@@ -36,7 +36,7 @@ public:
         : _name(name), _global(globalCounter), _lastOrder(lastOrder), _runCount(runCount) {}
 
     std::string_view Name() const override { return _name; }
-    void Execute(nvrhi::ICommandList* /*cl*/, const pyxis::PassContext& /*ctx*/) override {
+    void Execute(nvrhi::ICommandList* /*commandList*/, const pyxis::PassContext& /*ctx*/) override {
         _lastOrder = _global.fetch_add(1);
         ++_runCount;
     }
@@ -54,7 +54,7 @@ TEST(RenderGraphSmoke, EmptyGraphExecuteIsNoOp) {
     pyxis::Profiler profiler{ nullptr };  // CPU-only — §18.7
     pyxis::RenderGraph graph{ /*device=*/nullptr, &profiler };
     const pyxis::PassContext ctx{};
-    graph.Execute(/*cl=*/nullptr, ctx);
+    graph.Execute(/*commandList=*/nullptr, ctx);
     SUCCEED();
 }
 

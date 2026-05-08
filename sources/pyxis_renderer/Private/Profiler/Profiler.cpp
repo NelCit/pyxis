@@ -206,8 +206,8 @@ Profiler::CpuScope::~CpuScope() {
 // debug marker. Resolution is deferred to the slot drain in BeginFrame().
 // ---------------------------------------------------------------------------
 
-Profiler::GpuScope::GpuScope(Profiler& profiler, nvrhi::ICommandList* cl, std::string_view name)
-    : _profiler(&profiler), _commandList(cl), _name(MakeScopeName(name)) {
+Profiler::GpuScope::GpuScope(Profiler& profiler, nvrhi::ICommandList* commandList, std::string_view name)
+    : _profiler(&profiler), _commandList(commandList), _name(MakeScopeName(name)) {
     if (_commandList) _commandList->beginMarker(_name.data.data());
 
     if (_commandList && _profiler->_impl->device) {

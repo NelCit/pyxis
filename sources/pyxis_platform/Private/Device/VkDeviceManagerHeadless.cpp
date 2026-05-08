@@ -224,13 +224,13 @@ IDeviceManager* CreateHeadlessDeviceManager(const DeviceCreationParams&  params,
                                             const Resolution&            initialBackbuffer,
                                             DeviceManagerCreateStatus*   status) noexcept {
     DeviceManagerCreateStatus localStatus = DeviceManagerCreateStatus::Unknown;
-    auto* dm = new VkDeviceManagerHeadless(params, initialBackbuffer, &localStatus);
+    auto* deviceManager = new VkDeviceManagerHeadless(params, initialBackbuffer, &localStatus);
     if (status) *status = localStatus;
     if (localStatus != DeviceManagerCreateStatus::Ok) {
-        delete dm;
+        delete deviceManager;
         return nullptr;
     }
-    return dm;
+    return deviceManager;
 }
 
 }  // namespace pyxis

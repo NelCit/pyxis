@@ -38,12 +38,12 @@ PyxisRenderer::PyxisRenderer(nvrhi::IDevice*           device,
 
 PyxisRenderer::~PyxisRenderer() { delete _impl; }
 
-void PyxisRenderer::RenderFrame(nvrhi::ICommandList*  cl,
+void PyxisRenderer::RenderFrame(nvrhi::ICommandList*  commandList,
                                 const RenderSettings& settings,
                                 const RenderTargets&  targets) {
-    if (!_impl || !_impl->graph || !cl) return;
+    if (!_impl || !_impl->graph || !commandList) return;
     PassContext ctx{};
-    ctx.commandList    = cl;
+    ctx.commandList    = commandList;
     ctx.profiler       = _impl->profiler;
     ctx.settings       = &settings;
     ctx.targets        = &targets;
@@ -52,7 +52,7 @@ void PyxisRenderer::RenderFrame(nvrhi::ICommandList*  cl,
     ctx.framesInFlight = 1;
 
     const Profiler::CpuScope frameScope(*_impl->profiler, "render.frame.cpu");
-    _impl->graph->Execute(cl, ctx);
+    _impl->graph->Execute(commandList, ctx);
 }
 
 void PyxisRenderer::Resize(uint32_t /*w*/, uint32_t /*h*/)        { /* M1 no-op */ }

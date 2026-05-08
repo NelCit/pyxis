@@ -23,7 +23,7 @@ class IRenderPass {
 public:
     virtual ~IRenderPass() = default;
     [[nodiscard]] virtual std::string_view Name() const = 0;
-    virtual void Execute(nvrhi::ICommandList* cl, const PassContext& ctx) = 0;
+    virtual void Execute(nvrhi::ICommandList* commandList, const PassContext& ctx) = 0;
 };
 
 }  // namespace pyxis

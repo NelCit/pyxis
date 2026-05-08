@@ -33,7 +33,7 @@ public:
     // Returns true on success. On any failure the caller should run the
     // viewer with ImGui disabled — IsReady() will report false and every
     // other method becomes a no-op.
-    [[nodiscard]] bool Init(IWindow* window, IDeviceManager* dm) noexcept;
+    [[nodiscard]] bool Init(IWindow* window, IDeviceManager* deviceManager) noexcept;
 
     void Shutdown() noexcept;
 
@@ -49,7 +49,7 @@ public:
     void BeginFrame() noexcept;
     void BuildFpsPanel(double cpuFrameMs, double gpuFrameMs, uint64_t frameIndex) noexcept;
     void Render() noexcept;
-    void Submit(nvrhi::ICommandList* cl, nvrhi::ITexture* colorTarget) noexcept;
+    void Submit(nvrhi::ICommandList* commandList, nvrhi::ITexture* colorTarget) noexcept;
 
 private:
     bool   _ready    = false;

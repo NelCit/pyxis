@@ -618,15 +618,15 @@ IDeviceManager* CreateWindowedDeviceManager(const DeviceCreationParams& params,
                                             const Resolution&           initialBackbuffer,
                                             DeviceManagerCreateStatus*  status) noexcept {
     DeviceManagerCreateStatus localStatus = DeviceManagerCreateStatus::Unknown;
-    auto* dm = new VkDeviceManager(params, window, initialBackbuffer, &localStatus);
+    auto* deviceManager = new VkDeviceManager(params, window, initialBackbuffer, &localStatus);
     if (status) *status = localStatus;
     if (localStatus != DeviceManagerCreateStatus::Ok) {
         Logging::Get().Error(log::PLATFORM,
             std::string{"CreateWindowedDeviceManager: failed with status="} + StatusName(localStatus));
-        delete dm;
+        delete deviceManager;
         return nullptr;
     }
-    return dm;
+    return deviceManager;
 }
 
 }  // namespace pyxis

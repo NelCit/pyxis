@@ -51,11 +51,11 @@ namespace {
 // stb_image_write. BGRA → RGBA swizzle on the CPU side. Plan §35
 // image-regression artefact for M1.
 bool CaptureBackbufferToPng(nvrhi::IDevice*       device,
-                            nvrhi::ICommandList*  cl,
+                            nvrhi::ICommandList*  commandList,
                             nvrhi::ITexture*      backbuffer,
                             std::string_view      pngPath) noexcept {
     auto& log = Logging::Get();
-    if (!device || !cl || !backbuffer || pngPath.empty()) return false;
+    if (!device || !commandList || !backbuffer || pngPath.empty()) return false;
 
     const auto& tdesc = backbuffer->getDesc();
 
@@ -72,12 +72,12 @@ bool CaptureBackbufferToPng(nvrhi::IDevice*       device,
         return false;
     }
 
-    cl->copyTexture(staging.Get(),    nvrhi::TextureSlice{},
-                    backbuffer,        nvrhi::TextureSlice{});
-    cl->setTextureState(backbuffer, nvrhi::AllSubresources, nvrhi::ResourceStates::Present);
-    cl->commitBarriers();
-    cl->close();
-    device->executeCommandList(cl);
+    commandList->copyTexture(staging.Get(),    nvrhi::TextureSlice{},
+                             backbuffer,        nvrhi::TextureSlice{});
+    commandList->setTextureState(backbuffer, nvrhi::AllSubresources, nvrhi::ResourceStates::Present);
+    commandList->commitBarriers();
+    commandList->close();
+    device->executeCommandList(commandList);
     device->waitForIdle();
 
     std::size_t rowPitch = 0;
@@ -176,13 +176,13 @@ int RunViewerLoop(int adapterIndex, bool enableValidation,
 
     const Resolution backbuffer{ winDesc.width, winDesc.height };
     DeviceManagerCreateStatus status = DeviceManagerCreateStatus::Unknown;
-    const std::unique_ptr<IDeviceManager> dm{
+    const std::unique_ptr<IDeviceManager> deviceManager{
         CreateWindowedDeviceManager(params, window.get(), backbuffer, &status) };
-    if (!dm) {
+    if (!deviceManager) {
         log.Error(log::PLATFORM, "ViewerMode: device manager init failed");
         return EXIT_DEVICE_INIT_FAIL;
     }
-    nvrhi::IDevice* device = dm->GetDevice();
+    nvrhi::IDevice* device = deviceManager->GetDevice();
     if (!device) {
         log.Error(log::PLATFORM, "ViewerMode: nvrhi::IDevice not available");
         return EXIT_DEVICE_INIT_FAIL;
@@ -207,7 +207,7 @@ int RunViewerLoop(int adapterIndex, bool enableValidation,
     // is enough — VkDeviceManager::BeginFrame waits on its timeline so the
     // GPU has retired our last submit before we re-open this list. M2+
     // grows this back to a per-slot ring when active framesInFlight rises.
-    const nvrhi::CommandListHandle commandList = device->createCommandList();
+    const nvrhi::CommandListHandle commandListHandle = device->createCommandList();
 
     // ---- ImGui ----------------------------------------------------------
     // Init in both modes so --screenshot doubles as a visual proof of the
@@ -215,7 +215,7 @@ int RunViewerLoop(int adapterIndex, bool enableValidation,
     // plus the panel in its default position.
     ImGuiHost imguiHost;
     const bool screenshotMode = !screenshotPath.empty();
-    if (!imguiHost.Init(window.get(), dm.get())) {
+    if (!imguiHost.Init(window.get(), deviceManager.get())) {
         log.Warn(log::APP, "ViewerMode: ImGui init failed; continuing without UI");
     }
     if (screenshotMode) {
@@ -235,7 +235,7 @@ int RunViewerLoop(int adapterIndex, bool enableValidation,
         window->PollEvents();
         scene.Tick();
         profiler.BeginFrame();
-        dm->BeginFrame();
+        deviceManager->BeginFrame();
 
         // Build the ImGui draw data on the CPU side. The Performance panel
         // pulls from the renderer's FrameProfile snapshot, which the
@@ -248,18 +248,18 @@ int RunViewerLoop(int adapterIndex, bool enableValidation,
             imguiHost.Render();
         }
 
-        nvrhi::ITexture* backbuffer = dm->GetCurrentBackbuffer();
+        nvrhi::ITexture* backbuffer = deviceManager->GetCurrentBackbuffer();
         if (backbuffer) {
-            nvrhi::ICommandList* cl = commandList.Get();
+            nvrhi::ICommandList* commandList = commandListHandle.Get();
 
-            cl->open();
+            commandList->open();
             RenderTargets targets{};
             targets.color = backbuffer;
             RenderSettings settings{};
             settings.width  = backbuffer->getDesc().width;
             settings.height = backbuffer->getDesc().height;
 
-            renderer.RenderFrame(cl, settings, targets);
+            renderer.RenderFrame(commandList, settings, targets);
 
             // ImGui submit: NVRHI just left the backbuffer in
             // ResourceStates::RenderTarget after the renderer's draw,
@@ -271,35 +271,35 @@ int RunViewerLoop(int adapterIndex, bool enableValidation,
             // capture so --screenshot also doubles as visual proof of the
             // dockable Performance panel.
             if (imguiHost.IsReady()) {
-                cl->setTextureState(backbuffer, nvrhi::AllSubresources,
-                                    nvrhi::ResourceStates::RenderTarget);
-                cl->commitBarriers();
-                imguiHost.Submit(cl, backbuffer);
+                commandList->setTextureState(backbuffer, nvrhi::AllSubresources,
+                                             nvrhi::ResourceStates::RenderTarget);
+                commandList->commitBarriers();
+                imguiHost.Submit(commandList, backbuffer);
             }
 
             // Screenshot path: capture this frame's backbuffer to PNG and
             // exit. CaptureBackbufferToPng owns the close + execute +
             // waitForIdle, so we skip the regular Present below.
             if (screenshotMode && frameIndex == SCREENSHOT_FRAME) {
-                CaptureBackbufferToPng(device, cl, backbuffer, screenshotPath);
-                dm->WaitIdle();
+                CaptureBackbufferToPng(device, commandList, backbuffer, screenshotPath);
+                deviceManager->WaitIdle();
                 return EXIT_OK;
             }
 
             // Transition back to Present for the swapchain.
-            cl->setTextureState(backbuffer, nvrhi::AllSubresources, nvrhi::ResourceStates::Present);
-            cl->commitBarriers();
-            cl->close();
-            device->executeCommandList(cl);
+            commandList->setTextureState(backbuffer, nvrhi::AllSubresources, nvrhi::ResourceStates::Present);
+            commandList->commitBarriers();
+            commandList->close();
+            device->executeCommandList(commandList);
         }
 
-        dm->EndFrame();
+        deviceManager->EndFrame();
         profiler.EndFrame();
         ++frameIndex;
     }
 
     log.Info(log::APP, "ViewerMode: frame loop exited; tearing down");
-    dm->WaitIdle();
+    deviceManager->WaitIdle();
     imguiHost.Shutdown();
     return EXIT_OK;
 }

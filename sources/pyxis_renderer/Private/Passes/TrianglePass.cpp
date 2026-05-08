@@ -109,7 +109,7 @@ nvrhi::FramebufferHandle TrianglePass::GetOrCreateFramebuffer(nvrhi::ITexture* c
     return fb;
 }
 
-void TrianglePass::Execute(nvrhi::ICommandList* cl, const PassContext& ctx) {
+void TrianglePass::Execute(nvrhi::ICommandList* commandList, const PassContext& ctx) {
     if (!_shadersOk || !ctx.targets || !ctx.targets->color) return;
 
     nvrhi::ITexture* colorTex = ctx.targets->color;
@@ -117,27 +117,27 @@ void TrianglePass::Execute(nvrhi::ICommandList* cl, const PassContext& ctx) {
     // Clear the color target to the settings-provided clear colour.
     if (ctx.settings) {
         const auto& c = ctx.settings->clearColor;
-        const nvrhi::Color clearC(c[0], c[1], c[2], c[3]);
-        cl->clearTextureFloat(colorTex, nvrhi::AllSubresources, clearC);
+        const nvrhi::Color clearColor(c[0], c[1], c[2], c[3]);
+        commandList->clearTextureFloat(colorTex, nvrhi::AllSubresources, clearColor);
     }
 
-    const nvrhi::FramebufferHandle fb = GetOrCreateFramebuffer(colorTex);
-    const nvrhi::GraphicsPipelineHandle pipe = _pipelineCache[colorTex];
-    if (!pipe || !fb) return;
+    const nvrhi::FramebufferHandle      framebuffer = GetOrCreateFramebuffer(colorTex);
+    const nvrhi::GraphicsPipelineHandle pipeline    = _pipelineCache[colorTex];
+    if (!pipeline || !framebuffer) return;
 
     const auto& tdesc = colorTex->getDesc();
-    nvrhi::GraphicsState gs;
-    gs.pipeline    = pipe;
-    gs.framebuffer = fb;
-    gs.bindings    = { _bindingSet };
-    gs.viewport.addViewportAndScissorRect(nvrhi::Viewport(
+    nvrhi::GraphicsState graphicsState;
+    graphicsState.pipeline    = pipeline;
+    graphicsState.framebuffer = framebuffer;
+    graphicsState.bindings    = { _bindingSet };
+    graphicsState.viewport.addViewportAndScissorRect(nvrhi::Viewport(
         static_cast<float>(tdesc.width),
         static_cast<float>(tdesc.height)));
-    cl->setGraphicsState(gs);
+    commandList->setGraphicsState(graphicsState);
 
     nvrhi::DrawArguments draw;
     draw.vertexCount = 3;
-    cl->draw(draw);
+    commandList->draw(draw);
 }
 
 }  // namespace pyxis

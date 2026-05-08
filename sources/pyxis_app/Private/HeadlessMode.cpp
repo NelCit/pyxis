@@ -20,7 +20,7 @@ namespace {
 constexpr int EXIT_OK             = 0;
 constexpr int EXIT_DEVICE_INIT_FAIL = 2;
 
-int RunCommon(IDeviceManager* dm) noexcept {
+int RunCommon(IDeviceManager* deviceManager) noexcept {
     auto& log = Logging::Get();
 
     SceneWorldFacade scene;
@@ -37,7 +37,7 @@ int RunCommon(IDeviceManager* dm) noexcept {
 
     log.Info(log::APP, "M0 skeleton OK — exiting cleanly");
     scene.Shutdown();
-    delete dm;
+    delete deviceManager;
     return EXIT_OK;
 }
 
@@ -53,12 +53,12 @@ int RunHeadless(int adapterIndex, bool enableValidation) noexcept {
 
     const Resolution              backbuffer{ 1920, 1080 };
     DeviceManagerCreateStatus     status = DeviceManagerCreateStatus::Unknown;
-    IDeviceManager* dm = CreateHeadlessDeviceManager(params, backbuffer, &status);
-    if (dm == nullptr) {
+    IDeviceManager* deviceManager = CreateHeadlessDeviceManager(params, backbuffer, &status);
+    if (deviceManager == nullptr) {
         log.Error(log::PLATFORM, "CreateHeadlessDeviceManager failed");
         return EXIT_DEVICE_INIT_FAIL;
     }
-    return RunCommon(dm);
+    return RunCommon(deviceManager);
 }
 
 int RunViewer(int adapterIndex, bool enableValidation,
