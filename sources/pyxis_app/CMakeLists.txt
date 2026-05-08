@@ -21,6 +21,8 @@ target_sources(pyxis PRIVATE
     Private/CliArgs.cpp
     Private/Config/Configuration.h
     Private/Config/Configuration.cpp
+    Private/Output/ExrWriter.h
+    Private/Output/ExrWriter.cpp
     Private/HeadlessMode.h
     Private/HeadlessMode.cpp
     Private/ViewerMode.h
@@ -43,6 +45,7 @@ target_include_directories(pyxis PRIVATE
 
 find_package(Stb REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
+find_package(tinyexr CONFIG REQUIRED)
 
 # Plan §29.1 overlay order: pyxis loads <exe-dir>/Resources/parameters.
 # default.json as the on-disk default. Copy the source-of-truth to the
@@ -78,7 +81,8 @@ target_link_libraries(pyxis PRIVATE
     Pyxis::Renderer
     pyxis_imgui
     Vulkan::Vulkan        # vkCmdBeginRendering / vkCmdEndRendering / descriptor-pool calls
-    nlohmann_json::nlohmann_json   # parameters.json + effective-config writer (§26 / §27)
+    nlohmann_json::nlohmann_json     # parameters.json + effective-config writer (§26 / §27)
+    unofficial::tinyexr::tinyexr     # headless EXR writer (§41 M2)
 )
 
 # stb_image_write is header-only; vcpkg's `Stb` config exports the

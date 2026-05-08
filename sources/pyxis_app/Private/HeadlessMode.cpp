@@ -3,6 +3,7 @@
 #include "HeadlessMode.h"
 
 #include "Config/Configuration.h"
+#include "Output/ExrWriter.h"
 #include "ViewerMode.h"
 
 #include <Pyxis/Platform/Device/DeviceCreationParams.h>
@@ -144,14 +145,16 @@ int RunHeadless(const Configuration& config) noexcept {
         log.Error(log::APP, "headless: mapStagingTexture failed");
         return EXIT_DEVICE_INIT_FAIL;
     }
-    {
-        std::string msg = "headless: rendered ";
-        msg += std::to_string(rtDesc.width) + "x" + std::to_string(rtDesc.height);
-        msg += "  rowPitch=" + std::to_string(rowPitch);
-        msg += "  -> EXR writer wired in next commit (target: " + config.output.image + ")";
-        log.Info(log::APP, msg);
-    }
+    // ---- EXR write -----------------------------------------------------
+    auto writeResult = WriteExrBgra8(config.output.image,
+                                     rtDesc.width, rtDesc.height,
+                                     mapped, rowPitch);
     device->unmapStagingTexture(staging.Get());
+    if (!writeResult) {
+        log.Error(log::APP, "headless: " + writeResult.error());
+        scene.Shutdown();
+        return EXIT_DEVICE_INIT_FAIL;
+    }
 
     // ---- Effective-config dump + teardown ------------------------------
     if (!config.output.effectiveConfig.empty()) {
