@@ -21,17 +21,15 @@
 namespace pyxis {
 
 struct PyxisRenderer::Impl {
-    nvrhi::IDevice*           device   = nullptr;
-    Profiler*                 profiler = nullptr;
+    Profiler*                    profiler = nullptr;
     std::unique_ptr<RenderGraph> graph;
-    uint64_t                  frameIndex = 0;
+    uint64_t                     frameIndex = 0;
 };
 
 PyxisRenderer::PyxisRenderer(nvrhi::IDevice*           device,
                              Profiler&                 profiler,
                              const RendererCreateDesc& /*desc*/)
     : _impl(new Impl()) {
-    _impl->device   = device;
     _impl->profiler = &profiler;
     _impl->graph    = std::make_unique<RenderGraph>(device, &profiler);
     _impl->graph->AddPass(std::make_unique<TrianglePass>(device));

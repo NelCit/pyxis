@@ -24,8 +24,14 @@ namespace pyxis::app {
 
 namespace {
 
-constexpr int EXIT_OK             = 0;
+constexpr int EXIT_OK               = 0;
 constexpr int EXIT_DEVICE_INIT_FAIL = 2;
+
+// GLFW key code for Escape. Hard-coded to avoid pulling <GLFW/glfw3.h>
+// into pyxis_app (glfw is PRIVATE-linked from pyxis_platform). The
+// value has been 256 since GLFW 3.0 and matches USB HID Escape — stable
+// enough for "Escape closes the viewer" UX.
+constexpr int GLFW_ESCAPE_KEY_CODE  = 256;
 
 }  // namespace
 
@@ -48,7 +54,7 @@ int RunViewerLoop(int adapterIndex, bool enableValidation) noexcept {
     std::atomic<bool> shouldClose{false};
     window->SetEventSink([&](const InputEvent& e) {
         if (e.kind == InputEventKind::WindowClose) shouldClose.store(true);
-        if (e.kind == InputEventKind::KeyDown && e.key == 256 /* GLFW_KEY_ESCAPE */) {
+        if (e.kind == InputEventKind::KeyDown && e.key == GLFW_ESCAPE_KEY_CODE) {
             shouldClose.store(true);
         }
     });

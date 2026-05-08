@@ -77,6 +77,16 @@ nvrhi::FramebufferHandle TrianglePass::GetOrCreateFramebuffer(nvrhi::ITexture* c
     if (auto it = _framebufferCache.find(color); it != _framebufferCache.end()) {
         return it->second;
     }
+    // Bounded-size cache: after a swapchain rebuild the prior swapchain
+    // images are released by NVRHI's RefCountPtr but stale `nvrhi::ITexture*`
+    // keys (whose values are now dangling framebuffers) sit in the cache
+    // forever. Once we exceed 2× the expected swapchain image count, drop
+    // everything — the cache miss costs one frame, which is invisible.
+    constexpr std::size_t MAX_CACHE_ENTRIES = 6;
+    if (_framebufferCache.size() >= MAX_CACHE_ENTRIES) {
+        _framebufferCache.clear();
+        _pipelineCache.clear();
+    }
     nvrhi::FramebufferDesc fbDesc;
     fbDesc.addColorAttachment(color);
     const nvrhi::FramebufferHandle fb = _device->createFramebuffer(fbDesc);
