@@ -64,7 +64,8 @@ struct GpuScene::Impl {
     struct MeshEntry {
         bool                            live           = false;
         bool                            quarantined    = false;
-        bool                            needsGpuUpload = false;   // true between CreateMesh and the next CommitResources.
+        bool                            needsGpuUpload = false;   // true between CreateMesh and the next CommitResources upload step.
+        bool                            needsBlasBuild = false;   // true between mesh upload and the next CommitResources BLAS step.
         uint8_t                         generation     = 0;
         // CPU-side copies of the input MeshDesc spans. The renderer
         // owns these from CreateMesh until DestroyMesh.
@@ -76,15 +77,21 @@ struct GpuScene::Impl {
         std::string                     debugName;
         // GPU-side state populated by CommitResources via NVRHI's
         // writeBuffer staging path. Both buffers are tagged
-        // `isAccelStructBuildInput` so the next M3 commit can build a
-        // BLAS straight from them without re-uploading. Vertex stride
-        // is sizeof(hlslpp::float3) = 16 bytes (12 floats + 4 padding);
-        // VK_FORMAT_R32G32B32_SFLOAT with a 16-byte stride is valid
-        // ray-tracing geometry input under VK_KHR_ray_tracing_pipeline.
+        // `isAccelStructBuildInput` so the BLAS build step can read
+        // them directly. Vertex stride is sizeof(hlslpp::float3) = 16
+        // bytes (12 floats + 4 padding); VK_FORMAT_R32G32B32_SFLOAT
+        // with a 16-byte stride is valid ray-tracing geometry input
+        // under VK_KHR_ray_tracing_pipeline.
         nvrhi::BufferHandle             vertexBuffer;
         nvrhi::BufferHandle             indexBuffer;
         uint32_t                        vertexCount = 0;
         uint32_t                        indexCount  = 0;
+        // Bottom-level acceleration structure built from the buffers
+        // above. v1 keys BLAS by MeshHandle (§16) — strict prototype
+        // sharing means many instances of the same mesh reference one
+        // BLAS, which is what the TLAS-build step (next M3 commit)
+        // consumes.
+        nvrhi::rt::AccelStructHandle    blas;
     };
 
     nvrhi::IDevice*    device   = nullptr;   // borrowed; outlives this scene.
@@ -186,7 +193,8 @@ Expected<MeshHandle> GpuScene::CreateMesh(const MeshDesc& meshDesc) {
     // ---- Populate entry ----------------------------------------------------
     Impl::MeshEntry& entry = _impl->meshes[slot];
     entry.live           = true;
-    entry.needsGpuUpload = true;     // drained on the next CommitResources.
+    entry.needsGpuUpload = true;     // drained on the next CommitResources upload step.
+    entry.needsBlasBuild = true;     // drained on the next CommitResources BLAS step.
     entry.vertexCount    = static_cast<uint32_t>(meshDesc.positions.size());
     entry.indexCount     = static_cast<uint32_t>(meshDesc.indices.size());
     entry.positions.assign(meshDesc.positions.begin(), meshDesc.positions.end());
@@ -219,12 +227,24 @@ void GpuScene::DestroyMesh(MeshHandle meshHandle) {
         return;
     }
     entry.live = false;
+    entry.needsGpuUpload = false;
+    entry.needsBlasBuild = false;
     entry.positions.clear();
     entry.indices.clear();
     entry.normals.clear();
     entry.tangents.clear();
     entry.uv0.clear();
     entry.debugName.clear();
+    // Drop the GPU resources. NVRHI's deferred-destruction queue
+    // keeps them alive until any in-flight command list that
+    // references them retires (NVRHI tracks RefCountPtr ownership
+    // across executeCommandList submissions), so this is safe even
+    // mid-frame.
+    entry.vertexBuffer = nullptr;
+    entry.indexBuffer  = nullptr;
+    entry.blas         = nullptr;
+    entry.vertexCount  = 0;
+    entry.indexCount   = 0;
     if (entry.generation == HANDLE_GENERATION_QUARANTINE) {
         entry.quarantined = true;
     } else {
@@ -379,22 +399,101 @@ Expected<void> GpuScene::CommitResources(nvrhi::ICommandList* commandList) {
         entry.needsGpuUpload = false;
     }
 
-    // BLAS build / TLAS rebuild / camera + light upload land in
-    // subsequent M3 commits. Until then CommitResources only services
-    // the mesh-upload path.
+    // ---- Build pending BLAS -------------------------------------------
+    // §16 split rules. M3's path-trace box has < 64k tris (the hardcoded
+    // cube ships at 12), so PreferFastTrace alone is the right choice
+    // — `AllowCompaction` is opt-in for ≥ 64k tris and pays a memory
+    // savings that doesn't matter at this scale. `AllowUpdate` is
+    // never set in v1: animation is post-v1 (§42), so BLAS is built
+    // once and refit is irrelevant.
+    static constexpr uint32_t BLAS_COMPACTION_TRIANGLE_THRESHOLD = 64u * 1024u;
+    for (Impl::MeshEntry& entry : _impl->meshes) {
+        if (!entry.live || entry.needsGpuUpload || !entry.needsBlasBuild) continue;
+        if (!entry.vertexBuffer || !entry.indexBuffer) {
+            return std::unexpected{
+                PYXIS_ERROR(ErrorKind::InvalidState,
+                            "CommitResources: BLAS build for '%s' missing vertex/index buffers",
+                            entry.debugName.c_str())};
+        }
+
+        const uint32_t triangleCount = entry.indexCount / 3u;
+
+        // Geometry: one triangles-only entry pointing at the mesh's
+        // vertex+index buffers. Vertex format is R32G32B32_FLOAT with a
+        // sizeof(hlslpp::float3) stride (16 bytes) — the SSE alignment
+        // padding is benign because the format declares only 12 bytes
+        // are read per vertex. Index format is R32_UINT, matching the
+        // public MeshDesc::indices spelling.
+        nvrhi::rt::GeometryTriangles triangles;
+        triangles.setVertexBuffer (entry.vertexBuffer.Get())
+                 .setVertexFormat (nvrhi::Format::RGB32_FLOAT)
+                 .setVertexCount  (entry.vertexCount)
+                 .setVertexStride (sizeof(hlslpp::float3))
+                 .setIndexBuffer  (entry.indexBuffer.Get())
+                 .setIndexFormat  (nvrhi::Format::R32_UINT)
+                 .setIndexCount   (entry.indexCount);
+
+        nvrhi::rt::GeometryDesc geometry;
+        geometry.setTriangles(triangles)
+                .setFlags(nvrhi::rt::GeometryFlags::Opaque);
+
+        // Build flags: PreferFastTrace always; add AllowCompaction
+        // for the ≥ 64k-tri path the §16 contract calls out. M3 cube
+        // hits the small-mesh branch.
+        auto buildFlags = nvrhi::rt::AccelStructBuildFlags::PreferFastTrace;
+        if (triangleCount >= BLAS_COMPACTION_TRIANGLE_THRESHOLD) {
+            buildFlags = buildFlags | nvrhi::rt::AccelStructBuildFlags::AllowCompaction;
+        }
+
+        // AccelStructDesc carries the geometry list (NVRHI uses the
+        // same desc for both create + build to size internal scratch).
+        nvrhi::rt::AccelStructDesc blasDesc;
+        blasDesc.isTopLevel = false;
+        blasDesc.bottomLevelGeometries.push_back(geometry);
+        blasDesc.buildFlags = buildFlags;
+        blasDesc.debugName  = entry.debugName.empty()
+                               ? std::string{"mesh.blas"}
+                               : entry.debugName + ".blas";
+        entry.blas = _impl->device->createAccelStruct(blasDesc);
+        if (!entry.blas) {
+            return std::unexpected{
+                PYXIS_ERROR(ErrorKind::AccelStructBuildFailed,
+                            "CommitResources: createAccelStruct(BLAS) failed for '%s' (triCount=%u)",
+                            entry.debugName.c_str(), triangleCount)};
+        }
+
+        // Build the BLAS on the supplied command list. The geometry
+        // pointer points at the local `geometry` value above; NVRHI
+        // copies what it needs internally before the call returns, so
+        // letting the local go out of scope after the call is safe.
+        commandList->buildBottomLevelAccelStruct(entry.blas.Get(),
+                                                 &geometry, /*numGeometries*/ 1,
+                                                 buildFlags);
+        entry.needsBlasBuild = false;
+    }
+
+    // TLAS rebuild + camera + light upload land in subsequent M3
+    // commits. Until then CommitResources services upload + BLAS.
     return {};
 }
 
 // ---- Introspection ---------------------------------------------------------
 FrameStats GpuScene::LastFrameStats() const {
     FrameStats stats = _impl->lastFrameStats;
-    // Recount live meshes on read so stats reflect the current table
-    // even before CommitResources lands.
+    // Recount live meshes + live BLAS on read so stats reflect the
+    // current table state even before CommitResources lands. This
+    // also keeps blasCount honest after a Destroy*: the cumulative
+    // count tracked in `lastFrameStats.blasCount` would over-report
+    // otherwise (BLAS gets dropped in DestroyMesh once that lands).
     uint64_t liveMeshCount = 0;
+    uint64_t liveBlasCount = 0;
     for (const Impl::MeshEntry& entry : _impl->meshes) {
-        if (entry.live) ++liveMeshCount;
+        if (!entry.live) continue;
+        ++liveMeshCount;
+        if (entry.blas) ++liveBlasCount;
     }
     stats.meshCount = liveMeshCount;
+    stats.blasCount = liveBlasCount;
     return stats;
 }
 
