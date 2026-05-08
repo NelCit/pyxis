@@ -155,6 +155,46 @@ endfunction()
 
 
 # ===========================================================================
+# pyxis_thirdparty_require_hlslpp() — pulled in by pyxis_renderer's public
+# headers (MeshDesc / InstanceDesc / CameraDesc use hlslpp::float3 /
+# float4 / float4x4 per plan §10 / §23). Header-only.
+#
+# vcpkg ships an `unofficial::hlslpp::hlslpp` target via
+# `share/hlslpp/hlslpp-config.cmake`, but as of vcpkg port 3.8 that
+# config has a typo (`INTERACE IMPORTED` instead of `INTERFACE
+# IMPORTED`) which makes find_package(hlslpp CONFIG) silently produce
+# no usable target. Locate the umbrella header directly with
+# find_path() and wrap it in our own INTERFACE target so we don't
+# depend on upstream fixing the typo. When vcpkg corrects it we can
+# switch back to find_package without changing call sites.
+# ===========================================================================
+function(pyxis_thirdparty_require_hlslpp)
+    if(TARGET pyxis_hlslpp)
+        return()
+    endif()
+
+    # vcpkg ships the umbrella header at
+    # ${VCPKG_INSTALLED_DIR}/<triplet>/include/hlslpp/hlsl++.h, one level
+    # below the standard include root. PATH_SUFFIXES "hlslpp" tells
+    # find_path() to look one level deeper than the prefix paths
+    # CMAKE_PREFIX_PATH already includes.
+    find_path(PYXIS_HLSLPP_INCLUDE
+        NAMES         "hlsl++.h"
+        PATH_SUFFIXES "hlslpp"
+        DOC           "Directory containing hlsl++.h (vcpkg ships it under include/hlslpp/)")
+    if(NOT PYXIS_HLSLPP_INCLUDE)
+        message(FATAL_ERROR
+            "Pyxis: hlslpp headers not found. Expected vcpkg to install "
+            "include/hlslpp/hlsl++.h — is hlslpp listed in vcpkg.json?")
+    endif()
+
+    add_library(pyxis_hlslpp INTERFACE)
+    target_include_directories(pyxis_hlslpp SYSTEM INTERFACE "${PYXIS_HLSLPP_INCLUDE}")
+    message(STATUS "Pyxis: hlslpp at ${PYXIS_HLSLPP_INCLUDE}")
+endfunction()
+
+
+# ===========================================================================
 # pyxis_thirdparty_require_imgui() — pulled in by pyxis_app's ViewerMode.
 # Builds a `pyxis_imgui` static library combining ImGui's core + the
 # Vulkan + GLFW backends. `find_package(Vulkan)` and `find_package(glfw3)`

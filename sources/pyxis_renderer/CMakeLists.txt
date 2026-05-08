@@ -33,6 +33,20 @@ target_sources(pyxis_renderer PUBLIC
 
         # M3 public surface — foundation for Expected<T>-returning verbs.
         Public/Pyxis/Renderer/Error.h
+
+        # M3 public Desc PODs. Byte-stable per §18.9 / §22.3 — adding
+        # fields requires the trailing _reserved trick; reordering or
+        # narrowing types is a major-version break. See each header
+        # for milestone-specific notes (M3 only consumes the base
+        # block of OpenPBRMaterialDesc, etc.).
+        Public/Pyxis/Renderer/Descs/MeshDesc.h
+        Public/Pyxis/Renderer/Descs/InstanceDesc.h
+        Public/Pyxis/Renderer/Descs/OpenPBRMaterialDesc.h
+        Public/Pyxis/Renderer/Descs/CameraDesc.h
+        Public/Pyxis/Renderer/Descs/LightDesc.h
+        Public/Pyxis/Renderer/Descs/TextureKey.h
+        Public/Pyxis/Renderer/Descs/GpuSceneCreateDesc.h
+        Public/Pyxis/Renderer/Descs/FrameStats.h
 )
 
 # ----------------------------------------------------------------------------
@@ -97,10 +111,18 @@ target_sources(pyxis_renderer PRIVATE
 # ----------------------------------------------------------------------------
 find_package(flecs CONFIG REQUIRED)
 
-# Flecs is PRIVATE — never propagated to dependents (plan §49).
+# hlslpp is header-only and lives in our public Descs (MeshDesc /
+# InstanceDesc / CameraDesc use float3 / float4x4). Linked PUBLIC so
+# consumers (pyxis_app, pyxis_unit_tests, future pyxis_hydra) see the
+# include path.
+pyxis_thirdparty_require_hlslpp()
+
+# Flecs is PRIVATE — never propagated to dependents (plan §49). hlslpp
+# is PUBLIC — it leaks through Public/Descs/* and consumers must see it.
 target_link_libraries(pyxis_renderer
     PUBLIC
         Pyxis::Platform
+        pyxis_hlslpp
     PRIVATE
         $<TARGET_NAME_IF_EXISTS:flecs::flecs_static>
         $<TARGET_NAME_IF_EXISTS:flecs::flecs>
