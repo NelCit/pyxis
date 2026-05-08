@@ -256,7 +256,17 @@ DeviceManagerCreateStatus VkDeviceManager::Bringup(const DeviceCreationParams& p
     qInfo.queueCount       = 1;
     qInfo.pQueuePriorities = &queuePriority;
 
-    std::array<const char*, 8> requiredExt{
+    // Single source of truth for the device extensions we enable. Donut /
+    // NVRHI's tutorial pattern (NVRHI Tutorial.md): the same array is fed
+    // to vkCreateDevice (declares the request) AND to
+    // nvrhi::vulkan::DeviceDesc::deviceExtensions (tells NVRHI which of
+    // its boolean capability flags to flip). Splitting the list across
+    // two declarations was a maintenance hazard — adding an extension
+    // to one and forgetting the other would silently break NVRHI's
+    // capability flags or skip the extension at vkCreateDevice. Storage
+    // type is `const char*[]` (not `const char* const[]`) because NVRHI's
+    // DeviceDesc::deviceExtensions is `const char**`.
+    static const char* deviceExtensions[] = {  // NOLINT(misc-const-correctness)
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
         VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
         VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
@@ -316,8 +326,8 @@ DeviceManagerCreateStatus VkDeviceManager::Bringup(const DeviceCreationParams& p
     dInfo.sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     dInfo.queueCreateInfoCount    = 1;
     dInfo.pQueueCreateInfos       = &qInfo;
-    dInfo.enabledExtensionCount   = static_cast<uint32_t>(requiredExt.size());
-    dInfo.ppEnabledExtensionNames = requiredExt.data();
+    dInfo.enabledExtensionCount   = static_cast<uint32_t>(std::size(deviceExtensions));
+    dInfo.ppEnabledExtensionNames = deviceExtensions;
     dInfo.pNext                   = &features2;
 
     if (vkCreateDevice(_physicalDevice, &dInfo, nullptr, &_device) != VK_SUCCESS) {
@@ -337,23 +347,11 @@ DeviceManagerCreateStatus VkDeviceManager::Bringup(const DeviceCreationParams& p
     nvrhiDesc.graphicsQueueIndex  = _graphicsFamily;
     nvrhiDesc.bufferDeviceAddressSupported = true;
 
-    // Non-constexpr because nvrhi::vulkan::DeviceDesc::deviceExtensions
-    // is `const char**` (pointer-to-non-const), so the elements must be
-    // plain `const char*` (not `const char* const`). misc-const-correctness
-    // would suggest making the elements `const char* const`, but that
-    // breaks the assignment to NVRHI's field.
-    static const char* nvrhiExts[] = {  // NOLINT(readability-identifier-naming, misc-const-correctness)
-        VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-        VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
-        VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
-        VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
-        VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME,
-        VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME,
-        VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME,
-        VK_EXT_HOST_QUERY_RESET_EXTENSION_NAME,
-    };
-    nvrhiDesc.deviceExtensions    = nvrhiExts;
-    nvrhiDesc.numDeviceExtensions = std::size(nvrhiExts);
+    // Same `deviceExtensions` array we fed to vkCreateDevice — NVRHI walks
+    // it to flip its internal capability flags (vulkan-device.cpp's
+    // extensionStringMap), so the two sources MUST stay in sync.
+    nvrhiDesc.deviceExtensions    = deviceExtensions;
+    nvrhiDesc.numDeviceExtensions = std::size(deviceExtensions);
 
     _nvrhiDevice = nvrhi::vulkan::createDevice(nvrhiDesc);
     if (!_nvrhiDevice) {
