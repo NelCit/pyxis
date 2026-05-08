@@ -15,6 +15,10 @@
 
 namespace pyxis {
 
+void VulkanHppInitFromLoader  (PFN_vkGetInstanceProcAddr) noexcept;
+void VulkanHppInitFromInstance(VkInstance) noexcept;
+void VulkanHppInitFromDevice  (VkDevice)   noexcept;
+
 namespace {
 
 constexpr uint32_t VULKAN_API_VERSION = VK_API_VERSION_1_3;
@@ -71,12 +75,15 @@ DeviceManagerCreateStatus VkDeviceManagerHeadless::Bringup(
     _framesInFlight = 3;
     _backbuffer     = initialBackbuffer;
 
+    VulkanHppInitFromLoader(&vkGetInstanceProcAddr);
+
     _instance = CreateInstance(params.enableValidation,
                                params.applicationName, params.applicationVersion);
     if (_instance == VK_NULL_HANDLE) {
         log.Error(log::PLATFORM, "VkDeviceManagerHeadless: VkInstance creation failed");
         return DeviceManagerCreateStatus::InstanceCreationFailed;
     }
+    VulkanHppInitFromInstance(_instance);
 
     uint32_t deviceCount = 0;
     vkEnumeratePhysicalDevices(_instance, &deviceCount, nullptr);
@@ -162,6 +169,7 @@ DeviceManagerCreateStatus VkDeviceManagerHeadless::Bringup(
         return DeviceManagerCreateStatus::DeviceCreationFailed;
     }
     vkGetDeviceQueue(_device, _graphicsFamily, 0, &_graphicsQueue);
+    VulkanHppInitFromDevice(_device);
 
     {
         std::string msg = "Vulkan headless device ready: ";

@@ -27,6 +27,12 @@ public:
     [[nodiscard]] uint32_t           GetFramesInFlight() const noexcept override;
     [[nodiscard]] bool               IsHeadless()        const noexcept override { return true; }
 
+    // Headless: no swapchain. M2 will wire a writeable readback target.
+    [[nodiscard]] nvrhi::ITexture* GetCurrentBackbuffer() const noexcept override { return nullptr; }
+    [[nodiscard]] uint32_t         GetBackbufferCount()   const noexcept override { return 0; }
+    [[nodiscard]] uint32_t         GetCurrentBackbufferIndex() const noexcept override { return 0; }
+    [[nodiscard]] nvrhi::ITexture* GetBackbuffer(uint32_t)      const noexcept override { return nullptr; }
+
     void BeginFrame() override;
     void EndFrame() override;
     void WaitIdle() override;

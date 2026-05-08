@@ -1,28 +1,27 @@
 // Pyxis platform — windowed VkDeviceManager.
 //
-// Plan §5.c. M0 ships the constructor + adapter pick + feature query +
-// VkInstance/VkDevice creation. Swapchain + GLFW window are wired in M1
-// (per §41) — both are stubbed to no-ops for now so the M0 exit criterion
-// "pyxis.exe runs and prints adapter on the lab machine" holds.
-//
-// A NVRHI device is created in M0 only if NVRHI is present in the build
-// (PYXIS_HAVE_NVRHI). The skeleton commit pins NVRHI's GIT_TAG to a TODO
-// placeholder (§49) so the platform target builds without NVRHI by default.
+// Plan §5.c. M1 wires the full path: VkInstance + VkDevice + nvrhi::IDevice
+// wrap + VkSurfaceKHR (from the IWindow) + VkSwapchainKHR + per-image
+// nvrhi::ITexture handles for the renderer to write into.
 
 #pragma once
 
 #include <Pyxis/Platform/Device/DeviceCreationParams.h>
 #include <Pyxis/Platform/Device/IDeviceManager.h>
 
+#include <nvrhi/nvrhi.h>
+#include <nvrhi/vulkan.h>
+
 #include <vulkan/vulkan.h>
 
-#include <atomic>
+#include <vector>
 
 namespace pyxis {
 
 class VkDeviceManager final : public IDeviceManager {
 public:
     VkDeviceManager(const DeviceCreationParams& params,
+                    IWindow*                    window,
                     const Resolution&           initialBackbuffer,
                     DeviceManagerCreateStatus*  outStatus) noexcept;
     ~VkDeviceManager() override;
@@ -37,23 +36,53 @@ public:
     void EndFrame() override;
     void WaitIdle() override;
 
+    [[nodiscard]] nvrhi::ITexture* GetCurrentBackbuffer() const noexcept override;
+    [[nodiscard]] uint32_t         GetBackbufferCount()   const noexcept override { return static_cast<uint32_t>(_swapchainTextures.size()); }
+    [[nodiscard]] uint32_t         GetCurrentBackbufferIndex() const noexcept override { return _currentImage; }
+    [[nodiscard]] nvrhi::ITexture* GetBackbuffer(uint32_t index) const noexcept override;
+
 private:
     DeviceManagerCreateStatus Bringup(const DeviceCreationParams& params,
+                                      IWindow*                    window,
                                       const Resolution&           initialBackbuffer) noexcept;
+    bool                      CreateSwapchain(uint32_t width, uint32_t height) noexcept;
+    void                      DestroySwapchain() noexcept;
     void                      Teardown() noexcept;
 
-    VkInstance        _instance       = VK_NULL_HANDLE;
-    VkPhysicalDevice  _physicalDevice = VK_NULL_HANDLE;
-    VkDevice          _device         = VK_NULL_HANDLE;
-    VkQueue           _graphicsQueue  = VK_NULL_HANDLE;
-    uint32_t          _graphicsFamily = 0;
+    // ---- Vulkan state ----------------------------------------------------
+    VkInstance        _instance         = VK_NULL_HANDLE;
+    VkPhysicalDevice  _physicalDevice   = VK_NULL_HANDLE;
+    VkDevice          _device           = VK_NULL_HANDLE;
+    VkQueue           _graphicsQueue    = VK_NULL_HANDLE;
+    uint32_t          _graphicsFamily   = 0;
 
+    IWindow*          _window           = nullptr;          // borrowed
+    VkSurfaceKHR      _surface          = VK_NULL_HANDLE;
+    VkSwapchainKHR    _swapchain        = VK_NULL_HANDLE;
+    VkFormat          _swapchainFormat  = VK_FORMAT_UNDEFINED;
+    VkExtent2D        _swapchainExtent  = { 0, 0 };
+
+    std::vector<VkImage>                _swapchainImages;
+    std::vector<nvrhi::TextureHandle>   _swapchainTextures;
+
+    // Per-frame sync — one acquire + one render-finished semaphore per
+    // backbuffer. _frameFences cap to MAX_FRAMES_IN_FLIGHT (3).
+    std::vector<VkSemaphore>            _imageAvailable;
+    std::vector<VkSemaphore>            _renderFinished;
+
+    uint32_t          _currentImage     = 0;     // last vkAcquireNextImageKHR result
+    uint32_t          _frameSlot        = 0;     // 0..framesInFlight - 1
+    bool              _resizePending    = false;
+
+    // ---- NVRHI -----------------------------------------------------------
+    nvrhi::DeviceHandle      _nvrhiDevice;
+    nvrhi::vulkan::IDevice*  _nvrhiVulkan = nullptr;
+
+    // ---- Misc state ------------------------------------------------------
     AdapterInfo       _adapter{};
-    uint32_t          _framesInFlight = 2;
+    uint32_t          _framesInFlight   = 2;
     Resolution        _backbuffer{};
-
-    nvrhi::IDevice*   _nvrhiDevice = nullptr;
-    bool              _ready       = false;
+    bool              _ready            = false;
 };
 
 }  // namespace pyxis

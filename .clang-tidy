@@ -7,6 +7,8 @@
 Checks: >
   bugprone-*,
   -bugprone-easily-swappable-parameters,
+  -bugprone-invalid-enum-default-initialization,
+  -bugprone-narrowing-conversions,
   performance-*,
   -performance-enum-size,
   modernize-use-nullptr,

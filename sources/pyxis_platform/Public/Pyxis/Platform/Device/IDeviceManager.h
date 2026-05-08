@@ -13,7 +13,13 @@
 
 #include <cstdint>
 
+namespace nvrhi {
+class ITexture;
+}
+
 namespace pyxis {
+
+class IWindow;
 
 // Result of a device-manager creation attempt. We do not throw across the
 // DLL boundary (§30.6) — failure is reported as a value with a kind. Full
@@ -56,6 +62,16 @@ public:
     virtual void EndFrame()   = 0;
 
     // -------------------------------------------------------------------
+    // Swapchain accessors (viewer only — headless returns nullptr / 0).
+    // The current backbuffer is the texture the renderer writes its final
+    // present blit into; the index rotates per-frame after BeginFrame.
+    // -------------------------------------------------------------------
+    [[nodiscard]] virtual nvrhi::ITexture* GetCurrentBackbuffer() const noexcept = 0;
+    [[nodiscard]] virtual uint32_t         GetBackbufferCount()   const noexcept = 0;
+    [[nodiscard]] virtual uint32_t         GetCurrentBackbufferIndex() const noexcept = 0;
+    [[nodiscard]] virtual nvrhi::ITexture* GetBackbuffer(uint32_t index) const noexcept = 0;
+
+    // -------------------------------------------------------------------
     // Synchronous wait for the GPU. Used at shutdown and for readback in
     // headless mode.
     // -------------------------------------------------------------------
@@ -71,6 +87,7 @@ protected:
 // -----------------------------------------------------------------------
 [[nodiscard]] PYXIS_PLATFORM_API IDeviceManager* CreateWindowedDeviceManager(
     const DeviceCreationParams&  params,
+    IWindow*                     window,        // borrowed; outlives the device manager
     const Resolution&            initialBackbuffer,
     DeviceManagerCreateStatus*   status) noexcept;
 
