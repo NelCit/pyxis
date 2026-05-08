@@ -72,17 +72,31 @@ hlslpp::float4x4 BuildViewMatrix() noexcept {
 // flipped (pre-multiplied -1 in the second row) so the M3 image is
 // upright; Vulkan's NDC has Y-down by default.
 //
-// Derivation (column-vector convention, then transposed):
-//   col-vec P (Vulkan, depth [0,1]):
-//     [ f/aspect 0  0           0       ]
-//     [ 0       -f  0           0       ]   (-f flips Y)
-//     [ 0        0  far/(far-n) 1       ]
-//     [ 0        0  -n*far/(far-n) 0    ]
-//   row-vec is the transpose of the above:
-//     [ f/aspect 0  0           0 ]
-//     [ 0       -f  0           0 ]
-//     [ 0        0  far/(far-n) 1 ]
-//     [ 0        0 -n*far/(far-n) 0 ]
+// Derivation (right-handed view space, depth [0,1] Vulkan):
+//   col-vec P (multiply on the left, p_clip = P * p_view):
+//     [ f/aspect 0  0                  0                  ]
+//     [ 0       -f  0                  0                  ]   (-f flips Y)
+//     [ 0        0  far/(near-far)     near*far/(near-far) ]
+//     [ 0        0 -1                  0                  ]
+//   row-vec form is the transpose (multiply on the right, p_clip =
+//   p_view * P):
+//     [ f/aspect 0  0                   0 ]
+//     [ 0       -f  0                   0 ]
+//     [ 0        0  far/(near-far)     -1 ]
+//     [ 0        0  near*far/(near-far) 0 ]
+//
+// Verification for view = (0, 0, -3, 1) with near=0.1, far=100:
+//   p.z = -3 * far/(near-far) + 1 * near*far/(near-far)
+//       = -3 * (100/-99.9) + 10/-99.9
+//       = 3.003 - 0.1
+//       = 2.903
+//   p.w = -3 * (-1) + 1 * 0 = 3
+//   NDC.z = 2.903 / 3 = 0.967  -- well within [0, 1] (close to far).
+//
+// (An earlier draft used `far/zSpan` and `+1` here; that flipped two
+// signs, projecting the cube to NDC.z = 1.034 — outside the clip
+// range, so every primary ray missed and the screen showed only
+// sky.)
 hlslpp::float4x4 BuildProjMatrix(std::uint32_t renderWidth,
                                  std::uint32_t renderHeight) noexcept {
     const float fovY   = 1.0472f;   // 60 degrees in radians.
@@ -92,13 +106,13 @@ hlslpp::float4x4 BuildProjMatrix(std::uint32_t renderWidth,
     const float focal  = 1.0f / std::tan(fovY * 0.5f);
     const float nearZ  = 0.1f;
     const float farZ   = 100.0f;
-    const float zSpan  = farZ - nearZ;
+    const float nearMinusFar = nearZ - farZ;   // negative.
 
     return hlslpp::float4x4(
-        hlslpp::float4(focal / aspect, 0.0f,   0.0f,                     0.0f),
-        hlslpp::float4(0.0f,           -focal, 0.0f,                     0.0f),
-        hlslpp::float4(0.0f,           0.0f,   farZ / zSpan,             1.0f),
-        hlslpp::float4(0.0f,           0.0f,   -nearZ * farZ / zSpan,    0.0f));
+        hlslpp::float4(focal / aspect, 0.0f,   0.0f,                            0.0f),
+        hlslpp::float4(0.0f,           -focal, 0.0f,                            0.0f),
+        hlslpp::float4(0.0f,           0.0f,   farZ / nearMinusFar,             -1.0f),
+        hlslpp::float4(0.0f,           0.0f,   nearZ * farZ / nearMinusFar,     0.0f));
 }
 
 }  // namespace

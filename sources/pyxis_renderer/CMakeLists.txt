@@ -176,21 +176,21 @@ pyxis_compile_slang_shader(
 pyxis_compile_slang_shader(
     TARGET      pyxis_renderer
     SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/raygen.slang
-    ENTRY_POINT RayGenMain
+    ENTRY_POINT main
     STAGE       raygen
     OUTPUT      raygen.spv
 )
 pyxis_compile_slang_shader(
     TARGET      pyxis_renderer
     SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/miss.slang
-    ENTRY_POINT MissMain
+    ENTRY_POINT main
     STAGE       miss
     OUTPUT      miss.spv
 )
 pyxis_compile_slang_shader(
     TARGET      pyxis_renderer
     SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/closesthit.slang
-    ENTRY_POINT ClosestHitMain
+    ENTRY_POINT main
     STAGE       closesthit
     OUTPUT      closesthit.spv
 )

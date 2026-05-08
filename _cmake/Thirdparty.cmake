@@ -104,6 +104,49 @@ function(pyxis_thirdparty_require_nvrhi)
 
     FetchContent_MakeAvailable(nvrhi)
 
+    # Pyxis-local NVRHI patch: gate the NV linear-swept-spheres
+    # pipeline-create flag on the extension being enabled.
+    #
+    # Upstream NVRHI (commit 54100464) unconditionally chains a
+    # PipelineCreateFlags2CreateInfoKHR struct with the
+    # `eRayTracingAllowSpheresAndLinearSweptSpheresNV` bit set into
+    # *every* RT pipeline create. The struct itself requires
+    # VK_KHR_maintenance5 and the flag bit requires
+    # VK_NV_ray_tracing_linear_swept_spheres — Pyxis pulls in
+    # neither — so vkCreateRayTracingPipelinesKHR fails on every
+    # ray-tracing pipeline creation.
+    #
+    # The fix mirrors the existing NV_cluster_acceleration_structure
+    # gate a few lines below: condition the flag-set and the pNext
+    # chain on the extension being enabled. Two string-replaces; both
+    # are idempotent because the buggy substring is gone after the
+    # first successful run.
+    set(_rtCpp "${nvrhi_SOURCE_DIR}/src/vulkan/vulkan-raytracing.cpp")
+    if(EXISTS "${_rtCpp}")
+        file(READ "${_rtCpp}" _rtCppContent)
+        set(_buggyFlagSet
+"        auto pipelineFlags2 = vk::PipelineCreateFlags2CreateInfoKHR();
+        pipelineFlags2.setFlags(vk::PipelineCreateFlagBits2::eRayTracingAllowSpheresAndLinearSweptSpheresNV);")
+        set(_fixedFlagSet
+"        auto pipelineFlags2 = vk::PipelineCreateFlags2CreateInfoKHR();
+        if (m_Context.extensions.NV_ray_tracing_linear_swept_spheres) pipelineFlags2.setFlags(vk::PipelineCreateFlagBits2::eRayTracingAllowSpheresAndLinearSweptSpheresNV);")
+        set(_buggyPNextChain
+"            .setPLibraryInfo(&libraryInfo)
+            .setPNext(&pipelineFlags2);")
+        set(_fixedPNextChain
+"            .setPLibraryInfo(&libraryInfo);
+        if (m_Context.extensions.NV_ray_tracing_linear_swept_spheres) pipelineInfo.setPNext(&pipelineFlags2);")
+        string(FIND "${_rtCppContent}" "${_buggyFlagSet}" _buggyAt)
+        if(_buggyAt GREATER -1)
+            string(REPLACE "${_buggyFlagSet}"  "${_fixedFlagSet}"  _rtCppContent "${_rtCppContent}")
+            string(REPLACE "${_buggyPNextChain}" "${_fixedPNextChain}" _rtCppContent "${_rtCppContent}")
+            file(WRITE "${_rtCpp}" "${_rtCppContent}")
+            message(STATUS "Pyxis: NVRHI patched (NV-LSS pipeline-create flag gated on extension)")
+        else()
+            message(STATUS "Pyxis: NVRHI already patched or upstream changed; skipping NV-LSS gate")
+        endif()
+    endif()
+
     # NVRHI's targets aren't ours; strip clang-tidy + suppress its own
     # /W4 /WX warnings if any leaked out (NVRHI is /W3 internally).
     foreach(t IN ITEMS nvrhi nvrhi_vk vma)

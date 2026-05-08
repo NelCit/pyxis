@@ -198,6 +198,12 @@ DeviceManagerCreateStatus VkDeviceManagerHeadless::Bringup(
         VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME,
         VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME,
         VK_EXT_HOST_QUERY_RESET_EXTENSION_NAME,
+        // NVRHI's createRayTracingPipeline always sets pLibraryInfo on
+        // the VkRayTracingPipelineCreateInfoKHR. Vulkan requires that
+        // pointer to be NULL unless `VK_KHR_pipeline_library` is
+        // enabled (VUID-VkRayTracingPipelineCreateInfoKHR-
+        // pLibraryInfo-03595), so we enable it here.
+        VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME,
     };
 
     // Same Vulkan 1.3 feature chain as VkDeviceManager (§5.b mandatory):
@@ -242,7 +248,13 @@ DeviceManagerCreateStatus VkDeviceManagerHeadless::Bringup(
     VkPhysicalDeviceFeatures2 features2{};
     features2.sType                                 = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
     features2.features.shaderInt64                  = VK_TRUE;
-    features2.features.shaderStorageImageReadWithoutFormat = VK_TRUE;
+    features2.features.shaderStorageImageReadWithoutFormat  = VK_TRUE;
+    // Slang emits RWTexture2D<float4> as Image with format=Unknown,
+    // which requires both Read and Write WithoutFormat to be enabled
+    // for the raygen shader's `gOutput[index] = float4(...)` write to
+    // pass `vkCmdTraceRaysKHR` validation
+    // (VUID-vkCmdTraceRaysKHR-OpTypeImage-07027).
+    features2.features.shaderStorageImageWriteWithoutFormat = VK_TRUE;
     features2.pNext                                 = &rtFeats;
 
     VkDeviceCreateInfo dInfo{};

@@ -255,6 +255,12 @@ DeviceManagerCreateStatus VkDeviceManager::Bringup(const DeviceCreationParams& p
         VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME,
         VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME,
         VK_EXT_HOST_QUERY_RESET_EXTENSION_NAME,
+        // Required because NVRHI's createRayTracingPipeline always
+        // sets pLibraryInfo on the VkRayTracingPipelineCreateInfoKHR;
+        // VUID-VkRayTracingPipelineCreateInfoKHR-pLibraryInfo-03595
+        // requires pLibraryInfo == NULL unless this extension is
+        // enabled.
+        VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME,
     };
 
     // Vulkan 1.3 features chain — sync2 + dynamic rendering + timeline semaphores
@@ -299,7 +305,11 @@ DeviceManagerCreateStatus VkDeviceManager::Bringup(const DeviceCreationParams& p
     VkPhysicalDeviceFeatures2 features2{};
     features2.sType                                 = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
     features2.features.shaderInt64                  = VK_TRUE;
-    features2.features.shaderStorageImageReadWithoutFormat = VK_TRUE;
+    features2.features.shaderStorageImageReadWithoutFormat  = VK_TRUE;
+    // Match VkDeviceManagerHeadless: Slang's RWTexture2D<float4> emits
+    // Unknown image format, requiring Write-WithoutFormat for the
+    // shader's image store to pass validation.
+    features2.features.shaderStorageImageWriteWithoutFormat = VK_TRUE;
     features2.pNext                                 = &rtFeats;
 
     VkDeviceCreateInfo dInfo{};

@@ -10,8 +10,11 @@
 
 #include "ShaderInterop.slang"
 
+// Slang emits the SPIR-V `OpEntryPoint` name as `"main"` regardless
+// of the source-side function name; the C++ side passes `"main"` to
+// NVRHI's createShader. See the matching note in raygen.slang.
 [shader("miss")]
-void MissMain(inout HitInfo payload) {
+void main(inout HitInfo payload) {
     payload.color = float3(0.55f, 0.65f, 0.85f);   // overcast-sky blue.
     payload.hitT  = -1.0f;
 }

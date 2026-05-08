@@ -75,12 +75,18 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
     const Path missPath       = locator.LocateResource("shaders/miss.spv");
     const Path closestHitPath = locator.LocateResource("shaders/closesthit.spv");
 
+    // Slang emits the SPIR-V `OpEntryPoint` name as `"main"` for every
+    // [shader(...)]-attributed function regardless of the source-side
+    // function name (verified via spirv-dis on the .spv); the .slang
+    // files have been renamed to `void main(...)` to keep both sides
+    // aligned. Passing anything else here trips
+    // VUID-VkPipelineShaderStageCreateInfo-pName-00707.
     _raygenShader     = LoadSpirv(_device, raygenPath.View(),
-                                  nvrhi::ShaderType::RayGeneration, "RayGenMain");
+                                  nvrhi::ShaderType::RayGeneration, "main");
     _missShader       = LoadSpirv(_device, missPath.View(),
-                                  nvrhi::ShaderType::Miss, "MissMain");
+                                  nvrhi::ShaderType::Miss, "main");
     _closestHitShader = LoadSpirv(_device, closestHitPath.View(),
-                                  nvrhi::ShaderType::ClosestHit, "ClosestHitMain");
+                                  nvrhi::ShaderType::ClosestHit, "main");
     if (!_raygenShader || !_missShader || !_closestHitShader) {
         Logging::Get().Error(log::RENDER,
             "PathTracePass: shader load failed; pass will skip");
@@ -91,12 +97,28 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
     // stages so we don't have to re-author this for shadow-trace etc.
     // additions later. Slot indices match the raygen.slang register
     // assignments (b0 / t0 / u0).
+    // Non-volatile ConstantBuffer (= VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)
+    // matches Slang's `ConstantBuffer<T>` declaration in the shader.
+    //
+    // bindingOffsets are zeroed: NVRHI's default offsets
+    // (shaderResource=0, constantBuffer=256, unorderedAccess=384)
+    // would emit Vulkan binding numbers 256 / 0 / 384 for our three
+    // items, which doesn't match the shader's `[[vk::binding(0/1/2,
+    // 0)]]` declarations and trips
+    // VUID-VkRayTracingPipelineCreateInfoKHR-layout-07988/07990.
+    // With offsets zero, items collapse to one binding space and the
+    // distinct slot numbers (0 / 1 / 2) we pass below produce
+    // bindings 0 / 1 / 2 — matching what Slang emitted in the SPIR-V.
     nvrhi::BindingLayoutDesc layoutDesc;
-    layoutDesc.visibility = nvrhi::ShaderType::AllRayTracing;
+    layoutDesc.visibility                      = nvrhi::ShaderType::AllRayTracing;
+    layoutDesc.bindingOffsets.shaderResource   = 0;
+    layoutDesc.bindingOffsets.sampler          = 0;
+    layoutDesc.bindingOffsets.constantBuffer   = 0;
+    layoutDesc.bindingOffsets.unorderedAccess  = 0;
     layoutDesc.bindings = {
-        nvrhi::BindingLayoutItem::VolatileConstantBuffer(0),   // b0 CameraUniforms
-        nvrhi::BindingLayoutItem::RayTracingAccelStruct(0),    // t0 TLAS
-        nvrhi::BindingLayoutItem::Texture_UAV(0),              // u0 output
+        nvrhi::BindingLayoutItem::ConstantBuffer(0),           // binding 0 CameraUniforms
+        nvrhi::BindingLayoutItem::RayTracingAccelStruct(1),    // binding 1 TLAS
+        nvrhi::BindingLayoutItem::Texture_UAV(2),              // binding 2 output
     };
     _bindingLayout = _device->createBindingLayout(layoutDesc);
     if (!_bindingLayout) {
@@ -139,13 +161,14 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
     _shaderTable->addHitGroup("HitGroupDefault");
 
     // Camera uniforms constant buffer — sized for one CameraUniforms
-    // struct; rewritten every frame from GpuScene's CameraDesc.
+    // struct; rewritten every frame from GpuScene's CameraDesc via
+    // commandList->writeBuffer (non-volatile path).
     nvrhi::BufferDesc cbDesc;
     cbDesc.byteSize           = sizeof(CameraUniformsCpu);
     cbDesc.debugName          = "PathTrace.CameraUniforms";
     cbDesc.isConstantBuffer   = true;
-    cbDesc.isVolatile         = true;
-    cbDesc.maxVersions        = 16;   // ample for per-frame rewrites within a multi-frame ring.
+    cbDesc.initialState       = nvrhi::ResourceStates::ConstantBuffer;
+    cbDesc.keepInitialState   = true;
     _cameraUniformsBuffer     = _device->createBuffer(cbDesc);
     if (!_cameraUniformsBuffer) {
         Logging::Get().Error(log::RENDER, "PathTracePass: createBuffer(CameraUniforms) failed");
@@ -167,11 +190,14 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(nvrhi::ITexture* ou
         _bindingSetCache.clear();
     }
 
+    // Slot numbers match the BindingLayoutDesc above (0 / 1 / 2 with
+    // zero offsets) so NVRHI emits Vulkan bindings 0 / 1 / 2 to match
+    // the shader's `[[vk::binding(0/1/2, 0)]]` declarations.
     nvrhi::BindingSetDesc setDesc;
     setDesc.bindings = {
-        nvrhi::BindingSetItem::ConstantBuffer(0, _cameraUniformsBuffer),
-        nvrhi::BindingSetItem::RayTracingAccelStruct(0, _scene->GetTlas()),
-        nvrhi::BindingSetItem::Texture_UAV(0, output),
+        nvrhi::BindingSetItem::ConstantBuffer       (0, _cameraUniformsBuffer),
+        nvrhi::BindingSetItem::RayTracingAccelStruct(1, _scene->GetTlas()),
+        nvrhi::BindingSetItem::Texture_UAV          (2, output),
     };
     nvrhi::BindingSetHandle set = _device->createBindingSet(setDesc, _bindingLayout);
     _bindingSetCache[output] = set;

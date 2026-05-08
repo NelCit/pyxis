@@ -5,6 +5,7 @@
 #include "Config/Configuration.h"
 #include "ImGuiHost.h"
 #include "Output/TextureReadback.h"
+#include "Render/AovTextures.h"
 #include "Render/HardcodedCubeScene.h"
 
 #include <Pyxis/Platform/Device/DeviceCreationParams.h>
@@ -212,6 +213,19 @@ int RunViewerLoop(const Configuration& config,
         return EXIT_DEVICE_INIT_FAIL;
     }
 
+    // PathTracePass writes via UAV (RWTexture2D<float4>) which the
+    // swapchain image can't accept (VK_FORMAT_B8G8R8A8_SRGB doesn't
+    // support storage). Render into an intermediate AOV color
+    // texture (BGRA8_UNORM, storage-capable) and copy to the
+    // swapchain image afterward — same pattern §9 v1's render graph
+    // ends with `CopyToHydraBuffer / Present` for.
+    auto aovsResult = AovTextures::Create(device, winDesc.width, winDesc.height);
+    if (!aovsResult) {
+        log.Error(log::APP, "ViewerMode: " + aovsResult.error());
+        return EXIT_DEVICE_INIT_FAIL;
+    }
+    const AovTextures aovs = std::move(*aovsResult);
+
     RendererCreateDesc rendererDesc{};
     rendererDesc.initialWidth  = winDesc.width;
     rendererDesc.initialHeight = winDesc.height;
@@ -319,13 +333,24 @@ int RunViewerLoop(const Configuration& config,
                           + std::string{commitResult.error().message.View()});
             }
 
+            // Render into the AOV color (storage-capable BGRA8_UNORM)
+            // rather than directly into the swapchain backbuffer (which
+            // is sRGB and rejects storage writes). After the path
+            // trace finishes we copyTexture from AOV → swapchain.
             RenderTargets targets{};
-            targets.color = backbuffer;
+            targets.color = aovs.color.Get();
             RenderSettings settings{};
-            settings.width  = backbuffer->getDesc().width;
-            settings.height = backbuffer->getDesc().height;
+            settings.width  = aovs.width;
+            settings.height = aovs.height;
 
             renderer.RenderFrame(commandList, settings, targets);
+
+            // Copy AOV color → swapchain backbuffer. NVRHI tracks the
+            // transitions for both images via `keepInitialState`, so
+            // an explicit barrier isn't needed — copyTexture inserts
+            // the right CopySrc/CopyDest transitions automatically.
+            commandList->copyTexture(backbuffer,    nvrhi::TextureSlice{},
+                                     aovs.color.Get(), nvrhi::TextureSlice{});
 
             // ImGui submit: NVRHI just left the backbuffer in
             // ResourceStates::RenderTarget after the renderer's draw,

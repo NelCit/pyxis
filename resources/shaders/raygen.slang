@@ -9,19 +9,30 @@
 // returns barycentric colour, miss returns sky blue — both already
 // satisfy the M3 "cube renders" exit criterion.
 //
-// Bindings — these match `pyxis::PathTracePass` on the C++ side.
-//   space=0, b0  : CameraUniforms cbuffer
-//   space=0, t0  : RaytracingAccelerationStructure (TLAS)
-//   space=0, u0  : RWTexture2D<float4> (output colour)
+// Bindings — these match `pyxis::PathTracePass`'s NVRHI BindingLayout
+// on the C++ side. NVRHI translates a sequential `addItem(...)` list
+// into Vulkan binding numbers per item (set 0, binding 0, 1, 2, ...);
+// HLSL's separate `register(b0)/t0/u0` namespaces collapse to one
+// binding-number space under -target spirv, so we use explicit
+// `[[vk::binding(N, S)]]` attributes to lock the slot assignment.
+//
+//   set=0, binding=0 : CameraUniforms cbuffer
+//   set=0, binding=1 : RaytracingAccelerationStructure (TLAS)
+//   set=0, binding=2 : RWTexture2D<float4> (output colour)
 
 #include "ShaderInterop.slang"
 
-ConstantBuffer<CameraUniforms>         gCamera : register(b0);
-RaytracingAccelerationStructure        gTlas   : register(t0);
-RWTexture2D<float4>                    gOutput : register(u0);
+[[vk::binding(0, 0)]] ConstantBuffer<CameraUniforms>  gCamera;
+[[vk::binding(1, 0)]] RaytracingAccelerationStructure gTlas;
+[[vk::binding(2, 0)]] RWTexture2D<float4>             gOutput;
 
+// Slang emits the SPIR-V `OpEntryPoint` name as `"main"` regardless
+// of the source-side function name (verified via spirv-dis); the C++
+// side passes `"main"` to NVRHI's createShader so we keep the function
+// name aligned to avoid the VUID-VkPipelineShaderStageCreateInfo-
+// pName-00707 mismatch.
 [shader("raygeneration")]
-void RayGenMain() {
+void main() {
     const uint2 launchIndex = DispatchRaysIndex().xy;
     const uint2 launchDim   = DispatchRaysDimensions().xy;
 

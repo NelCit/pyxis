@@ -226,6 +226,28 @@ int RunHeadless(const Configuration& config) noexcept {
         scene.Shutdown();
         return EXIT_RUNTIME_FAIL;
     }
+    // Sanity check: a render that worked has SOME non-black pixels
+    // (cube colour from closesthit or sky from miss). All-zero output
+    // would mean PathTracePass silently no-op'd; surface that as a
+    // log warning so a regression doesn't go quietly.
+    {
+        const auto* bytes = static_cast<const uint8_t*>(readback->Data());
+        bool anyNonBlack = false;
+        for (uint32_t row = 0; row < readback->Height() && !anyNonBlack; ++row) {
+            const uint8_t* rowPtr = bytes + (row * readback->RowPitch());
+            for (uint32_t col = 0; col < readback->Width(); ++col) {
+                if (rowPtr[col * 4 + 0] != 0 || rowPtr[col * 4 + 1] != 0
+                    || rowPtr[col * 4 + 2] != 0) {
+                    anyNonBlack = true;
+                    break;
+                }
+            }
+        }
+        log.Info(log::APP, anyNonBlack
+                            ? "headless: render produced non-black pixels (looks valid)"
+                            : "headless: render output is fully black — PathTracePass likely skipped");
+    }
+
     auto writeResult = WriteExrBgra8(config.output.image,
                                      readback->Width(),
                                      readback->Height(),
