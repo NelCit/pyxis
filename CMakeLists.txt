@@ -105,6 +105,12 @@ add_subdirectory(sources/pyxis_app)
 if(PYXIS_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests/unit)
+    # Integration tests (CMake-driven, spawn pyxis.exe). Gated on the
+    # viewer/headless executable being built; PYXIS_BUILD_VIEWER is the
+    # right umbrella because pyxis.exe ships both modes.
+    if(PYXIS_BUILD_VIEWER)
+        add_subdirectory(tests/integration)
+    endif()
 endif()
 
 # Install ---------------------------------------------------------------------

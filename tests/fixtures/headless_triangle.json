@@ -1,0 +1,24 @@
+{
+  "$comment": "Pyxis M2 exit-criterion fixture. `pyxis --headless --config <this>` must produce a deterministic EXR; re-running with the same config must yield a byte-identical file (§33.7). Held small (640x360) so the test is quick and fits well under M2's tinyexr ZIP throughput.",
+
+  "render": {
+    "width":           640,
+    "height":          360,
+    "samplesPerFrame": 1,
+    "seed":            42
+  },
+
+  "output": {
+    "image":           "headless_triangle.exr",
+    "effectiveConfig": "headless_triangle.effective.json"
+  },
+
+  "diagnostics": {
+    "validationLayer": false,
+    "aftermath":       false
+  },
+
+  "limits": {
+    "framesInFlight":  3
+  }
+}
