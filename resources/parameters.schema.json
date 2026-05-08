@@ -1,0 +1,44 @@
+{
+  "$schema":  "https://json-schema.org/draft/2020-12/schema",
+  "$id":      "https://nelcit.dev/pyxis/parameters.schema.json",
+  "title":    "Pyxis parameters.json (M2 subset)",
+  "$comment": "M2 ships the subset HeadlessMode consumes. M3+ grows scene / textures / geometry / hydra / profiling / app sections in lockstep with the systems that consume them. Schema validation is documentation-only at M2; the C++ loader does an inline required-field + type check (Configuration.cpp). Real schema-driven validation lands with M11 alongside the §29 panels.",
+  "type":     "object",
+  "properties": {
+    "render": {
+      "type": "object",
+      "properties": {
+        "width":           { "type": "integer", "minimum": 1 },
+        "height":          { "type": "integer", "minimum": 1 },
+        "samplesPerFrame": { "type": "integer", "minimum": 1 },
+        "seed":            { "type": "integer", "minimum": 1, "description": "§33.7: zero seed defeats byte-identical EXR." }
+      },
+      "additionalProperties": true
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "image":           { "type": "string" },
+        "ldr":             { "type": "string" },
+        "effectiveConfig": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "diagnostics": {
+      "type": "object",
+      "properties": {
+        "validationLayer": { "type": "boolean" },
+        "aftermath":       { "type": "boolean" }
+      },
+      "additionalProperties": true
+    },
+    "limits": {
+      "type": "object",
+      "properties": {
+        "framesInFlight":  { "type": "integer", "minimum": 1, "maximum": 3, "description": "§33.1 cap; §33.7 raises headless to 3." }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

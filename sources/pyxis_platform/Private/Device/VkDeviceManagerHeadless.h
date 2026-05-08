@@ -31,13 +31,18 @@ public:
     [[nodiscard]] uint32_t           GetFramesInFlight() const noexcept override;
     [[nodiscard]] bool               IsHeadless()        const noexcept override { return true; }
 
-    // Headless: no swapchain. M2 will wire a writeable readback target.
-    [[nodiscard]] nvrhi::ITexture* GetCurrentBackbuffer() const noexcept override { return nullptr; }
-    [[nodiscard]] uint32_t         GetBackbufferCount()   const noexcept override { return 0; }
+    // Headless has no swapchain. The IDeviceManager swapchain accessors
+    // contractually return nullptr / 0 here (IDeviceManager.h: "viewer
+    // only — headless returns nullptr / 0"). The render target itself
+    // is owned caller-side by `pyxis::app::AovTextures` per §18.4
+    // ("Renderer never allocates these"); HeadlessMode constructs the
+    // AOV texture set after this manager comes up and binds it via
+    // RenderTargets.
+    [[nodiscard]] nvrhi::ITexture* GetCurrentBackbuffer()      const noexcept override { return nullptr; }
+    [[nodiscard]] uint32_t         GetBackbufferCount()        const noexcept override { return 0; }
     [[nodiscard]] uint32_t         GetCurrentBackbufferIndex() const noexcept override { return 0; }
-    [[nodiscard]] nvrhi::ITexture* GetBackbuffer(uint32_t)      const noexcept override { return nullptr; }
-    // Headless never rebuilds anything — generation stays at 0.
-    [[nodiscard]] uint32_t         GetSwapchainGeneration() const noexcept override { return 0; }
+    [[nodiscard]] nvrhi::ITexture* GetBackbuffer(uint32_t /*index*/) const noexcept override { return nullptr; }
+    [[nodiscard]] uint32_t         GetSwapchainGeneration()    const noexcept override { return 0; }
 
     void BeginFrame() override;
     void EndFrame() override;
@@ -61,7 +66,6 @@ private:
     // path will raise this back to 3 per §33.7 once it actually exercises
     // the multi-frame queueing.
     uint32_t          _framesInFlight = 1;
-    Resolution        _backbuffer{};
 
     // RefCountPtr so the wrapped nvrhi::Device follows the same lifetime
     // discipline as the windowed manager (drops before vkDestroyDevice).

@@ -72,10 +72,24 @@ DeviceManagerCreateStatus VkDeviceManagerHeadless::Bringup(
 
     auto& log = Logging::Get();
 
-    // M1 pins 1 frame in flight in both modes — headless's §33.7 ramp to 3
-    // for byte-identical EXR lands with M2's --config + EXR output path.
-    _framesInFlight = 1;
-    _backbuffer     = initialBackbuffer;
+    // §33.7 byte-identical EXR pin lands here at M2: headless honours the
+    // params.framesInFlight value the caller supplies (HeadlessMode pins
+    // it to 3, the §33.1 cap) instead of forcing 1 like M1 did. The
+    // caller is expected to be in-range; we still clamp as a safety net
+    // (this is a public-ish DLL boundary) but log a Warning so misuse
+    // surfaces rather than getting silently rewritten.
+    constexpr uint32_t MIN_FIF = 1u;
+    constexpr uint32_t MAX_FIF = 3u;        // == MAX_FRAMES_IN_FLIGHT (§33.1).
+    if (params.framesInFlight < MIN_FIF || params.framesInFlight > MAX_FIF) {
+        log.Warn(log::PLATFORM,
+                 std::string{"VkDeviceManagerHeadless: framesInFlight="} +
+                 std::to_string(params.framesInFlight) +
+                 " out of range [" + std::to_string(MIN_FIF) + ", " +
+                 std::to_string(MAX_FIF) + "]; clamping. Determinism" +
+                 " (§33.7) requires the caller to supply " +
+                 std::to_string(MAX_FIF) + ".");
+    }
+    _framesInFlight = std::clamp<uint32_t>(params.framesInFlight, MIN_FIF, MAX_FIF);
 
     VulkanHppInitFromLoader(&vkGetInstanceProcAddr);
 
@@ -186,9 +200,50 @@ DeviceManagerCreateStatus VkDeviceManagerHeadless::Bringup(
         VK_EXT_HOST_QUERY_RESET_EXTENSION_NAME,
     };
 
-    VkPhysicalDeviceFeatures coreFeatures{};
-    coreFeatures.shaderInt64 = VK_TRUE;
-    coreFeatures.shaderStorageImageReadWithoutFormat = VK_TRUE;
+    // Same Vulkan 1.3 feature chain as VkDeviceManager (§5.b mandatory):
+    // sync2 + dynamicRendering + timelineSemaphore + bufferDeviceAddress
+    // + descriptorIndexing + shaderDrawParameters. NVRHI's renderer code
+    // assumes all of these regardless of mode, and validation fires
+    // VUID-vkCmdPipelineBarrier2-synchronization2-03848 etc. if any are
+    // missing. M1 didn't notice because RunHeadless never actually
+    // exercised the renderer; M2's render-to-EXR path does.
+    VkPhysicalDeviceVulkan13Features v13{};
+    v13.sType            = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+    v13.synchronization2 = VK_TRUE;
+    v13.dynamicRendering = VK_TRUE;
+
+    VkPhysicalDeviceVulkan12Features v12{};
+    v12.sType                                       = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+    v12.timelineSemaphore                           = VK_TRUE;
+    v12.bufferDeviceAddress                         = VK_TRUE;
+    v12.descriptorIndexing                          = VK_TRUE;
+    v12.runtimeDescriptorArray                      = VK_TRUE;
+    v12.descriptorBindingPartiallyBound             = VK_TRUE;
+    v12.shaderSampledImageArrayNonUniformIndexing   = VK_TRUE;
+    v12.shaderStorageBufferArrayNonUniformIndexing  = VK_TRUE;
+    v12.hostQueryReset                              = VK_TRUE;
+    v12.pNext                                       = &v13;
+
+    VkPhysicalDeviceVulkan11Features v11{};
+    v11.sType                = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+    v11.shaderDrawParameters = VK_TRUE;
+    v11.pNext                = &v12;
+
+    VkPhysicalDeviceAccelerationStructureFeaturesKHR asFeats{};
+    asFeats.sType                                   = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
+    asFeats.accelerationStructure                   = VK_TRUE;
+    asFeats.pNext                                   = &v11;
+
+    VkPhysicalDeviceRayTracingPipelineFeaturesKHR rtFeats{};
+    rtFeats.sType                                   = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
+    rtFeats.rayTracingPipeline                      = VK_TRUE;
+    rtFeats.pNext                                   = &asFeats;
+
+    VkPhysicalDeviceFeatures2 features2{};
+    features2.sType                                 = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    features2.features.shaderInt64                  = VK_TRUE;
+    features2.features.shaderStorageImageReadWithoutFormat = VK_TRUE;
+    features2.pNext                                 = &rtFeats;
 
     VkDeviceCreateInfo dInfo{};
     dInfo.sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -196,7 +251,9 @@ DeviceManagerCreateStatus VkDeviceManagerHeadless::Bringup(
     dInfo.pQueueCreateInfos       = &qInfo;
     dInfo.enabledExtensionCount   = static_cast<uint32_t>(std::size(deviceExtensions));
     dInfo.ppEnabledExtensionNames = deviceExtensions;
-    dInfo.pEnabledFeatures        = &coreFeatures;
+    dInfo.pNext                   = &features2;
+    // dInfo.pEnabledFeatures stays null — features come through the
+    // VkPhysicalDeviceFeatures2 chain (Vulkan 1.1+ pattern).
 
     if (vkCreateDevice(_physicalDevice, &dInfo, nullptr, &_device) != VK_SUCCESS) {
         log.Error(log::PLATFORM, "VkDeviceManagerHeadless: vkCreateDevice failed");
@@ -226,6 +283,11 @@ DeviceManagerCreateStatus VkDeviceManagerHeadless::Bringup(
         return DeviceManagerCreateStatus::DeviceCreationFailed;
     }
 
+    // Per §18.4 / pyxis::app::AovTextures the render target is now
+    // caller-allocated; the device manager exposes only the device,
+    // queues, and per-frame plumbing. `initialBackbuffer` is reduced to
+    // a startup-log diagnostic for "what dims does the caller intend to
+    // render at" — useful when scrubbing logs but not load-bearing.
     {
         std::string msg = "Vulkan headless device ready: ";
         msg.append(_adapter.NameView());
@@ -235,6 +297,9 @@ DeviceManagerCreateStatus VkDeviceManagerHeadless::Bringup(
         msg += std::to_string(_adapter.totalDeviceLocalBytes / (1024ull * 1024ull));
         msg += " MiB  framesInFlight=";
         msg += std::to_string(_framesInFlight);
+        msg += "  intended-render-dims=";
+        msg += std::to_string(initialBackbuffer.width) + "x" +
+               std::to_string(initialBackbuffer.height);
         log.Info(log::PLATFORM, msg);
     }
 
@@ -245,10 +310,16 @@ void VkDeviceManagerHeadless::Teardown() noexcept {
     if (_device != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(_device);
     }
-    // Drop the NVRHI device wrapper BEFORE vkDestroyDevice — its dtor
-    // walks internal refs that touch the VkDevice, so the wrapped device
-    // must outlive everything NVRHI knows about. Same discipline as the
-    // windowed manager.
+    // The caller (HeadlessMode → AovTextures) owns the offscreen render
+    // target now and must drop its handle before this manager goes
+    // away — RAII in the caller's frame scope guarantees that. We just
+    // drain NVRHI's deferred-destruction queue so anything the caller
+    // already released gets cleaned up before the wrapped nvrhi::Device
+    // dies, which must happen BEFORE vkDestroyDevice — NVRHI's deleters
+    // walk internal refs that touch the VkDevice.
+    if (_nvrhiDevice) {
+        _nvrhiDevice->runGarbageCollection();
+    }
     _nvrhiDevice = nullptr;
     if (_device != VK_NULL_HANDLE) {
         vkDestroyDevice(_device, nullptr);
@@ -264,10 +335,14 @@ nvrhi::IDevice*    VkDeviceManagerHeadless::GetDevice()         const noexcept {
 const AdapterInfo& VkDeviceManagerHeadless::GetAdapterInfo()    const noexcept { return _adapter; }
 uint32_t           VkDeviceManagerHeadless::GetFramesInFlight() const noexcept { return _framesInFlight; }
 
-// Headless has no swapchain to acquire from / present to; M2 wires
-// per-frame readback into a writable target via --config.
-void VkDeviceManagerHeadless::BeginFrame() {}  // TODO(M2): readback target acquire.
-void VkDeviceManagerHeadless::EndFrame()   {}  // TODO(M2): per-frame EXR write.
+// Headless has no swapchain to acquire from / present to. The offscreen
+// render target is created once at device-init and lives for the
+// lifetime of the manager; readback + EXR write are the caller's job
+// (HeadlessMode owns that path — see RunHeadless), so BeginFrame /
+// EndFrame are intentional no-ops and stay no-ops at M3+ as long as
+// the backbuffer remains a single persistent target.
+void VkDeviceManagerHeadless::BeginFrame() {}
+void VkDeviceManagerHeadless::EndFrame()   {}
 
 void VkDeviceManagerHeadless::WaitIdle() {
     if (_device != VK_NULL_HANDLE) vkDeviceWaitIdle(_device);

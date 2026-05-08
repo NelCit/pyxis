@@ -19,6 +19,14 @@ target_sources(pyxis PRIVATE
     Private/Application.cpp
     Private/CliArgs.h
     Private/CliArgs.cpp
+    Private/Config/Configuration.h
+    Private/Config/Configuration.cpp
+    Private/Output/ExrWriter.h
+    Private/Output/ExrWriter.cpp
+    Private/Output/TextureReadback.h
+    Private/Output/TextureReadback.cpp
+    Private/Render/AovTextures.h
+    Private/Render/AovTextures.cpp
     Private/HeadlessMode.h
     Private/HeadlessMode.cpp
     Private/ViewerMode.h
@@ -40,6 +48,27 @@ target_include_directories(pyxis PRIVATE
 )
 
 find_package(Stb REQUIRED)
+find_package(nlohmann_json CONFIG REQUIRED)
+find_package(tinyexr CONFIG REQUIRED)
+
+# Plan §29.1 overlay order: pyxis loads <exe-dir>/Resources/parameters.
+# default.json as the on-disk default. Copy the source-of-truth to the
+# binary's Resources/ alongside the shaders Slang.cmake puts there.
+set(_pyxis_app_resources_src "${CMAKE_SOURCE_DIR}/resources")
+set(_pyxis_app_resources_dst "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/$<CONFIG>/Resources")
+add_custom_command(TARGET pyxis POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${_pyxis_app_resources_src}/parameters.default.json"
+        "${_pyxis_app_resources_dst}/parameters.default.json"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${_pyxis_app_resources_src}/parameters.schema.json"
+        "${_pyxis_app_resources_dst}/parameters.schema.json"
+    BYPRODUCTS
+        "${_pyxis_app_resources_dst}/parameters.default.json"
+        "${_pyxis_app_resources_dst}/parameters.schema.json"
+    COMMENT "Copying parameters.{default,schema}.json to <bin>/Resources/")
+unset(_pyxis_app_resources_src)
+unset(_pyxis_app_resources_dst)
 
 # ImGui (with Vulkan + GLFW backends) — built lazily by the helper in
 # _cmake/Thirdparty.cmake. pyxis_app/ViewerMode is the only consumer
@@ -56,6 +85,8 @@ target_link_libraries(pyxis PRIVATE
     Pyxis::Renderer
     pyxis_imgui
     Vulkan::Vulkan        # vkCmdBeginRendering / vkCmdEndRendering / descriptor-pool calls
+    nlohmann_json::nlohmann_json     # parameters.json + effective-config writer (§26 / §27)
+    unofficial::tinyexr::tinyexr     # headless EXR writer (§41 M2)
 )
 
 # stb_image_write is header-only; vcpkg's `Stb` config exports the

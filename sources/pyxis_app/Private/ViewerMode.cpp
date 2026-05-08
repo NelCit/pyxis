@@ -2,7 +2,9 @@
 
 #include "ViewerMode.h"
 
+#include "Config/Configuration.h"
 #include "ImGuiHost.h"
+#include "Output/TextureReadback.h"
 
 #include <Pyxis/Platform/Device/DeviceCreationParams.h>
 #include <Pyxis/Platform/Device/IDeviceManager.h>
@@ -48,9 +50,12 @@ constexpr int GLFW_ESCAPE_KEY_CODE  = 256;
 
 namespace {
 
-// Capture the current backbuffer to PNG via an NVRHI staging texture +
+// Capture the current backbuffer to PNG via TextureReadback +
 // stb_image_write. BGRA → RGBA swizzle on the CPU side. Plan §35
-// image-regression artefact for M1.
+// image-regression artefact for M1. Caller passes an already-open
+// command list — we record the readback copy onto it, restore the
+// backbuffer to Present state (so the next swapchain acquire sees a
+// sane layout), close + execute + wait, then map and write the PNG.
 bool CaptureBackbufferToPng(nvrhi::IDevice*       device,
                             nvrhi::ICommandList*  commandList,
                             nvrhi::ITexture*      backbuffer,
@@ -58,42 +63,30 @@ bool CaptureBackbufferToPng(nvrhi::IDevice*       device,
     auto& log = Logging::Get();
     if (!device || !commandList || !backbuffer || pngPath.empty()) return false;
 
-    const auto& tdesc = backbuffer->getDesc();
-
-    nvrhi::TextureDesc stagingDesc;
-    stagingDesc.format     = tdesc.format;
-    stagingDesc.width      = tdesc.width;
-    stagingDesc.height     = tdesc.height;
-    stagingDesc.dimension  = nvrhi::TextureDimension::Texture2D;
-    stagingDesc.debugName  = "screenshot-staging";
-    const nvrhi::StagingTextureHandle staging =
-        device->createStagingTexture(stagingDesc, nvrhi::CpuAccessMode::Read);
-    if (!staging) {
-        log.Error(log::APP, "screenshot: createStagingTexture failed");
+    auto readback = TextureReadback::RecordCopy(device, commandList, backbuffer,
+                                                "screenshot-staging");
+    if (!readback) {
+        log.Error(log::APP, "screenshot: " + readback.error());
         return false;
     }
 
-    commandList->copyTexture(staging.Get(),    nvrhi::TextureSlice{},
-                             backbuffer,        nvrhi::TextureSlice{});
     commandList->setTextureState(backbuffer, nvrhi::AllSubresources, nvrhi::ResourceStates::Present);
     commandList->commitBarriers();
     commandList->close();
     device->executeCommandList(commandList);
     device->waitForIdle();
 
-    std::size_t rowPitch = 0;
-    const void* mapped = device->mapStagingTexture(staging.Get(), nvrhi::TextureSlice{},
-                                                   nvrhi::CpuAccessMode::Read, &rowPitch);
-    if (!mapped) {
-        log.Error(log::APP, "screenshot: mapStagingTexture failed");
+    if (auto mapResult = readback->Map(); !mapResult) {
+        log.Error(log::APP, "screenshot: " + mapResult.error());
         return false;
     }
 
     // BGRA8 → RGBA8 swizzle, contiguous row pitch for stb_image_write.
-    const std::size_t imageWidth  = tdesc.width;
-    const std::size_t imageHeight = tdesc.height;
+    const std::size_t imageWidth  = readback->Width();
+    const std::size_t imageHeight = readback->Height();
+    const std::size_t rowPitch    = readback->RowPitch();
     std::vector<uint8_t> rgba(imageWidth * imageHeight * 4);
-    const auto* src = static_cast<const uint8_t*>(mapped);
+    const auto* src = static_cast<const uint8_t*>(readback->Data());
     for (std::size_t row = 0; row < imageHeight; ++row) {
         const uint8_t* srcRow = src + row * rowPitch;
         uint8_t*       dstRow = rgba.data() + (row * imageWidth * 4);
@@ -104,7 +97,6 @@ bool CaptureBackbufferToPng(nvrhi::IDevice*       device,
             dstRow[col * 4 + 3] = srcRow[col * 4 + 3];   // A ← A
         }
     }
-    device->unmapStagingTexture(staging.Get());
 
     const std::string path{ pngPath };
     const int wrote = stbi_write_png(path.c_str(),
@@ -139,14 +131,16 @@ bool CaptureBackbufferToPng(nvrhi::IDevice*       device,
 
 }  // namespace
 
-int RunViewerLoop(int adapterIndex, bool enableValidation,
-                  std::string_view screenshotPath) noexcept {
+int RunViewerLoop(const Configuration& config,
+                  std::string_view     screenshotPath) noexcept {
     auto& log = Logging::Get();
 
     // ---- Window ----------------------------------------------------------
+    // §27 render.{width,height} drive the swapchain dims; the window
+    // is sized to match so the backbuffer fills the client area.
     WindowDesc winDesc{};
-    winDesc.width  = 1920;
-    winDesc.height = 1080;
+    winDesc.width  = config.render.width;
+    winDesc.height = config.render.height;
     winDesc.title  = "Pyxis";
 
     const std::unique_ptr<IWindow> window{ CreateGlfwWindow(winDesc) };
@@ -170,9 +164,11 @@ int RunViewerLoop(int adapterIndex, bool enableValidation,
 
     // ---- Device manager --------------------------------------------------
     DeviceCreationParams params{};
-    params.adapterIndex     = adapterIndex;
-    params.enableValidation = enableValidation;
-    params.framesInFlight   = 1;
+    // M3+ wires config.adapter; for now defer to the discrete-first
+    // picker via -1.
+    params.adapterIndex     = -1;
+    params.enableValidation = config.diagnostics.validationLayer;
+    params.framesInFlight   = config.limits.framesInFlight;
     params.applicationName  = "pyxis";
 
     const Resolution backbuffer{ winDesc.width, winDesc.height };
@@ -211,13 +207,16 @@ int RunViewerLoop(int adapterIndex, bool enableValidation,
     const nvrhi::CommandListHandle commandListHandle = device->createCommandList();
 
     // ---- ImGui ----------------------------------------------------------
-    // Init in both modes so --screenshot doubles as a visual proof of the
-    // M1 dockable Performance panel: the captured PNG shows the triangle
-    // plus the panel in its default position.
+    // Skipped in screenshot mode: the captured PNG is a clean
+    // regression artefact (just the triangle on the clear colour) so
+    // the §35 image-diff fixture isn't perturbed by FPS / scope-tree
+    // text. The interactive viewer keeps ImGui as normal.
     ImGuiHost imguiHost;
     const bool screenshotMode = !screenshotPath.empty();
-    if (!imguiHost.Init(window.get(), deviceManager.get())) {
-        log.Warn(log::APP, "ViewerMode: ImGui init failed; continuing without UI");
+    if (!screenshotMode) {
+        if (!imguiHost.Init(window.get(), deviceManager.get())) {
+            log.Warn(log::APP, "ViewerMode: ImGui init failed; continuing without UI");
+        }
     }
     if (screenshotMode) {
         log.Info(log::APP, "ViewerMode: --screenshot path supplied; capturing one frame after warmup");
@@ -225,13 +224,12 @@ int RunViewerLoop(int adapterIndex, bool enableValidation,
         log.Info(log::APP, "ViewerMode: entering frame loop");
     }
 
-    // Capture the backbuffer at frame index = SCREENSHOT_FRAME so the
-    // swapchain has settled. 3 frames is enough on FIFO; keeps the
-    // smoke fast.
-    // Frame 30 is well past the SLOT_COUNT-frame profiler ring warmup
-    // (so the screenshot's Performance panel actually has the scope
-    // tree filled in) and still well before any real-world delay.
-    constexpr uint64_t SCREENSHOT_FRAME = 30;
+    // Frame 3 is the original M1 capture point — far enough past frame 0
+    // that the swapchain has rotated through every image at least once
+    // (FIFO + 3-image swapchain), short enough to keep the screenshot
+    // smoke under a second. The profiler ring drain doesn't matter for
+    // the screenshot itself (we don't draw timing text any more).
+    constexpr uint64_t SCREENSHOT_FRAME = 3;
     // Cadence for the periodic profiler log line. Every 120 frames is
     // ~1 s at 120 FPS — enough samples for the rolling FrameProfile to
     // be representative without spamming stdout.

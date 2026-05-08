@@ -1,9 +1,9 @@
-// Pyxis app — headless mode driver.
+// Pyxis app — headless / viewer mode entrypoints.
 //
-// Plan §1 / §41. M0 ships the no-frame variant: opens a headless device,
-// initialises SceneWorld, runs world.progress() once to prove the phase
-// pipeline executes, prints adapter info, exits 0. Real EXR writing lands
-// at M2.
+// Plan §1 / §41. Both modes accept the resolved Configuration (post
+// JSON-overlay + CLI-override per §29.1) so adapter selection, render
+// dims, output paths, validation toggles, etc. all flow through the
+// same struct.
 
 #pragma once
 
@@ -11,14 +11,16 @@
 
 namespace pyxis::app {
 
-// Returns the process exit code (§41: 0 ok, 2 device init fail).
-int RunHeadless(int adapterIndex, bool enableValidation) noexcept;
+struct Configuration;
 
-// Same shape as RunHeadless but using the windowed VkDeviceManager.
-// `screenshotPath` is the optional --screenshot <path> CLI flag — when
-// non-empty, the viewer runs a small fixed number of warmup frames,
-// captures the backbuffer to PNG at <path>, and exits with code 0.
-int RunViewer(int adapterIndex, bool enableValidation,
-              std::string_view screenshotPath) noexcept;
+// Returns the process exit code (§41: 0 ok, 2 device init fail).
+// Drives the offscreen render-target path + EXR writer.
+int RunHeadless(const Configuration& config) noexcept;
+
+// Viewer mode. screenshotPath is the M1 --screenshot debug capture
+// (non-empty -> render a few warmup frames, write a PNG, exit 0).
+// Empty = normal interactive viewer.
+int RunViewer(const Configuration& config,
+              std::string_view     screenshotPath) noexcept;
 
 }  // namespace pyxis::app
