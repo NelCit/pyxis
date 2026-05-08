@@ -44,6 +44,25 @@ target_include_directories(pyxis PRIVATE
 find_package(Stb REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 
+# Plan §29.1 overlay order: pyxis loads <exe-dir>/Resources/parameters.
+# default.json as the on-disk default. Copy the source-of-truth to the
+# binary's Resources/ alongside the shaders Slang.cmake puts there.
+set(_pyxis_app_resources_src "${CMAKE_SOURCE_DIR}/resources")
+set(_pyxis_app_resources_dst "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/$<CONFIG>/Resources")
+add_custom_command(TARGET pyxis POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${_pyxis_app_resources_src}/parameters.default.json"
+        "${_pyxis_app_resources_dst}/parameters.default.json"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${_pyxis_app_resources_src}/parameters.schema.json"
+        "${_pyxis_app_resources_dst}/parameters.schema.json"
+    BYPRODUCTS
+        "${_pyxis_app_resources_dst}/parameters.default.json"
+        "${_pyxis_app_resources_dst}/parameters.schema.json"
+    COMMENT "Copying parameters.{default,schema}.json to <bin>/Resources/")
+unset(_pyxis_app_resources_src)
+unset(_pyxis_app_resources_dst)
+
 # ImGui (with Vulkan + GLFW backends) — built lazily by the helper in
 # _cmake/Thirdparty.cmake. pyxis_app/ViewerMode is the only consumer
 # in M1; the FPS panel + dockspace land here. The helper assumes

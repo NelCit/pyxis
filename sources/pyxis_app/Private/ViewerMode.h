@@ -30,7 +30,9 @@
 
 namespace pyxis::app {
 
-int RunViewerLoop(int adapterIndex, bool enableValidation,
-                  std::string_view screenshotPath) noexcept;
+struct Configuration;
+
+int RunViewerLoop(const Configuration& config,
+                  std::string_view     screenshotPath) noexcept;
 
 }  // namespace pyxis::app

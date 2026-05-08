@@ -8,6 +8,7 @@
 #include "Application.h"
 
 #include "CliArgs.h"
+#include "Config/Configuration.h"
 #include "HeadlessMode.h"
 
 #include <Pyxis/Platform/Logging/Log.h>
@@ -68,10 +69,20 @@ int Run(int argc, char** argv) noexcept {
 
     EmitVersionBanner();
 
-    if (cli.headless) {
-        return RunHeadless(cli.adapterIndex, cli.enableValidation);
+    // §29.1 overlay: defaults -> exe-dir -> %LOCALAPPDATA% -> --config,
+    // then ApplyCliOverrides. ResolveConfiguration handles the chain;
+    // failure is fatal under M0's exit code 3 (config fail).
+    auto resolved = ResolveConfiguration(cli);
+    if (!resolved) {
+        std::fprintf(stderr, "pyxis: config error: %s\n", resolved.error().c_str());
+        return EXIT_CONFIG_FAIL;
     }
-    return RunViewer(cli.adapterIndex, cli.enableValidation, cli.screenshotPath);
+    const Configuration& config = *resolved;
+
+    if (cli.headless) {
+        return RunHeadless(config);
+    }
+    return RunViewer(config, cli.screenshotPath);
 }
 
 }  // namespace pyxis::app

@@ -65,15 +65,33 @@ struct Configuration {
     // profiling) land alongside the systems that consume them.
 };
 
-// Parse a parameters.json document into Configuration. Defaults are
-// applied for missing fields; an unparseable document or a schema-level
-// error returns the unexpected branch with a human-readable message.
+// Overlay a parameters.json document onto an existing Configuration.
+// Missing keys keep the previous value; present keys replace it
+// (§29.1 "Each overlay is a key-by-key merge"). Returns the
+// unexpected branch with a human-readable message on JSON / type
+// errors.
+[[nodiscard]] std::expected<void, std::string>
+OverlayConfiguration(Configuration& target, std::string_view jsonText) noexcept;
+
+// Convenience: parse a parameters.json document into a fresh
+// Configuration. Equivalent to `Configuration{}; OverlayConfiguration(...)`.
+// Useful for tests that want a one-shot parse without the overlay
+// chain.
 [[nodiscard]] std::expected<Configuration, std::string>
 ParseConfiguration(std::string_view jsonText) noexcept;
 
-// Overlay CLI args onto a parsed Configuration. Applied AFTER parse, so
-// CLI values take precedence (per §27 "applied after parse, before
-// validate"). Mutates `config` in place.
+// Resolve the full overlay chain (§29.1): C++ defaults (the
+// Configuration{} field initialisers) -> <exe-dir>/Resources/
+// parameters.default.json -> %LOCALAPPDATA%/Pyxis/parameters.json ->
+// --config <path>, then ApplyCliOverrides. Returns the unexpected
+// branch with a human-readable message if --config is supplied but
+// can't be loaded; missing default / user files are silently skipped.
+[[nodiscard]] std::expected<Configuration, std::string>
+ResolveConfiguration(const CliArgs& cli) noexcept;
+
+// Overlay CLI args onto a parsed Configuration. Applied AFTER all
+// JSON overlays, so CLI values take precedence (§27 "applied after
+// parse, before validate"). Mutates `config` in place.
 void ApplyCliOverrides(Configuration& config, const CliArgs& cli) noexcept;
 
 // Validate a fully-resolved Configuration (after CLI overrides). Headless

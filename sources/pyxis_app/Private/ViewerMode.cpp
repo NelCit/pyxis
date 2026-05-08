@@ -2,6 +2,7 @@
 
 #include "ViewerMode.h"
 
+#include "Config/Configuration.h"
 #include "ImGuiHost.h"
 
 #include <Pyxis/Platform/Device/DeviceCreationParams.h>
@@ -139,14 +140,16 @@ bool CaptureBackbufferToPng(nvrhi::IDevice*       device,
 
 }  // namespace
 
-int RunViewerLoop(int adapterIndex, bool enableValidation,
-                  std::string_view screenshotPath) noexcept {
+int RunViewerLoop(const Configuration& config,
+                  std::string_view     screenshotPath) noexcept {
     auto& log = Logging::Get();
 
     // ---- Window ----------------------------------------------------------
+    // §27 render.{width,height} drive the swapchain dims; the window
+    // is sized to match so the backbuffer fills the client area.
     WindowDesc winDesc{};
-    winDesc.width  = 1920;
-    winDesc.height = 1080;
+    winDesc.width  = config.render.width;
+    winDesc.height = config.render.height;
     winDesc.title  = "Pyxis";
 
     const std::unique_ptr<IWindow> window{ CreateGlfwWindow(winDesc) };
@@ -170,9 +173,11 @@ int RunViewerLoop(int adapterIndex, bool enableValidation,
 
     // ---- Device manager --------------------------------------------------
     DeviceCreationParams params{};
-    params.adapterIndex     = adapterIndex;
-    params.enableValidation = enableValidation;
-    params.framesInFlight   = 1;
+    // M3+ wires config.adapter; for now defer to the discrete-first
+    // picker via -1.
+    params.adapterIndex     = -1;
+    params.enableValidation = config.diagnostics.validationLayer;
+    params.framesInFlight   = config.limits.framesInFlight;
     params.applicationName  = "pyxis";
 
     const Resolution backbuffer{ winDesc.width, winDesc.height };

@@ -1,0 +1,25 @@
+{
+  "$comment": "Pyxis canonical defaults. Plan §29.1 overlay order: this file -> %LOCALAPPDATA%/Pyxis/parameters.json -> --config <path>. C++ defaults in Configuration.h are kept identical so the overlay is idempotent against a fresh Configuration{}.",
+
+  "render": {
+    "width":           1920,
+    "height":          1080,
+    "samplesPerFrame": 1,
+    "seed":            1
+  },
+
+  "output": {
+    "image":           "",
+    "ldr":             "",
+    "effectiveConfig": ""
+  },
+
+  "diagnostics": {
+    "validationLayer": false,
+    "aftermath":       false
+  },
+
+  "limits": {
+    "framesInFlight":  1
+  }
+}

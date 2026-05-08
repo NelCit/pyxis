@@ -4,14 +4,19 @@
 
 #include "CliArgs.h"
 
+#include <Pyxis/Platform/FileSystem/AssetLocator.h>
+#include <Pyxis/Platform/FileSystem/Path.h>
 #include <Pyxis/Platform/Logging/Log.h>
 #include <Pyxis/Platform/Logging/LogCategories.h>
 
 #include <nlohmann/json.hpp>
 
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <ios>
+#include <optional>
+#include <sstream>
 #include <string>
 
 namespace pyxis::app {
@@ -48,8 +53,8 @@ std::string ReadField(const nlohmann::json& parent, const char* key, T& out) {
 
 }  // namespace
 
-std::expected<Configuration, std::string>
-ParseConfiguration(std::string_view jsonText) noexcept {
+std::expected<void, std::string>
+OverlayConfiguration(Configuration& target, std::string_view jsonText) noexcept {
     // allow_exceptions=false keeps us /EHs-c- clean; on parse error
     // nlohmann returns json::value_t::discarded which is_discarded()=true.
     const nlohmann::json document =
@@ -64,30 +69,114 @@ ParseConfiguration(std::string_view jsonText) noexcept {
         return std::unexpected{std::string{"parameters.json: top-level must be an object"}};
     }
 
-    Configuration config{};
     std::string failure;
-
     if (auto render = document.find("render"); render != document.end() && render->is_object()) {
-        if (failure.empty()) failure = ReadField(*render, "width",           config.render.width);
-        if (failure.empty()) failure = ReadField(*render, "height",          config.render.height);
-        if (failure.empty()) failure = ReadField(*render, "samplesPerFrame", config.render.samplesPerFrame);
-        if (failure.empty()) failure = ReadField(*render, "seed",            config.render.seed);
+        if (failure.empty()) failure = ReadField(*render, "width",           target.render.width);
+        if (failure.empty()) failure = ReadField(*render, "height",          target.render.height);
+        if (failure.empty()) failure = ReadField(*render, "samplesPerFrame", target.render.samplesPerFrame);
+        if (failure.empty()) failure = ReadField(*render, "seed",            target.render.seed);
     }
     if (auto output = document.find("output"); output != document.end() && output->is_object()) {
-        if (failure.empty()) failure = ReadField(*output, "image",            config.output.image);
-        if (failure.empty()) failure = ReadField(*output, "ldr",              config.output.ldr);
-        if (failure.empty()) failure = ReadField(*output, "effectiveConfig",  config.output.effectiveConfig);
+        if (failure.empty()) failure = ReadField(*output, "image",            target.output.image);
+        if (failure.empty()) failure = ReadField(*output, "ldr",              target.output.ldr);
+        if (failure.empty()) failure = ReadField(*output, "effectiveConfig",  target.output.effectiveConfig);
     }
     if (auto diag = document.find("diagnostics"); diag != document.end() && diag->is_object()) {
-        if (failure.empty()) failure = ReadField(*diag, "validationLayer", config.diagnostics.validationLayer);
-        if (failure.empty()) failure = ReadField(*diag, "aftermath",       config.diagnostics.aftermath);
+        if (failure.empty()) failure = ReadField(*diag, "validationLayer", target.diagnostics.validationLayer);
+        if (failure.empty()) failure = ReadField(*diag, "aftermath",       target.diagnostics.aftermath);
     }
     if (auto limits = document.find("limits"); limits != document.end() && limits->is_object()) {
-        if (failure.empty()) failure = ReadField(*limits, "framesInFlight", config.limits.framesInFlight);
+        if (failure.empty()) failure = ReadField(*limits, "framesInFlight", target.limits.framesInFlight);
     }
     if (!failure.empty()) {
         return std::unexpected{"parameters.json: " + failure};
     }
+    return {};
+}
+
+std::expected<Configuration, std::string>
+ParseConfiguration(std::string_view jsonText) noexcept {
+    Configuration config{};
+    if (auto result = OverlayConfiguration(config, jsonText); !result) {
+        return std::unexpected{result.error()};
+    }
+    return config;
+}
+
+namespace {
+
+// Read a whole text file. Returns nullopt when the file doesn't exist or
+// can't be opened — overlay sites silently skip that layer.
+std::optional<std::string> ReadFileToString(const std::string& path) noexcept {
+    const std::ifstream stream(path, std::ios::binary);
+    if (!stream.is_open()) return std::nullopt;
+    std::ostringstream buffer;
+    buffer << stream.rdbuf();
+    return buffer.str();
+}
+
+// %LOCALAPPDATA%/Pyxis/parameters.json. Mirrors AssetLocator::LocalAppData
+// without forcing the directory creation that LocalAppData() does.
+std::string UserParametersPath() noexcept {
+    const char* localAppData = std::getenv("LOCALAPPDATA");
+    if (localAppData == nullptr || *localAppData == '\0') return {};
+    return std::string{localAppData} + "/Pyxis/parameters.json";
+}
+
+}  // namespace
+
+std::expected<Configuration, std::string>
+ResolveConfiguration(const CliArgs& cli) noexcept {
+    auto& log = Logging::Get();
+    Configuration config{};   // Step 1: embedded defaults (C++ field initialisers).
+
+    // Step 2: <exe-dir>/Resources/parameters.default.json. Optional —
+    // missing file silently keeps the C++ defaults so a stripped binary
+    // still boots.
+    {
+        const AssetLocator locator;
+        const Path defaultsPath = locator.LocateResource("parameters.default.json");
+        if (!defaultsPath.View().empty()) {
+            if (auto text = ReadFileToString(std::string{defaultsPath.View()})) {
+                if (auto result = OverlayConfiguration(config, *text); !result) {
+                    return std::unexpected{
+                        "parameters.default.json: " + result.error()};
+                }
+                log.Debug(log::APP, "Configuration: overlaid <exe-dir>/Resources/parameters.default.json");
+            }
+        }
+    }
+
+    // Step 3: %LOCALAPPDATA%/Pyxis/parameters.json (per-user, optional).
+    {
+        const std::string userPath = UserParametersPath();
+        if (!userPath.empty()) {
+            if (auto text = ReadFileToString(userPath)) {
+                if (auto result = OverlayConfiguration(config, *text); !result) {
+                    return std::unexpected{userPath + ": " + result.error()};
+                }
+                log.Debug(log::APP, "Configuration: overlaid " + userPath);
+            }
+        }
+    }
+
+    // Step 4: --config <path> (explicit, highest precedence among JSON
+    // overlays). Failure here is fatal — the user asked for it.
+    if (!cli.configPath.empty()) {
+        const std::string explicitPath{cli.configPath};
+        auto text = ReadFileToString(explicitPath);
+        if (!text) {
+            return std::unexpected{
+                "--config: cannot read " + explicitPath};
+        }
+        if (auto result = OverlayConfiguration(config, *text); !result) {
+            return std::unexpected{explicitPath + ": " + result.error()};
+        }
+        log.Info(log::APP, "Configuration: overlaid --config " + explicitPath);
+    }
+
+    // Step 5: CLI overrides — applied last so command-line always wins.
+    ApplyCliOverrides(config, cli);
     return config;
 }
 
