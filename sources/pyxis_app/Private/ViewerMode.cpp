@@ -386,8 +386,10 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
     {
       const Profiler::CpuScope imguiCpu(profiler, "app.imgui.cpu");
       const FrameProfile frameProfile = renderer.LastFrameProfile();
+      const FrameStats sceneStats = gpuScene.LastFrameStats();
       imguiHost.BeginFrame();
       imguiHost.BuildFpsPanel(frameProfile);
+      imguiHost.BuildScenePanel(sceneStats);
       imguiHost.Render();
     }
 

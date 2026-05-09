@@ -9,6 +9,7 @@
 #pragma once
 
 #include <Pyxis/Renderer/Descs/FrameProfile.h>
+#include <Pyxis/Renderer/Descs/FrameStats.h>
 
 #include <cstdint>
 
@@ -52,6 +53,14 @@ class ImGuiHost {
   // Builds the dockable Performance panel. Shows the totals + the
   // pre-order scope tree from the supplied FrameProfile snapshot.
   void BuildFpsPanel(const FrameProfile& frameProfile) noexcept;
+
+  // Builds the dockable Scene panel — counts (meshes / materials /
+  // textures / instances / lights / BLAS), GPU memory by category
+  // (vertex / index / texture / TLAS / BLAS bytes), and the
+  // per-frame health row (pending uploads / BLAS builds, stale
+  // handle drops, degraded sentinel). Reads from the snapshot the
+  // caller pulled via GpuScene::LastFrameStats().
+  void BuildScenePanel(const FrameStats& sceneStats) noexcept;
   void Render() noexcept;
 
   // Notify the ImGui Vulkan backend that the swapchain was recreated

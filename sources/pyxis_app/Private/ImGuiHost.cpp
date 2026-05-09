@@ -214,6 +214,110 @@ void ImGuiHost::BuildFpsPanel(const FrameProfile& frameProfile) noexcept {
   ImGui::End();
 }
 
+void ImGuiHost::BuildScenePanel(const FrameStats& sceneStats) noexcept {
+  if (!_ready)
+    return;
+
+  // M7 audit follow-up: dockable Scene panel showing the §18.4
+  // FrameStats snapshot. Counts go under the header section,
+  // GPU-side memory under "GPU memory", per-frame health row at the
+  // bottom (pending uploads / BLAS builds, stale handle drops,
+  // degraded sentinel). All values come from a single
+  // GpuScene::LastFrameStats() call the caller drained for us.
+  //
+  // Bytes formatted by absolute magnitude (B / KiB / MiB / GiB)
+  // because raw byte counts are unreadable past ~1 KiB but the
+  // smaller scenes (M3 cube, M5 / M6 / M7 fixtures) live well below
+  // 1 MiB and would lose precision under a uniform MB / GB unit.
+  auto formatBytes = [](uint64_t bytes, char* buf, std::size_t bufSize) {
+    if (bytes >= (1ull << 30))
+    {
+      const double gib = static_cast<double>(bytes) / static_cast<double>(1ull << 30);
+      std::snprintf(buf, bufSize, "%.2f GiB", gib);
+    }
+    else if (bytes >= (1ull << 20))
+    {
+      const double mib = static_cast<double>(bytes) / static_cast<double>(1ull << 20);
+      std::snprintf(buf, bufSize, "%.2f MiB", mib);
+    }
+    else if (bytes >= (1ull << 10))
+    {
+      const double kib = static_cast<double>(bytes) / static_cast<double>(1ull << 10);
+      std::snprintf(buf, bufSize, "%.2f KiB", kib);
+    }
+    else
+    {
+      std::snprintf(buf, bufSize, "%llu B", static_cast<unsigned long long>(bytes));
+    }
+  };
+  char bytesBuf[32];
+
+  if (ImGui::Begin("Scene", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+  {
+    ImGui::Text("Counts");
+    ImGui::Separator();
+    ImGui::Text("Meshes      : %llu", static_cast<unsigned long long>(sceneStats.meshCount));
+    ImGui::Text("Materials   : %llu", static_cast<unsigned long long>(sceneStats.materialCount));
+    ImGui::Text("Textures    : %llu", static_cast<unsigned long long>(sceneStats.textureCount));
+    ImGui::Text("Instances   : %llu", static_cast<unsigned long long>(sceneStats.instanceCount));
+    ImGui::Text("Lights      : %llu", static_cast<unsigned long long>(sceneStats.lightCount));
+    ImGui::Text("BLAS        : %llu", static_cast<unsigned long long>(sceneStats.blasCount));
+    // TLAS: GpuScene allocates exactly 0 or 1 TLAS in v1 (multi-tier
+    // sharding is post-v1 §16.5); a non-zero tlasBytes implies one
+    // TLAS exists. No FrameStats counter for it — display the boolean.
+    ImGui::Text("TLAS        : %s", sceneStats.tlasBytes > 0 ? "1" : "0");
+
+    ImGui::Spacing();
+    ImGui::Text("GPU memory");
+    ImGui::Separator();
+    formatBytes(sceneStats.vertexBytes, bytesBuf, sizeof(bytesBuf));
+    ImGui::Text("Vertex      : %s", bytesBuf);
+    formatBytes(sceneStats.indexBytes, bytesBuf, sizeof(bytesBuf));
+    ImGui::Text("Index       : %s", bytesBuf);
+    formatBytes(sceneStats.textureBytes, bytesBuf, sizeof(bytesBuf));
+    ImGui::Text("Texture     : %s", bytesBuf);
+    formatBytes(sceneStats.blasBytes, bytesBuf, sizeof(bytesBuf));
+    ImGui::Text("BLAS        : %s", bytesBuf);
+    formatBytes(sceneStats.tlasBytes, bytesBuf, sizeof(bytesBuf));
+    ImGui::Text("TLAS        : %s", bytesBuf);
+    const uint64_t totalBytes = sceneStats.vertexBytes + sceneStats.indexBytes
+                                + sceneStats.textureBytes + sceneStats.blasBytes
+                                + sceneStats.tlasBytes;
+    formatBytes(totalBytes, bytesBuf, sizeof(bytesBuf));
+    ImGui::Text("Total       : %s", bytesBuf);
+
+    ImGui::Spacing();
+    ImGui::Text("This frame");
+    ImGui::Separator();
+    ImGui::Text("Pending uploads     : %llu",
+                static_cast<unsigned long long>(sceneStats.pendingUploads));
+    ImGui::Text("Pending BLAS builds : %llu",
+                static_cast<unsigned long long>(sceneStats.pendingBlasBuilds));
+    // staleHandleDrops + degraded are health signals — colour them
+    // when non-zero / true so the user sees them immediately. Yellow
+    // for the soft warning (drops > 0); red for the degraded sentinel.
+    if (sceneStats.staleHandleDrops > 0)
+    {
+      ImGui::TextColored(ImVec4(0.95f, 0.85f, 0.20f, 1.0f),
+                         "Stale handle drops  : %llu",
+                         static_cast<unsigned long long>(sceneStats.staleHandleDrops));
+    }
+    else
+    {
+      ImGui::Text("Stale handle drops  : 0");
+    }
+    if (sceneStats.degraded)
+    {
+      ImGui::TextColored(ImVec4(0.95f, 0.30f, 0.20f, 1.0f), "Degraded            : YES");
+    }
+    else
+    {
+      ImGui::Text("Degraded            : no");
+    }
+  }
+  ImGui::End();
+}
+
 void ImGuiHost::Render() noexcept {
   if (!_ready)
     return;
