@@ -127,6 +127,37 @@ std::uint64_t HashMaterialDesc(const OpenPBRMaterialDesc& desc) noexcept {
   return hash;
 }
 
+// Hash a MeshDesc by content (positions + indices + optional vertex
+// attributes). Used by CreateMesh's content-dedup path so two
+// `MeshDesc` calls with byte-identical geometry collapse to the same
+// MeshHandle — and therefore one BLAS, satisfying §15's "BLAS keyed
+// on `MeshHandle`. If the same SdfPath mesh is consumed by N
+// instancers, all share one BLAS." Without this, three separate
+// `def Mesh "FooSphere"` prims with identical points/indices yield
+// three handles + three BLAS even though they're geometrically
+// indistinguishable.
+//
+// `debugName` is intentionally NOT hashed — it's a diagnostic-only
+// field per the §18.4 MeshDesc contract, and dedup by name would
+// defeat the geometric-identity dedup we want here. The first
+// CreateMesh's debugName "wins" for the shared entry.
+std::uint64_t HashMeshDesc(const MeshDesc& desc) noexcept {
+  std::uint64_t hash = FNV1A_64_OFFSET;
+  // Hash each span's contents byte-by-byte. Empty spans (optional
+  // attributes) hash to the FNV1a identity for that mix step.
+  auto mixSpan = [&](const void* data, std::size_t bytes) {
+    if (bytes == 0)
+      return;
+    hash = (hash ^ HashBytes(data, bytes)) * FNV1A_64_PRIME;
+  };
+  mixSpan(desc.positions.data(), desc.positions.size_bytes());
+  mixSpan(desc.indices.data(),   desc.indices.size_bytes());
+  mixSpan(desc.normals.data(),   desc.normals.size_bytes());
+  mixSpan(desc.tangents.data(),  desc.tangents.size_bytes());
+  mixSpan(desc.uv0.data(),       desc.uv0.size_bytes());
+  return hash;
+}
+
 // Hash a TextureKey. The key body is small + has no pointer-bearing
 // fields besides the path string_view, which we hash as bytes
 // independently.
@@ -269,6 +300,12 @@ struct GpuScene::Impl {
     // closesthit reads .xyz only; the w slot is reserved for an
     // M9 per-face flag (alpha-test, double-sided override, etc.).
     std::vector<hlslpp::float4>  faceNormals;
+
+    // §15 content-dedup: FNV1a-64 of (positions + indices + optional
+    // attributes) at CreateMesh time. Stored on the entry so
+    // DestroyMesh can erase the matching map entry without re-hashing
+    // the (possibly-cleared) buffers.
+    std::uint64_t                descHash       = 0;
   };
 
   struct InstanceEntry {
@@ -355,6 +392,14 @@ struct GpuScene::Impl {
   // upgrade is on the M8 perf-sweep checklist.
   std::unordered_map<std::uint64_t, MaterialHandle> materialDescHashToHandle;
   std::unordered_map<std::uint64_t, TextureHandle>  textureKeyHashToHandle;
+  // §15 content-dedup map: hash → MeshHandle. CreateMesh hashes the
+  // input MeshDesc's geometry, looks up here, and returns the
+  // existing handle on a hit so identical mesh content authored under
+  // different SdfPaths shares one MeshHandle → one BLAS. Required for
+  // PointInstancer-with-shared-prototype + identical-content scenes
+  // (default.usd's three spheres) to actually share BLAS the way
+  // §15 promises.
+  std::unordered_map<std::uint64_t, MeshHandle>     meshDescHashToHandle;
 
   // M5 GPU pools.
   // - materialGpuBuffer: structured buffer of OpenPBRMaterialGPU,
@@ -544,6 +589,36 @@ Expected<MeshHandle> GpuScene::CreateMesh(const MeshDesc& meshDesc) {
                                        meshDesc.uv0.size(), meshDesc.positions.size())};
   }
 
+  // ---- §15 content-dedup -------------------------------------------------
+  // Hash the geometry (positions + indices + optional attrs) and
+  // check the dedup map. On a hit, return the existing handle so two
+  // CreateMesh calls with byte-identical content share one MeshHandle
+  // → one BLAS. Default scene's three spheres exercise this — same
+  // 80-tri icosphere data inlined three times collapses to one slot.
+  const std::uint64_t descHash = HashMeshDesc(meshDesc);
+  if (auto found = _impl->meshDescHashToHandle.find(descHash);
+      found != _impl->meshDescHashToHandle.end())
+  {
+    // Validate the cached handle still resolves to a live entry — a
+    // hash collision (FNV1a-64 birthday risk is negligible at v1
+    // mesh counts but not zero) or a stale entry from a Destroy that
+    // somehow missed the map cleanup falls through to a fresh
+    // allocation.
+    const auto cachedValue = static_cast<std::uint32_t>(found->second);
+    const std::uint32_t cachedSlot = HandleSlot(cachedValue);
+    if (cachedSlot > 0 && cachedSlot < _impl->meshes.size())
+    {
+      const Impl::MeshEntry& cached = _impl->meshes[cachedSlot];
+      if (cached.live && !cached.quarantined
+          && cached.generation == HandleGeneration(cachedValue))
+      {
+        return found->second;
+      }
+    }
+    // Stale map entry — drop it and fall through to allocate fresh.
+    _impl->meshDescHashToHandle.erase(found);
+  }
+
   // ---- Allocate slot -----------------------------------------------------
   uint32_t slot = 0;
   for (uint32_t candidateSlot = 1; candidateSlot < _impl->meshes.size(); ++candidateSlot)
@@ -613,7 +688,12 @@ Expected<MeshHandle> GpuScene::CreateMesh(const MeshDesc& meshDesc) {
   }
   _impl->meshFaceNormalsNeedUpload = true;
 
-  return static_cast<MeshHandle>(HandleEncode(slot, entry.generation));
+  // Record the descHash on the entry + register the handle in the
+  // dedup map. DestroyMesh erases the map entry symmetrically.
+  entry.descHash = descHash;
+  const auto handle = static_cast<MeshHandle>(HandleEncode(slot, entry.generation));
+  _impl->meshDescHashToHandle.emplace(descHash, handle);
+  return handle;
 }
 
 Expected<void> GpuScene::UpdateMesh(MeshHandle /*meshHandle*/, const MeshDesc& /*meshDesc*/) {
@@ -636,6 +716,11 @@ void GpuScene::DestroyMesh(MeshHandle meshHandle) {
     ++_impl->lastFrameStats.staleHandleDrops;
     return;
   }
+  // §15 content-dedup map cleanup. Erase by stored hash so a future
+  // CreateMesh of the same content allocates fresh instead of
+  // looking up a dead slot.
+  _impl->meshDescHashToHandle.erase(entry.descHash);
+  entry.descHash = 0;
   entry.live = false;
   entry.needsGpuUpload = false;
   entry.needsBlasBuild = false;
