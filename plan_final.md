@@ -4572,7 +4572,7 @@ an S1 incident.
 | Tiny image regression | Python harness | RMSE > tolerance |
 | NVRHI validation (Debug) | Vulkan validation layer | Any error or perf warning |
 | Memory leak (Debug) | VMA `vmaCalculateStatistics` at process exit (intra-process GPU allocation tracking; `VkPhysicalDeviceMemoryBudget` reports system-wide pressure and cannot detect leaks) + `BudgetTracker` post-run delta | Non-zero leak |
-| Nightly | Subset-Moana headless | RMSE > tolerance, peak GPU > +10% baseline |
+| Nightly | Bistro headless | RMSE > tolerance, peak GPU > +10% baseline |
 
 CI lives under `_pipelines/pyxis_ci.yml`.
 Build matrix: Debug + Release; both use Vulkan validation in Debug only.
@@ -4631,7 +4631,7 @@ Build matrix: Debug + Release; both use Vulkan validation in Debug only.
 14. `HdPyxisMesh`, `HdPyxisInstancer`, `HdPyxisCamera`, `HdPyxisRenderBuffer`.
 15. UsdPreviewSurface → OpenPBR adapter; texture cache; first textured Hydra render → M5.
 16. Lights (distant, dome, rect) → M7.
-17. Moana stage open via `UsdImagingStageSceneIndex` (Hydra 2.0); attach flatten,
+17. Bistro stage open via `UsdImagingStageSceneIndex` (Hydra 2.0); attach flatten,
     prototype-propagating, material-binding scene-index filters; subsets, instancers,
     large texture handling → M8a/M8b/M9.
 18. Headless mode polish; deterministic seeding; EXR writer; exit codes.
@@ -4642,7 +4642,7 @@ Build matrix: Debug + Release; both use Vulkan validation in Debug only.
     M4 onward. Same `MeshDesc`/`InstanceDesc`/`OpenPBRMaterialDesc` outputs; shares
     `pyxis_material_translation`. The walker emits prims in **`SdfPath`-sorted order**
     so instance IDs match the Hydra adapter byte-for-byte. M8a is gated on **both**
-    adapters loading the Moana subset and producing RMSE-zero regression images.
+    adapters loading Bistro and producing RMSE-zero regression images.
 
 ---
 
@@ -4664,7 +4664,7 @@ actually is.
   no v1 stand-in, no scheduled refactor. Once a system is registered in M0/M3, its
   schedule slot is final.
 - **Both ingest adapters** (`pyxis_hydra` and `pyxis_usd_ingest`) ship from M0 and
-  are at parity: each Moana regression image is rendered *twice* in CI (once per
+  are at parity: each Bistro regression image is rendered *twice* in CI (once per
   adapter) and they must match byte-for-byte.
 - The folder layout (§2), all CMake targets (§3), all third-party deps (§4), the
   threading model (§31), the error contract (§18.6).
@@ -4862,7 +4862,7 @@ what it must not foreclose.
   uploads textures in their native format and clamps with
   `textures.maxResolution`.
 - **Mip streaming / partial residency.** Sparse-binding for huge texture
-  sets (Moana hero foliage). Bind only the mip pyramid above the current
+  sets (production-class hero foliage). Bind only the mip pyramid above the current
   screen-size estimate; promote/demote on visibility change. Requires
   `VK_KHR_sparse_*` and a residency-budget controller.
 - **OpenColorIO 2 colour management.** Per-texture input colour space (USD
@@ -5079,7 +5079,7 @@ Each milestone has a corresponding verification step:
    timestamps appear, verify barriers don't crash NVRHI validation.
 4. Tiny `.usda` fixtures rendered headless → image diff vs in-tree baseline EXR
    (RMSE < per-test tolerance).
-5. Moana subset test (nightly): renders, diff vs baseline, profiles within ±10% of
+5. Bistro test (nightly): renders, diff vs baseline, profiles within ±10% of
    reference timings.
 6. spdlog summary at end of each headless run is parsed and asserted to contain all
    required fields (no silent missing scopes).
@@ -5108,7 +5108,7 @@ Each milestone has a corresponding verification step:
 - **BLAS by MeshHandle** (strict prototype sharing); compaction default-on.
 - **Profiling is first-class infra**; ImGui/spdlog/JSON/CSV are output backends.
 - **Image is the only regression artifact** v1.
-- **Subdivision, volumes, curves, displacement deferred** — Moana will be approximated.
+- **Subdivision, volumes, curves, displacement deferred** — affected hero meshes will be approximated.
 - **Texture compression deferred** — native formats only v1; rely on resolution clamp.
 - **MaterialX in scope, scoped** to `open_pbr_surface` (canonical 1:1) and
   `standard_surface` (translation shim); arbitrary node graphs logged-and-skipped.
@@ -5128,7 +5128,7 @@ All four open questions from the previous draft have been resolved:
 
 1. **Subdivision in v1?** → Deferred. Render polymesh hulls; revisit after M11.
 2. **Texture compression?** → Deferred. Upload textures in their native format; rely on
-   `textures.maxResolution` to cap GPU footprint. Revisit if Moana exceeds memory budget.
+   `textures.maxResolution` to cap GPU footprint. Revisit if v1 hero scene (Bistro) or post-v1 production-class scenes exceed memory budget.
 3. **MaterialX coverage v1?** → In scope, scoped to `open_pbr_surface` (canonical 1:1 mapping)
    plus `standard_surface` as a translation shim into OpenPBR. Arbitrary node graphs are
    logged-and-skipped with constant-default fallback, not baked.
@@ -5544,7 +5544,7 @@ and `/plan.md` are dual-owned by `@pyxis-renderer-team` *and* `@pyxis-maintainer
 - **Severity classes**:
   - **S1** — main branch fails to build, or the headless smoke-test crashes.
     Revert-or-fix within 24 h. Block all merges to main until green.
-  - **S2** — nightly subset-Moana RMSE regression > 2× tolerance, or peak GPU
+  - **S2** — nightly Bistro RMSE regression > 2× tolerance, or peak GPU
     > +20 % baseline. Tracking issue + assignment within 48 h.
   - **S3** — flaky test, perf jitter inside ±10 % budget. Logged; addressed in
     the next maintenance sprint.
@@ -5653,7 +5653,7 @@ Aftermath (§33.9) covers GPU device-lost. CPU crashes need a separate path.
 
 - File: `%LOCALAPPDATA%/Pyxis/Logs/pyxis-<pid>-YYYYMMDD.log`.
 - Rotation: 64 MiB per file, 10 files retained per `<pid>` ⇒ ≤ 640 MiB per
-  process. Sized to absorb a Moana ingest run with chatty unsupported-feature
+  process. Sized to absorb a long ingest run with chatty unsupported-feature
   warnings without truncating the tail.
 - Process-exit cleanup: log files older than 30 days are deleted on startup
   (best-effort; failures swallowed).
