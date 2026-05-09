@@ -127,6 +127,8 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
       nvrhi::BindingLayoutItem::StructuredBuffer_SRV(6),     // binding 6 instance→mesh (M7 NdotL)
       nvrhi::BindingLayoutItem::StructuredBuffer_SRV(7),     // binding 7 mesh face normals (M7 NdotL)
       nvrhi::BindingLayoutItem::StructuredBuffer_SRV(8),     // binding 8 mesh face offsets (M7 NdotL)
+      nvrhi::BindingLayoutItem::Texture_SRV(9),              // binding 9 dome env-map (M7-IBL)
+      nvrhi::BindingLayoutItem::Sampler(10),                 // binding 10 dome sampler (M7-IBL)
   };
   _bindingLayout = _device->createBindingLayout(layoutDesc);
   if (!_bindingLayout)
@@ -300,6 +302,47 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
     return;
   }
 
+  // M7-IBL: 1×1 black RGBA32F dome fallback texture + a default
+  // linear-clamp sampler. Used by the miss shader's lat-long sample
+  // when no dome with a resolved env-map exists; texture sampled as
+  // (0,0,0,0) so the miss shader's "use authored color" branch
+  // continues to fire as the visible result. The fallback texture
+  // gets its zero pixel written on the first Execute() — same shape
+  // as the other M5/M6/M7 fallbacks.
+  nvrhi::TextureDesc domeFallbackDesc;
+  domeFallbackDesc.width = 1;
+  domeFallbackDesc.height = 1;
+  domeFallbackDesc.format = nvrhi::Format::RGBA32_FLOAT;
+  domeFallbackDesc.dimension = nvrhi::TextureDimension::Texture2D;
+  domeFallbackDesc.debugName = "PathTrace.FallbackDomeTexture";
+  domeFallbackDesc.initialState = nvrhi::ResourceStates::ShaderResource;
+  domeFallbackDesc.keepInitialState = true;
+  _fallbackDomeTexture = _device->createTexture(domeFallbackDesc);
+  if (!_fallbackDomeTexture)
+  {
+    Logging::Get().Error(log::RENDER, "PathTracePass: createTexture(FallbackDomeTexture) failed");
+    return;
+  }
+  // Default linear-clamp sampler — used as fallback when GpuScene
+  // hasn't created its bindless sampler yet (i.e. first frame /
+  // empty scene). The HDRI lat-long sample wraps in U (azimuth) and
+  // clamps in V (elevation); a single sampler covers both — sample
+  // wrap mode at the GLSL/HLSL site rather than baking it into a
+  // per-axis sampler.
+  nvrhi::SamplerDesc samplerDesc;
+  samplerDesc.minFilter = true;
+  samplerDesc.magFilter = true;
+  samplerDesc.mipFilter = true;
+  samplerDesc.addressU = nvrhi::SamplerAddressMode::Wrap;
+  samplerDesc.addressV = nvrhi::SamplerAddressMode::Clamp;
+  samplerDesc.addressW = nvrhi::SamplerAddressMode::Wrap;
+  _fallbackDomeSampler = _device->createSampler(samplerDesc);
+  if (!_fallbackDomeSampler)
+  {
+    Logging::Get().Error(log::RENDER, "PathTracePass: createSampler(FallbackDomeSampler) failed");
+    return;
+  }
+
   _shadersOk = true;
   Logging::Get().Info(log::RENDER, "PathTracePass: initialised (RT pipeline + SBT ready)");
 }
@@ -318,12 +361,16 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(nvrhi::ITexture* ou
   nvrhi::IBuffer* sceneInstanceMesh = _scene->GetInstanceMeshBuffer();
   nvrhi::IBuffer* sceneMeshFaceNormals = _scene->GetMeshFaceNormalsBuffer();
   nvrhi::IBuffer* sceneMeshFaceOffsets = _scene->GetMeshFaceOffsetsBuffer();
+  nvrhi::ITexture* sceneDomeTexture = _scene->GetDomeEnvMapTexture();
+  nvrhi::ISampler* sceneBindlessSampler = _scene->GetBindlessSampler();
   if (sceneMaterials != _lastSeenMaterialBuffer
       || sceneInstanceMaterial != _lastSeenInstanceMaterialBuffer
       || sceneLights != _lastSeenLightBuffer
       || sceneInstanceMesh != _lastSeenInstanceMeshBuffer
       || sceneMeshFaceNormals != _lastSeenMeshFaceNormalsBuffer
-      || sceneMeshFaceOffsets != _lastSeenMeshFaceOffsetsBuffer)
+      || sceneMeshFaceOffsets != _lastSeenMeshFaceOffsetsBuffer
+      || sceneDomeTexture != _lastSeenDomeTexture
+      || sceneBindlessSampler != _lastSeenBindlessSampler)
   {
     _bindingSetCache.clear();
     _lastSeenMaterialBuffer = sceneMaterials;
@@ -332,6 +379,8 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(nvrhi::ITexture* ou
     _lastSeenInstanceMeshBuffer = sceneInstanceMesh;
     _lastSeenMeshFaceNormalsBuffer = sceneMeshFaceNormals;
     _lastSeenMeshFaceOffsetsBuffer = sceneMeshFaceOffsets;
+    _lastSeenDomeTexture = sceneDomeTexture;
+    _lastSeenBindlessSampler = sceneBindlessSampler;
   }
 
   if (auto cached = _bindingSetCache.find(output); cached != _bindingSetCache.end())
@@ -376,6 +425,17 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(nvrhi::ITexture* ou
   nvrhi::IBuffer* meshFaceOffsetsBuffer = _scene->GetMeshFaceOffsetsBuffer();
   if (meshFaceOffsetsBuffer == nullptr)
     meshFaceOffsetsBuffer = _fallbackMeshFaceOffsetsBuffer.Get();
+  // M7-IBL: dome HDRI texture + sampler. Scene's first live dome
+  // wins; falls back to the 1×1 black texture + the local linear-
+  // clamp sampler when no dome with a resolved env-map exists. The
+  // miss shader handles the all-black case via the M7-simple
+  // "use authored color" branch.
+  nvrhi::ITexture* domeTexture = _scene->GetDomeEnvMapTexture();
+  if (domeTexture == nullptr)
+    domeTexture = _fallbackDomeTexture.Get();
+  nvrhi::ISampler* domeSampler = _scene->GetBindlessSampler();
+  if (domeSampler == nullptr)
+    domeSampler = _fallbackDomeSampler.Get();
 
   nvrhi::BindingSetDesc setDesc;
   setDesc.bindings = {
@@ -388,6 +448,8 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(nvrhi::ITexture* ou
       nvrhi::BindingSetItem::StructuredBuffer_SRV(6, instanceMeshBuffer),
       nvrhi::BindingSetItem::StructuredBuffer_SRV(7, meshFaceNormalsBuffer),
       nvrhi::BindingSetItem::StructuredBuffer_SRV(8, meshFaceOffsetsBuffer),
+      nvrhi::BindingSetItem::Texture_SRV(9, domeTexture),
+      nvrhi::BindingSetItem::Sampler(10, domeSampler),
   };
   nvrhi::BindingSetHandle set = _device->createBindingSet(setDesc, _bindingLayout);
   _bindingSetCache[output] = set;
@@ -517,6 +579,17 @@ void PathTracePass::Execute(nvrhi::ICommandList* commandList, const PassContext&
     commandList->writeBuffer(_fallbackMeshFaceNormalsBuffer.Get(),
                              FALLBACK_MESH_FACE_NORMALS_ZERO,
                              sizeof(FALLBACK_MESH_FACE_NORMALS_ZERO));
+  }
+
+  // M7-IBL: zero-init the 1×1 dome fallback texture if the scene
+  // hasn't bound a real env-map. RGBA32_FLOAT, 16 bytes — sample
+  // returns (0,0,0,0) so the miss shader's "use authored color"
+  // branch is the visible result.
+  if (_scene->GetDomeEnvMapTexture() == nullptr)
+  {
+    static const float FALLBACK_DOME_PIXEL[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    commandList->writeTexture(_fallbackDomeTexture.Get(), 0, 0, FALLBACK_DOME_PIXEL,
+                              sizeof(FALLBACK_DOME_PIXEL));
   }
 
   // ---- Bind + dispatch ----------------------------------------------

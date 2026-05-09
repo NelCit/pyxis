@@ -155,6 +155,11 @@ target_include_directories(pyxis_renderer
 find_package(Stb REQUIRED)
 target_include_directories(pyxis_renderer PRIVATE ${Stb_INCLUDE_DIR})
 
+# tinyexr — HDR / EXR decode for M7 dome environment maps. pyxis_app
+# already links it for EXR output; the renderer pulls it independently
+# for the input / decode side.
+find_package(tinyexr CONFIG REQUIRED)
+
 # stb_image's IMPLEMENTATION TU has missing-field-initializer
 # patterns inside the third-party header (same as stb_image_write
 # in pyxis_app). Disable the warning + clang-tidy on that single
@@ -170,6 +175,7 @@ target_link_libraries(pyxis_renderer
     PRIVATE
         $<TARGET_NAME_IF_EXISTS:flecs::flecs_static>
         $<TARGET_NAME_IF_EXISTS:flecs::flecs>
+        unofficial::tinyexr::tinyexr
 )
 
 # Debug-only: PYXIS_DEBUG_TOOLS toggles Flecs Explorer (§30.11).

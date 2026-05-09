@@ -93,6 +93,13 @@ class PathTracePass final : public IRenderPass {
   nvrhi::BufferHandle _fallbackMeshFaceNormalsBuffer;
   nvrhi::BufferHandle _fallbackMeshFaceOffsetsBuffer;
 
+  // M7-IBL: 1×1 black RGBA32F fallback texture + a default linear-
+  // clamp sampler. Bound at bindings 9/10 when the scene has no dome
+  // light with a resolved env-map — sampling returns black so the
+  // miss shader's "use authored color" branch fires unchanged.
+  nvrhi::TextureHandle _fallbackDomeTexture;
+  nvrhi::SamplerHandle _fallbackDomeSampler;
+
   // Output binding-set cache, keyed on the output texture pointer.
   // Bounded — a swapchain rebuild churns through up to ~3 swapchain
   // images, so 6 entries is more than enough headroom and the
@@ -120,6 +127,14 @@ class PathTracePass final : public IRenderPass {
   nvrhi::IBuffer* _lastSeenInstanceMeshBuffer = nullptr;
   nvrhi::IBuffer* _lastSeenMeshFaceNormalsBuffer = nullptr;
   nvrhi::IBuffer* _lastSeenMeshFaceOffsetsBuffer = nullptr;
+
+  // M7-IBL: invalidation handles for bindings 9 (dome texture) +
+  // 10 (sampler). The texture pointer flips when GpuScene resolves
+  // its first dome's env-map; the sampler is shared across the
+  // material + dome path and rarely changes, but we track it so a
+  // future per-role-sampler change invalidates correctly.
+  nvrhi::ITexture* _lastSeenDomeTexture = nullptr;
+  nvrhi::ISampler* _lastSeenBindlessSampler = nullptr;
 
   bool _shadersOk = false;  // true if ctor loaded all three shaders + built pipeline.
 };

@@ -1,43 +1,85 @@
 // Pyxis renderer — miss shader.
 //
-// Plan §41 M7-simple. Reads the M7 lights buffer at binding 5 to
-// find the FIRST authored Dome light and emits its `color × intensity`
-// as the background — replacing the M3-era hardcoded sky blue.
-// Falls back to a soft sky-blue when no dome is authored (preserves
-// the M3/M5/M6 fixture renders that don't ship a Dome light).
+// Plan §41 M7-IBL. Samples the dome HDRI bound at binding 9 via the
+// ray direction's lat-long (equirectangular) UV, modulates by the
+// FIRST authored Dome light's color × intensity, and emits that as
+// the background. Replaces the M3-era hardcoded sky-blue (`0.55,
+// 0.65, 0.85`) and the M7-simple "authored-color-only" fallback.
 //
-// **No HDRI lat-long sampling here yet** — that's the M7-full /
-// IBL importance sampler the user fills in alongside the closesthit
-// per §7. Once it lands, this shader will sample the dome's
-// `envMapTex` (already declared in `LightGpu`) at the ray direction's
-// spherical coords. Until then the dome's authored color is the
-// best signal we have, and at least the background follows what the
-// `.usd` actually requests.
+// Lat-long mapping (right-handed Y-up, USD convention):
+//   u = atan2(dir.x, dir.z) / (2π) + 0.5    // azimuth, wraps in U
+//   v = acos(dir.y) / π                     // elevation, [0, 1]
+// +Z is at u = 0.5 (image centre column), +Y at v = 0 (top row),
+// -Y at v = 1 (bottom row). Matches Poly Haven HDRI authoring.
+//
+// **Still no IBL importance sampling** — that's the M7-full closesthit
+// replacement (alias-table over the env-map per §7). The miss-shader
+// background here is just visual — the closesthit's dome term
+// continues to use the simple Lambert-against-up approximation
+// until M7-full lands.
 
 #include "ShaderInterop.slang"
 
-[[vk::binding(5, 0)]] StructuredBuffer<LightGpu> gLights;
+[[vk::binding(5, 0)]]  StructuredBuffer<LightGpu> gLights;
+[[vk::binding(9, 0)]]  Texture2D<float4>          gDomeEnvMap;
+[[vk::binding(10, 0)]] SamplerState               gDomeSampler;
+
+static const float PYXIS_PI         = 3.14159265358979323846;
+static const float PYXIS_TWO_PI     = 6.28318530717958647692;
+
+// Convert a unit-length world-space direction to equirectangular
+// lat-long UV. Defensively clamps cos-theta input so acos() doesn't
+// produce NaN at the poles when the direction's y is slightly out
+// of [-1, 1] from float-precision drift.
+float2 latLongUv(float3 dir) {
+    const float u = atan2(dir.x, dir.z) / PYXIS_TWO_PI + 0.5;
+    const float v = acos(clamp(dir.y, -1.0, 1.0)) / PYXIS_PI;
+    return float2(u, v);
+}
 
 // Slang emits the SPIR-V `OpEntryPoint` name as `"main"` regardless
 // of the source-side function name; the C++ side passes `"main"` to
 // NVRHI's createShader. See the matching note in raygen.slang.
 [shader("miss")]
 void main(inout HitInfo payload) {
-    // M3 fallback colour — soft sky-blue. Used when no authored
-    // dome is found (M3 cube fixture, M5 three-material fixture,
-    // M6 instanced grid all hit this path).
-    float3 background = float3(0.55, 0.65, 0.85);
+    // Find the first authored Dome light — its color × intensity
+    // tints / scales the HDRI sample. The fallback (no dome found)
+    // keeps the M3-era soft sky-blue.
+    float3 domeTint     = float3(0.55, 0.65, 0.85);
+    float  domeScale    = 1.0;
+    bool   domeFound    = false;
 
     uint lightCount;
     uint _stride;
     gLights.GetDimensions(lightCount, _stride);
     for (uint i = 0; i < lightCount; ++i) {
         const LightGpu L = gLights[i];
-        if (L.intensity <= 0.0) continue;        // sentinel / disabled
-        if (L.kind != LIGHT_KIND_DOME) continue; // first dome wins
-        background = float3(L.colorR, L.colorG, L.colorB) * L.intensity;
+        if (L.intensity <= 0.0) continue;
+        if (L.kind != LIGHT_KIND_DOME) continue;
+        domeTint  = float3(L.colorR, L.colorG, L.colorB);
+        domeScale = L.intensity;
+        domeFound = true;
         break;
     }
+
+    // Sample the HDRI at the primary ray's miss direction. The
+    // PathTracePass's 1×1 black fallback covers the no-bound-dome
+    // case — the texture sample returns (0,0,0,0), so without an
+    // authored dome we keep the soft-blue fallback above; with an
+    // authored dome the (color × intensity) modulates the HDRI.
+    const float3 dir = normalize(WorldRayDirection());
+    const float2 uv  = latLongUv(dir);
+    const float3 hdri = gDomeEnvMap.SampleLevel(gDomeSampler, uv, 0).rgb;
+
+    // If a dome is authored: HDRI × tint × scale. The HDRI carries
+    // the radiance distribution; tint × scale lets the .usd modulate
+    // it without re-baking the EXR.
+    // If no dome: keep the legacy sky-blue (HDRI sample is
+    // 0 × 0.55,0.65,0.85 = 0 from the fallback texture, so we want
+    // the unscaled tint).
+    const float3 background = domeFound
+        ? hdri * domeTint * domeScale
+        : domeTint;
 
     payload.color = background;
     payload.hitT  = -1.0f;  // miss sentinel — raygen branches on this.

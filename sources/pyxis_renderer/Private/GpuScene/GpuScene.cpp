@@ -39,6 +39,8 @@
 #include <nvrhi/nvrhi.h>
 
 #include <stb_image.h>
+#include <tinyexr.h>
+#include <cstdlib>
 
 #include <cstdint>
 #include <cstring>
@@ -1199,49 +1201,95 @@ Expected<void> GpuScene::CommitResources(nvrhi::ICommandList* commandList) {
     _impl->bindlessSampler = _impl->device->createSampler(samplerDesc);
   }
 
-  // ---- M5: decode + upload pending textures -------------------------
-  // Synchronous stb_image decode on the render thread. The §31
-  // async I/O pool wires at M8 when texture-load latency starts to
-  // dominate frame time; for the M5 stub textured cube one
-  // texture per scene is the realistic upper bound.
+  // ---- M5/M7: decode + upload pending textures ----------------------
+  // Synchronous decode on the render thread (§31 async I/O pool
+  // wires at M8). LDR (.png/.jpg) goes through stb_image as RGBA8;
+  // HDR (.exr — added at M7 for the dome environment map) goes
+  // through tinyexr as RGBA32F. Format selection happens per entry
+  // based on extension.
   for (Impl::TextureEntry& entry : _impl->textures)
   {
     if (!entry.live || !entry.needsGpuUpload || entry.resolvedPath.empty())
       continue;
 
+    // Sniff extension — case-insensitive ".exr" suffix routes to
+    // tinyexr; everything else goes through stb_image.
+    const std::string& path = entry.resolvedPath;
+    const bool isExr = path.size() >= 4
+        && (path.compare(path.size() - 4, 4, ".exr") == 0
+            || path.compare(path.size() - 4, 4, ".EXR") == 0);
+
     int width = 0;
     int height = 0;
-    int channelsInFile = 0;
-    // stbi_load returns 4-channel RGBA8 since we request 4. The
-    // pointer is malloc-allocated; we copy into entry.pixelData
-    // and free immediately.
-    stbi_uc* decoded = stbi_load(entry.resolvedPath.c_str(), &width, &height,
-                                 &channelsInFile, 4);
-    if (decoded == nullptr || width <= 0 || height <= 0)
+    std::vector<std::uint8_t> decodedPixels;
+    nvrhi::Format pixelFormat = nvrhi::Format::UNKNOWN;
+    std::size_t rowPitchBytes = 0;
+
+    if (isExr)
     {
-      Logging::Get().Warn(log::RENDER,
-                          std::string{"TextureCache: stbi_load failed for "}
-                              + entry.resolvedPath
-                              + " — falling back to missing-texture (slot 0).");
-      entry.needsGpuUpload = false;
-      entry.bindlessSlot = 0;  // points at missingTexture
-      if (decoded)
-        stbi_image_free(decoded);
-      continue;
+      // tinyexr LoadEXR: malloc's float[w*h*4] in RGBA order. We
+      // upload directly as RGBA32_FLOAT — 16 B/pixel, so a 1024×512
+      // dome env-map costs ~8 MB GPU (fine for v1; M9 polish drops
+      // to RGBA16_FLOAT once the half-float pack lands).
+      float* exrPixels = nullptr;
+      const char* exrErr = nullptr;
+      const int loadResult =
+          LoadEXR(&exrPixels, &width, &height, path.c_str(), &exrErr);
+      if (loadResult != TINYEXR_SUCCESS || exrPixels == nullptr || width <= 0
+          || height <= 0)
+      {
+        Logging::Get().Warn(log::RENDER,
+                            std::string{"TextureCache: LoadEXR failed for "} + path
+                                + (exrErr ? std::string{" — "} + exrErr : std::string{})
+                                + " — falling back to missing-texture (slot 0).");
+        if (exrErr)
+          FreeEXRErrorMessage(exrErr);
+        if (exrPixels)
+          std::free(exrPixels);
+        entry.needsGpuUpload = false;
+        entry.bindlessSlot = 0;
+        continue;
+      }
+      const std::size_t pixelByteCount = static_cast<std::size_t>(width) * height * 4u
+                                       * sizeof(float);
+      decodedPixels.assign(reinterpret_cast<std::uint8_t*>(exrPixels),
+                           reinterpret_cast<std::uint8_t*>(exrPixels) + pixelByteCount);
+      std::free(exrPixels);
+      pixelFormat = nvrhi::Format::RGBA32_FLOAT;
+      rowPitchBytes = static_cast<std::size_t>(width) * 4u * sizeof(float);
+    }
+    else
+    {
+      int channelsInFile = 0;
+      stbi_uc* decoded = stbi_load(path.c_str(), &width, &height, &channelsInFile, 4);
+      if (decoded == nullptr || width <= 0 || height <= 0)
+      {
+        Logging::Get().Warn(log::RENDER,
+                            std::string{"TextureCache: stbi_load failed for "} + path
+                                + " — falling back to missing-texture (slot 0).");
+        entry.needsGpuUpload = false;
+        entry.bindlessSlot = 0;
+        if (decoded)
+          stbi_image_free(decoded);
+        continue;
+      }
+      const auto pixelByteCount = static_cast<std::size_t>(width) * height * 4u;
+      decodedPixels.assign(decoded, decoded + pixelByteCount);
+      stbi_image_free(decoded);
+      // BaseColor + Emission go through the sRGB→linear EOTF on
+      // sample; everything else is linear data (normal maps, ORM
+      // packs, env-maps via the EXR path above, etc.). §13.
+      pixelFormat = (entry.keyCopy.role == TextureKey::Role::BaseColor
+                     || entry.keyCopy.role == TextureKey::Role::Emission)
+                        ? nvrhi::Format::SRGBA8_UNORM
+                        : nvrhi::Format::RGBA8_UNORM;
+      rowPitchBytes = static_cast<std::size_t>(width) * 4u;
     }
 
-    const auto pixelByteCount = static_cast<std::size_t>(width) * height * 4;
-    entry.pixelData.assign(decoded, decoded + pixelByteCount);
-    stbi_image_free(decoded);
+    entry.pixelData = std::move(decodedPixels);
     entry.width = static_cast<std::uint32_t>(width);
     entry.height = static_cast<std::uint32_t>(height);
-    // BaseColor + Emission go through the sRGB→linear EOTF on
-    // sample; everything else is linear data (normal maps, ORM
-    // packs, etc.). §13 colorspace rule.
-    entry.format = (entry.keyCopy.role == TextureKey::Role::BaseColor
-                    || entry.keyCopy.role == TextureKey::Role::Emission)
-                       ? nvrhi::Format::SRGBA8_UNORM
-                       : nvrhi::Format::RGBA8_UNORM;
+    entry.format = pixelFormat;
 
     nvrhi::TextureDesc texDesc;
     texDesc.width = entry.width;
@@ -1259,10 +1307,7 @@ Expected<void> GpuScene::CommitResources(nvrhi::ICommandList* commandList) {
                                          entry.resolvedPath.c_str())};
     }
     commandList->writeTexture(entry.texture.Get(), 0, 0, entry.pixelData.data(),
-                              static_cast<std::size_t>(entry.width) * 4u);
-    // Drop the CPU copy now that the GPU upload is queued — staging
-    // ring + the §31 deletion guard ensure the bytes survive the
-    // submit. Frees ~width*height*4 bytes per texture.
+                              rowPitchBytes);
     entry.pixelData.clear();
     entry.pixelData.shrink_to_fit();
     entry.needsGpuUpload = false;
@@ -1773,6 +1818,38 @@ nvrhi::IBuffer* GpuScene::GetInstanceMaterialBuffer() const noexcept {
 
 nvrhi::IBuffer* GpuScene::GetLightBuffer() const noexcept {
   return _impl->lightsGpuBuffer.Get();
+}
+
+nvrhi::ITexture* GpuScene::GetDomeEnvMapTexture() const noexcept {
+  // Walk live LightEntries in slot order; return the first Dome with
+  // a valid + non-quarantined envMap-resolved texture. The miss
+  // shader's lat-long sample uses just one dome (the convention every
+  // production renderer follows — multiple domes is post-v1, §43).
+  // Returns nullptr when no dome with an env-map exists; PathTracePass
+  // binds a 1×1 black fallback in that case.
+  for (const Impl::LightEntry& entry : _impl->lights)
+  {
+    if (!entry.live || entry.descCopy.kind != LightDesc::Kind::Dome)
+      continue;
+    const auto envMapValue = static_cast<std::uint32_t>(entry.descCopy.envMap);
+    if (envMapValue == 0)
+      continue;
+    const std::uint32_t texSlot = HandleSlot(envMapValue);
+    if (texSlot == 0 || texSlot >= _impl->textures.size())
+      continue;
+    const Impl::TextureEntry& tex = _impl->textures[texSlot];
+    if (!tex.live || tex.quarantined
+        || tex.generation != HandleGeneration(envMapValue))
+      continue;
+    if (!tex.texture)
+      continue;
+    return tex.texture.Get();
+  }
+  return nullptr;
+}
+
+nvrhi::ISampler* GpuScene::GetBindlessSampler() const noexcept {
+  return _impl->bindlessSampler.Get();
 }
 
 nvrhi::IBuffer* GpuScene::GetInstanceMeshBuffer() const noexcept {

@@ -28,6 +28,7 @@
 #include <Pyxis/Renderer/Descs/LightDesc.h>
 #include <Pyxis/Renderer/Descs/MeshDesc.h>
 #include <Pyxis/Renderer/Descs/OpenPBRMaterialDesc.h>
+#include <Pyxis/Renderer/Descs/TextureKey.h>
 #include <Pyxis/Renderer/GpuScene.h>
 
 #include <pxr/usd/usd/prim.h>
@@ -240,9 +241,36 @@ void EmitLight(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCache,
   else if (prim.IsA<pxr::UsdLuxDomeLight>())
   {
     desc.kind = LightDesc::Kind::Dome;
-    // M7-simple skips `inputs:texture:file` (env map IBL is the
-    // M7-full closesthit's job). Color * intensity becomes uniform
-    // ambient.
+    // Resolve the dome's `inputs:texture:file` SdfAssetPath through
+    // USD's ArResolver (handles relative `@./default_sky.exr@`-style
+    // refs against the .usd's parent directory) and AcquireTexture
+    // it. The resulting TextureHandle is stored on LightDesc.envMap;
+    // GpuScene::CommitResources resolves it to a bindless slot at
+    // pack time, and PathTracePass reads the first live dome's
+    // texture for the miss shader's lat-long sample.
+    const pxr::UsdAttribute textureAttr =
+        prim.GetAttribute(pxr::TfToken("inputs:texture:file"));
+    if (textureAttr)
+    {
+      pxr::SdfAssetPath assetPath;
+      if (textureAttr.Get(&assetPath))
+      {
+        // ResolvedPath() runs USD's ArResolver; falls back to the
+        // raw asset string if the resolver couldn't find the file
+        // (rare for relative siblings; the M7 path-trace then
+        // logs an EXR-decode failure at CommitResources time).
+        std::string resolvedPath = assetPath.GetResolvedPath();
+        if (resolvedPath.empty())
+          resolvedPath = assetPath.GetAssetPath();
+        if (!resolvedPath.empty())
+        {
+          TextureKey key;
+          key.resolvedPath = resolvedPath;
+          key.role = TextureKey::Role::Emission;  // HDR env-map: linear, no sRGB EOTF
+          desc.envMap = scene.AcquireTexture(key);
+        }
+      }
+    }
   }
   else
   {

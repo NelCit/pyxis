@@ -56,6 +56,8 @@ namespace nvrhi {
 class IDevice;
 class ICommandList;
 class IBuffer;
+class ITexture;
+class ISampler;
 namespace rt {
 class IAccelStruct;
 }  // namespace rt
@@ -192,6 +194,19 @@ public:
   // Sized to the mesh table length so the closesthit's lookup is
   // bounds-safe by construction.
   [[nodiscard]] nvrhi::IBuffer*          GetMeshFaceOffsetsBuffer() const noexcept;
+
+  // M7-IBL: env-map texture of the FIRST live UsdLuxDomeLight, or
+  // nullptr if no dome with a resolved envMap exists. Miss shader
+  // samples this at the ray direction's lat-long uv to draw the
+  // actual HDRI background. Multi-dome scenes pick the first one
+  // (production-renderer convention; multi-dome is post-v1 §43).
+  [[nodiscard]] nvrhi::ITexture*         GetDomeEnvMapTexture() const noexcept;
+
+  // M5/M7: shared linear-clamp sampler used for every bindless
+  // texture lookup (materials' baseColor/normal/etc. + the dome
+  // env-map). Per-role samplers (anisotropic for tangent maps, etc.)
+  // are an M9 polish item.
+  [[nodiscard]] nvrhi::ISampler*         GetBindlessSampler() const noexcept;
 
 private:
   // PIMPL: NVRHI handles, entry-table vectors, per-frame ring slots
