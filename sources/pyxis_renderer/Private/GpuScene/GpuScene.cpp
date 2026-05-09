@@ -1963,13 +1963,25 @@ FrameStats GpuScene::LastFrameStats() const {
   uint64_t liveBlasCount = 0;
   uint64_t vertexBytes = 0;
   uint64_t indexBytes = 0;
+  uint64_t blasBytesEstimate = 0;
+  // Heuristic: ≈70 B per triangle for the BLAS storage. Real number
+  // varies by driver + whether RTXMU compacted the build (compaction
+  // typically saves 30–50%). NVRHI's IAccelStruct interface only
+  // exposes `getDesc()` + `isCompacted()` — no byte size — so we
+  // approximate from triangle count for the v1 panel. M8 perf-sweep
+  // wires the real number via NVRHI's RTXMU pool-stats hook.
+  constexpr uint64_t BLAS_BYTES_PER_TRIANGLE_ESTIMATE = 70;
   for (const Impl::MeshEntry& entry : _impl->meshes)
   {
     if (!entry.live)
       continue;
     ++liveMeshCount;
     if (entry.blas)
+    {
       ++liveBlasCount;
+      const uint64_t triangleCount = entry.indexCount / 3u;
+      blasBytesEstimate += triangleCount * BLAS_BYTES_PER_TRIANGLE_ESTIMATE;
+    }
     if (entry.vertexBuffer)
       vertexBytes += entry.vertexBuffer->getDesc().byteSize;
     if (entry.indexBuffer)
@@ -2030,13 +2042,12 @@ FrameStats GpuScene::LastFrameStats() const {
   stats.vertexBytes = vertexBytes;
   stats.indexBytes = indexBytes;
   stats.textureBytes = textureBytes;
-  // BLAS / TLAS byte counts are deferred — RTXMU's suballocation
-  // pool means individual `entry.blas->getDesc().byteSize` returns
-  // the LOGICAL build-info size, not the physical pool footprint.
-  // Reporting honest numbers needs an NVRHI hook into RTXMU's pool
-  // accounting — landing alongside the M8 perf-sweep work.
-  // Until then `blasBytes` / `tlasBytes` stay at 0 and the Scene
-  // panel shows them as such.
+  stats.blasBytes = blasBytesEstimate;
+  // TLAS byte estimate: VkAccelerationStructureInstanceKHR is 64 B
+  // per instance + ~64 B internal book-keeping per entry. Same
+  // heuristic-pending-real-RTXMU-query caveat as blasBytes.
+  constexpr uint64_t TLAS_BYTES_PER_INSTANCE_ESTIMATE = 128;
+  stats.tlasBytes = liveInstanceCount * TLAS_BYTES_PER_INSTANCE_ESTIMATE;
   return stats;
 }
 

@@ -5,6 +5,8 @@
 #include "Camera/FlyCameraController.h"
 #include "Config/Configuration.h"
 #include "ImGuiHost.h"
+
+#include <imgui.h>
 #include "Output/TextureReadback.h"
 #include "Render/AovTextures.h"
 #include "HydraEngine/HydraEngine.h"
@@ -175,6 +177,29 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
     if (event.kind == InputEventKind::KeyDown && event.key == GLFW_ESCAPE_KEY_CODE)
     {
       shouldClose.store(true);
+    }
+
+    // Route mouse / keyboard to the fly camera ONLY if ImGui isn't
+    // consuming them this frame. Without this gate the camera rotates
+    // while the user drags an ImGui window's title-bar (which holds
+    // LMB + drags the mouse — exactly what the camera's RMB-equivalent
+    // expects). `WantCaptureMouse` / `WantCaptureKeyboard` are set by
+    // `ImGui::NewFrame()` and reflect "is the cursor over an ImGui
+    // window / is an ImGui widget focused"; they're sticky across an
+    // active drag.
+    const ImGuiContext* imguiCtx = ImGui::GetCurrentContext();
+    const ImGuiIO* imguiIO = (imguiCtx != nullptr) ? &ImGui::GetIO() : nullptr;
+    const bool isMouseEvent = (event.kind == InputEventKind::MouseButtonDown
+                               || event.kind == InputEventKind::MouseButtonUp
+                               || event.kind == InputEventKind::MouseMove);
+    const bool isKeyEvent = (event.kind == InputEventKind::KeyDown
+                             || event.kind == InputEventKind::KeyUp);
+    if (imguiIO != nullptr)
+    {
+      if (isMouseEvent && imguiIO->WantCaptureMouse)
+        return;
+      if (isKeyEvent && imguiIO->WantCaptureKeyboard)
+        return;
     }
     cameraController.HandleEvent(event);
   });

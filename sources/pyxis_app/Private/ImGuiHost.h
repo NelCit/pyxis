@@ -74,6 +74,18 @@ class ImGuiHost {
  private:
   bool _ready = false;
   void* _instance = nullptr;  // VkInstance (borrowed) — kept for the function loader
+
+  // Performance-panel rolling history. 240 frames @ 60 Hz = ~4 s of
+  // visual context — enough to spot the per-pass cost shape of a
+  // brief stutter without overwhelming the panel with raw noise. Push
+  // happens at the top of BuildFpsPanel; ImGui::PlotLines reads the
+  // arrays in-order via the head offset to render a wrap-aware line
+  // chart. Sized for the v1 fixed-cap regime; the §34 ring lands
+  // alongside the full per-frame profiler at M11.
+  static constexpr std::size_t PERF_HISTORY_SIZE = 240;
+  float _cpuMsHistory[PERF_HISTORY_SIZE]{};
+  float _gpuMsHistory[PERF_HISTORY_SIZE]{};
+  std::size_t _historyHead = 0;
 };
 
 }  // namespace pyxis::app

@@ -11,6 +11,8 @@
 #include <nvrhi/nvrhi.h>
 #include <vulkan/vulkan.h>
 
+#include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -180,39 +182,76 @@ void ImGuiHost::BuildFpsPanel(const FrameProfile& frameProfile) noexcept {
   if (!_ready)
     return;
 
-  // M1 panel — §41 ships only "FPS shows". The §29.3 Performance panel
-  // proper (240-frame rolling history, sparklines, min/avg/p99,
-  // TLAS/BLAS-build ms, upload-queue bytes, RenderGraph compile-cache
-  // hit/miss, Tracy connect button, Copy-CSV button) lands at M11
-  // alongside the §34 history ring and the M3+ subsystems those rows
-  // depend on. What we render here is the latest drained FrameProfile
-  // snapshot only.
-  //
-  // AlwaysAutoResize keeps the window snug against the scope tree
-  // (which grows when nested passes appear) without needing manual
-  // sizing — sufficient for the M1 scope tree, replaced by an explicit
-  // multi-column layout at M11.
-  // Default position top-left so it doesn't overlap the Scene panel
-  // (which opens at the right of it). FirstUseEver = the user can
-  // drag the window anywhere after first appearance and we won't
-  // teleport it back.
+  // Push the current frame's CPU + GPU ms into the rolling history
+  // ring. Read by ImGui::PlotLines below; the ring is sized to 240
+  // frames (~4 s @ 60 Hz) — short enough to feel responsive,
+  // long enough to spot a stutter without overwhelming the panel.
+  _cpuMsHistory[_historyHead] = frameProfile.cpuFrameMs;
+  _gpuMsHistory[_historyHead] = frameProfile.gpuFrameMs;
+  _historyHead = (_historyHead + 1) % PERF_HISTORY_SIZE;
+
+  // Default position top-left so it doesn't overlap the Scene panel.
+  // FirstUseEver = the user can drag the window anywhere after first
+  // appearance and we won't teleport it back.
   ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f), ImGuiCond_FirstUseEver);
-  if (ImGui::Begin("Performance", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+  ImGui::SetNextWindowSize(ImVec2(420.0f, 0.0f), ImGuiCond_FirstUseEver);
+  if (ImGui::Begin("Performance", nullptr, ImGuiWindowFlags_NoSavedSettings))
   {
     const ImGuiIO& imguiIO = ImGui::GetIO();
-    ImGui::Text("Frame: %llu", static_cast<unsigned long long>(frameProfile.frameIndex));
-    ImGui::Text("FPS  : %.1f", static_cast<double>(imguiIO.Framerate));
+    ImGui::Text("Frame: %llu",
+                static_cast<unsigned long long>(frameProfile.frameIndex));
+    ImGui::SameLine(180.0f);
+    ImGui::Text("FPS: %.1f", static_cast<double>(imguiIO.Framerate));
+
+    // Find the auto-scale upper bound for the graphs — max of CPU
+    // OR GPU history ring, clamped to a 1 ms floor so a flat-zero
+    // initial ring doesn't render as a single line at the top.
+    float maxMs = 1.0f;
+    for (std::size_t i = 0; i < PERF_HISTORY_SIZE; ++i)
+    {
+      maxMs = (_cpuMsHistory[i] > maxMs) ? _cpuMsHistory[i] : maxMs;
+      maxMs = (_gpuMsHistory[i] > maxMs) ? _gpuMsHistory[i] : maxMs;
+    }
+    // Round up to the next 5 ms so the y-axis label rounds to a
+    // human-friendly bucket and a one-frame spike doesn't rescale
+    // every other frame.
+    maxMs = std::ceil(maxMs / 5.0f) * 5.0f;
+
+    // ----- CPU section ------------------------------------------------
+    ImGui::Spacing();
     ImGui::Separator();
-    ImGui::Text("CPU  : %.3f ms", frameProfile.cpuFrameMs);
-    ImGui::Text("GPU  : %.3f ms", frameProfile.gpuFrameMs);
-    ImGui::Separator();
-    // Pre-order scope tree. Two spaces per nesting level; CPU/GPU
-    // tag in front of the name; durationMs at the trailing column.
+    ImGui::TextColored(ImVec4(0.55f, 0.85f, 0.55f, 1.0f),
+                       "CPU      %.3f ms", frameProfile.cpuFrameMs);
+    char overlayCpu[32];
+    std::snprintf(overlayCpu, sizeof(overlayCpu), "CPU ms (max %.1f)", maxMs);
+    ImGui::PlotLines("##cpuMs", _cpuMsHistory, static_cast<int>(PERF_HISTORY_SIZE),
+                     static_cast<int>(_historyHead), overlayCpu, 0.0f, maxMs,
+                     ImVec2(0.0f, 60.0f));
     for (const FrameProfile::PassTiming& timing : frameProfile.passes)
     {
-      const char* kind = (timing.kind == FrameProfile::ScopeKind::Cpu) ? "CPU" : "GPU";
+      if (timing.kind != FrameProfile::ScopeKind::Cpu)
+        continue;
       const std::string_view name = timing.name.View();
-      ImGui::Text("%*s%s %.*s  %.3f ms", static_cast<int>(timing.depth * 2), "", kind,
+      ImGui::Text("  %*s%.*s   %.3f ms", static_cast<int>(timing.depth * 2), "",
+                  static_cast<int>(name.size()), name.data(), timing.durationMs);
+    }
+
+    // ----- GPU section ------------------------------------------------
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::TextColored(ImVec4(0.55f, 0.70f, 0.95f, 1.0f),
+                       "GPU      %.3f ms", frameProfile.gpuFrameMs);
+    char overlayGpu[32];
+    std::snprintf(overlayGpu, sizeof(overlayGpu), "GPU ms (max %.1f)", maxMs);
+    ImGui::PlotLines("##gpuMs", _gpuMsHistory, static_cast<int>(PERF_HISTORY_SIZE),
+                     static_cast<int>(_historyHead), overlayGpu, 0.0f, maxMs,
+                     ImVec2(0.0f, 60.0f));
+    for (const FrameProfile::PassTiming& timing : frameProfile.passes)
+    {
+      if (timing.kind != FrameProfile::ScopeKind::Gpu)
+        continue;
+      const std::string_view name = timing.name.View();
+      ImGui::Text("  %*s%.*s   %.3f ms", static_cast<int>(timing.depth * 2), "",
                   static_cast<int>(name.size()), name.data(), timing.durationMs);
     }
   }
