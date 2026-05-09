@@ -8,7 +8,7 @@
 
 namespace pyxis::app {
 
-bool HydraEngine::Load(std::string_view usdPath, GpuScene& scene) {
+pyxis::usd_ingest::IngestStats HydraEngine::Load(std::string_view usdPath, GpuScene& scene) {
   auto& log = Logging::Get();
   log.Info(log::APP, "HydraEngine: loading " + std::string{usdPath}
                          + " (M4 stub: shares StageWalker with UsdDirectEngine "
@@ -23,8 +23,7 @@ bool HydraEngine::Load(std::string_view usdPath, GpuScene& scene) {
   // full UsdImagingStageSceneIndex → HdRenderIndex → HdEngine flow
   // when OpenPBR shading makes the dirty-bit dispatch load-bearing.
   pyxis::usd_ingest::StageWalker walker;
-  const pyxis::usd_ingest::IngestStats stats = walker.WalkFile(usdPath, scene);
-  return stats.meshesEmitted > 0 || stats.camerasEmitted > 0;
+  return walker.WalkFile(usdPath, scene);
 }
 
 }  // namespace pyxis::app

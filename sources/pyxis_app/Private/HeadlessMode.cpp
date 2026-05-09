@@ -155,16 +155,18 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene)
   bool sceneLoaded = false;
   if (!resolvedScene.path.empty())
   {
+    pyxis::usd_ingest::IngestStats stats{};
     if (config.app.ingest == "usd_direct")
     {
       UsdDirectEngine engine;
-      sceneLoaded = engine.Load(resolvedScene.path, gpuScene);
+      stats = engine.Load(resolvedScene.path, gpuScene);
     }
     else if (config.app.ingest == "hydra")
     {
       HydraEngine engine;
-      sceneLoaded = engine.Load(resolvedScene.path, gpuScene);
+      stats = engine.Load(resolvedScene.path, gpuScene);
     }
+    sceneLoaded = stats.meshesEmitted > 0 || stats.camerasEmitted > 0;
   }
   if (!sceneLoaded)
   {

@@ -591,13 +591,17 @@ void ImGuiHost::BuildFpsPanel(const FrameProfile& frameProfile) noexcept {
         // started. NOT part of the frame profile (the profiler only
         // sees scopes opened/closed inside Profiler::BeginFrame...
         // EndFrame); we surface it here so the user sees the full
-        // load picture: USD parse + scene mutation + first commit.
+        // load picture broken down by StageWalker sub-pass.
         if (!_ingestSourceLabel.empty())
         {
           ImGui::Spacing();
-          ImGui::Text("Ingest (%s): %.1f ms", _ingestSourceLabel.c_str(), _ingestMs);
-          ImGui::TextDisabled(
-              "  (USD parse + StageWalker / Hydra emit + GpuScene mutation calls)");
+          ImGui::Text("Ingest (%s): %.1f ms total",
+                      _ingestSourceLabel.c_str(), _ingestTotalMs);
+          ImGui::Text("  UsdStage::Open      %.1f ms", _ingestStageOpenMs);
+          ImGui::Text("  Traverse + sort     %.1f ms", _ingestTraverseSortMs);
+          ImGui::Text("  Materials           %.1f ms", _ingestMaterialPassMs);
+          ImGui::Text("  PointInstancers     %.1f ms", _ingestInstancerPassMs);
+          ImGui::Text("  Meshes/lights/cam   %.1f ms", _ingestMeshLightCameraMs);
         }
 
         ImGui::Spacing();
@@ -887,16 +891,27 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
                    ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings))
   {
     // ---- Top-level actions -------------------------------------------
-    // Reload shaders: latches a request that ViewerMode drains via
-    // TakeShaderReloadRequest() each frame and forwards to the
-    // renderer-side shader-library invalidation. Decouples the editor
-    // (which only sees GpuScene) from PyxisRenderer's reload entry
-    // point — see the public TakeShaderReloadRequest() declaration in
-    // ImGuiHost.h for the full handshake.
+    // Both buttons latch requests drained by ViewerMode (per-frame).
+    // - Reload shaders: re-reads .spv from disk + rebuilds RT pipeline.
+    //   Slang -> SPIR-V is a CMake build-step (ShaderMake), so the
+    //   workflow is "rebuild shaders externally first, then click".
+    // - Open scene: pops a Win COM IFileOpenDialog filtered to USD;
+    //   the picked path latches into _editorPendingScenePath and
+    //   ViewerMode handles waitForIdle + GpuScene::Clear + re-ingest.
     if (ImGui::Button("Reload shaders"))
       _editorReloadShadersRequested = true;
     ImGui::SameLine();
-    ImGui::TextDisabled("(re-translate Slang -> SPIR-V at next CommitResources)");
+    if (ImGui::Button("Open scene..."))
+    {
+      std::string picked = OpenScenePickerDialog();
+      if (!picked.empty())
+        _editorPendingScenePath = std::move(picked);
+    }
+    if (!_editorPendingScenePath.empty())
+    {
+      ImGui::TextColored(ImVec4(0.95f, 0.85f, 0.20f, 1.0f),
+                         "Pending scene reload: %s", _editorPendingScenePath.c_str());
+    }
     ImGui::Spacing();
 
     // ---- Camera section ----------------------------------------------
@@ -1076,31 +1091,8 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
       }
     }
 
-    // ---- Scene loader ------------------------------------------------
-    // "Open scene..." pops a Windows IFileOpenDialog filtered to USD
-    // extensions; the picked path is latched into _editorPendingScenePath
-    // and ViewerMode drains it via TakeSceneReloadRequest() each frame.
-    // ViewerMode handles the actual reload sequence: device->waitForIdle,
-    // GpuScene::Clear, re-instantiate the selected ingest engine,
-    // engine.Load(picked, gpuScene). The Editor panel only knows about
-    // GpuScene — the renderer-side wiring lives across the API boundary.
-    if (ImGui::CollapsingHeader("Scene"))
-    {
-      if (ImGui::Button("Open scene..."))
-      {
-        std::string picked = OpenScenePickerDialog();
-        if (!picked.empty())
-          _editorPendingScenePath = std::move(picked);
-      }
-      ImGui::SameLine();
-      ImGui::TextDisabled("(*.usd / *.usda / *.usdc / *.usdz)");
-
-      if (!_editorPendingScenePath.empty())
-      {
-        ImGui::TextColored(ImVec4(0.95f, 0.85f, 0.20f, 1.0f),
-                           "Pending: %s", _editorPendingScenePath.c_str());
-      }
-    }
+    // (Scene loader moved to the top-level "Open scene..." button at
+    // the head of this panel — see the comment block above.)
   }
   ImGui::End();
 }

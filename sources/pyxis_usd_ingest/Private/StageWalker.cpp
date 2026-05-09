@@ -55,6 +55,7 @@
 #include <hlsl++.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <string>
 #include <unordered_map>
@@ -587,13 +588,27 @@ void EmitCamera(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCache,
 IngestStats StageWalker::WalkFile(std::string_view usdPath, GpuScene& scene) {
   auto& log = Logging::Get();
   const std::string pathString{usdPath};
+
+  using Clock = std::chrono::steady_clock;
+  const auto walkStart = Clock::now();
   const pxr::UsdStageRefPtr stage = pxr::UsdStage::Open(pathString);
+  const auto stageOpenEnd = Clock::now();
   if (!stage)
   {
     log.Error(log::APP, std::string{"StageWalker: failed to open "} + pathString);
-    return {};
+    IngestStats failed{};
+    failed.stageOpenMs =
+        std::chrono::duration<float, std::milli>(stageOpenEnd - walkStart).count();
+    failed.totalMs = failed.stageOpenMs;
+    return failed;
   }
-  const IngestStats stats = WalkStage(stage, scene);
+  IngestStats stats = WalkStage(stage, scene);
+  const auto walkEnd = Clock::now();
+  // stageOpenMs is local to WalkFile (WalkStage didn't open the
+  // stage); fold it in + recompute totalMs to include it.
+  stats.stageOpenMs =
+      std::chrono::duration<float, std::milli>(stageOpenEnd - walkStart).count();
+  stats.totalMs = std::chrono::duration<float, std::milli>(walkEnd - walkStart).count();
   log.Info(log::APP,
            "StageWalker: " + pathString + " walked — "
                + std::to_string(stats.meshesEmitted) + " meshes, "
@@ -611,6 +626,9 @@ IngestStats StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
   if (!stage)
     return stats;
 
+  using Clock = std::chrono::steady_clock;
+  const auto walkStart = Clock::now();
+
   // Collect every prim, sort by SdfPath. §25.O.3: SdfPath-sorted is
   // the P0 byte-equal invariant — both adapters must emit instances
   // in this exact order.
@@ -621,6 +639,9 @@ IngestStats StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
                    [](const pxr::UsdPrim& lhs, const pxr::UsdPrim& rhs) {
                      return lhs.GetPath() < rhs.GetPath();
                    });
+  const auto traverseEnd = Clock::now();
+  stats.traverseSortMs =
+      std::chrono::duration<float, std::milli>(traverseEnd - walkStart).count();
 
   pxr::UsdGeomXformCache xformCache;
   bool cameraSet = false;
@@ -633,6 +654,7 @@ IngestStats StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
   // so any difference in material translation breaks the §25.O.3
   // byte-equal invariant.
   MaterialHandleByPath materialsByPath;
+  const auto materialPassStart = Clock::now();
   for (const pxr::UsdPrim& prim : prims)
   {
     if (!prim.IsA<pxr::UsdShadeMaterial>())
@@ -646,6 +668,9 @@ IngestStats StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
     materialsByPath.emplace(primPath, handle);
     ++stats.materialsEmitted;
   }
+  const auto materialPassEnd = Clock::now();
+  stats.materialPassMs =
+      std::chrono::duration<float, std::milli>(materialPassEnd - materialPassStart).count();
 
   // Pass 2 — UsdGeomPointInstancer (M6). Walked BEFORE the standalone
   // mesh pass so any prototype meshes referenced by an instancer get
@@ -654,6 +679,7 @@ IngestStats StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
   // prototype. SdfPath-sorted iteration order is preserved per
   // §25.O.3 so both adapters expand instancers identically.
   ConsumedPrototypePaths consumedPrototypes;
+  const auto instancerPassStart = Clock::now();
   for (const pxr::UsdPrim& prim : prims)
   {
     if (!prim.IsA<pxr::UsdGeomPointInstancer>())
@@ -661,10 +687,14 @@ IngestStats StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
     EmitPointInstancer(prim, xformCache, materialsByPath, scene, stats,
                        consumedPrototypes);
   }
+  const auto instancerPassEnd = Clock::now();
+  stats.instancerPassMs =
+      std::chrono::duration<float, std::milli>(instancerPassEnd - instancerPassStart).count();
 
   // Pass 3 — meshes / camera / lights, with material handles resolved
   // from pass 1 and instancer prototypes skipped (pass 2 already
   // expanded them).
+  const auto meshPassStart = Clock::now();
   for (const pxr::UsdPrim& prim : prims)
   {
     if (prim.IsA<pxr::UsdGeomMesh>())
@@ -709,6 +739,14 @@ IngestStats StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
       }
     }
   }
+  const auto meshPassEnd = Clock::now();
+  stats.meshLightCameraMs =
+      std::chrono::duration<float, std::milli>(meshPassEnd - meshPassStart).count();
+  // totalMs covers WalkStage end-to-end (sum of stages + harness
+  // overhead). WalkFile recomputes totalMs to also include the
+  // pxr::UsdStage::Open above WalkStage.
+  stats.totalMs =
+      std::chrono::duration<float, std::milli>(meshPassEnd - walkStart).count();
 
   return stats;
 }

@@ -29,6 +29,8 @@
 
 #pragma once
 
+#include <Pyxis/UsdIngest/StageWalker.h>
+
 #include <string_view>
 
 namespace pyxis {
@@ -45,10 +47,11 @@ class HydraEngine final {
   HydraEngine(const HydraEngine&) = delete;
   HydraEngine& operator=(const HydraEngine&) = delete;
 
-  // Open `usdPath`, load into `scene`. Returns true on success;
-  // false (with an already-logged Error line) if the stage couldn't
-  // open. M4 stub shares StageWalker with UsdDirectEngine.
-  [[nodiscard]] bool Load(std::string_view usdPath, GpuScene& scene);
+  // Open `usdPath`, load into `scene`. Returns the IngestStats from
+  // StageWalker so callers can surface counts + per-stage timings.
+  // M4 stub shares StageWalker with UsdDirectEngine for §25.O.3
+  // byte-equal parity; the full HdEngine pipeline lands at M5+.
+  pyxis::usd_ingest::IngestStats Load(std::string_view usdPath, GpuScene& scene);
 };
 
 }  // namespace pyxis::app

@@ -136,13 +136,23 @@ class ImGuiHost {
   // the dialog.
   std::string                           _editorPendingScenePath;
 
-  // Last-completed ingest source label + timing — set by ViewerMode
-  // via SetIngestProfile() right after engine.Load() returns. Surfaced
-  // in the Performance panel's Loading section so the user sees USD
-  // parsing cost alongside the first-frame mesh upload + BLAS build
-  // totals (which the FrameProfile-derived _loadingCpuMs already
-  // covers). 0 ms / empty source = no ingest has run yet.
-  float                                 _ingestMs           = 0.0f;
+  // Last-completed ingest source label + per-stage timing — set by
+  // ViewerMode via SetIngestProfile() right after engine.Load()
+  // returns. Surfaced in the Performance panel's Loading section so
+  // the user sees USD parsing cost alongside the first-frame mesh
+  // upload + BLAS build totals (which the FrameProfile-derived
+  // _loadingCpuMs already covers). All zero / empty source = no
+  // ingest has run yet.
+  // The five sub-stage durations (stageOpenMs ... meshLightCameraMs)
+  // mirror IngestStats's fields and break out where the load latency
+  // actually goes — supports the user's "more detailed loading"
+  // request and tracks the §34 KPI sub-budgets.
+  float                                 _ingestTotalMs           = 0.0f;
+  float                                 _ingestStageOpenMs       = 0.0f;
+  float                                 _ingestTraverseSortMs    = 0.0f;
+  float                                 _ingestMaterialPassMs    = 0.0f;
+  float                                 _ingestInstancerPassMs   = 0.0f;
+  float                                 _ingestMeshLightCameraMs = 0.0f;
   std::string                           _ingestSourceLabel;
 
  public:
@@ -167,13 +177,33 @@ class ImGuiHost {
     return true;
   }
 
+  // Per-stage ingest breakdown, mirrored 1:1 from
+  // pyxis::usd_ingest::IngestStats's timing fields. Lives in this
+  // header (rather than just including IngestStats) so ImGuiHost
+  // doesn't acquire a build-time dep on pyxis_usd_ingest's public
+  // header — the panel-side struct is intentionally thin.
+  struct IngestProfile {
+    float totalMs           = 0.0f;
+    float stageOpenMs       = 0.0f;
+    float traverseSortMs    = 0.0f;
+    float materialPassMs    = 0.0f;
+    float instancerPassMs   = 0.0f;
+    float meshLightCameraMs = 0.0f;
+  };
+
   // Pushed by ViewerMode after each successful (or failed-with-fallback)
   // ingest run. `sourceLabel` is the §29.4.a label
   // ("default_bundled" / "config_path" / "cli_path" / "cube_fallback")
   // or the ingest adapter ("usd_direct" / "hydra"); displayed verbatim
   // beside the timing in the Loading section.
-  void SetIngestProfile(float milliseconds, std::string_view sourceLabel) noexcept {
-    _ingestMs = milliseconds;
+  void SetIngestProfile(const IngestProfile& profile,
+                        std::string_view sourceLabel) noexcept {
+    _ingestTotalMs           = profile.totalMs;
+    _ingestStageOpenMs       = profile.stageOpenMs;
+    _ingestTraverseSortMs    = profile.traverseSortMs;
+    _ingestMaterialPassMs    = profile.materialPassMs;
+    _ingestInstancerPassMs   = profile.instancerPassMs;
+    _ingestMeshLightCameraMs = profile.meshLightCameraMs;
     _ingestSourceLabel.assign(sourceLabel.data(), sourceLabel.size());
   }
 

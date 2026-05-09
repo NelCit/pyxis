@@ -9,6 +9,8 @@
 
 #pragma once
 
+#include <Pyxis/UsdIngest/StageWalker.h>
+
 #include <string_view>
 
 namespace pyxis {
@@ -27,11 +29,12 @@ class UsdDirectEngine final {
 
   // Open `usdPath`, walk the stage in SdfPath-sorted order, push the
   // resulting MeshDesc / InstanceDesc / CameraDesc into `scene` via
-  // the public §18 API. Returns true on success; false (with an
-  // already-logged Error line) if the stage couldn't open. Either
-  // outcome leaves `scene` in a renderable state — failure means the
-  // M3 hardcoded-cube fallback path lights up.
-  [[nodiscard]] bool Load(std::string_view usdPath, GpuScene& scene);
+  // the public §18 API. Returns the IngestStats from StageWalker so
+  // callers can surface counts + per-stage timings (pxr::UsdStage::Open
+  // / pass1 materials / pass2 instancers / pass3 meshes-camera-lights).
+  // On failure the returned stats has every counter zero — the caller
+  // (ViewerMode) detects this and falls back to the hardcoded cube.
+  pyxis::usd_ingest::IngestStats Load(std::string_view usdPath, GpuScene& scene);
 };
 
 }  // namespace pyxis::app

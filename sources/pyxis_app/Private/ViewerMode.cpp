@@ -253,37 +253,44 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
   // back to the M3 hardcoded cube so pyxis.exe always renders.
   //
   // Local lambda so the editor's "Open scene..." path below can reuse
-  // the same dispatch. Times the call and writes back through outMs.
-  // Returns true on success.
-  auto loadScene = [&](std::string_view path,
-                       std::string_view adapterLabel,
-                       float&           outMs) -> bool {
-    const auto startTime = std::chrono::steady_clock::now();
-    bool loaded = false;
+  // the same dispatch. The IngestStats from StageWalker carries both
+  // counts and per-stage timings (UsdStage::Open / pass1 materials /
+  // pass2 instancers / pass3 meshes-lights-camera) — we copy the
+  // five timing fields into ImGuiHost::IngestProfile to feed the
+  // Loading panel breakdown. Returns true if any meshes / cameras
+  // landed (matches the prior bool semantics).
+  auto loadScene = [&](std::string_view             path,
+                       std::string_view             adapterLabel,
+                       ImGuiHost::IngestProfile&    outProfile) -> bool {
+    pyxis::usd_ingest::IngestStats stats{};
     if (adapterLabel == "usd_direct")
     {
       UsdDirectEngine engine;
-      loaded = engine.Load(std::string{path}, gpuScene);
+      stats = engine.Load(std::string{path}, gpuScene);
     }
     else if (adapterLabel == "hydra")
     {
       HydraEngine engine;
-      loaded = engine.Load(std::string{path}, gpuScene);
+      stats = engine.Load(std::string{path}, gpuScene);
     }
-    const auto endTime = std::chrono::steady_clock::now();
-    outMs = std::chrono::duration<float, std::milli>(endTime - startTime).count();
-    return loaded;
+    outProfile.totalMs           = stats.totalMs;
+    outProfile.stageOpenMs       = stats.stageOpenMs;
+    outProfile.traverseSortMs    = stats.traverseSortMs;
+    outProfile.materialPassMs    = stats.materialPassMs;
+    outProfile.instancerPassMs   = stats.instancerPassMs;
+    outProfile.meshLightCameraMs = stats.meshLightCameraMs;
+    return stats.meshesEmitted > 0 || stats.camerasEmitted > 0;
   };
 
   // Startup ingest. ImGuiHost isn't built yet (Init runs further down)
-  // so we stash the duration + adapter label in pendingIngest{Ms,Source}
-  // and push them into the panel once ImGuiHost is ready below.
-  float       pendingIngestMs     = 0.0f;
-  std::string pendingIngestSource;
+  // so we stash the breakdown + adapter label in pendingIngest{Profile,
+  // Source} and push them into the panel once ImGuiHost is ready below.
+  ImGuiHost::IngestProfile pendingIngestProfile{};
+  std::string              pendingIngestSource;
   bool sceneLoaded = false;
   if (!resolvedScene.path.empty())
   {
-    sceneLoaded = loadScene(resolvedScene.path, config.app.ingest, pendingIngestMs);
+    sceneLoaded = loadScene(resolvedScene.path, config.app.ingest, pendingIngestProfile);
     pendingIngestSource = config.app.ingest;
   }
   if (sceneLoaded)
@@ -313,7 +320,12 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
     log.Error(log::APP, "ViewerMode: " + aovsResult.error());
     return EXIT_DEVICE_INIT_FAIL;
   }
-  const AovTextures aovs = std::move(*aovsResult);
+  // Non-const so the swapchain-rebuilt branch below can recreate it
+  // when the OS window resizes. PathTracePass dispatches against
+  // aovs.{width,height} and we copyTexture aovs.color -> backbuffer
+  // afterwards, so a stale AOV would render a clipped picture into a
+  // resized backbuffer.
+  AovTextures aovs = std::move(*aovsResult);
 
   RendererCreateDesc rendererDesc{};
   rendererDesc.initialWidth = winDesc.width;
@@ -347,7 +359,7 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
   // call rebuilds the Loading section.
   if (imguiHost.IsReady() && !pendingIngestSource.empty())
   {
-    imguiHost.SetIngestProfile(pendingIngestMs, pendingIngestSource);
+    imguiHost.SetIngestProfile(pendingIngestProfile, pendingIngestSource);
   }
   if (screenshotMode)
   {
@@ -421,16 +433,40 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
       deviceManager->BeginFrame();
     }
 
-    // Notify ImGui when the swapchain was rebuilt (resize, fullscreen
-    // toggle). vkDeviceWaitIdle has already happened inside
-    // CreateSwapchain so it's safe to call ImGui_ImplVulkan_
-    // SetMinImageCount here.
+    // Swapchain rebuilt (resize, fullscreen toggle). vkDeviceWaitIdle
+    // has already happened inside the device manager's resize path so
+    // it's safe to:
+    //   - notify ImGui (image-count + per-frame ring),
+    //   - re-create the AOV color texture at the new backbuffer size
+    //     (PathTracePass dispatches at aovs.{width,height} and we
+    //     copyTexture aovs.color -> backbuffer afterwards; a stale
+    //     AOV renders a clipped image into the resized backbuffer),
+    //   - tell PyxisRenderer (its Resize is currently a no-op for M3
+    //     but will resize accumulation buffers at M5+).
     const uint32_t currentSwapchainGeneration = deviceManager->GetSwapchainGeneration();
     if (currentSwapchainGeneration != lastSeenSwapchainGeneration)
     {
       if (imguiHost.IsReady())
       {
         imguiHost.OnSwapchainRebuilt(deviceManager->GetBackbufferCount());
+      }
+      if (auto* freshBackbuffer = deviceManager->GetCurrentBackbuffer(); freshBackbuffer != nullptr)
+      {
+        const auto& bbDesc = freshBackbuffer->getDesc();
+        if (bbDesc.width != aovs.width || bbDesc.height != aovs.height)
+        {
+          auto rebuiltAovs = AovTextures::Create(device, bbDesc.width, bbDesc.height);
+          if (rebuiltAovs)
+          {
+            aovs = std::move(*rebuiltAovs);
+            renderer.Resize(bbDesc.width, bbDesc.height);
+          }
+          else
+          {
+            log.Error(log::APP,
+                      "ViewerMode: AOV recreate failed on resize: " + rebuiltAovs.error());
+          }
+        }
       }
       lastSeenSwapchainGeneration = currentSwapchainGeneration;
     }
@@ -473,11 +509,11 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
       {
         device->waitForIdle();
         gpuScene.Clear();
-        float reloadIngestMs = 0.0f;
-        const bool reloadOk = loadScene(sceneReloadPath, config.app.ingest, reloadIngestMs);
+        ImGuiHost::IngestProfile reloadProfile{};
+        const bool reloadOk = loadScene(sceneReloadPath, config.app.ingest, reloadProfile);
         if (reloadOk)
         {
-          imguiHost.SetIngestProfile(reloadIngestMs, config.app.ingest);
+          imguiHost.SetIngestProfile(reloadProfile, config.app.ingest);
           log.Info(log::APP, "ViewerMode: scene reload OK (" + sceneReloadPath + ")");
         }
         else
@@ -491,7 +527,7 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
             log.Error(log::APP, "ViewerMode: scene reload + cube fallback both failed: "
                                     + cubeResult.error());
           }
-          imguiHost.SetIngestProfile(reloadIngestMs, "cube_fallback");
+          imguiHost.SetIngestProfile(reloadProfile, "cube_fallback");
           log.Warn(log::APP,
                    "ViewerMode: scene reload FAILED (" + sceneReloadPath
                        + "); falling back to cube");
