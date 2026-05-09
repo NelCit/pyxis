@@ -212,7 +212,13 @@ def Xform "PyxisDefault"
         def DistantLight "Sun"
         {
             color3f inputs:color = (1.0, 0.95, 0.88)
-            float inputs:intensity = 4.0
+            # M7-simple Lambert has no tone mapper / exposure stops
+            # yet; intensity 1.2 keeps front-facing PolishedMetal
+            # (baseColor 0.95) at lighting × baseColor ≈ 0.95 × 1.2
+            # × NdotL ≤ 1.14 — a slight clip on the brightest pixel
+            # but no large blow-out. M9-full bumps this to physical
+            # units alongside the proper tone-map pass.
+            float inputs:intensity = 1.2
             float inputs:angle = 0.53
             matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 0.7071, 0.7071, 0), (0, -0.7071, 0.7071, 0), (0, 0, 0, 1) )
             uniform token[] xformOpOrder = ["xformOp:transform"]
@@ -223,7 +229,19 @@ def Xform "PyxisDefault"
             asset inputs:texture:file = @./default_sky.exr@
             token inputs:texture:format = "latlong"
             color3f inputs:color = (1.0, 1.0, 1.0)
-            float inputs:intensity = 1.0
+            # Closesthit's dome term is "Lambert against +Y" (no HDRI
+            # integral yet — that's M7-full per §7), so intensity
+            # acts as a half-strength ambient multiplier. 0.4 keeps
+            # an upward-facing surface's ambient contribution at
+            # ~0.2 × baseColor — visible but not blown.
+            #
+            # The miss shader's HDRI background uses this same
+            # color × intensity so the rendered SKY pixel = HDRI ×
+            # 0.4 — slightly dimmer than the raw EXR values (which
+            # can hit 5–10 nits in bright cloud areas) but matches
+            # the closesthit's contribution scale so foreground +
+            # background read consistently.
+            float inputs:intensity = 0.4
         }
     }
 
