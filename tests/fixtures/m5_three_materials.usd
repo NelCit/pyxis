@@ -1,0 +1,114 @@
+#usda 1.0
+(
+    "Pyxis M5 fixture — three triangle meshes with three distinct"
+    "UsdPreviewSurface materials. The integration test renders this"
+    "headless through both adapters and verifies (a) the run completes,"
+    "(b) the EXR is large enough to plausibly carry pixel data,"
+    "(c) two runs produce byte-identical output, and (d) the EXR DIFFERS"
+    "from the bundled default.usd render (proving the material path"
+    "actually moves pixels — i.e. AcquireMaterial → packed material"
+    "buffer → closesthit emits mat.baseColor → tonemap writes a color"
+    "other than the all-grey baseline)."
+    upAxis = "Y"
+    metersPerUnit = 1.0
+    defaultPrim = "M5Fixture"
+    doc = "Pyxis M5 three-material integration fixture."
+)
+
+def Xform "M5Fixture"
+{
+    # ----------------------------------------------------------------
+    # Three flat triangles arranged horizontally in front of the camera.
+    # Each triangle is a single UsdGeomMesh with faceVertexCounts=[3] —
+    # StageWalker's M5 triangle-list constraint accepts these directly.
+    # ----------------------------------------------------------------
+    def Mesh "TriRed"
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(-1.5, -0.5, 0), (-0.5, -0.5, 0), (-1.0, 0.5, 0)]
+        rel material:binding = </M5Fixture/Materials/RedFlat>
+    }
+
+    def Mesh "TriGreen"
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(-0.4, -0.5, 0), (0.4, -0.5, 0), (0.0, 0.5, 0)]
+        rel material:binding = </M5Fixture/Materials/GreenFlat>
+    }
+
+    def Mesh "TriBlue"
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(0.5, -0.5, 0), (1.5, -0.5, 0), (1.0, 0.5, 0)]
+        rel material:binding = </M5Fixture/Materials/BlueFlat>
+    }
+
+    # ----------------------------------------------------------------
+    # Three diffuse-only UsdPreviewSurface materials. Plan §11 / §25.E:
+    # FromUsdShade reads `diffuseColor`, packs into baseColor, the
+    # closesthit emits mat.baseColor directly (M5 stub).
+    # ----------------------------------------------------------------
+    def Scope "Materials"
+    {
+        def Material "RedFlat"
+        {
+            token outputs:surface.connect = </M5Fixture/Materials/RedFlat/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.95, 0.05, 0.05)
+                float inputs:roughness = 0.5
+                float inputs:metallic = 0.0
+                token outputs:surface
+            }
+        }
+
+        def Material "GreenFlat"
+        {
+            token outputs:surface.connect = </M5Fixture/Materials/GreenFlat/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.05, 0.95, 0.05)
+                float inputs:roughness = 0.5
+                float inputs:metallic = 0.0
+                token outputs:surface
+            }
+        }
+
+        def Material "BlueFlat"
+        {
+            token outputs:surface.connect = </M5Fixture/Materials/BlueFlat/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.05, 0.05, 0.95)
+                float inputs:roughness = 0.5
+                float inputs:metallic = 0.0
+                token outputs:surface
+            }
+        }
+    }
+
+    # Camera at (0, 0, 4) looking at origin (-Z forward).
+    def Scope "Cameras"
+    {
+        def Camera "main"
+        {
+            float focalLength = 35
+            float horizontalAperture = 36
+            float verticalAperture = 24
+            float fStop = 0
+            float focusDistance = 4.0
+            float2 clippingRange = (0.1, 100)
+            matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 4, 1) )
+            uniform token[] xformOpOrder = ["xformOp:transform"]
+        }
+    }
+}
