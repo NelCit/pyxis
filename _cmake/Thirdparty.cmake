@@ -104,6 +104,74 @@ function(pyxis_thirdparty_require_nvrhi)
 
     FetchContent_MakeAvailable(nvrhi)
 
+    # Pyxis-local NVRHI patch: gate the NV linear-swept-spheres
+    # pipeline-create flag on the extension being enabled.
+    #
+    # Upstream NVRHI (commit 54100464) unconditionally chains a
+    # PipelineCreateFlags2CreateInfoKHR struct with the
+    # `eRayTracingAllowSpheresAndLinearSweptSpheresNV` bit set into
+    # *every* RT pipeline create. The struct itself requires
+    # VK_KHR_maintenance5 and the flag bit requires
+    # VK_NV_ray_tracing_linear_swept_spheres — Pyxis pulls in neither
+    # (LSS is not exposed on most consumer Ada+ drivers, e.g. NVIDIA
+    # 596.36 / RTX 4070 Laptop), so vkCreateRayTracingPipelinesKHR
+    # fails on every ray-tracing pipeline creation.
+    #
+    # Upstream PR (drop this block when the SHA bump pulls it in):
+    #     https://github.com/NVIDIA-RTX/NVRHI fix/lss-flag-gating
+    #
+    # The fix mirrors the existing NV_cluster_acceleration_structure
+    # gate a few lines below: condition the flag-set and the pNext
+    # chain on the extension being enabled. Two string-replaces; both
+    # are idempotent because the buggy substring is gone after the
+    # first successful run.
+    #
+    # Hardening: if the file exists but neither the buggy nor the
+    # already-patched form is present, the upstream source has
+    # reshaped this function (a SHA bump landed an unrelated change to
+    # the same lines). FATAL_ERROR rather than silently producing a
+    # build that crashes at first RT pipeline create.
+    set(_rtCpp "${nvrhi_SOURCE_DIR}/src/vulkan/vulkan-raytracing.cpp")
+    if(EXISTS "${_rtCpp}")
+        file(READ "${_rtCpp}" _rtCppContent)
+        set(_buggyFlagSet
+"        auto pipelineFlags2 = vk::PipelineCreateFlags2CreateInfoKHR();
+        pipelineFlags2.setFlags(vk::PipelineCreateFlagBits2::eRayTracingAllowSpheresAndLinearSweptSpheresNV);")
+        set(_fixedFlagSet
+"        auto pipelineFlags2 = vk::PipelineCreateFlags2CreateInfoKHR();
+        if (m_Context.extensions.NV_ray_tracing_linear_swept_spheres) pipelineFlags2.setFlags(vk::PipelineCreateFlagBits2::eRayTracingAllowSpheresAndLinearSweptSpheresNV);")
+        set(_buggyPNextChain
+"            .setPLibraryInfo(&libraryInfo)
+            .setPNext(&pipelineFlags2);")
+        set(_fixedPNextChain
+"            .setPLibraryInfo(&libraryInfo);
+        if (m_Context.extensions.NV_ray_tracing_linear_swept_spheres) pipelineInfo.setPNext(&pipelineFlags2);")
+        string(FIND "${_rtCppContent}" "${_buggyFlagSet}" _buggyAt)
+        string(FIND "${_rtCppContent}" "${_fixedFlagSet}" _fixedAt)
+        if(_buggyAt GREATER -1)
+            string(REPLACE "${_buggyFlagSet}"  "${_fixedFlagSet}"  _rtCppContent "${_rtCppContent}")
+            string(REPLACE "${_buggyPNextChain}" "${_fixedPNextChain}" _rtCppContent "${_rtCppContent}")
+            file(WRITE "${_rtCpp}" "${_rtCppContent}")
+            message(STATUS "Pyxis: NVRHI patched (NV-LSS pipeline-create flag gated on extension)")
+        elseif(_fixedAt GREATER -1)
+            message(STATUS "Pyxis: NVRHI already patched (NV-LSS gate present); nothing to do")
+        else()
+            message(FATAL_ERROR
+                "Pyxis: NVRHI source at ${_rtCpp} matches neither the buggy nor the "
+                "patched form of the NV-LSS pipeline-create gate. The upstream commit "
+                "(PYXIS_NVRHI_GIT_TAG=${PYXIS_NVRHI_GIT_TAG}) likely reshaped "
+                "createRayTracingPipeline. Investigate before continuing — building "
+                "without the gate produces a binary that crashes at the first RT "
+                "pipeline create on any device that does not advertise "
+                "VK_NV_ray_tracing_linear_swept_spheres.")
+        endif()
+    else()
+        message(FATAL_ERROR
+            "Pyxis: NVRHI source path not found: ${_rtCpp}. NVRHI's source layout "
+            "changed and the LSS gate patch can no longer locate its target. Update "
+            "this patch block in _cmake/Thirdparty.cmake before continuing.")
+    endif()
+
     # NVRHI's targets aren't ours; strip clang-tidy + suppress its own
     # /W4 /WX warnings if any leaked out (NVRHI is /W3 internally).
     foreach(t IN ITEMS nvrhi nvrhi_vk vma)
@@ -151,6 +219,46 @@ function(pyxis_thirdparty_require_slang)
     set(PYXIS_SLANG_COMPILER "${_slangc}" CACHE FILEPATH "Slang compiler (slangc.exe)" FORCE)
     set(PYXIS_SLANG_INCLUDE  "${slang_prebuilt_SOURCE_DIR}/include" CACHE PATH "Slang include dir" FORCE)
     message(STATUS "Pyxis: Slang ${PYXIS_SLANG_VERSION} at ${PYXIS_SLANG_COMPILER}")
+endfunction()
+
+
+# ===========================================================================
+# pyxis_thirdparty_require_hlslpp() — pulled in by pyxis_renderer's public
+# headers (MeshDesc / InstanceDesc / CameraDesc use hlslpp::float3 /
+# float4 / float4x4 per plan §10 / §23). Header-only.
+#
+# vcpkg ships an `unofficial::hlslpp::hlslpp` target via
+# `share/hlslpp/hlslpp-config.cmake`, but as of vcpkg port 3.8 that
+# config has a typo (`INTERACE IMPORTED` instead of `INTERFACE
+# IMPORTED`) which makes find_package(hlslpp CONFIG) silently produce
+# no usable target. Locate the umbrella header directly with
+# find_path() and wrap it in our own INTERFACE target so we don't
+# depend on upstream fixing the typo. When vcpkg corrects it we can
+# switch back to find_package without changing call sites.
+# ===========================================================================
+function(pyxis_thirdparty_require_hlslpp)
+    if(TARGET pyxis_hlslpp)
+        return()
+    endif()
+
+    # vcpkg ships the umbrella header at
+    # ${VCPKG_INSTALLED_DIR}/<triplet>/include/hlslpp/hlsl++.h, one level
+    # below the standard include root. PATH_SUFFIXES "hlslpp" tells
+    # find_path() to look one level deeper than the prefix paths
+    # CMAKE_PREFIX_PATH already includes.
+    find_path(PYXIS_HLSLPP_INCLUDE
+        NAMES         "hlsl++.h"
+        PATH_SUFFIXES "hlslpp"
+        DOC           "Directory containing hlsl++.h (vcpkg ships it under include/hlslpp/)")
+    if(NOT PYXIS_HLSLPP_INCLUDE)
+        message(FATAL_ERROR
+            "Pyxis: hlslpp headers not found. Expected vcpkg to install "
+            "include/hlslpp/hlsl++.h — is hlslpp listed in vcpkg.json?")
+    endif()
+
+    add_library(pyxis_hlslpp INTERFACE)
+    target_include_directories(pyxis_hlslpp SYSTEM INTERFACE "${PYXIS_HLSLPP_INCLUDE}")
+    message(STATUS "Pyxis: hlslpp at ${PYXIS_HLSLPP_INCLUDE}")
 endfunction()
 
 

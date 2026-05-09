@@ -6,6 +6,7 @@
 #include "Output/ExrWriter.h"
 #include "Output/TextureReadback.h"
 #include "Render/AovTextures.h"
+#include "Render/HardcodedCubeScene.h"
 #include "ViewerMode.h"
 
 #include <Pyxis/Platform/Device/DeviceCreationParams.h>
@@ -13,10 +14,12 @@
 #include <Pyxis/Platform/Device/Resolution.h>
 #include <Pyxis/Platform/Logging/Log.h>
 #include <Pyxis/Platform/Logging/LogCategories.h>
+#include <Pyxis/Renderer/Descs/GpuSceneCreateDesc.h>
+#include <Pyxis/Renderer/Descs/RendererCreateDesc.h>
 #include <Pyxis/Renderer/Descs/RenderSettings.h>
 #include <Pyxis/Renderer/Descs/RenderTargets.h>
-#include <Pyxis/Renderer/Descs/RendererCreateDesc.h>
-#include <Pyxis/Renderer/Forward.h>          // MAX_FRAMES_IN_FLIGHT (§33.1).
+#include <Pyxis/Renderer/Forward.h>  // MAX_FRAMES_IN_FLIGHT (§33.1).
+#include <Pyxis/Renderer/GpuScene.h>
 #include <Pyxis/Renderer/Profiler.h>
 #include <Pyxis/Renderer/PyxisRenderer.h>
 #include <Pyxis/Renderer/SceneWorldFacade.h>
@@ -29,198 +32,264 @@ namespace pyxis::app {
 
 namespace {
 
-constexpr int EXIT_OK               = 0;
-constexpr int EXIT_DEVICE_INIT_FAIL = 2;   // Vulkan / NVRHI init failure.
-constexpr int EXIT_CONFIG_FAIL      = 3;   // ValidateForHeadless rejected the config.
-constexpr int EXIT_RUNTIME_FAIL     = 4;   // Render-time failure: scene init, staging,
-                                            // mapping, or EXR write.
+constexpr int EXIT_OK = 0;
+constexpr int EXIT_DEVICE_INIT_FAIL = 2;  // Vulkan / NVRHI init failure.
+constexpr int EXIT_CONFIG_FAIL = 3;       // ValidateForHeadless rejected the config.
+constexpr int EXIT_RUNTIME_FAIL = 4;      // Render-time failure: scene init, staging,
+                                          // mapping, or EXR write.
 
 }  // namespace
 
 int RunHeadless(const Configuration& config) noexcept {
-    auto& log = Logging::Get();
+  auto& log = Logging::Get();
 
-    // §27 ValidateForHeadless: non-zero seed (§33.7), non-empty
-    // output.image, non-zero render dims. Surfaces a config-fail exit
-    // before we even spin up Vulkan.
-    if (auto validation = ValidateForHeadless(config); !validation) {
-        log.Error(log::APP, "headless: " + validation.error());
-        return EXIT_CONFIG_FAIL;
-    }
+  // §27 ValidateForHeadless: non-zero seed (§33.7), non-empty
+  // output.image, non-zero render dims. Surfaces a config-fail exit
+  // before we even spin up Vulkan.
+  if (auto validation = ValidateForHeadless(config); !validation)
+  {
+    log.Error(log::APP, "headless: " + validation.error());
+    return EXIT_CONFIG_FAIL;
+  }
 
-    // ---- §33.7 determinism pinning -------------------------------------
-    // Headless raises framesInFlight to the §33.1 compile-time cap
-    // regardless of config. Rationale: M3+'s samplesPerFrame *
-    // accumulationFrameLimit loop submits work in flight, and the
-    // byte-identical EXR contract requires consistent FIF across runs
-    // (different FIF changes the submission interleaving + thus
-    // floating-point reduction order for accumulation). RNG seed != 0
-    // + non-empty output.image were already validated.
-    //
-    // The static_assert below ties the headless determinism pin to the
-    // renderer's compile-time cap: if a future RFC bumps
-    // MAX_FRAMES_IN_FLIGHT, this site fails to compile and forces the
-    // author to reconsider whether headless determinism is still
-    // satisfied at the new cap. Without it the two constants could
-    // silently drift.
-    constexpr uint32_t HEADLESS_FRAMES_IN_FLIGHT = MAX_FRAMES_IN_FLIGHT;
-    static_assert(HEADLESS_FRAMES_IN_FLIGHT == 3,
-                  "Headless §33.7 determinism pin assumes a 3-deep ring; "
-                  "revisit before changing MAX_FRAMES_IN_FLIGHT.");
-    if (config.limits.framesInFlight != HEADLESS_FRAMES_IN_FLIGHT) {
-        log.Info(log::APP, "headless: §33.7 pinning framesInFlight=" +
-                           std::to_string(HEADLESS_FRAMES_IN_FLIGHT) +
-                           " (config requested " +
-                           std::to_string(config.limits.framesInFlight) + ")");
-    }
-    {
-        std::string summary = "headless: determinism pin — seed=";
-        summary += std::to_string(config.render.seed);
-        summary += "  framesInFlight=" + std::to_string(HEADLESS_FRAMES_IN_FLIGHT);
-        summary += "  dims=" + std::to_string(config.render.width) +
-                   "x" + std::to_string(config.render.height);
-        summary += "  samples=" + std::to_string(config.render.samplesPerFrame);
-        log.Info(log::APP, summary);
-    }
+  // ---- §33.7 determinism pinning -------------------------------------
+  // Headless raises framesInFlight to the §33.1 compile-time cap
+  // regardless of config. Rationale: M3+'s samplesPerFrame *
+  // accumulationFrameLimit loop submits work in flight, and the
+  // byte-identical EXR contract requires consistent FIF across runs
+  // (different FIF changes the submission interleaving + thus
+  // floating-point reduction order for accumulation). RNG seed != 0
+  // + non-empty output.image were already validated.
+  //
+  // The static_assert below ties the headless determinism pin to the
+  // renderer's compile-time cap: if a future RFC bumps
+  // MAX_FRAMES_IN_FLIGHT, this site fails to compile and forces the
+  // author to reconsider whether headless determinism is still
+  // satisfied at the new cap. Without it the two constants could
+  // silently drift.
+  constexpr uint32_t HEADLESS_FRAMES_IN_FLIGHT = MAX_FRAMES_IN_FLIGHT;
+  static_assert(HEADLESS_FRAMES_IN_FLIGHT == 3,
+                "Headless §33.7 determinism pin assumes a 3-deep ring; "
+                "revisit before changing MAX_FRAMES_IN_FLIGHT.");
+  if (config.limits.framesInFlight != HEADLESS_FRAMES_IN_FLIGHT)
+  {
+    log.Info(log::APP,
+             "headless: §33.7 pinning framesInFlight=" + std::to_string(HEADLESS_FRAMES_IN_FLIGHT)
+                 + " (config requested " + std::to_string(config.limits.framesInFlight) + ")");
+  }
+  {
+    std::string summary = "headless: determinism pin — seed=";
+    summary += std::to_string(config.render.seed);
+    summary += "  framesInFlight=" + std::to_string(HEADLESS_FRAMES_IN_FLIGHT);
+    summary += "  dims=" + std::to_string(config.render.width) + "x"
+               + std::to_string(config.render.height);
+    summary += "  samples=" + std::to_string(config.render.samplesPerFrame);
+    log.Info(log::APP, summary);
+  }
 
-    // ---- Device manager ------------------------------------------------
-    DeviceCreationParams params{};
-    params.adapterIndex     = -1;     // M3+ wires config.adapter; for now use the discrete-first picker.
-    params.enableValidation = config.diagnostics.validationLayer;
-    params.framesInFlight   = HEADLESS_FRAMES_IN_FLIGHT;
-    params.applicationName  = "pyxis (headless)";
+  // ---- Device manager ------------------------------------------------
+  DeviceCreationParams params{};
+  params.adapterIndex = -1;  // M3+ wires config.adapter; for now use the discrete-first picker.
+  params.enableValidation = config.diagnostics.validationLayer;
+  params.framesInFlight = HEADLESS_FRAMES_IN_FLIGHT;
+  params.applicationName = "pyxis (headless)";
 
-    const Resolution             backbuffer{ config.render.width, config.render.height };
-    DeviceManagerCreateStatus    status = DeviceManagerCreateStatus::Unknown;
-    const std::unique_ptr<IDeviceManager> deviceManager{
-        CreateHeadlessDeviceManager(params, backbuffer, &status) };
-    if (!deviceManager) {
-        log.Error(log::PLATFORM, "CreateHeadlessDeviceManager failed");
-        return EXIT_DEVICE_INIT_FAIL;
-    }
-    nvrhi::IDevice* device = deviceManager->GetDevice();
-    if (!device) {
-        log.Error(log::PLATFORM, "headless: nvrhi::IDevice not available");
-        return EXIT_DEVICE_INIT_FAIL;
-    }
+  const Resolution backbuffer{config.render.width, config.render.height};
+  DeviceManagerCreateStatus status = DeviceManagerCreateStatus::Unknown;
+  const std::unique_ptr<IDeviceManager> deviceManager{
+      CreateHeadlessDeviceManager(params, backbuffer, &status)};
+  if (!deviceManager)
+  {
+    log.Error(log::PLATFORM, "CreateHeadlessDeviceManager failed");
+    return EXIT_DEVICE_INIT_FAIL;
+  }
+  nvrhi::IDevice* device = deviceManager->GetDevice();
+  if (!device)
+  {
+    log.Error(log::PLATFORM, "headless: nvrhi::IDevice not available");
+    return EXIT_DEVICE_INIT_FAIL;
+  }
 
-    // ---- AOV textures (caller-allocated per §18.4) ---------------------
-    // Declared after deviceManager so RAII destroys it BEFORE the device
-    // dies — NVRHI's deferred-destruction queue must drain against a
-    // still-live VkDevice.
-    auto aovsResult = AovTextures::Create(device, config.render.width, config.render.height);
-    if (!aovsResult) {
-        log.Error(log::APP, "headless: " + aovsResult.error());
-        return EXIT_RUNTIME_FAIL;
-    }
-    const AovTextures aovs = std::move(*aovsResult);
-    nvrhi::ITexture* const renderTarget = aovs.color.Get();
+  // ---- AOV textures (caller-allocated per §18.4) ---------------------
+  // Declared after deviceManager so RAII destroys it BEFORE the device
+  // dies — NVRHI's deferred-destruction queue must drain against a
+  // still-live VkDevice.
+  auto aovsResult = AovTextures::Create(device, config.render.width, config.render.height);
+  if (!aovsResult)
+  {
+    log.Error(log::APP, "headless: " + aovsResult.error());
+    return EXIT_RUNTIME_FAIL;
+  }
+  const AovTextures aovs = std::move(*aovsResult);
+  nvrhi::ITexture* const renderTarget = aovs.color.Get();
 
-    // ---- SceneWorld + Profiler + Renderer ------------------------------
-    SceneWorldFacade scene;
-    if (scene.Init() != SceneWorldStatus::Ok) {
-        log.Error(log::RENDER, "SceneWorldFacade::Init failed");
-        return EXIT_RUNTIME_FAIL;
-    }
-    Profiler              profiler{ device };
-    RendererCreateDesc    rendererDesc{};
-    rendererDesc.initialWidth  = config.render.width;
-    rendererDesc.initialHeight = config.render.height;
-    PyxisRenderer         renderer{ device, profiler, rendererDesc };
+  // ---- SceneWorld + Profiler + GpuScene + Renderer -------------------
+  // GpuScene is the canonical scene-mutation API (§18.5);
+  // PyxisRenderer's ctor takes it by reference per §18.6 and
+  // PathTracePass binds its TLAS + camera every frame. Headless
+  // raises framesInFlight to the §33.7 byte-equal pin
+  // (MAX_FRAMES_IN_FLIGHT == 3).
+  SceneWorldFacade scene;
+  if (scene.Init() != SceneWorldStatus::Ok)
+  {
+    log.Error(log::RENDER, "SceneWorldFacade::Init failed");
+    return EXIT_RUNTIME_FAIL;
+  }
+  Profiler profiler{device};
+  GpuSceneCreateDesc gpuSceneDesc{};
+  gpuSceneDesc.framesInFlight = HEADLESS_FRAMES_IN_FLIGHT;
+  GpuScene gpuScene{device, profiler, gpuSceneDesc};
 
-    const nvrhi::CommandListHandle commandListHandle = device->createCommandList();
-    nvrhi::ICommandList* const     commandList       = commandListHandle.Get();
+  // M3 hardcoded cube + camera + distant light. M3.5 + M4 replace
+  // this with USD-loaded scene content; until then it's the only
+  // thing that gets rendered.
+  if (auto cubeResult =
+          BuildHardcodedCubeScene(gpuScene, config.render.width, config.render.height);
+      !cubeResult)
+  {
+    log.Error(log::APP, "headless: " + cubeResult.error());
+    scene.Shutdown();
+    return EXIT_RUNTIME_FAIL;
+  }
 
-    // ---- One render frame ----------------------------------------------
-    // M2 ships a single render. samplesPerFrame > 1 is M3+'s
-    // accumulation territory — for the hardcoded triangle every frame
-    // would paint the same pixels anyway, so iterating buys nothing.
-    scene.Tick();
-    profiler.BeginFrame();
-    deviceManager->BeginFrame();
+  RendererCreateDesc rendererDesc{};
+  rendererDesc.initialWidth = config.render.width;
+  rendererDesc.initialHeight = config.render.height;
+  PyxisRenderer renderer{device, gpuScene, profiler, rendererDesc};
 
-    {
-        const Profiler::CpuScope frameScope(profiler, "headless.frame");
+  const nvrhi::CommandListHandle commandListHandle = device->createCommandList();
+  nvrhi::ICommandList* const commandList = commandListHandle.Get();
 
-        commandList->open();
-        RenderTargets targets{};
-        targets.color = renderTarget;
-        RenderSettings settings{};
-        settings.width  = renderTarget->getDesc().width;
-        settings.height = renderTarget->getDesc().height;
-        renderer.RenderFrame(commandList, settings, targets);
-        // Force the offscreen RT into CopySource before we close the
-        // command list. Without this we relied on NVRHI's auto-barrier
-        // logic spanning two separate executeCommandList submissions —
-        // technically fine today (NVRHI tracks state across submits) but
-        // brittle: a future refactor that takes the readback path through
-        // a separate command-list pool would lose that tracking and we'd
-        // get UB on the copy. Explicit is cheaper than mysterious.
-        commandList->setTextureState(renderTarget, nvrhi::AllSubresources,
-                                     nvrhi::ResourceStates::CopySource);
-        commandList->commitBarriers();
-        commandList->close();
-        device->executeCommandList(commandList);
-    }
+  // ---- One render frame ----------------------------------------------
+  // Single render. M3's PathTracePass is one-sample-per-frame with
+  // no accumulation, so iterating buys nothing yet —
+  // samplesPerFrame > 1 wires in at M5+ when the accumulation
+  // buffer lands.
+  scene.Tick();
+  profiler.BeginFrame();
+  deviceManager->BeginFrame();
 
-    deviceManager->EndFrame();
-    profiler.EndFrame();
-    device->runGarbageCollection();
+  {
+    const Profiler::CpuScope frameScope(profiler, "headless.frame");
 
-    // ---- Readback + EXR write ------------------------------------------
-    // TextureReadback is the shared helper — same pattern is used by
-    // ViewerMode::CaptureBackbufferToPng. Phase 1 (RecordCopy) records
-    // the staging-texture allocation + copy on a fresh command list;
-    // we then close + execute + waitForIdle so the GPU has retired the
-    // copy before Phase 2 (Map) hands us the host pointer. The handle
-    // unmaps on scope exit.
     commandList->open();
-    auto readback = TextureReadback::RecordCopy(device, commandList, renderTarget,
-                                                "headless-readback-staging");
-    if (!readback) {
-        log.Error(log::APP, "headless: " + readback.error());
-        scene.Shutdown();
-        return EXIT_RUNTIME_FAIL;
+
+    // Drain pending GpuScene mutations onto the open command list
+    // (mesh upload, BLAS build, TLAS rebuild). Failure aborts the
+    // frame; partial state stays dirty so the next CommitResources
+    // retries.
+    if (auto commitResult = gpuScene.CommitResources(commandList); !commitResult)
+    {
+      log.Error(log::APP, "headless: " + std::string{commitResult.error().message.View()});
+      commandList->close();
+      scene.Shutdown();
+      return EXIT_RUNTIME_FAIL;
     }
+
+    RenderTargets targets{};
+    targets.color = renderTarget;
+    RenderSettings settings{};
+    settings.width = renderTarget->getDesc().width;
+    settings.height = renderTarget->getDesc().height;
+    renderer.RenderFrame(commandList, settings, targets);
+    // Force the offscreen RT into CopySource before we close the
+    // command list. Without this we relied on NVRHI's auto-barrier
+    // logic spanning two separate executeCommandList submissions —
+    // technically fine today (NVRHI tracks state across submits) but
+    // brittle: a future refactor that takes the readback path through
+    // a separate command-list pool would lose that tracking and we'd
+    // get UB on the copy. Explicit is cheaper than mysterious.
+    commandList->setTextureState(renderTarget, nvrhi::AllSubresources,
+                                 nvrhi::ResourceStates::CopySource);
+    commandList->commitBarriers();
     commandList->close();
     device->executeCommandList(commandList);
-    device->waitForIdle();
-    device->runGarbageCollection();
+  }
 
-    if (auto mapResult = readback->Map(); !mapResult) {
-        log.Error(log::APP, "headless: " + mapResult.error());
-        scene.Shutdown();
-        return EXIT_RUNTIME_FAIL;
-    }
-    auto writeResult = WriteExrBgra8(config.output.image,
-                                     readback->Width(),
-                                     readback->Height(),
-                                     readback->Data(),
-                                     readback->RowPitch());
-    if (!writeResult) {
-        log.Error(log::APP, "headless: " + writeResult.error());
-        scene.Shutdown();
-        return EXIT_RUNTIME_FAIL;
-    }
+  deviceManager->EndFrame();
+  profiler.EndFrame();
+  device->runGarbageCollection();
 
-    // ---- Effective-config dump + teardown ------------------------------
-    // The EXR is the primary artefact and is already on disk; a failure
-    // to write the sidecar effective-config is logged but does not fail
-    // the run.
-    if (!config.output.effectiveConfig.empty()) {
-        if (auto effectiveResult = WriteEffectiveConfig(config); !effectiveResult) {
-            log.Warn(log::APP, "headless: " + effectiveResult.error());
-        }
-    }
+  // ---- Readback + EXR write ------------------------------------------
+  // TextureReadback is the shared helper — same pattern is used by
+  // ViewerMode::CaptureBackbufferToPng. Phase 1 (RecordCopy) records
+  // the staging-texture allocation + copy on a fresh command list;
+  // we then close + execute + waitForIdle so the GPU has retired the
+  // copy before Phase 2 (Map) hands us the host pointer. The handle
+  // unmaps on scope exit.
+  commandList->open();
+  auto readback =
+      TextureReadback::RecordCopy(device, commandList, renderTarget, "headless-readback-staging");
+  if (!readback)
+  {
+    log.Error(log::APP, "headless: " + readback.error());
     scene.Shutdown();
-    return EXIT_OK;
+    return EXIT_RUNTIME_FAIL;
+  }
+  commandList->close();
+  device->executeCommandList(commandList);
+  device->waitForIdle();
+  device->runGarbageCollection();
+
+  if (auto mapResult = readback->Map(); !mapResult)
+  {
+    log.Error(log::APP, "headless: " + mapResult.error());
+    scene.Shutdown();
+    return EXIT_RUNTIME_FAIL;
+  }
+  // Sanity check: a render that worked has SOME non-black pixels
+  // (cube colour from closesthit or sky from miss). All-zero output
+  // would mean PathTracePass silently no-op'd; surface that as a
+  // log warning so a regression doesn't go quietly.
+  {
+    const auto* bytes = static_cast<const uint8_t*>(readback->Data());
+    bool anyNonBlack = false;
+    for (uint32_t row = 0; row < readback->Height() && !anyNonBlack; ++row)
+    {
+      const uint8_t* rowPtr = bytes + (row * readback->RowPitch());
+      for (uint32_t col = 0; col < readback->Width(); ++col)
+      {
+        if (rowPtr[col * 4 + 0] != 0 || rowPtr[col * 4 + 1] != 0 || rowPtr[col * 4 + 2] != 0)
+        {
+          anyNonBlack = true;
+          break;
+        }
+      }
+    }
+    log.Info(log::APP,
+             anyNonBlack ? "headless: render produced non-black pixels (looks valid)"
+                         : "headless: render output is fully black — PathTracePass likely skipped");
+  }
+
+  auto writeResult = WriteExrBgra8(config.output.image, readback->Width(), readback->Height(),
+                                   readback->Data(), readback->RowPitch());
+  if (!writeResult)
+  {
+    log.Error(log::APP, "headless: " + writeResult.error());
+    scene.Shutdown();
+    return EXIT_RUNTIME_FAIL;
+  }
+
+  // ---- Effective-config dump + teardown ------------------------------
+  // The EXR is the primary artefact and is already on disk; a failure
+  // to write the sidecar effective-config is logged but does not fail
+  // the run.
+  if (!config.output.effectiveConfig.empty())
+  {
+    if (auto effectiveResult = WriteEffectiveConfig(config); !effectiveResult)
+    {
+      log.Warn(log::APP, "headless: " + effectiveResult.error());
+    }
+  }
+  scene.Shutdown();
+  return EXIT_OK;
 }
 
 int RunViewer(const Configuration& config, std::string_view screenshotPath) noexcept {
-    // Viewer keeps the M1 entrypoint shape — config feeds adapter +
-    // validation + render dims, screenshotPath is the orthogonal
-    // --screenshot capture flag.
-    return RunViewerLoop(config, screenshotPath);
+  // Viewer keeps the M1 entrypoint shape — config feeds adapter +
+  // validation + render dims, screenshotPath is the orthogonal
+  // --screenshot capture flag.
+  return RunViewerLoop(config, screenshotPath);
 }
 
 }  // namespace pyxis::app

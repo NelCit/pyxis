@@ -8,7 +8,7 @@
 namespace pyxis::scene {
 
 void RunUploadDirtyMaterials(flecs::iter& /*it*/) {
-    // M0: no-op. M5+ wires the real OpenPBR upload + dedupe path.
+  // M0: no-op. M5+ wires the real OpenPBR upload + dedupe path.
 }
 
 }  // namespace pyxis::scene

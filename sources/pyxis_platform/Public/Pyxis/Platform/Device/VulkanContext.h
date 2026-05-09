@@ -22,17 +22,17 @@
 namespace pyxis {
 
 struct PYXIS_PLATFORM_API VulkanContext {
-    // Reinterpret on consumer side as VkInstance / VkPhysicalDevice /
-    // VkDevice / VkQueue. Borrowed — owned by the IDeviceManager.
-    void*    instance       = nullptr;
-    void*    physicalDevice = nullptr;
-    void*    device         = nullptr;
-    void*    graphicsQueue  = nullptr;
-    uint32_t graphicsFamily = 0;
-    // VkFormat of the swapchain colour attachment. Reinterpret as
-    // VkFormat on the consumer side. Zero in headless mode (no
-    // swapchain — ImGui-style consumers don't run there anyway).
-    uint32_t colorFormat    = 0;
+  // Reinterpret on consumer side as VkInstance / VkPhysicalDevice /
+  // VkDevice / VkQueue. Borrowed — owned by the IDeviceManager.
+  void* instance = nullptr;
+  void* physicalDevice = nullptr;
+  void* device = nullptr;
+  void* graphicsQueue = nullptr;
+  uint32_t graphicsFamily = 0;
+  // VkFormat of the swapchain colour attachment. Reinterpret as
+  // VkFormat on the consumer side. Zero in headless mode (no
+  // swapchain — ImGui-style consumers don't run there anyway).
+  uint32_t colorFormat = 0;
 };
 
 }  // namespace pyxis

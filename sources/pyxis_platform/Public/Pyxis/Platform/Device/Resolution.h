@@ -9,8 +9,8 @@
 namespace pyxis {
 
 struct Resolution {
-    uint32_t width  = 1920;
-    uint32_t height = 1080;
+  uint32_t width = 1920;
+  uint32_t height = 1080;
 };
 
 }  // namespace pyxis

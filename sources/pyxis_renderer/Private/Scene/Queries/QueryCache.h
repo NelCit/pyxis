@@ -15,24 +15,24 @@
 namespace pyxis::scene {
 
 class QueryCache final {
-public:
-    explicit QueryCache(flecs::world& world);
+ public:
+  explicit QueryCache(flecs::world& world);
 
-    QueryCache(const QueryCache&)            = delete;
-    QueryCache& operator=(const QueryCache&) = delete;
+  QueryCache(const QueryCache&) = delete;
+  QueryCache& operator=(const QueryCache&) = delete;
 
-    // Cached queries are added by later milestones; this M0 cache merely
-    // proves the registration-time pattern works and the unit test can
-    // read it back.
-    [[nodiscard]] uint32_t QueryCount() const noexcept { return _count; }
+  // Cached queries are added by later milestones; this M0 cache merely
+  // proves the registration-time pattern works and the unit test can
+  // read it back.
+  [[nodiscard]] uint32_t QueryCount() const noexcept { return _count; }
 
-private:
-    // World pointer is captured for the M3+ build-out (real flecs::query<...>
-    // construction will call back through it). M0 doesn't read it; mark it
-    // [[maybe_unused]] so /Werror,-Wunused-private-field doesn't fire while
-    // the field is part of the public contract that lands later.
-    [[maybe_unused]] flecs::world* _world = nullptr;
-    uint32_t                       _count = 0;
+ private:
+  // World pointer is captured for the M3+ build-out (real flecs::query<...>
+  // construction will call back through it). M0 doesn't read it; mark it
+  // [[maybe_unused]] so /Werror,-Wunused-private-field doesn't fire while
+  // the field is part of the public contract that lands later.
+  [[maybe_unused]] flecs::world* _world = nullptr;
+  uint32_t _count = 0;
 };
 
 }  // namespace pyxis::scene

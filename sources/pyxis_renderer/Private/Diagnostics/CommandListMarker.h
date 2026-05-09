@@ -16,28 +16,30 @@
 namespace pyxis {
 
 class CommandListMarker final {
-public:
-    CommandListMarker(nvrhi::ICommandList* commandList, std::string_view name) noexcept
-        : _commandList(commandList) {
-        if (_commandList && !name.empty()) {
-            // beginMarker takes const char*; std::string_view::data() is
-            // not guaranteed null-terminated, so we materialise a small
-            // bounded copy.
-            const std::size_t copyLen = std::min(name.size(), _name.size() - 1);
-            std::memcpy(_name.data(), name.data(), copyLen);
-            _name[copyLen] = '\0';
-            _commandList->beginMarker(_name.data());
-        }
+ public:
+  CommandListMarker(nvrhi::ICommandList* commandList, std::string_view name) noexcept
+      : _commandList(commandList) {
+    if (_commandList && !name.empty())
+    {
+      // beginMarker takes const char*; std::string_view::data() is
+      // not guaranteed null-terminated, so we materialise a small
+      // bounded copy.
+      const std::size_t copyLen = std::min(name.size(), _name.size() - 1);
+      std::memcpy(_name.data(), name.data(), copyLen);
+      _name[copyLen] = '\0';
+      _commandList->beginMarker(_name.data());
     }
-    ~CommandListMarker() noexcept {
-        if (_commandList) _commandList->endMarker();
-    }
-    CommandListMarker(const CommandListMarker&)            = delete;
-    CommandListMarker& operator=(const CommandListMarker&) = delete;
+  }
+  ~CommandListMarker() noexcept {
+    if (_commandList)
+      _commandList->endMarker();
+  }
+  CommandListMarker(const CommandListMarker&) = delete;
+  CommandListMarker& operator=(const CommandListMarker&) = delete;
 
-private:
-    nvrhi::ICommandList*  _commandList = nullptr;
-    std::array<char, 64>  _name{};
+ private:
+  nvrhi::ICommandList* _commandList = nullptr;
+  std::array<char, 64> _name{};
 };
 
 }  // namespace pyxis

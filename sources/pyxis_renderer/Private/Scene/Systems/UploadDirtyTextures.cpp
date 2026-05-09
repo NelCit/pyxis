@@ -9,8 +9,8 @@
 namespace pyxis::scene {
 
 void RunUploadDirtyTextures(flecs::iter& /*it*/) {
-    // M0: no-op. Real queries (Texture + Dirty<Texture>) and the
-    // associated GPU upload pipeline land in M5.
+  // M0: no-op. Real queries (Texture + Dirty<Texture>) and the
+  // associated GPU upload pipeline land in M5.
 }
 
 }  // namespace pyxis::scene

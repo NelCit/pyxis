@@ -21,18 +21,18 @@ VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 namespace pyxis {
 
 void VulkanHppInitFromLoader(PFN_vkGetInstanceProcAddr getInstanceProcAddr) noexcept {
-    VULKAN_HPP_DEFAULT_DISPATCHER.init(getInstanceProcAddr);
+  VULKAN_HPP_DEFAULT_DISPATCHER.init(getInstanceProcAddr);
 }
 
 void VulkanHppInitFromInstance(VkInstance instance) noexcept {
-    // Wrap the C handle into vk::Instance explicitly so the templated
-    // init() overload doesn't try to deduce against the opaque C pointer
-    // (which would require VkInstance_T's definition — it's opaque).
-    VULKAN_HPP_DEFAULT_DISPATCHER.init(vk::Instance(instance));
+  // Wrap the C handle into vk::Instance explicitly so the templated
+  // init() overload doesn't try to deduce against the opaque C pointer
+  // (which would require VkInstance_T's definition — it's opaque).
+  VULKAN_HPP_DEFAULT_DISPATCHER.init(vk::Instance(instance));
 }
 
 void VulkanHppInitFromDevice(VkDevice device) noexcept {
-    VULKAN_HPP_DEFAULT_DISPATCHER.init(vk::Device(device));
+  VULKAN_HPP_DEFAULT_DISPATCHER.init(vk::Device(device));
 }
 
 }  // namespace pyxis

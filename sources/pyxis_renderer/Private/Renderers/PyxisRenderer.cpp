@@ -1,30 +1,32 @@
-// Pyxis renderer — PyxisRenderer implementation (M1).
+// Pyxis renderer — PyxisRenderer implementation.
 //
-// Plan §18.6. Owns a RenderGraph + a Profiler reference. M1 adds one
-// pass (TrianglePass); M3+ adds the path-trace + accumulation + tone-
-// map + AOV-resolve chain.
+// Plan §18.6. Owns a RenderGraph + a Profiler reference. M3 wires
+// PathTracePass as the only pass; the §9 v1 graph (Accumulation →
+// ToneMap → AovResolve → DebugView → CopyToHydraBuffer → Present)
+// fills in at M5+.
 
-#include <Pyxis/Renderer/PyxisRenderer.h>
-
-#include "Passes/TrianglePass.h"
+#include "Passes/PathTracePass.h"
 #include "RenderGraph/PassContext.h"
 #include "RenderGraph/RenderGraph.h"
 
 #include <Pyxis/Platform/Logging/Log.h>
 #include <Pyxis/Platform/Logging/LogCategories.h>
+#include <Pyxis/Renderer/GpuScene.h>
 #include <Pyxis/Renderer/Profiler.h>
+#include <Pyxis/Renderer/PyxisRenderer.h>
 
 #include <nvrhi/nvrhi.h>
 
 namespace pyxis {
 
-PyxisRenderer::PyxisRenderer(nvrhi::IDevice*           device,
-                             Profiler&                 profiler,
+PyxisRenderer::PyxisRenderer(nvrhi::IDevice* device, GpuScene& scene, Profiler& profiler,
                              const RendererCreateDesc& /*desc*/)
-    : _profiler(&profiler),
-      _graph(std::make_unique<RenderGraph>(device, &profiler)) {
-    _graph->AddPass(std::make_unique<TrianglePass>(device));
-    Logging::Get().Info(log::RENDER, "PyxisRenderer: initialised (TrianglePass registered)");
+    : _profiler(&profiler), _graph(std::make_unique<RenderGraph>(device, &profiler)) {
+  // PathTracePass runs only when the supplied scene has a TLAS +
+  // camera; before that (e.g. an empty scene), the pass early-outs
+  // and the output buffer is left untouched.
+  _graph->AddPass(std::make_unique<PathTracePass>(device, scene));
+  Logging::Get().Info(log::RENDER, "PyxisRenderer: initialised (PathTracePass registered)");
 }
 
 // Out-of-line dtor lives here so unique_ptr<RenderGraph>'s deleter sees
@@ -32,37 +34,40 @@ PyxisRenderer::PyxisRenderer(nvrhi::IDevice*           device,
 // it). Same reason `=default` works here but wouldn't in the header.
 PyxisRenderer::~PyxisRenderer() = default;
 
-void PyxisRenderer::RenderFrame(nvrhi::ICommandList*  commandList,
-                                const RenderSettings& settings,
-                                const RenderTargets&  targets) {
-    if (!_graph || !commandList) return;
-    PassContext context{};
-    context.commandList    = commandList;
-    context.profiler       = _profiler;
-    context.settings       = &settings;
-    context.targets        = &targets;
-    context.frameIndex     = _frameIndex++;
-    // M1 active runtime: 1 frame in flight (cap = MAX_FRAMES_IN_FLIGHT = 3).
-    context.framesInFlight = 1;
+void PyxisRenderer::RenderFrame(nvrhi::ICommandList* commandList, const RenderSettings& settings,
+                                const RenderTargets& targets) {
+  if (!_graph || !commandList)
+    return;
+  PassContext context{};
+  context.commandList = commandList;
+  context.profiler = _profiler;
+  context.settings = &settings;
+  context.targets = &targets;
+  context.frameIndex = _frameIndex++;
+  // Active runtime: 1 frame in flight (cap = MAX_FRAMES_IN_FLIGHT = 3).
+  // Headless raises this to 3 for §33.7 byte-equal EXR; the viewer
+  // stays at 1 until the pacing knobs land at M11.
+  context.framesInFlight = 1;
 
-    const Profiler::CpuScope frameScope(*_profiler, "render.frame.cpu");
-    _graph->Execute(commandList, context);
+  const Profiler::CpuScope frameScope(*_profiler, "render.frame.cpu");
+  _graph->Execute(commandList, context);
 }
 
 void PyxisRenderer::Resize(uint32_t /*width*/, uint32_t /*height*/) {
-    // TODO(M3): forward to RenderGraph for pass-local target resize +
-    // accumulation reset. M1's TrianglePass keys its framebuffer cache
-    // on nvrhi::ITexture* identity, so a swapchain rebuild already
-    // invalidates the cached entries naturally.
+  // No-op until M5+ adds an internal accumulation buffer that's
+  // sized off the render resolution. PathTracePass writes into a
+  // caller-allocated AOV color texture, so swapchain rebuilds
+  // already invalidate cached pass state through the pass's own
+  // texture-identity cache.
 }
 
 void PyxisRenderer::ResetAccumulation() {
-    // TODO(M3): clear PathTracePass's accumulation buffer so the next
-    // frame starts from sample 0. No-op until the buffer exists.
+  // No-op until M5+ adds an accumulation buffer to clear. The M3
+  // path-tracer renders one sample per frame straight to the AOV.
 }
 
 FrameProfile PyxisRenderer::LastFrameProfile() const {
-    return _profiler->LastFrameProfile();
+  return _profiler->LastFrameProfile();
 }
 
 }  // namespace pyxis

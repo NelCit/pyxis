@@ -7,5 +7,5 @@
 #include "Private/Application.h"
 
 int main(int argc, char** argv) {
-    return pyxis::app::Run(argc, argv);
+  return pyxis::app::Run(argc, argv);
 }

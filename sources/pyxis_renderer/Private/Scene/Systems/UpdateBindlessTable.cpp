@@ -8,7 +8,7 @@
 namespace pyxis::scene {
 
 void RunUpdateBindlessTable(flecs::iter& /*it*/) {
-    // M0: no-op. M5+ lights up the descriptor-indexing path.
+  // M0: no-op. M5+ lights up the descriptor-indexing path.
 }
 
 }  // namespace pyxis::scene

@@ -15,12 +15,12 @@ namespace pyxis::scene {
 // Specialised, named dirty axes. Flecs can query for them by name; in
 // systems we use the explicit type so reviewers see what work each system
 // does. Plan §8.1.
-struct DirtyTopology     {};   // Mesh structure changed; rebuild BLAS.
-struct DirtyTransform    {};   // Instance transform changed; refit TLAS.
-struct DirtyMaterial     {};   // Material params changed; re-upload GPU layout.
-struct DirtyVisibility   {};   // Instance hidden/shown; mark TLAS dirty.
-struct DirtyTexture      {};   // Texture upload pending.
-struct DirtyLight        {};   // Light params changed.
-struct DirtyTextureGpu   {};   // Bindless slot pending update (post-decode).
+struct DirtyTopology {};    // Mesh structure changed; rebuild BLAS.
+struct DirtyTransform {};   // Instance transform changed; refit TLAS.
+struct DirtyMaterial {};    // Material params changed; re-upload GPU layout.
+struct DirtyVisibility {};  // Instance hidden/shown; mark TLAS dirty.
+struct DirtyTexture {};     // Texture upload pending.
+struct DirtyLight {};       // Light params changed.
+struct DirtyTextureGpu {};  // Bindless slot pending update (post-decode).
 
 }  // namespace pyxis::scene

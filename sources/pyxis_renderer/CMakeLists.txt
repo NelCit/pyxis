@@ -30,12 +30,42 @@ target_sources(pyxis_renderer PUBLIC
         Public/Pyxis/Renderer/Descs/RendererCreateDesc.h
         Public/Pyxis/Renderer/Descs/RenderSettings.h
         Public/Pyxis/Renderer/Descs/RenderTargets.h
+
+        # M3 public surface — foundation for Expected<T>-returning verbs.
+        Public/Pyxis/Renderer/Error.h
+
+        # M3 public Desc PODs. Byte-stable per §18.9 / §22.3 — adding
+        # fields requires the trailing _reserved trick; reordering or
+        # narrowing types is a major-version break. See each header
+        # for milestone-specific notes (M3 only consumes the base
+        # block of OpenPBRMaterialDesc, etc.).
+        Public/Pyxis/Renderer/Descs/MeshDesc.h
+        Public/Pyxis/Renderer/Descs/InstanceDesc.h
+        Public/Pyxis/Renderer/Descs/OpenPBRMaterialDesc.h
+        Public/Pyxis/Renderer/Descs/CameraDesc.h
+        Public/Pyxis/Renderer/Descs/LightDesc.h
+        Public/Pyxis/Renderer/Descs/TextureKey.h
+        Public/Pyxis/Renderer/Descs/GpuSceneCreateDesc.h
+        Public/Pyxis/Renderer/Descs/FrameStats.h
+
+        # M3 GpuScene — canonical scene-mutation API. Stub impl in
+        # Private/GpuScene/GpuScene.cpp; real bodies land in subsequent
+        # M3 commits.
+        Public/Pyxis/Renderer/GpuScene.h
 )
 
 # ----------------------------------------------------------------------------
 # Private — SceneWorld and the Flecs phase pipeline (§8 / §30.11).
 # ----------------------------------------------------------------------------
 target_sources(pyxis_renderer PRIVATE
+    # M3 — Error / PYXIS_ERROR implementation (foundation for Expected<T>).
+    Private/Errors/Error.cpp
+
+    # M3 — GpuScene canonical scene-mutation API. PIMPL'd per §18.9;
+    # mesh upload + BLAS build + TLAS rebuild are wired here at M3,
+    # materials + textures fill in at M5+.
+    Private/GpuScene/GpuScene.cpp
+
     # M1 — RenderGraph + Passes + Profiler + Renderer.
     Private/Diagnostics/CommandListMarker.h
 
@@ -44,8 +74,8 @@ target_sources(pyxis_renderer PRIVATE
     Private/RenderGraph/RenderGraph.h
     Private/RenderGraph/RenderGraph.cpp
 
-    Private/Passes/TrianglePass.h
-    Private/Passes/TrianglePass.cpp
+    Private/Passes/PathTracePass.h
+    Private/Passes/PathTracePass.cpp
 
     Private/Profiler/Profiler.cpp
 
@@ -91,10 +121,29 @@ target_sources(pyxis_renderer PRIVATE
 # ----------------------------------------------------------------------------
 find_package(flecs CONFIG REQUIRED)
 
-# Flecs is PRIVATE — never propagated to dependents (plan §49).
+# hlslpp is header-only and lives in our public Descs (MeshDesc /
+# InstanceDesc / CameraDesc use float3 / float4x4). Linked PUBLIC so
+# consumers (pyxis_app, pyxis_unit_tests, future pyxis_hydra) see the
+# include path.
+pyxis_thirdparty_require_hlslpp()
+
+# Flecs is PRIVATE — never propagated to dependents (plan §49). hlslpp
+# is PUBLIC — it leaks through Public/Descs/* and consumers must see it.
+# resources/shaders/ is on the private include path so C++ TUs can
+# `#include "ShaderInterop.slang"` and pick up the shared structs
+# (CameraUniforms, HitInfo, ...) directly. The Slang file branches on
+# __cplusplus, so the same header satisfies both the slangc shader
+# build and the renderer's C++ side without a hand-maintained C++
+# shadow.
+target_include_directories(pyxis_renderer
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/resources/shaders
+)
+
 target_link_libraries(pyxis_renderer
     PUBLIC
         Pyxis::Platform
+        pyxis_hlslpp
     PRIVATE
         $<TARGET_NAME_IF_EXISTS:flecs::flecs_static>
         $<TARGET_NAME_IF_EXISTS:flecs::flecs>
@@ -112,20 +161,28 @@ include(Version)
 pyxis_generate_version_header(pyxis_renderer)
 pyxis_generate_version_source(pyxis_renderer)
 
-# Shaders — M1 triangle vert + frag compiled by Slang at build time
-# (plan §10 / §23).
+# Shaders — M3 ray-tracing pipeline (raygen / miss / closesthit)
+# compiled by Slang at build time (plan §10 / §23). The .spv lands in
+# <bin>/Resources/shaders/ and is loaded by PathTracePass at startup.
 include(Slang)
 pyxis_compile_slang_shader(
     TARGET      pyxis_renderer
-    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/triangle.vert.slang
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/raygen.slang
     ENTRY_POINT main
-    STAGE       vertex
-    OUTPUT      triangle.vert.spv
+    STAGE       raygen
+    OUTPUT      raygen.spv
 )
 pyxis_compile_slang_shader(
     TARGET      pyxis_renderer
-    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/triangle.frag.slang
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/miss.slang
     ENTRY_POINT main
-    STAGE       fragment
-    OUTPUT      triangle.frag.spv
+    STAGE       miss
+    OUTPUT      miss.spv
+)
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/closesthit.slang
+    ENTRY_POINT main
+    STAGE       closesthit
+    OUTPUT      closesthit.spv
 )

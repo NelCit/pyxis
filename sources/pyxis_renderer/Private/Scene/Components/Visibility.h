@@ -9,7 +9,7 @@
 namespace pyxis::scene {
 
 struct Visibility {
-    bool visible = true;
+  bool visible = true;
 };
 
 }  // namespace pyxis::scene

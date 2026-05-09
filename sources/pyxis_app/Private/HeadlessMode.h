@@ -20,7 +20,6 @@ int RunHeadless(const Configuration& config) noexcept;
 // Viewer mode. screenshotPath is the M1 --screenshot debug capture
 // (non-empty -> render a few warmup frames, write a PNG, exit 0).
 // Empty = normal interactive viewer.
-int RunViewer(const Configuration& config,
-              std::string_view     screenshotPath) noexcept;
+int RunViewer(const Configuration& config, std::string_view screenshotPath) noexcept;
 
 }  // namespace pyxis::app

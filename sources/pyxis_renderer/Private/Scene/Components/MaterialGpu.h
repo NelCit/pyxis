@@ -11,7 +11,7 @@
 namespace pyxis::scene {
 
 struct MaterialGpu {
-    uint32_t gpuSlot = 0;
+  uint32_t gpuSlot = 0;
 };
 
 }  // namespace pyxis::scene

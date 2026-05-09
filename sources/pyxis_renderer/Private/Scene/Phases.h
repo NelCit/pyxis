@@ -13,13 +13,13 @@
 
 namespace pyxis::scene {
 
-struct PhaseUploadTextures   {};   // System_UploadDirtyTextures
-struct PhaseUploadMaterials  {};   // System_UploadDirtyMaterials
-struct PhaseExtractMeshes    {};   // System_ExtractDirtyMeshes
-struct PhaseBuildBlas        {};   // System_BuildDirtyBlas
-struct PhaseRebuildTlas      {};   // System_RebuildTlas
-struct PhaseUpdateBindless   {};   // System_UpdateBindlessTable
-struct PhaseClearDirty       {};   // System_ClearDirtyFlags
+struct PhaseUploadTextures {};   // System_UploadDirtyTextures
+struct PhaseUploadMaterials {};  // System_UploadDirtyMaterials
+struct PhaseExtractMeshes {};    // System_ExtractDirtyMeshes
+struct PhaseBuildBlas {};        // System_BuildDirtyBlas
+struct PhaseRebuildTlas {};      // System_RebuildTlas
+struct PhaseUpdateBindless {};   // System_UpdateBindlessTable
+struct PhaseClearDirty {};       // System_ClearDirtyFlags
 
 // Returns the registered Flecs entity for a phase tag. Phases are
 // constructed at SceneWorld::Init time and registered into the custom

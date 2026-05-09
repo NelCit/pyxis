@@ -78,7 +78,7 @@ Renderer's public surface is exhaustive (§18.1) — `Forward.h`, `RendererApi.h
 - **Naming** (§30.2): `PascalCase` types/free funcs/member funcs, `_camelCase` private fields, `camelCase` POD public fields/locals, `UPPER_SNAKE_CASE` compile-time constants (no prefix; `MAX_FRAMES_IN_FLIGHT`, `HANDLE_SLOT_BITS`), `PascalCase` enum-class constants (no prefix; `MeshHandle::Invalid`), `PYXIS_SCREAM` macros, single flat `pyxis::` namespace. Acronyms count as words (`BlasCache`, not `BLASCache`).
 - **No singletons** except `pyxis::Logging::Get()` (§33.10) and Tracy's client. `Profiler` is constructor-injected.
 - **No allocations in pass `Execute()`** — preallocate in `Declare()` / on-resize.
-- **Public headers must not** include `<windows.h>`, transitively pull `pxr/...` (renderer is USD-free), or expose NVRHI types beyond opaque `IDevice*` / `ICommandList*`.
+- **Public headers must not** include `<windows.h>`, transitively pull `pxr/...` (renderer is USD-free), or expose NVRHI types beyond opaque `IDevice*` / `ICommandList*`. Public classes use PIMPL (`struct Impl;` + `std::unique_ptr<Impl>`) — STL containers and concrete NVRHI handles live in `Impl`, never in the public class body. §18.9.
 - **`PYXIS_ERROR(kind, fmt, ...)`** is the canonical `Error` constructor. `PYXIS_TRY` propagates `Expected<T>` failures up.
 - **Three error tiers**: `PYXIS_ASSERT` / `PYXIS_VERIFY` (programmer error) → `Expected<T, Error>` (recoverable) → `PYXIS_FATAL` (fatal, after flushing logs).
 
@@ -135,7 +135,7 @@ All inputs (UsdPreviewSurface, MaterialX `open_pbr_surface` / `standard_surface`
 ## Slang interop (§10, §23)
 
 - `ShaderInterop.slang` is the only file shared between C++ and shaders. `PYXIS_INTEROP_STRUCT` macro; `#ifdef __cplusplus` swaps `hlslpp::float4`/`float4x4`/etc. aliases.
-- **Row-major matrices everywhere**. Multiplication is row-vector: `pos_clip = mul(pos_world, viewProj)`.
+- **Row-major storage, column-vector math** (textbook, `v' = M·v`): `pos_clip = mul(viewProj, pos_world)`. Translation lives in the **last column** of every transform matrix. (Earlier drafts said row-vector; flipped at M3 — see plan §10.)
 - Default cbuffer layout (16-byte vector alignment, `std140`-equivalent). `static_assert(sizeof(...) % 16 == 0)` mandatory.
 - ShaderMake driven; permutations via `-D NAME={0,1}`; `-matrix-layout-row-major -O3 -profile sm_6_6 -target spirv -emit-spirv-directly`.
 

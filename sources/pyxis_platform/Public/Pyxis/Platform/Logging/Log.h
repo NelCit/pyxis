@@ -22,53 +22,53 @@
 namespace pyxis {
 
 class PYXIS_PLATFORM_API Logger final {
-public:
-    // ------------------------------------------------------------------
-    // Apply a new configuration. Idempotent; safe to call multiple times.
-    // The first call lazy-creates the rotating file sink.
-    // ------------------------------------------------------------------
-    void Configure(const LogConfig& cfg);
+ public:
+  // ------------------------------------------------------------------
+  // Apply a new configuration. Idempotent; safe to call multiple times.
+  // The first call lazy-creates the rotating file sink.
+  // ------------------------------------------------------------------
+  void Configure(const LogConfig& cfg);
 
-    // ------------------------------------------------------------------
-    // Per-level emit. `category` follows the §31 dotted-prefix convention.
-    // The message buffer is bounded; overlong messages are truncated with
-    // a trailing ellipsis.
-    // ------------------------------------------------------------------
-    void Trace   (std::string_view category, std::string_view message) noexcept;
-    void Debug   (std::string_view category, std::string_view message) noexcept;
-    void Info    (std::string_view category, std::string_view message) noexcept;
-    void Warn    (std::string_view category, std::string_view message) noexcept;
-    void Error   (std::string_view category, std::string_view message) noexcept;
-    void Critical(std::string_view category, std::string_view message) noexcept;
+  // ------------------------------------------------------------------
+  // Per-level emit. `category` follows the §31 dotted-prefix convention.
+  // The message buffer is bounded; overlong messages are truncated with
+  // a trailing ellipsis.
+  // ------------------------------------------------------------------
+  void Trace(std::string_view category, std::string_view message) noexcept;
+  void Debug(std::string_view category, std::string_view message) noexcept;
+  void Info(std::string_view category, std::string_view message) noexcept;
+  void Warn(std::string_view category, std::string_view message) noexcept;
+  void Error(std::string_view category, std::string_view message) noexcept;
+  void Critical(std::string_view category, std::string_view message) noexcept;
 
-    // ------------------------------------------------------------------
-    // Drain every sink. Called at process exit and from PYXIS_FATAL.
-    // ------------------------------------------------------------------
-    void Flush() noexcept;
+  // ------------------------------------------------------------------
+  // Drain every sink. Called at process exit and from PYXIS_FATAL.
+  // ------------------------------------------------------------------
+  void Flush() noexcept;
 
-    // Disable copy/move; the logger is process-scoped through Logging::Get().
-    Logger(const Logger&)            = delete;
-    Logger& operator=(const Logger&) = delete;
+  // Disable copy/move; the logger is process-scoped through Logging::Get().
+  Logger(const Logger&) = delete;
+  Logger& operator=(const Logger&) = delete;
 
-private:
-    friend class Logging;
-    Logger();
-    ~Logger();
+ private:
+  friend class Logging;
+  Logger();
+  ~Logger();
 
-    struct Impl;
-    Impl* _impl = nullptr;   // owned; private to keep spdlog out of Public/.
+  struct Impl;
+  Impl* _impl = nullptr;  // owned; private to keep spdlog out of Public/.
 };
 
 class PYXIS_PLATFORM_API Logging final {
-public:
-    // ------------------------------------------------------------------
-    // Process-scoped accessor. Plan §33.10 — the documented exception to
-    // the "no singletons" rule (§30.9) along with Tracy's client.
-    // ------------------------------------------------------------------
-    [[nodiscard]] static Logger& Get() noexcept;
+ public:
+  // ------------------------------------------------------------------
+  // Process-scoped accessor. Plan §33.10 — the documented exception to
+  // the "no singletons" rule (§30.9) along with Tracy's client.
+  // ------------------------------------------------------------------
+  [[nodiscard]] static Logger& Get() noexcept;
 
-private:
-    Logging() = delete;
+ private:
+  Logging() = delete;
 };
 
 }  // namespace pyxis

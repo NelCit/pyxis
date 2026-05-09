@@ -20,7 +20,32 @@ AllowShortIfStatementsOnASingleLine: Never
 AllowShortLambdasOnASingleLine: All
 AllowShortCaseLabelsOnASingleLine: false
 
-BreakBeforeBraces: Attach
+# Pyxis brace style: Allman braces (`{` on its own line) for control
+# statements (if / else / for / while / do / switch); functions,
+# classes, namespaces, structs and enums keep the attached / K&R
+# style. The visual contrast between the condition expression and the
+# body block is the explicit user preference; type-or-function
+# definitions stay attached so the file's overall vertical rhythm
+# isn't perturbed.
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterCaseLabel:    false
+  AfterClass:        false
+  AfterControlStatement: Always
+  AfterEnum:         false
+  AfterFunction:     false
+  AfterNamespace:    false
+  AfterStruct:       false
+  AfterUnion:        false
+  AfterExternBlock:  false
+  BeforeElse:        true
+  BeforeCatch:       true
+  BeforeLambdaBody:  false
+  BeforeWhile:       false
+  IndentBraces:      false
+  SplitEmptyFunction:  false
+  SplitEmptyRecord:    false
+  SplitEmptyNamespace: false
 BreakConstructorInitializers: BeforeColon
 BreakInheritanceList: BeforeColon
 BreakBeforeBinaryOperators: NonAssignment

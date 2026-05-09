@@ -8,13 +8,13 @@
 #pragma once
 
 #if defined(_WIN32)
-#  if defined(PYXIS_PLATFORM_BUILDING_DLL)
-#    define PYXIS_PLATFORM_API __declspec(dllexport)
-#  elif defined(PYXIS_PLATFORM_USING_DLL)
-#    define PYXIS_PLATFORM_API __declspec(dllimport)
-#  else
-#    define PYXIS_PLATFORM_API
-#  endif
+#if defined(PYXIS_PLATFORM_BUILDING_DLL)
+#define PYXIS_PLATFORM_API __declspec(dllexport)
+#elif defined(PYXIS_PLATFORM_USING_DLL)
+#define PYXIS_PLATFORM_API __declspec(dllimport)
 #else
-#  define PYXIS_PLATFORM_API
+#define PYXIS_PLATFORM_API
+#endif
+#else
+#define PYXIS_PLATFORM_API
 #endif

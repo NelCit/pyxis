@@ -17,40 +17,40 @@
 namespace pyxis::app {
 
 struct CliArgs {
-    // ---- Mode + adapter -------------------------------------------------
-    bool        headless         = false;
-    bool        enableValidation = false;     // --vk-validation
-    int32_t     adapterIndex     = -1;        // -1 = pick highest-VRAM RT-capable.
+  // ---- Mode + adapter -------------------------------------------------
+  bool headless = false;
+  bool enableValidation = false;  // --vk-validation
+  int32_t adapterIndex = -1;      // -1 = pick highest-VRAM RT-capable.
 
-    // ---- Help / version -------------------------------------------------
-    bool        showHelp         = false;
-    bool        showVersion      = false;
+  // ---- Help / version -------------------------------------------------
+  bool showHelp = false;
+  bool showVersion = false;
 
-    // ---- §26 config + scene --------------------------------------------
-    std::string_view configPath;               // --config <path>
-    std::string_view scenePath;                // --scene <path>  (M2: stored, M4 wires)
-    std::string_view cameraSdfPath;            // --camera <sdfPath>  (M2: stored)
+  // ---- §26 config + scene --------------------------------------------
+  std::string_view configPath;     // --config <path>
+  std::string_view scenePath;      // --scene <path>  (M2: stored, M4 wires)
+  std::string_view cameraSdfPath;  // --camera <sdfPath>  (M2: stored)
 
-    // ---- §26 render / output overrides ---------------------------------
-    // Zero means "no override; defer to JSON or default". Non-zero
-    // overrides the corresponding parameters.json field at validate time.
-    uint32_t    width            = 0;          // --width <int>
-    uint32_t    height           = 0;          // --height <int>
-    uint32_t    samples          = 0;          // --samples <int>
-    uint32_t    seed             = 0;          // --seed <int>
-    std::string_view outputPath;               // --output <path>  (overrides output.image)
-    std::string_view profilePath;              // --profile <path>  (M11+ wires)
+  // ---- §26 render / output overrides ---------------------------------
+  // Zero means "no override; defer to JSON or default". Non-zero
+  // overrides the corresponding parameters.json field at validate time.
+  uint32_t width = 0;            // --width <int>
+  uint32_t height = 0;           // --height <int>
+  uint32_t samples = 0;          // --samples <int>
+  uint32_t seed = 0;             // --seed <int>
+  std::string_view outputPath;   // --output <path>  (overrides output.image)
+  std::string_view profilePath;  // --profile <path>  (M11+ wires)
 
-    // ---- M1 viewer extras ----------------------------------------------
-    // --screenshot <path>: run the viewer for a few warmup frames, copy
-    // the backbuffer to PNG at the given path, then exit. Plan §35
-    // image-regression artefact for the M1 viewer (M2's --headless
-    // --output is the proper EXR pipeline). Empty = no screenshot.
-    std::string_view screenshotPath;
+  // ---- M1 viewer extras ----------------------------------------------
+  // --screenshot <path>: run the viewer for a few warmup frames, copy
+  // the backbuffer to PNG at the given path, then exit. Plan §35
+  // image-regression artefact for the M1 viewer (M2's --headless
+  // --output is the proper EXR pipeline). Empty = no screenshot.
+  std::string_view screenshotPath;
 
-    // ---- Parse error reporting -----------------------------------------
-    bool        invalid          = false;      // True if `parse` saw an unknown flag.
-    std::string_view invalidArg;
+  // ---- Parse error reporting -----------------------------------------
+  bool invalid = false;  // True if `parse` saw an unknown flag.
+  std::string_view invalidArg;
 };
 
 // Parses `argv[1..argc-1]`. Never allocates beyond the implicit

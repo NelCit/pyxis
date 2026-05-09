@@ -26,11 +26,9 @@ namespace pyxis::app {
 //
 // Returns the unexpected branch with a human-readable message on
 // any failure (path-create, channel-conversion, tinyexr write).
-[[nodiscard]] std::expected<void, std::string>
-WriteExrBgra8(std::string_view filePath,
-              uint32_t          width,
-              uint32_t          height,
-              const void*       bgra8Pixels,
-              std::size_t       rowPitchBytes) noexcept;
+[[nodiscard]] std::expected<void, std::string> WriteExrBgra8(std::string_view filePath,
+                                                             uint32_t width, uint32_t height,
+                                                             const void* bgra8Pixels,
+                                                             std::size_t rowPitchBytes) noexcept;
 
 }  // namespace pyxis::app

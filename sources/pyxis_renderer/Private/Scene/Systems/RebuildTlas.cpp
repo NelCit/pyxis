@@ -8,8 +8,8 @@
 namespace pyxis::scene {
 
 void RunRebuildTlas(flecs::iter& /*it*/) {
-    // M0: no-op. M3+ adds the real two-tier TLAS (static + dynamic) with
-    // the §16.5 sharding rule for Moana.
+  // M0: no-op. M3+ adds the real two-tier TLAS (static + dynamic) with
+  // the §16.5 sharding rule for Moana.
 }
 
 }  // namespace pyxis::scene

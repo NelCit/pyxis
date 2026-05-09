@@ -45,26 +45,27 @@
 namespace pyxis::app {
 
 struct AovTextures {
-    // §18.4 slots.
-    nvrhi::TextureHandle color;
-    // M5+ — uncomment + populate in Create() alongside their consumer
-    // passes. Kept here so the §18.4 slot list is visible at the point
-    // a future contributor goes looking for it:
-    //   nvrhi::TextureHandle depth;          // M5  R32F
-    //   nvrhi::TextureHandle normal;         // M5  RGB16F
-    //   nvrhi::TextureHandle albedo;         // M5  RGBA16F
-    //   nvrhi::TextureHandle motionVector;   // M11 RG16F
-    //   nvrhi::TextureHandle materialId;     // M6  R32_UINT
-    //   nvrhi::TextureHandle instanceId;     // M6  R32_UINT
+  // §18.4 slots.
+  nvrhi::TextureHandle color;
+  // M5+ — uncomment + populate in Create() alongside their consumer
+  // passes. Kept here so the §18.4 slot list is visible at the point
+  // a future contributor goes looking for it:
+  //   nvrhi::TextureHandle depth;          // M5  R32F
+  //   nvrhi::TextureHandle normal;         // M5  RGB16F
+  //   nvrhi::TextureHandle albedo;         // M5  RGBA16F
+  //   nvrhi::TextureHandle motionVector;   // M11 RG16F
+  //   nvrhi::TextureHandle materialId;     // M6  R32_UINT
+  //   nvrhi::TextureHandle instanceId;     // M6  R32_UINT
 
-    uint32_t width  = 0;
-    uint32_t height = 0;
+  uint32_t width = 0;
+  uint32_t height = 0;
 
-    // Allocate the M2 active set (color only). Returns the unexpected
-    // branch with a human-readable reason on null device, zero dims, or
-    // an NVRHI createTexture failure.
-    [[nodiscard]] static std::expected<AovTextures, std::string>
-    Create(nvrhi::IDevice* device, uint32_t width, uint32_t height) noexcept;
+  // Allocate the M2 active set (color only). Returns the unexpected
+  // branch with a human-readable reason on null device, zero dims, or
+  // an NVRHI createTexture failure.
+  [[nodiscard]] static std::expected<AovTextures, std::string> Create(nvrhi::IDevice* device,
+                                                                      uint32_t width,
+                                                                      uint32_t height) noexcept;
 };
 
 }  // namespace pyxis::app

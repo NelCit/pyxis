@@ -10,7 +10,7 @@
 namespace pyxis::scene {
 
 struct TextureGpu {
-    uint32_t bindlessSlot = 0;
+  uint32_t bindlessSlot = 0;
 };
 
 }  // namespace pyxis::scene

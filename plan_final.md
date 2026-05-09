@@ -1191,11 +1191,18 @@ Every line above is an RFC trigger, not a v1 milestone (§44).
   written and read as row-major; no per-shader `column_major` qualifiers anywhere.
 - C++ side: `hlslpp::float4x4` rows are stored as `float4` rows; uploaded byte-for-byte to
   constant/structured buffers; consumed in shaders as row-major `float4x4`.
-- Multiplication convention is **row-vector**: `pos_clip = mul(pos_world, viewProjMatrix)`
-  (HLSL/Slang default with row-major layout). Camera/instance code, the `ShaderInterop`
-  header and any debug viz must follow this; do not mix `mul(M, v)` and `mul(v, M)` styles.
+- Multiplication convention is **column-vector** (textbook math, `v' = M·v`):
+  `pos_clip = mul(viewProjMatrix, pos_world)` — matrix on the left, vector on the right.
+  Translation lives in the **last column** of every transform matrix. Camera / instance
+  code, the `ShaderInterop` header and any debug viz must follow this; do not mix
+  `mul(M, v)` and `mul(v, M)` styles. (Earlier drafts of this plan specified
+  row-vector convention; the M3 cube-render commit flipped to column-vector across the
+  codebase because it matches the standard linear-algebra notation used in
+  graphics literature, GLSL's default `mat * vec`, and what most contributors
+  reach for first.)
 - BLAS/TLAS instance transforms are `3x4` row-major affine (`VkTransformMatrixKHR` is
-  natively row-major, so we copy without transpose).
+  natively row-major with translation in the last column — same shape as our
+  column-vector matrices, dropped to 3 rows since the bottom `[0,0,0,1]` is implicit).
 - Compile-time guard in `Compiler.cmake`: a unit test asserts a known transform matches
   byte-for-byte between a C++-built `hlslpp::float4x4` and a Slang-side reference, to
   catch any accidental column-major regression.
@@ -2214,7 +2221,26 @@ NVRHI-private headers escape through the public surface.
   `std::span<const T>` (borrowed). Outputs that need to own a string
   (`Error::message`, `Error::source`) use `pyxis::ErrorMessage` — a fixed-size,
   `std::array`-backed POD. This is the ABI-safety lock; reviewers reject any PR that
-  adds an STL container to `Public/`.
+  adds an STL container to a public POD or method signature.
+- **PIMPL is mandatory on every public class.** `GpuScene` and `Profiler` hold
+  their `std::vector<Entry>` tables, per-frame ring slots, and NVRHI buffer /
+  texture / acceleration-structure / timer-query handles behind a
+  `struct Impl;` forward-declared in the header and `std::unique_ptr<Impl>`
+  (or raw `Impl*` with explicit out-of-line dtor) as the only data member.
+  The header forward-declares `nvrhi::IDevice` / `nvrhi::ICommandList` and
+  any other NVRHI type that appears as an opaque pointer in method
+  signatures; it never includes `<nvrhi/nvrhi.h>`, `<vector>`, `<array>`,
+  `<string>`, or any other STL container header. This protects consumers
+  (`pyxis_app.exe`, `pyxis_hydra.dll`, `pyxis_usd_ingest.dll`, future
+  out-of-tree integrations) from `_HAS_EXCEPTIONS` / debug-iterator / SCL
+  flag mismatches that would otherwise corrupt vector / unique_ptr
+  layouts silently — the trade-off is one extra heap allocation per
+  public-class instance, which is dwarfed by the per-frame GPU work.
+  Render-side accessors that return a borrowed `nvrhi::*` pointer (e.g.
+  `GpuScene::GetTlas()` returning `nvrhi::rt::IAccelStruct*`) are
+  permitted because the consumer round-trips the pointer into another
+  binding desc without dereferencing it; the full NVRHI header is
+  included only by the .cpp that actually reads the type's members.
 - Public POD descriptors are **frozen at the byte level**: `sizeof`, `alignof`, member
   offsets and padding are part of the contract. Adding a member — even at the end —
   changes `sizeof` and is therefore a major-version break unless the type carries an
@@ -2226,6 +2252,14 @@ NVRHI-private headers escape through the public surface.
   in fields persisted past a call, or in any public POD that is stored anywhere
   (`Error::message` and `FrameProfile::PassTiming::name` use the inline
   `ErrorMessage`/`ScopeName` PODs precisely because of this rule).
+  **One narrow exception**: `FrameProfile::passes` is a `std::span<const
+  PassTiming>` that points into Profiler-owned storage (the slot's
+  resolved-pass list inside `Profiler::Impl`) guaranteed stable until
+  the next `BeginFrame()`. Callers who want a longer-lived snapshot
+  copy the span's contents into their own storage — the contract is
+  documented on the type. The §18.9 review still rejects new
+  spans-out-of-public-API by default; this is a single grandfathered
+  case, not a new pattern.
 - Public method signatures are append-only between minor versions; renames or removals
   are major-version breaks.
 - Strong-handle enum underlying types are fixed at `uint32_t` and their `Invalid = 0`

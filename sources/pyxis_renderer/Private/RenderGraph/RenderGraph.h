@@ -17,7 +17,7 @@
 namespace nvrhi {
 class ICommandList;
 class IDevice;
-}
+}  // namespace nvrhi
 
 namespace pyxis {
 
@@ -25,25 +25,25 @@ class Profiler;
 struct PassContext;
 
 class RenderGraph final {
-public:
-    RenderGraph(nvrhi::IDevice* device, Profiler* profiler) noexcept;
-    ~RenderGraph();
+ public:
+  RenderGraph(nvrhi::IDevice* device, Profiler* profiler) noexcept;
+  ~RenderGraph();
 
-    RenderGraph(const RenderGraph&)            = delete;
-    RenderGraph& operator=(const RenderGraph&) = delete;
+  RenderGraph(const RenderGraph&) = delete;
+  RenderGraph& operator=(const RenderGraph&) = delete;
 
-    // Construction (called from PyxisRenderer::Init).
-    void AddPass(std::unique_ptr<IRenderPass> pass);
+  // Construction (called from PyxisRenderer::Init).
+  void AddPass(std::unique_ptr<IRenderPass> pass);
 
-    // Per-frame execute (called from PyxisRenderer::RenderFrame).
-    void Execute(nvrhi::ICommandList* commandList, const PassContext& context);
+  // Per-frame execute (called from PyxisRenderer::RenderFrame).
+  void Execute(nvrhi::ICommandList* commandList, const PassContext& context);
 
-private:
-    // _device is used by M3+'s RenderGraph::Compile to allocate barriers /
-    // imported resources; M1's minimal Execute doesn't read it.
-    [[maybe_unused]] nvrhi::IDevice*           _device   = nullptr;
-    Profiler*                                  _profiler = nullptr;
-    std::vector<std::unique_ptr<IRenderPass>>  _passes;
+ private:
+  // _device is used by M3+'s RenderGraph::Compile to allocate barriers /
+  // imported resources; M1's minimal Execute doesn't read it.
+  [[maybe_unused]] nvrhi::IDevice* _device = nullptr;
+  Profiler* _profiler = nullptr;
+  std::vector<std::unique_ptr<IRenderPass>> _passes;
 };
 
 }  // namespace pyxis

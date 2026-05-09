@@ -28,82 +28,81 @@ namespace {
 // Tiny no-GPU IRenderPass that just counts how many times it ran and
 // remembers the last execution order index.
 class CountingPass final : public pyxis::IRenderPass {
-public:
-    CountingPass(std::string_view name,
-                 std::atomic<int>& globalCounter,
-                 int& lastOrder,
-                 int& runCount)
-        : _name(name), _global(globalCounter), _lastOrder(lastOrder), _runCount(runCount) {}
+ public:
+  CountingPass(std::string_view name, std::atomic<int>& globalCounter, int& lastOrder,
+               int& runCount)
+      : _name(name), _global(globalCounter), _lastOrder(lastOrder), _runCount(runCount) {}
 
-    std::string_view Name() const override { return _name; }
-    void Execute(nvrhi::ICommandList* /*commandList*/, const pyxis::PassContext& /*context*/) override {
-        _lastOrder = _global.fetch_add(1);
-        ++_runCount;
-    }
+  std::string_view Name() const override { return _name; }
+  void Execute(nvrhi::ICommandList* /*commandList*/,
+               const pyxis::PassContext& /*context*/) override {
+    _lastOrder = _global.fetch_add(1);
+    ++_runCount;
+  }
 
-private:
-    std::string_view  _name;
-    std::atomic<int>& _global;
-    int&              _lastOrder;
-    int&              _runCount;
+ private:
+  std::string_view _name;
+  std::atomic<int>& _global;
+  int& _lastOrder;
+  int& _runCount;
 };
 
 }  // namespace
 
 TEST(RenderGraphSmoke, EmptyGraphExecuteIsNoOp) {
-    pyxis::Profiler profiler{ nullptr };  // CPU-only — §18.7
-    pyxis::RenderGraph graph{ /*device=*/nullptr, &profiler };
-    const pyxis::PassContext context{};
-    graph.Execute(/*commandList=*/nullptr, context);
-    SUCCEED();
+  pyxis::Profiler profiler{nullptr};  // CPU-only — §18.7
+  pyxis::RenderGraph graph{/*device=*/nullptr, &profiler};
+  const pyxis::PassContext context{};
+  graph.Execute(/*commandList=*/nullptr, context);
+  SUCCEED();
 }
 
 TEST(RenderGraphSmoke, AddPassExecutesInRegistrationOrder) {
-    pyxis::Profiler    profiler{ nullptr };
-    pyxis::RenderGraph graph{ /*device=*/nullptr, &profiler };
+  pyxis::Profiler profiler{nullptr};
+  pyxis::RenderGraph graph{/*device=*/nullptr, &profiler};
 
-    std::atomic<int> globalCounter{ 0 };
-    int orderA = -1, orderB = -1, orderC = -1;
-    int runsA  = 0,  runsB  = 0,  runsC  = 0;
+  std::atomic<int> globalCounter{0};
+  int orderA = -1, orderB = -1, orderC = -1;
+  int runsA = 0, runsB = 0, runsC = 0;
 
-    graph.AddPass(std::make_unique<CountingPass>("pass.A", globalCounter, orderA, runsA));
-    graph.AddPass(std::make_unique<CountingPass>("pass.B", globalCounter, orderB, runsB));
-    graph.AddPass(std::make_unique<CountingPass>("pass.C", globalCounter, orderC, runsC));
+  graph.AddPass(std::make_unique<CountingPass>("pass.A", globalCounter, orderA, runsA));
+  graph.AddPass(std::make_unique<CountingPass>("pass.B", globalCounter, orderB, runsB));
+  graph.AddPass(std::make_unique<CountingPass>("pass.C", globalCounter, orderC, runsC));
 
-    const pyxis::PassContext context{};
-    graph.Execute(nullptr, context);
+  const pyxis::PassContext context{};
+  graph.Execute(nullptr, context);
 
-    EXPECT_EQ(runsA, 1);
-    EXPECT_EQ(runsB, 1);
-    EXPECT_EQ(runsC, 1);
-    EXPECT_EQ(orderA, 0);
-    EXPECT_EQ(orderB, 1);
-    EXPECT_EQ(orderC, 2);
+  EXPECT_EQ(runsA, 1);
+  EXPECT_EQ(runsB, 1);
+  EXPECT_EQ(runsC, 1);
+  EXPECT_EQ(orderA, 0);
+  EXPECT_EQ(orderB, 1);
+  EXPECT_EQ(orderC, 2);
 }
 
 TEST(RenderGraphSmoke, ExecuteIsRepeatable) {
-    pyxis::Profiler    profiler{ nullptr };
-    pyxis::RenderGraph graph{ /*device=*/nullptr, &profiler };
+  pyxis::Profiler profiler{nullptr};
+  pyxis::RenderGraph graph{/*device=*/nullptr, &profiler};
 
-    std::atomic<int> globalCounter{ 0 };
-    int order = -1;
-    int runs  = 0;
-    graph.AddPass(std::make_unique<CountingPass>("pass.X", globalCounter, order, runs));
+  std::atomic<int> globalCounter{0};
+  int order = -1;
+  int runs = 0;
+  graph.AddPass(std::make_unique<CountingPass>("pass.X", globalCounter, order, runs));
 
-    const pyxis::PassContext context{};
-    graph.Execute(nullptr, context);
-    graph.Execute(nullptr, context);
-    graph.Execute(nullptr, context);
+  const pyxis::PassContext context{};
+  graph.Execute(nullptr, context);
+  graph.Execute(nullptr, context);
+  graph.Execute(nullptr, context);
 
-    EXPECT_EQ(runs, 3);
+  EXPECT_EQ(runs, 3);
 }
 
 TEST(RenderGraphSmoke, NullPassIsRejectedQuietly) {
-    pyxis::Profiler    profiler{ nullptr };
-    pyxis::RenderGraph graph{ /*device=*/nullptr, &profiler };
+  pyxis::Profiler profiler{nullptr};
+  pyxis::RenderGraph graph{/*device=*/nullptr, &profiler};
 
-    graph.AddPass(nullptr);  // §30.6: silent rejection, no crash
-    const pyxis::PassContext context{};
-    graph.Execute(nullptr, context);
-    SUCCEED();
+  graph.AddPass(nullptr);  // §30.6: silent rejection, no crash
+  const pyxis::PassContext context{};
+  graph.Execute(nullptr, context);
+  SUCCEED();
 }

@@ -27,6 +27,8 @@ target_sources(pyxis PRIVATE
     Private/Output/TextureReadback.cpp
     Private/Render/AovTextures.h
     Private/Render/AovTextures.cpp
+    Private/Render/HardcodedCubeScene.h
+    Private/Render/HardcodedCubeScene.cpp
     Private/HeadlessMode.h
     Private/HeadlessMode.cpp
     Private/ViewerMode.h

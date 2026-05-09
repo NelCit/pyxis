@@ -8,8 +8,8 @@
 namespace pyxis::scene {
 
 void RunExtractDirtyMeshes(flecs::iter& /*it*/) {
-    // M0: no-op. Real path lands at M3 (cube path-trace) when the vertex
-    // pool first carries data.
+  // M0: no-op. Real path lands at M3 (cube path-trace) when the vertex
+  // pool first carries data.
 }
 
 }  // namespace pyxis::scene

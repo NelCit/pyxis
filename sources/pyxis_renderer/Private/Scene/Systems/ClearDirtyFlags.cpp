@@ -15,8 +15,8 @@
 namespace pyxis::scene {
 
 void RunClearDirtyFlags(flecs::iter& /*it*/) {
-    // M0: no entity carries Dirty<*>. The real removal loop lands in M3+
-    // alongside the cached queries (§30.11 — no per-frame query construction).
+  // M0: no entity carries Dirty<*>. The real removal loop lands in M3+
+  // alongside the cached queries (§30.11 — no per-frame query construction).
 }
 
 }  // namespace pyxis::scene

@@ -8,8 +8,8 @@
 namespace pyxis::scene {
 
 void RunBuildDirtyBlas(flecs::iter& /*it*/) {
-    // M0: no-op. M3+ (cube path-trace) wires the real batched build with
-    // the size-split flag policy from §16.
+  // M0: no-op. M3+ (cube path-trace) wires the real batched build with
+  // the size-split flag policy from §16.
 }
 
 }  // namespace pyxis::scene

@@ -51,8 +51,15 @@ function(pyxis_compile_slang_shader)
         message(FATAL_ERROR "Pyxis: PYXIS_SLANG_COMPILER not set or missing — run pyxis_thirdparty_setup() first.")
     endif()
 
-    # Map our stage names to slangc's -stage values.
-    set(_slangStage "${SHADER_STAGE}")
+    # Map our short stage names to slangc's -stage values. `raygen` is
+    # the friendly form everyone writes; slangc requires the full
+    # `raygeneration`. The other RT stages (closesthit / miss / anyhit
+    # / intersection / callable) match slangc's spelling already.
+    if(SHADER_STAGE STREQUAL "raygen")
+        set(_slangStage "raygeneration")
+    else()
+        set(_slangStage "${SHADER_STAGE}")
+    endif()
 
     # Resolve absolute paths.
     if(NOT IS_ABSOLUTE "${SHADER_SOURCE}")

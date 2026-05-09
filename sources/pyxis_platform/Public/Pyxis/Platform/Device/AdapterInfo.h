@@ -20,11 +20,11 @@ namespace pyxis {
 // auto-flagged. The separate `vendorId` field below mirrors
 // VkPhysicalDeviceProperties::vendorID byte-for-byte.
 enum class AdapterVendor : uint32_t {
-    Unknown   = 0,
-    Nvidia    = 0x10DE,
-    Amd       = 0x1002,
-    Intel     = 0x8086,
-    Qualcomm  = 0x5143,
+  Unknown = 0,
+  Nvidia = 0x10DE,
+  Amd = 0x1002,
+  Intel = 0x8086,
+  Qualcomm = 0x5143,
 };
 
 // Mirrors VkPhysicalDeviceType. Used by the windowed/headless device
@@ -34,50 +34,48 @@ enum class AdapterVendor : uint32_t {
 // device-local, which would otherwise out-rank a discrete card on the
 // "largest device-local heap" heuristic.
 enum class AdapterType : uint32_t {
-    Other      = 0,
-    Integrated = 1,
-    Discrete   = 2,
-    Virtual    = 3,
-    Cpu        = 4,
+  Other = 0,
+  Integrated = 1,
+  Discrete = 2,
+  Virtual = 3,
+  Cpu = 4,
 };
 
 struct AdapterInfo {
-    static constexpr std::size_t NAME_CAPACITY = 192;
+  static constexpr std::size_t NAME_CAPACITY = 192;
 
-    // ---- Identity --------------------------------------------------------
-    AdapterVendor vendor       = AdapterVendor::Unknown;
-    AdapterType   type         = AdapterType::Other;
-    uint32_t      vendorId     = 0;
-    uint32_t      deviceId     = 0;
-    uint32_t      driverVersionRaw = 0;       // VkPhysicalDeviceProperties::driverVersion
+  // ---- Identity --------------------------------------------------------
+  AdapterVendor vendor = AdapterVendor::Unknown;
+  AdapterType type = AdapterType::Other;
+  uint32_t vendorId = 0;
+  uint32_t deviceId = 0;
+  uint32_t driverVersionRaw = 0;  // VkPhysicalDeviceProperties::driverVersion
 
-    // ---- Inline-owning name buffer (no STL across DLL — §18.9-equivalent).
-    std::array<char, NAME_CAPACITY> name{};
-    uint16_t                        nameSize = 0;
+  // ---- Inline-owning name buffer (no STL across DLL — §18.9-equivalent).
+  std::array<char, NAME_CAPACITY> name{};
+  uint16_t nameSize = 0;
 
-    [[nodiscard]] std::string_view NameView() const noexcept {
-        return { name.data(), nameSize };
-    }
+  [[nodiscard]] std::string_view NameView() const noexcept { return {name.data(), nameSize}; }
 
-    // ---- Memory ----------------------------------------------------------
-    uint64_t totalDeviceLocalBytes = 0;        // VRAM (largest device-local heap).
-    uint64_t totalHostVisibleBytes = 0;        // System RAM exposed to the GPU.
+  // ---- Memory ----------------------------------------------------------
+  uint64_t totalDeviceLocalBytes = 0;  // VRAM (largest device-local heap).
+  uint64_t totalHostVisibleBytes = 0;  // System RAM exposed to the GPU.
 
-    // ---- Capabilities ----------------------------------------------------
-    bool     supportsRayTracingPipeline = false;
-    bool     supportsAccelerationStructure = false;
-    bool     supportsBufferDeviceAddress = false;
-    bool     supportsDescriptorIndexing = false;
-    bool     supportsTimelineSemaphore = false;
-    bool     supportsSync2 = false;
-    bool     supportsHostQueryReset = false;
-    bool     supportsMaintenance4 = false;       // > 4 GiB single allocation.
-    bool     supportsShaderInt64 = false;        // RNG seed-mix (§12.1).
-    bool     supportsMemoryBudget = false;       // VK_EXT_memory_budget.
+  // ---- Capabilities ----------------------------------------------------
+  bool supportsRayTracingPipeline = false;
+  bool supportsAccelerationStructure = false;
+  bool supportsBufferDeviceAddress = false;
+  bool supportsDescriptorIndexing = false;
+  bool supportsTimelineSemaphore = false;
+  bool supportsSync2 = false;
+  bool supportsHostQueryReset = false;
+  bool supportsMaintenance4 = false;  // > 4 GiB single allocation.
+  bool supportsShaderInt64 = false;   // RNG seed-mix (§12.1).
+  bool supportsMemoryBudget = false;  // VK_EXT_memory_budget.
 
-    // pipelineCacheUUID — primary key for the persisted pipeline cache
-    // (plan §33.8). Encodes device + driver + ABI atomically.
-    std::array<uint8_t, 16> pipelineCacheUuid{};
+  // pipelineCacheUUID — primary key for the persisted pipeline cache
+  // (plan §33.8). Encodes device + driver + ABI atomically.
+  std::array<uint8_t, 16> pipelineCacheUuid{};
 };
 
 }  // namespace pyxis

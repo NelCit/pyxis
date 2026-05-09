@@ -41,42 +41,40 @@
 namespace pyxis::app {
 
 class TextureReadback {
-public:
-    // Phase 1. `commandList` must already be open. `source` and `device`
-    // must be non-null.
-    [[nodiscard]] static std::expected<TextureReadback, std::string>
-    RecordCopy(nvrhi::IDevice*      device,
-               nvrhi::ICommandList* commandList,
-               nvrhi::ITexture*     source,
-               const char*          debugName) noexcept;
+ public:
+  // Phase 1. `commandList` must already be open. `source` and `device`
+  // must be non-null.
+  [[nodiscard]] static std::expected<TextureReadback, std::string> RecordCopy(
+      nvrhi::IDevice* device, nvrhi::ICommandList* commandList, nvrhi::ITexture* source,
+      const char* debugName) noexcept;
 
-    // Phase 2. Caller is responsible for closing + executing the
-    // command list passed to RecordCopy and synchronising (waitForIdle)
-    // before this returns valid data.
-    [[nodiscard]] std::expected<void, std::string> Map() noexcept;
+  // Phase 2. Caller is responsible for closing + executing the
+  // command list passed to RecordCopy and synchronising (waitForIdle)
+  // before this returns valid data.
+  [[nodiscard]] std::expected<void, std::string> Map() noexcept;
 
-    [[nodiscard]] const void*    Data()     const noexcept { return _mapped;   }
-    [[nodiscard]] std::size_t    RowPitch() const noexcept { return _rowPitch; }
-    [[nodiscard]] uint32_t       Width()    const noexcept { return _width;    }
-    [[nodiscard]] uint32_t       Height()   const noexcept { return _height;   }
-    [[nodiscard]] nvrhi::Format  Format()   const noexcept { return _format;   }
+  [[nodiscard]] const void* Data() const noexcept { return _mapped; }
+  [[nodiscard]] std::size_t RowPitch() const noexcept { return _rowPitch; }
+  [[nodiscard]] uint32_t Width() const noexcept { return _width; }
+  [[nodiscard]] uint32_t Height() const noexcept { return _height; }
+  [[nodiscard]] nvrhi::Format Format() const noexcept { return _format; }
 
-    TextureReadback(const TextureReadback&)            = delete;
-    TextureReadback& operator=(const TextureReadback&) = delete;
-    TextureReadback(TextureReadback&&) noexcept;
-    TextureReadback& operator=(TextureReadback&&) noexcept;
-    ~TextureReadback() noexcept;
+  TextureReadback(const TextureReadback&) = delete;
+  TextureReadback& operator=(const TextureReadback&) = delete;
+  TextureReadback(TextureReadback&&) noexcept;
+  TextureReadback& operator=(TextureReadback&&) noexcept;
+  ~TextureReadback() noexcept;
 
-private:
-    TextureReadback() = default;
+ private:
+  TextureReadback() = default;
 
-    nvrhi::IDevice*             _device   = nullptr;
-    nvrhi::StagingTextureHandle _staging  = nullptr;
-    const void*                 _mapped   = nullptr;
-    std::size_t                 _rowPitch = 0;
-    uint32_t                    _width    = 0;
-    uint32_t                    _height   = 0;
-    nvrhi::Format               _format   = nvrhi::Format::UNKNOWN;
+  nvrhi::IDevice* _device = nullptr;
+  nvrhi::StagingTextureHandle _staging = nullptr;
+  const void* _mapped = nullptr;
+  std::size_t _rowPitch = 0;
+  uint32_t _width = 0;
+  uint32_t _height = 0;
+  nvrhi::Format _format = nvrhi::Format::UNKNOWN;
 };
 
 }  // namespace pyxis::app

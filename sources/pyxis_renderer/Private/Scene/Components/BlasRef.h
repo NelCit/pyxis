@@ -18,7 +18,7 @@ namespace pyxis::scene {
 enum class BlasHandle : uint32_t { Invalid = 0 };
 
 struct BlasRef {
-    BlasHandle blas = BlasHandle::Invalid;
+  BlasHandle blas = BlasHandle::Invalid;
 };
 
 }  // namespace pyxis::scene
