@@ -5258,6 +5258,20 @@ action`) layers on top for per-TU object caching.
   `instanceId` / `materialId` AOVs.
 - Exit: a 10k-instance scene renders at interactive rates on the lab GPU; AOVs match
   expected mapping.
+- **Scope split landed at M6**: this milestone ships the **CPU + GPU plumbing** for
+  native instancing — `UsdGeomPointInstancer` expansion in `StageWalker` (one
+  `AppendInstance` per instance, all referencing one prototype `MeshHandle` → §15 BLAS
+  sharing kicks in by construction), plus the GPU-side fix that frees TLAS
+  `instanceCustomIndex` for the §15 instance ID (a `StructuredBuffer<uint>` side-table
+  at binding 4 routes the instance ID to the bound material slot via one indirection).
+  M6 limitations (deferred to M9 per §41 polish): direct `UsdGeomMesh` prototypes only
+  (no nested `Xform`-wrapped hierarchies), no `invisibleIds`/`inactiveIds` masking, no
+  velocities/accelerations (animation, §42 post-v1). The `instanceId` / `materialId`
+  AOV write paths (closesthit-payload extension, raygen UAV writes, `RenderTargets`
+  slot allocation in `HeadlessMode`/`ViewerMode`) are **deferred to a follow-up PR** —
+  the `RenderTargets::instanceId` / `materialId` slots + `AovFlag::InstanceId` /
+  `MaterialId` are already declared in `Public/Descs/RenderTargets.h`, so wiring them
+  is a closesthit + binding-set extension that doesn't touch the public surface.
 
 ### Phase M7 — Lighting
 - Add: distant + dome (lat-long EXR + alias table) + rect lights; importance sampling

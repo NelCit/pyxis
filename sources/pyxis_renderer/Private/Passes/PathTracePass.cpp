@@ -122,6 +122,7 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
       nvrhi::BindingLayoutItem::RayTracingAccelStruct(1),    // binding 1 TLAS
       nvrhi::BindingLayoutItem::Texture_UAV(2),              // binding 2 output
       nvrhi::BindingLayoutItem::StructuredBuffer_SRV(3),     // binding 3 materials (M5)
+      nvrhi::BindingLayoutItem::StructuredBuffer_SRV(4),     // binding 4 instance→material (M6)
   };
   _bindingLayout = _device->createBindingLayout(layoutDesc);
   if (!_bindingLayout)
@@ -206,6 +207,31 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
     return;
   }
 
+  // M6: 1-element fallback instance→material side-table. Same
+  // contract as the material fallback — binding 4 must point at a
+  // non-null structured buffer even when the scene has no instances
+  // of its own (the M3 hardcoded cube path runs through the
+  // hardcoded-cube scene which DOES populate instances, so this
+  // fallback only matters in the truly-empty-scene degenerate case).
+  // Holds a single zero-uint, so any rogue InstanceID() lookup
+  // resolves to material slot 0 = sentinel grey.
+  nvrhi::BufferDesc instanceMatFallbackDesc;
+  instanceMatFallbackDesc.byteSize = sizeof(std::uint32_t);
+  instanceMatFallbackDesc.structStride = sizeof(std::uint32_t);
+  instanceMatFallbackDesc.canHaveRawViews = false;
+  instanceMatFallbackDesc.canHaveTypedViews = false;
+  instanceMatFallbackDesc.format = nvrhi::Format::UNKNOWN;
+  instanceMatFallbackDesc.debugName = "PathTrace.FallbackInstanceMaterial";
+  instanceMatFallbackDesc.initialState = nvrhi::ResourceStates::ShaderResource;
+  instanceMatFallbackDesc.keepInitialState = true;
+  _fallbackInstanceMaterialBuffer = _device->createBuffer(instanceMatFallbackDesc);
+  if (!_fallbackInstanceMaterialBuffer)
+  {
+    Logging::Get().Error(log::RENDER,
+                         "PathTracePass: createBuffer(FallbackInstanceMaterial) failed");
+    return;
+  }
+
   _shadersOk = true;
   Logging::Get().Info(log::RENDER, "PathTracePass: initialised (RT pipeline + SBT ready)");
 }
@@ -213,16 +239,19 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
 PathTracePass::~PathTracePass() = default;
 
 nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(nvrhi::ITexture* output) {
-  // M5: invalidate cache when the scene's material-buffer pointer
-  // flips. Lazy-allocated by GpuScene on the first
-  // AcquireMaterial → CommitResources, so a scene that started
-  // empty but gained a material between frames needs the cached
+  // M5/M6: invalidate cache when EITHER the scene's material buffer
+  // OR its instance→material side-table flips. Both are lazy-
+  // allocated by GpuScene; a scene that started empty but gained
+  // its first instance/material between frames needs the cached
   // binding sets thrown out.
   nvrhi::IBuffer* sceneMaterials = _scene->GetMaterialBuffer();
-  if (sceneMaterials != _lastSeenMaterialBuffer)
+  nvrhi::IBuffer* sceneInstanceMaterial = _scene->GetInstanceMaterialBuffer();
+  if (sceneMaterials != _lastSeenMaterialBuffer
+      || sceneInstanceMaterial != _lastSeenInstanceMaterialBuffer)
   {
     _bindingSetCache.clear();
     _lastSeenMaterialBuffer = sceneMaterials;
+    _lastSeenInstanceMaterialBuffer = sceneInstanceMaterial;
   }
 
   if (auto cached = _bindingSetCache.find(output); cached != _bindingSetCache.end())
@@ -235,16 +264,22 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(nvrhi::ITexture* ou
     _bindingSetCache.clear();
   }
 
-  // Slot numbers match the BindingLayoutDesc above (0 / 1 / 2 / 3
-  // with zero offsets) so NVRHI emits Vulkan bindings 0..3 to match
-  // the shaders' `[[vk::binding(N, 0)]]` declarations.
+  // Slot numbers match the BindingLayoutDesc above (0..4 with zero
+  // offsets) so NVRHI emits Vulkan bindings 0..4 to match the
+  // shaders' `[[vk::binding(N, 0)]]` declarations.
   // M5: binding 3 is the materials structured buffer — scene's own
   // (when AcquireMaterial has been called + CommitResources has
-  // run) or the 1-element fallback (zero baseColor, used by the M3
-  // cube fixture which has no materials).
+  // run) or the 1-element fallback grey (used by cube fixtures
+  // that have no materials).
+  // M6: binding 4 is the instance→material side-table — scene's
+  // own (when CommitResources has built a TLAS) or the 1-element
+  // fallback (used by truly-empty scenes).
   nvrhi::IBuffer* materialBuffer = _scene->GetMaterialBuffer();
   if (materialBuffer == nullptr)
     materialBuffer = _fallbackMaterialBuffer.Get();
+  nvrhi::IBuffer* instanceMaterialBuffer = _scene->GetInstanceMaterialBuffer();
+  if (instanceMaterialBuffer == nullptr)
+    instanceMaterialBuffer = _fallbackInstanceMaterialBuffer.Get();
 
   nvrhi::BindingSetDesc setDesc;
   setDesc.bindings = {
@@ -252,6 +287,7 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(nvrhi::ITexture* ou
       nvrhi::BindingSetItem::RayTracingAccelStruct(1, _scene->GetTlas()),
       nvrhi::BindingSetItem::Texture_UAV(2, output),
       nvrhi::BindingSetItem::StructuredBuffer_SRV(3, materialBuffer),
+      nvrhi::BindingSetItem::StructuredBuffer_SRV(4, instanceMaterialBuffer),
   };
   nvrhi::BindingSetHandle set = _device->createBindingSet(setDesc, _bindingLayout);
   _bindingSetCache[output] = set;
@@ -329,6 +365,17 @@ void PathTracePass::Execute(nvrhi::ICommandList* commandList, const PassContext&
     }();
     commandList->writeBuffer(_fallbackMaterialBuffer.Get(), &FALLBACK_MATERIAL_DEFAULT,
                              sizeof(FALLBACK_MATERIAL_DEFAULT));
+  }
+
+  // M6: same shape for the instance→material side-table fallback.
+  // Holds a single zero-uint so any rogue InstanceID resolves to
+  // material slot 0 (which the material fallback above maps to grey).
+  if (_scene->GetInstanceMaterialBuffer() == nullptr)
+  {
+    static const std::uint32_t FALLBACK_INSTANCE_MATERIAL_ZERO = 0u;
+    commandList->writeBuffer(_fallbackInstanceMaterialBuffer.Get(),
+                             &FALLBACK_INSTANCE_MATERIAL_ZERO,
+                             sizeof(FALLBACK_INSTANCE_MATERIAL_ZERO));
   }
 
   // ---- Bind + dispatch ----------------------------------------------

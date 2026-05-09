@@ -29,6 +29,7 @@ namespace pyxis::usd_ingest {
 struct PYXIS_USD_INGEST_API IngestStats {
   uint32_t meshesEmitted = 0;
   uint32_t instancesEmitted = 0;
+  uint32_t instancersEmitted = 0;  // M6: UsdGeomPointInstancer prims expanded
   uint32_t lightsEmitted = 0;
   uint32_t materialsEmitted = 0;
   uint32_t camerasEmitted = 0;

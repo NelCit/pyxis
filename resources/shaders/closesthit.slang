@@ -1,18 +1,21 @@
 // Pyxis renderer — closest-hit shader.
 //
-// Plan §41 M5. Reads the per-instance OpenPBR material from the
-// material structured buffer (binding 3, populated by GpuScene's
-// MaterialTable upload at CommitResources) and emits its baseColor
-// as the payload colour. **No BSDF, no lighting, no texture
-// sampling** — this is the M5 stub the user replaces with the full
-// branchless-on-flags OpenPBR closesthit (NEE direct lighting +
-// BRDF importance sampling + texture sampling for HasBaseColorMap
-// etc.) alongside lights at M7.
+// Plan §41 M5 + §15. Reads the per-instance OpenPBR material via a
+// two-step lookup: `InstanceID()` (the per-instance slot packed into
+// VkAccelerationStructureInstanceKHR.instanceCustomIndex per §15)
+// indexes the instance→material side-table at binding 4 to get a
+// material slot, which then indexes the material structured buffer
+// at binding 3. The indirection frees the TLAS custom-index for the
+// M6 instanceId AOV + future picking (§19.4).
 //
-// What this shader exercises end-to-end at M5:
+// **No BSDF, no lighting, no texture sampling** — this is the M5
+// stub the user replaces with the full branchless-on-flags OpenPBR
+// closesthit (NEE direct lighting + BRDF importance sampling +
+// texture sampling for HasBaseColorMap etc.) alongside lights at M7.
+//
+// What this shader exercises end-to-end at M5/M6:
 //   * Material buffer binding (binding 3, structured-buffer SRV)
-//   * Per-instance material lookup via InstanceID() — set by
-//     GpuScene to the material slot at TLAS rebuild
+//   * Instance→material side-table (binding 4, M6 P0)
 //   * §11 OpenPBRMaterialGPU layout (declared in ShaderInterop.slang;
 //     scalar baseColorR/G/B avoids the float3 16-vs-12-byte trap)
 //
@@ -25,22 +28,24 @@
 //   set=0, binding=2 : RWTexture2D<float4> output image (raygen)
 //   set=0, binding=3 : StructuredBuffer<OpenPBRMaterialGPU> materials
 //                      (closesthit — added at M5)
+//   set=0, binding=4 : StructuredBuffer<uint> instance→material slot
+//                      (closesthit — added at M6, plan §15)
 
 #include "ShaderInterop.slang"
 
 [[vk::binding(3, 0)]] StructuredBuffer<OpenPBRMaterialGPU> gMaterials;
+[[vk::binding(4, 0)]] StructuredBuffer<uint>               gInstanceMaterial;
 
 // Slang emits the SPIR-V `OpEntryPoint` name as `"main"` regardless
 // of the source-side function name; the C++ side passes `"main"` to
 // NVRHI's createShader. See the matching note in raygen.slang.
 [shader("closesthit")]
 void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attribs) {
-    // InstanceID() returns the `instanceID` GpuScene packed into
-    // VkAccelerationStructureInstanceKHR.instanceCustomIndex at
-    // TLAS rebuild — the MATERIAL slot of the hit instance's
-    // bound material (or 0 for "no material assigned" → sentinel
-    // magenta material packed at slot 0 by CommitResources).
-    const uint materialId = InstanceID();
+    // §15: InstanceID() is the per-instance slot. The side-table
+    // resolves it to a material slot (0 = "no material assigned" →
+    // sentinel grey material at materials[0]).
+    const uint instanceId = InstanceID();
+    const uint materialId = gInstanceMaterial[instanceId];
     const OpenPBRMaterialGPU mat = gMaterials[materialId];
 
     // M5 stub: emit baseColor directly. The user's full OpenPBR

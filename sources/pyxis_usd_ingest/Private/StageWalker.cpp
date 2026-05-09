@@ -31,8 +31,10 @@
 
 #include <pxr/usd/usd/prim.h>
 #include <pxr/usd/usd/primRange.h>
+#include <pxr/usd/usd/relationship.h>
 #include <pxr/usd/usdGeom/mesh.h>
 #include <pxr/usd/usdGeom/camera.h>
+#include <pxr/usd/usdGeom/pointInstancer.h>
 #include <pxr/usd/usdGeom/xformCache.h>
 #include <pxr/usd/usdLux/distantLight.h>
 #include <pxr/usd/usdLux/domeLight.h>
@@ -43,6 +45,10 @@
 #include <pxr/base/gf/matrix4d.h>
 #include <pxr/base/gf/camera.h>
 #include <pxr/base/gf/frustum.h>
+#include <pxr/base/gf/quath.h>
+#include <pxr/base/gf/rotation.h>
+#include <pxr/base/gf/vec3f.h>
+#include <pxr/base/vt/array.h>
 
 #include <hlsl++.h>
 
@@ -50,6 +56,7 @@
 #include <cstring>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace pyxis::usd_ingest {
@@ -86,6 +93,43 @@ hlslpp::float4x4 ToPyxisMatrix(const pxr::GfMatrix4d& usdMatrix) noexcept {
 }
 
 using MaterialHandleByPath = std::unordered_map<std::string, MaterialHandle>;
+using ConsumedPrototypePaths = std::unordered_set<std::string>;
+
+// Build a Pyxis MeshDesc from a UsdGeomMesh prim. Returns
+// std::nullopt for ngon-only / empty / invalid meshes — the M5
+// triangle-list constraint is shared with EmitMesh's main path.
+struct ProtoMeshBuffers {
+  std::vector<hlslpp::float3> positions;
+  std::vector<std::uint32_t>  indices;
+};
+[[nodiscard]] bool ExtractTriangleListMesh(const pxr::UsdGeomMesh& meshPrim,
+                                           ProtoMeshBuffers& out) noexcept {
+  pxr::VtArray<pxr::GfVec3f> usdPoints;
+  pxr::VtArray<int> usdCounts;
+  pxr::VtArray<int> usdIndices;
+  meshPrim.GetPointsAttr().Get(&usdPoints);
+  meshPrim.GetFaceVertexCountsAttr().Get(&usdCounts);
+  meshPrim.GetFaceVertexIndicesAttr().Get(&usdIndices);
+
+  if (usdPoints.empty() || usdCounts.empty() || usdIndices.empty())
+    return false;
+  for (const int faceCount : usdCounts)
+  {
+    if (faceCount != 3)
+      return false;
+  }
+
+  out.positions.clear();
+  out.positions.reserve(usdPoints.size());
+  for (const pxr::GfVec3f& point : usdPoints)
+    out.positions.emplace_back(point[0], point[1], point[2]);
+
+  out.indices.clear();
+  out.indices.reserve(usdIndices.size());
+  for (const int idx : usdIndices)
+    out.indices.push_back(static_cast<uint32_t>(idx));
+  return true;
+}
 
 // Resolve `meshPrim`'s bound UsdShadeMaterial via the
 // MaterialBindingAPI. Returns MaterialHandle::Invalid if no binding
@@ -107,6 +151,188 @@ MaterialHandle ResolveBoundMaterial(const pxr::UsdPrim& meshPrim,
   if (found == materialsByPath.end())
     return MaterialHandle::Invalid;
   return found->second;
+}
+
+// M6: walk a UsdGeomPointInstancer and expand it into N AppendInstance
+// calls against ONE prototype mesh per `prototypes` rel target. The
+// prototype meshes are registered exactly once (BLAS sharing per §15
+// kicks in here — N TLAS instances all reference the same MeshHandle
+// → same BLAS), and their SdfPaths get added to `consumedPrototypes`
+// so the main mesh pass doesn't double-emit them as standalone meshes.
+//
+// Per-instance transform per the UsdGeomPointInstancer spec:
+//     world = instancerWorldFromLocal · translate(positions[i])
+//             · rotate(orientations[i]) · scale(scales[i])
+// computed in USD's row-vector convention; ToPyxisMatrix() handles
+// the column-vector flip downstream.
+//
+// Defers to M7+: invisibleIds / inactiveIds masking, velocities /
+// accelerations / angularVelocities (animation, post-v1 §42),
+// non-Mesh prototypes (Xform-wrapped hierarchies — log + skip).
+void EmitPointInstancer(const pxr::UsdPrim& instancerPrim,
+                        pxr::UsdGeomXformCache& xformCache,
+                        const MaterialHandleByPath& materialsByPath,
+                        GpuScene& scene, IngestStats& stats,
+                        ConsumedPrototypePaths& consumedPrototypes) noexcept {
+  auto& log = Logging::Get();
+  const pxr::UsdGeomPointInstancer instancer(instancerPrim);
+  if (!instancer.GetPrim().IsValid())
+    return;
+
+  // Prototype targets — a relationship pointing at one or more
+  // SdfPaths. Each target is the root of a prototype hierarchy.
+  pxr::SdfPathVector prototypePaths;
+  instancer.GetPrototypesRel().GetTargets(&prototypePaths);
+  if (prototypePaths.empty())
+  {
+    log.Warn(log::APP, "StageWalker: PointInstancer "
+                           + instancerPrim.GetPath().GetString()
+                           + " has no prototypes — skipping.");
+    return;
+  }
+
+  // Register each prototype mesh once. Build parallel arrays of
+  // MeshHandle + bound MaterialHandle indexed by prototype index;
+  // the per-instance loop below indexes into these via protoIndices.
+  std::vector<MeshHandle> protoMeshes(prototypePaths.size(), MeshHandle::Invalid);
+  std::vector<MaterialHandle> protoMaterials(prototypePaths.size(),
+                                             MaterialHandle::Invalid);
+  for (std::size_t protoIdx = 0; protoIdx < prototypePaths.size(); ++protoIdx)
+  {
+    const pxr::SdfPath& protoPath = prototypePaths[protoIdx];
+    const pxr::UsdPrim protoPrim = instancerPrim.GetStage()->GetPrimAtPath(protoPath);
+    if (!protoPrim.IsValid())
+      continue;
+    // Mark the prototype root AND all descendants as consumed —
+    // pass 3's standalone-mesh walk will skip them so we don't
+    // double-emit a non-instanced copy. Walking descendants matters
+    // for the (M6-unsupported but defensively-handled) Xform-wrapped
+    // prototype case: without descendant marking, the inner meshes
+    // would leak through pass 3 and render as one extra standalone
+    // copy at the Xform's world position.
+    for (const pxr::UsdPrim& descendant : pxr::UsdPrimRange(protoPrim))
+      consumedPrototypes.emplace(descendant.GetPath().GetString());
+
+    // M6 limitation: only direct UsdGeomMesh prototypes (no nested
+    // Xform-wrapped hierarchies). Bistro foliage prototypes typically
+    // ARE direct meshes; the deeper nested-prototype case lands at M9.
+    if (!protoPrim.IsA<pxr::UsdGeomMesh>())
+    {
+      log.Warn(log::APP, "StageWalker: PointInstancer prototype "
+                             + protoPath.GetString()
+                             + " is not a UsdGeomMesh (M6 supports direct mesh "
+                               "prototypes only) — skipping.");
+      continue;
+    }
+    const pxr::UsdGeomMesh meshPrim(protoPrim);
+    ProtoMeshBuffers buffers;
+    if (!ExtractTriangleListMesh(meshPrim, buffers))
+    {
+      log.Warn(log::APP, "StageWalker: PointInstancer prototype "
+                             + protoPath.GetString()
+                             + " is empty or non-triangle-list — skipping.");
+      continue;
+    }
+    MeshDesc meshDesc;
+    meshDesc.positions = buffers.positions;
+    meshDesc.indices = buffers.indices;
+    meshDesc.debugName = protoPath.GetString();
+    const auto meshHandle = scene.CreateMesh(meshDesc);
+    if (!meshHandle.has_value())
+    {
+      log.Error(log::APP, "StageWalker: PointInstancer CreateMesh failed for "
+                              + protoPath.GetString() + ": "
+                              + std::string{meshHandle.error().message.View()});
+      continue;
+    }
+    protoMeshes[protoIdx] = *meshHandle;
+    protoMaterials[protoIdx] = ResolveBoundMaterial(protoPrim, materialsByPath);
+    ++stats.meshesEmitted;
+  }
+
+  // Per-instance transforms.
+  pxr::VtArray<int> protoIndices;
+  pxr::VtArray<pxr::GfVec3f> positions;
+  pxr::VtArray<pxr::GfQuath> orientations;
+  pxr::VtArray<pxr::GfVec3f> scales;
+  instancer.GetProtoIndicesAttr().Get(&protoIndices);
+  instancer.GetPositionsAttr().Get(&positions);
+  instancer.GetOrientationsAttr().Get(&orientations);
+  instancer.GetScalesAttr().Get(&scales);
+
+  if (protoIndices.empty())
+  {
+    log.Warn(log::APP, "StageWalker: PointInstancer "
+                           + instancerPrim.GetPath().GetString()
+                           + " has no protoIndices — no instances emitted.");
+    return;
+  }
+  // positions, orientations, scales are optional per the spec —
+  // identity defaults apply when absent. Resize-or-skip the optionals
+  // so the per-instance loop is uniform.
+  const std::size_t instanceCount = protoIndices.size();
+  if (!positions.empty() && positions.size() != instanceCount)
+  {
+    log.Warn(log::APP, "StageWalker: PointInstancer "
+                           + instancerPrim.GetPath().GetString()
+                           + " positions length mismatch — skipping.");
+    return;
+  }
+
+  const pxr::GfMatrix4d instancerWorld =
+      xformCache.GetLocalToWorldTransform(instancerPrim);
+
+  ++stats.instancersEmitted;
+  for (std::size_t instIdx = 0; instIdx < instanceCount; ++instIdx)
+  {
+    const int proto = protoIndices[instIdx];
+    if (proto < 0 || static_cast<std::size_t>(proto) >= protoMeshes.size())
+      continue;
+    const MeshHandle protoMesh = protoMeshes[proto];
+    if (protoMesh == MeshHandle::Invalid)
+      continue;
+
+    // S · R · T · instancerWorld — USD row-vector convention.
+    pxr::GfMatrix4d perInstance;
+    perInstance.SetIdentity();
+    if (!scales.empty())
+    {
+      pxr::GfMatrix4d scaleMat;
+      scaleMat.SetScale(pxr::GfVec3d(scales[instIdx][0], scales[instIdx][1],
+                                     scales[instIdx][2]));
+      perInstance = perInstance * scaleMat;
+    }
+    if (!orientations.empty())
+    {
+      pxr::GfMatrix4d rotMat;
+      rotMat.SetRotate(pxr::GfRotation(pxr::GfQuatd(orientations[instIdx])));
+      perInstance = perInstance * rotMat;
+    }
+    if (!positions.empty())
+    {
+      pxr::GfMatrix4d transMat;
+      transMat.SetTranslate(pxr::GfVec3d(positions[instIdx][0],
+                                         positions[instIdx][1],
+                                         positions[instIdx][2]));
+      perInstance = perInstance * transMat;
+    }
+    const pxr::GfMatrix4d worldFromLocal = perInstance * instancerWorld;
+
+    InstanceDesc instanceDesc;
+    instanceDesc.mesh = protoMesh;
+    instanceDesc.material = protoMaterials[proto];
+    instanceDesc.worldFromLocal = ToPyxisMatrix(worldFromLocal);
+    instanceDesc.debugName = instancerPrim.GetPath().GetString();
+    const auto instanceHandle = scene.AppendInstance(instanceDesc);
+    if (!instanceHandle.has_value())
+    {
+      // TLAS-cap exhaustion or similar — log once + bail.
+      log.Error(log::APP, "StageWalker: PointInstancer AppendInstance failed: "
+                              + std::string{instanceHandle.error().message.View()});
+      return;
+    }
+    ++stats.instancesEmitted;
+  }
 }
 
 // Emit a single UsdGeomMesh into `scene`. Returns true iff the mesh
@@ -238,7 +464,8 @@ IngestStats StageWalker::WalkFile(std::string_view usdPath, GpuScene& scene) {
   log.Info(log::APP,
            "StageWalker: " + pathString + " walked — "
                + std::to_string(stats.meshesEmitted) + " meshes, "
-               + std::to_string(stats.instancesEmitted) + " instances, "
+               + std::to_string(stats.instancesEmitted) + " instances ("
+               + std::to_string(stats.instancersEmitted) + " instancers), "
                + std::to_string(stats.lightsEmitted) + " lights, "
                + std::to_string(stats.camerasEmitted) + " cameras, "
                + std::to_string(stats.skipped) + " skipped.");
@@ -287,12 +514,30 @@ IngestStats StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
     ++stats.materialsEmitted;
   }
 
-  // Pass 2 — meshes / camera / lights, with material handles resolved
-  // from pass 1.
+  // Pass 2 — UsdGeomPointInstancer (M6). Walked BEFORE the standalone
+  // mesh pass so any prototype meshes referenced by an instancer get
+  // registered + recorded in `consumedPrototypes`; the mesh pass then
+  // skips them so we don't emit a non-instanced duplicate of each
+  // prototype. SdfPath-sorted iteration order is preserved per
+  // §25.O.3 so both adapters expand instancers identically.
+  ConsumedPrototypePaths consumedPrototypes;
+  for (const pxr::UsdPrim& prim : prims)
+  {
+    if (!prim.IsA<pxr::UsdGeomPointInstancer>())
+      continue;
+    EmitPointInstancer(prim, xformCache, materialsByPath, scene, stats,
+                       consumedPrototypes);
+  }
+
+  // Pass 3 — meshes / camera / lights, with material handles resolved
+  // from pass 1 and instancer prototypes skipped (pass 2 already
+  // expanded them).
   for (const pxr::UsdPrim& prim : prims)
   {
     if (prim.IsA<pxr::UsdGeomMesh>())
     {
+      if (consumedPrototypes.contains(prim.GetPath().GetString()))
+        continue;
       if (EmitMesh(prim, xformCache, materialsByPath, scene))
       {
         ++stats.meshesEmitted;
