@@ -37,6 +37,16 @@ class PathTracePass final : public IRenderPass {
   void Execute(nvrhi::ICommandList* commandList, const PassContext& context) override;
   [[nodiscard]] std::string_view Name() const override { return "pass.PathTrace"; }
 
+  // Re-load raygen / miss / closesthit .spv from disk, recreate the
+  // RT pipeline + shader binding table. The binding LAYOUT, the
+  // CameraUniforms cbuffer, and every fallback (material / instance /
+  // lights / mesh / dome / sampler) survive intact — only the shaders
+  // and pipeline-state objects depend on the .spv contents. Cached
+  // binding sets ALSO survive (binding sets reference the layout, not
+  // the pipeline). Returns true iff every step completed; on false the
+  // pre-reload pipeline is preserved and rendering continues unchanged.
+  [[nodiscard]] bool ReloadShaders() noexcept override;
+
  private:
   // Build the binding set for the supplied output texture. Cached
   // per `nvrhi::ITexture*` identity so we don't churn descriptor

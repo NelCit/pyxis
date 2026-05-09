@@ -12,6 +12,8 @@
 #include <Pyxis/Renderer/Descs/FrameStats.h>
 
 #include <cstdint>
+#include <string>
+#include <string_view>
 #include <vector>
 
 namespace nvrhi {
@@ -127,6 +129,22 @@ class ImGuiHost {
   // boundary on PyxisRenderer).
   bool                                  _editorReloadShadersRequested = false;
 
+  // Editor's "Open scene..." button latches the picked-file path here;
+  // ViewerMode drains it via TakeSceneReloadRequest() each frame.
+  // Empty string = no pending request. Owned std::string because the
+  // path comes out of an OS file dialog whose buffer disappears with
+  // the dialog.
+  std::string                           _editorPendingScenePath;
+
+  // Last-completed ingest source label + timing — set by ViewerMode
+  // via SetIngestProfile() right after engine.Load() returns. Surfaced
+  // in the Performance panel's Loading section so the user sees USD
+  // parsing cost alongside the first-frame mesh upload + BLAS build
+  // totals (which the FrameProfile-derived _loadingCpuMs already
+  // covers). 0 ms / empty source = no ingest has run yet.
+  float                                 _ingestMs           = 0.0f;
+  std::string                           _ingestSourceLabel;
+
  public:
   // Called by ViewerMode each frame; returns true and clears the
   // latched request iff the editor's "Reload shaders" button was
@@ -135,6 +153,28 @@ class ImGuiHost {
     const bool requested = _editorReloadShadersRequested;
     _editorReloadShadersRequested = false;
     return requested;
+  }
+
+  // Called by ViewerMode each frame; if the editor has a pending
+  // scene-reload path, moves it into `outPath` and returns true. The
+  // internal slot resets to empty in either branch so a subsequent
+  // call returns false until the user picks another file.
+  [[nodiscard]] bool TakeSceneReloadRequest(std::string& outPath) noexcept {
+    if (_editorPendingScenePath.empty())
+      return false;
+    outPath = std::move(_editorPendingScenePath);
+    _editorPendingScenePath.clear();
+    return true;
+  }
+
+  // Pushed by ViewerMode after each successful (or failed-with-fallback)
+  // ingest run. `sourceLabel` is the §29.4.a label
+  // ("default_bundled" / "config_path" / "cli_path" / "cube_fallback")
+  // or the ingest adapter ("usd_direct" / "hydra"); displayed verbatim
+  // beside the timing in the Loading section.
+  void SetIngestProfile(float milliseconds, std::string_view sourceLabel) noexcept {
+    _ingestMs = milliseconds;
+    _ingestSourceLabel.assign(sourceLabel.data(), sourceLabel.size());
   }
 
  private:

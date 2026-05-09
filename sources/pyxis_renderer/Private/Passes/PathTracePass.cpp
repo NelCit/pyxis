@@ -349,6 +349,82 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
 
 PathTracePass::~PathTracePass() = default;
 
+bool PathTracePass::ReloadShaders() noexcept {
+  // Editor-driven reload (M7 follow-up). Re-translates Slang -> SPIR-V
+  // is NOT done here — the Slang compiler isn't linked into the
+  // runtime; the .spv files are produced by ShaderMake at CMake
+  // build time. Click effect is therefore: re-read the .spv files
+  // currently on disk + rebuild the pipeline. Workflow: edit the
+  // .slang, run `cmake --build --target pyxis_renderer_shaders`
+  // in another terminal, then click Reload.
+  //
+  // Failure-handling: on any single step failing (file read,
+  // createShader, createRayTracingPipeline, createShaderTable) we
+  // restore the previous handles and return false so the editor
+  // can log it. Without this, a broken .spv would brick the viewer.
+  auto& log = Logging::Get();
+  const AssetLocator locator;
+  const Path raygenPath     = locator.LocateResource("shaders/raygen.spv");
+  const Path missPath       = locator.LocateResource("shaders/miss.spv");
+  const Path closestHitPath = locator.LocateResource("shaders/closesthit.spv");
+
+  nvrhi::ShaderHandle newRaygen =
+      LoadSpirv(_device, raygenPath.View(), nvrhi::ShaderType::RayGeneration, "main");
+  nvrhi::ShaderHandle newMiss =
+      LoadSpirv(_device, missPath.View(), nvrhi::ShaderType::Miss, "main");
+  nvrhi::ShaderHandle newClosestHit =
+      LoadSpirv(_device, closestHitPath.View(), nvrhi::ShaderType::ClosestHit, "main");
+  if (!newRaygen || !newMiss || !newClosestHit)
+  {
+    log.Error(log::RENDER, "PathTracePass::ReloadShaders: shader load failed; keeping old pipeline");
+    return false;
+  }
+
+  nvrhi::rt::PipelineDesc pipelineDesc;
+  pipelineDesc.shaders = {
+      nvrhi::rt::PipelineShaderDesc{}.setExportName("RayGenMain").setShader(newRaygen),
+      nvrhi::rt::PipelineShaderDesc{}.setExportName("MissMain").setShader(newMiss),
+  };
+  pipelineDesc.hitGroups = {
+      nvrhi::rt::PipelineHitGroupDesc{}
+          .setExportName("HitGroupDefault")
+          .setClosestHitShader(newClosestHit),
+  };
+  pipelineDesc.globalBindingLayouts = {_bindingLayout};
+  pipelineDesc.maxRecursionDepth = 1;
+  nvrhi::rt::PipelineHandle newPipeline = _device->createRayTracingPipeline(pipelineDesc);
+  if (!newPipeline)
+  {
+    log.Error(log::RENDER,
+              "PathTracePass::ReloadShaders: createRayTracingPipeline failed; keeping old pipeline");
+    return false;
+  }
+
+  nvrhi::rt::ShaderTableHandle newShaderTable = newPipeline->createShaderTable();
+  if (!newShaderTable)
+  {
+    log.Error(log::RENDER,
+              "PathTracePass::ReloadShaders: createShaderTable failed; keeping old pipeline");
+    return false;
+  }
+  newShaderTable->setRayGenerationShader("RayGenMain");
+  newShaderTable->addMissShader("MissMain");
+  newShaderTable->addHitGroup("HitGroupDefault");
+
+  // Atomic-ish swap: every reference taken in Execute reads from the
+  // member handles, so once we overwrite all four together (single-
+  // threaded — render thread only, gated by waitForIdle on the caller
+  // side) the next Execute picks up the new pipeline + table.
+  _raygenShader     = std::move(newRaygen);
+  _missShader       = std::move(newMiss);
+  _closestHitShader = std::move(newClosestHit);
+  _pipeline         = std::move(newPipeline);
+  _shaderTable      = std::move(newShaderTable);
+  _shadersOk = true;
+  log.Info(log::RENDER, "PathTracePass::ReloadShaders: reload OK");
+  return true;
+}
+
 nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(nvrhi::ITexture* output) {
   // M5/M6/M7: invalidate cache when ANY of the scene's lazy buffers
   // flips. Each is lazy-allocated by GpuScene on the first relevant

@@ -128,6 +128,19 @@ public:
   // dirty BLAS, rebuilds / refits TLAS. Render thread only.
   [[nodiscard]] Expected<void> CommitResources(nvrhi::ICommandList* commandList);
 
+  // ---- Scene-wide reset ----------------------------------------------
+  // Drops every mesh / material / texture / instance / light + the
+  // TLAS + the camera + the dedup maps + per-frame counters, leaving
+  // the scene in the exact post-construction state. Used by the
+  // viewer's "Open scene..." path: caller waits the device idle,
+  // calls Clear, then re-runs the ingest engine against the new path.
+  // Render thread only — same single-writer rule as every other
+  // mutation verb (§31). The caller must NOT have any in-flight
+  // command list referencing the scene's TLAS / buffers when this
+  // runs; the public ABI rule (§18.5) lets us assume callers honour
+  // the documented synchronisation contract.
+  void Clear() noexcept;
+
   // ---- Introspection -------------------------------------------------
   [[nodiscard]] FrameStats LastFrameStats() const;
 

@@ -57,6 +57,17 @@ class PYXIS_RENDERER_API PyxisRenderer final {
 
   [[nodiscard]] FrameProfile LastFrameProfile() const;
 
+  // Re-load every render-pass's shaders from disk and rebuild the
+  // pipeline-state objects. The Slang compiler isn't linked into the
+  // runtime — the .spv files this picks up are produced by ShaderMake
+  // at build time, so the click-effect is "rebuild shaders externally
+  // (cmake --build --target pyxis_renderer_shaders), then click
+  // Reload to pick them up". Returns true iff every pass succeeded.
+  // Caller must ensure no in-flight command buffer references the
+  // current pipeline (typical use: device->waitForIdle() before).
+  // Render thread only — no thread-safety on the underlying RenderGraph.
+  [[nodiscard]] bool ReloadShaders() noexcept;
+
  private:
   Profiler* _profiler = nullptr;
   std::unique_ptr<RenderGraph> _graph;

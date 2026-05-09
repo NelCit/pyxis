@@ -70,4 +70,10 @@ FrameProfile PyxisRenderer::LastFrameProfile() const {
   return _profiler->LastFrameProfile();
 }
 
+bool PyxisRenderer::ReloadShaders() noexcept {
+  if (!_graph)
+    return false;
+  return _graph->ReloadShaders();
+}
+
 }  // namespace pyxis

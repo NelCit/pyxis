@@ -18,6 +18,16 @@ void RenderGraph::AddPass(std::unique_ptr<IRenderPass> pass) {
     _passes.push_back(std::move(pass));
 }
 
+bool RenderGraph::ReloadShaders() noexcept {
+  bool allOk = true;
+  for (auto& pass : _passes)
+  {
+    if (!pass->ReloadShaders())
+      allOk = false;
+  }
+  return allOk;
+}
+
 void RenderGraph::Execute(nvrhi::ICommandList* commandList, const PassContext& context) {
   // Profiler::GpuScope already brackets the command list with NVRHI's
   // beginMarker/endMarker (Profiler.cpp), so RenderDoc / Aftermath get

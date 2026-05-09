@@ -32,6 +32,8 @@
     #endif
     #include <windows.h>
     #include <psapi.h>
+    #include <shobjidl.h>
+    #include <objbase.h>
 #endif
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_vulkan.h>
@@ -175,6 +177,84 @@ void ApplyPyxisTheme() noexcept {
   style.GrabRounding      = 2.0f;
   style.TabRounding       = 3.0f;
 }
+
+#if defined(_WIN32)
+// Modal Windows file-open dialog (IFileOpenDialog COM interface).
+// Returns the selected path on OK; empty string on Cancel / error /
+// the user dismissing the dialog. Filters to USD-family extensions
+// (.usd / .usda / .usdc / .usdz) since those are the only paths
+// either ingest adapter can hand to UsdStage::Open.
+//
+// COM threading: we initialise STA on the calling thread for the
+// duration of the call. That's safe even if Vulkan / GLFW also
+// initialised COM on this thread — CoInitializeEx returns
+// RPC_E_CHANGED_MODE if a different threading model is already
+// installed and we treat that as "already initialised" (still safe
+// to call CoCreateInstance).
+std::string OpenScenePickerDialog() noexcept {
+  HRESULT comResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+  const bool weInitedCom = SUCCEEDED(comResult);
+  if (comResult == RPC_E_CHANGED_MODE)
+  {
+    // Some other component already initialised COM on this thread
+    // with a different model — that's fine, we can still use the
+    // dialog. Don't call CoUninitialize at the end in that case.
+  }
+
+  IFileOpenDialog* dialog = nullptr;
+  comResult = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_ALL, IID_IFileOpenDialog,
+                               reinterpret_cast<void**>(&dialog));
+  if (FAILED(comResult) || !dialog)
+  {
+    if (weInitedCom)
+      CoUninitialize();
+    return {};
+  }
+
+  // USD-family filter — Pyxis only opens via UsdStage::Open which
+  // covers .usd / .usda / .usdc / .usdz. Other extensions are
+  // rejected by the ingest adapters anyway.
+  COMDLG_FILTERSPEC filterSpec[] = {
+      {L"USD scenes (*.usd;*.usda;*.usdc;*.usdz)", L"*.usd;*.usda;*.usdc;*.usdz"},
+      {L"All files",                                L"*.*"},
+  };
+  dialog->SetFileTypes(static_cast<UINT>(std::size(filterSpec)), filterSpec);
+  dialog->SetTitle(L"Pyxis - Open scene");
+
+  comResult = dialog->Show(nullptr);
+  std::string result;
+  if (SUCCEEDED(comResult))
+  {
+    IShellItem* item = nullptr;
+    if (SUCCEEDED(dialog->GetResult(&item)) && item)
+    {
+      PWSTR widePath = nullptr;
+      if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &widePath)) && widePath)
+      {
+        // UTF-16 -> UTF-8 (USD paths can contain non-ASCII; the
+        // ingest adapters take const char* / std::string and feed
+        // straight to UsdStage::Open which expects UTF-8).
+        const int byteCount =
+            WideCharToMultiByte(CP_UTF8, 0, widePath, -1, nullptr, 0, nullptr, nullptr);
+        if (byteCount > 1)
+        {
+          result.resize(static_cast<std::size_t>(byteCount - 1));
+          WideCharToMultiByte(CP_UTF8, 0, widePath, -1, result.data(), byteCount, nullptr,
+                              nullptr);
+        }
+        CoTaskMemFree(widePath);
+      }
+      item->Release();
+    }
+  }
+  dialog->Release();
+  if (weInitedCom)
+    CoUninitialize();
+  return result;
+}
+#else
+std::string OpenScenePickerDialog() noexcept { return {}; }
+#endif
 
 }  // namespace
 
@@ -505,6 +585,20 @@ void ImGuiHost::BuildFpsPanel(const FrameProfile& frameProfile) noexcept {
         ImGui::TextDisabled(
             "(captured on first frame; mesh upload + BLAS / TLAS build +\n"
             "  first PathTracePass dispatch all happen here)");
+
+        // Ingest pass — populated by ViewerMode via SetIngestProfile()
+        // right after the engine.Load() that ran BEFORE the frame loop
+        // started. NOT part of the frame profile (the profiler only
+        // sees scopes opened/closed inside Profiler::BeginFrame...
+        // EndFrame); we surface it here so the user sees the full
+        // load picture: USD parse + scene mutation + first commit.
+        if (!_ingestSourceLabel.empty())
+        {
+          ImGui::Spacing();
+          ImGui::Text("Ingest (%s): %.1f ms", _ingestSourceLabel.c_str(), _ingestMs);
+          ImGui::TextDisabled(
+              "  (USD parse + StageWalker / Hydra emit + GpuScene mutation calls)");
+        }
 
         ImGui::Spacing();
         ImGui::Text("CPU load: %.3f ms", _loadingCpuMs);
@@ -982,13 +1076,30 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
       }
     }
 
-    // ---- Scene loader (placeholder) ----------------------------------
+    // ---- Scene loader ------------------------------------------------
+    // "Open scene..." pops a Windows IFileOpenDialog filtered to USD
+    // extensions; the picked path is latched into _editorPendingScenePath
+    // and ViewerMode drains it via TakeSceneReloadRequest() each frame.
+    // ViewerMode handles the actual reload sequence: device->waitForIdle,
+    // GpuScene::Clear, re-instantiate the selected ingest engine,
+    // engine.Load(picked, gpuScene). The Editor panel only knows about
+    // GpuScene — the renderer-side wiring lives across the API boundary.
     if (ImGui::CollapsingHeader("Scene"))
     {
-      ImGui::TextDisabled(
-          "Scene-reload (file picker + GpuScene::Clear) lands at the\n"
-          "Phase-6 follow-up. Path overrides + restart-to-reload via\n"
-          "`pyxis.exe --scene <path>` are the v1 workflow.");
+      if (ImGui::Button("Open scene..."))
+      {
+        std::string picked = OpenScenePickerDialog();
+        if (!picked.empty())
+          _editorPendingScenePath = std::move(picked);
+      }
+      ImGui::SameLine();
+      ImGui::TextDisabled("(*.usd / *.usda / *.usdc / *.usdz)");
+
+      if (!_editorPendingScenePath.empty())
+      {
+        ImGui::TextColored(ImVec4(0.95f, 0.85f, 0.20f, 1.0f),
+                           "Pending: %s", _editorPendingScenePath.c_str());
+      }
     }
   }
   ImGui::End();

@@ -251,19 +251,40 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
   // through pyxis_usd_ingest's StageWalker; HydraEngine lands at
   // M4 P5e. Either failing or returning "nothing emitted" falls
   // back to the M3 hardcoded cube so pyxis.exe always renders.
+  //
+  // Local lambda so the editor's "Open scene..." path below can reuse
+  // the same dispatch. Times the call and writes back through outMs.
+  // Returns true on success.
+  auto loadScene = [&](std::string_view path,
+                       std::string_view adapterLabel,
+                       float&           outMs) -> bool {
+    const auto startTime = std::chrono::steady_clock::now();
+    bool loaded = false;
+    if (adapterLabel == "usd_direct")
+    {
+      UsdDirectEngine engine;
+      loaded = engine.Load(std::string{path}, gpuScene);
+    }
+    else if (adapterLabel == "hydra")
+    {
+      HydraEngine engine;
+      loaded = engine.Load(std::string{path}, gpuScene);
+    }
+    const auto endTime = std::chrono::steady_clock::now();
+    outMs = std::chrono::duration<float, std::milli>(endTime - startTime).count();
+    return loaded;
+  };
+
+  // Startup ingest. ImGuiHost isn't built yet (Init runs further down)
+  // so we stash the duration + adapter label in pendingIngest{Ms,Source}
+  // and push them into the panel once ImGuiHost is ready below.
+  float       pendingIngestMs     = 0.0f;
+  std::string pendingIngestSource;
   bool sceneLoaded = false;
   if (!resolvedScene.path.empty())
   {
-    if (config.app.ingest == "usd_direct")
-    {
-      UsdDirectEngine engine;
-      sceneLoaded = engine.Load(resolvedScene.path, gpuScene);
-    }
-    else if (config.app.ingest == "hydra")
-    {
-      HydraEngine engine;
-      sceneLoaded = engine.Load(resolvedScene.path, gpuScene);
-    }
+    sceneLoaded = loadScene(resolvedScene.path, config.app.ingest, pendingIngestMs);
+    pendingIngestSource = config.app.ingest;
   }
   if (sceneLoaded)
   {
@@ -274,6 +295,10 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
   {
     log.Error(log::APP, "ViewerMode: " + cubeResult.error());
     return EXIT_DEVICE_INIT_FAIL;
+  }
+  else if (pendingIngestSource.empty())
+  {
+    pendingIngestSource = "cube_fallback";
   }
 
   // PathTracePass writes via UAV (RWTexture2D<float4>) which the
@@ -315,6 +340,14 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
     {
       log.Warn(log::APP, "ViewerMode: ImGui init failed; continuing without UI");
     }
+  }
+  // Push the startup ingest timing into the Performance / Loading
+  // section now that ImGuiHost is ready. Done unconditionally — the
+  // setter is a noop on the panel side until the first BuildFpsPanel
+  // call rebuilds the Loading section.
+  if (imguiHost.IsReady() && !pendingIngestSource.empty())
+  {
+    imguiHost.SetIngestProfile(pendingIngestMs, pendingIngestSource);
   }
   if (screenshotMode)
   {
@@ -416,18 +449,53 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
       imguiHost.BuildScenePanel(sceneStats);
       imguiHost.BuildEditorPanel(gpuScene);
 
-      // Drain the editor's "Reload shaders" latch. Renderer-side
-      // shader-library invalidation isn't on the public surface yet
-      // (PyxisRenderer doesn't expose a reload entry; adding one is
-      // a v1.1 API addition under §22). For now we log the click so
-      // the button has visible feedback; the real reload arrives
-      // when the renderer's ShaderLibrary grows a public Invalidate
-      // hook.
+      // Drain the editor's "Reload shaders" latch. Wait the GPU idle
+      // (so no in-flight command buffer references the old pipeline /
+      // shader table) before asking the renderer to re-load every
+      // pass's shaders. PyxisRenderer::ReloadShaders walks each pass
+      // that overrides IRenderPass::ReloadShaders — at M7 that's
+      // PathTracePass only. Failure stays silent in the panel; the
+      // log line is the user-visible feedback.
       if (imguiHost.TakeShaderReloadRequest())
       {
-        log.Info(log::APP,
-                 "ViewerMode: shader-reload requested from Editor panel "
-                 "(renderer-side reload TODO)");
+        device->waitForIdle();
+        const bool reloadOk = renderer.ReloadShaders();
+        log.Info(log::APP, std::string{"ViewerMode: shader reload "}
+                                + (reloadOk ? "OK" : "FAILED (kept old pipeline)"));
+      }
+
+      // Drain the editor's "Open scene..." latch. Same waitForIdle
+      // discipline plus a GpuScene::Clear before re-running the
+      // ingest engine; the new ingest time pushes back into the
+      // Loading section via SetIngestProfile.
+      std::string sceneReloadPath;
+      if (imguiHost.TakeSceneReloadRequest(sceneReloadPath))
+      {
+        device->waitForIdle();
+        gpuScene.Clear();
+        float reloadIngestMs = 0.0f;
+        const bool reloadOk = loadScene(sceneReloadPath, config.app.ingest, reloadIngestMs);
+        if (reloadOk)
+        {
+          imguiHost.SetIngestProfile(reloadIngestMs, config.app.ingest);
+          log.Info(log::APP, "ViewerMode: scene reload OK (" + sceneReloadPath + ")");
+        }
+        else
+        {
+          // Fall back to the hardcoded cube so the viewer keeps
+          // rendering instead of going dark on a bad path.
+          if (auto cubeResult =
+                  BuildHardcodedCubeScene(gpuScene, winDesc.width, winDesc.height);
+              !cubeResult)
+          {
+            log.Error(log::APP, "ViewerMode: scene reload + cube fallback both failed: "
+                                    + cubeResult.error());
+          }
+          imguiHost.SetIngestProfile(reloadIngestMs, "cube_fallback");
+          log.Warn(log::APP,
+                   "ViewerMode: scene reload FAILED (" + sceneReloadPath
+                       + "); falling back to cube");
+        }
       }
 
       imguiHost.Render();

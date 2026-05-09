@@ -1155,6 +1155,70 @@ void GpuScene::RemoveLight(LightHandle lightHandle) {
   _impl->lightsNeedGpuUpload = true;
 }
 
+// ---- Scene-wide reset ------------------------------------------------------
+void GpuScene::Clear() noexcept {
+  // Reset to the post-construction shape. Every NVRHI handle owned by
+  // the impl is reference-counted (nvrhi::RefCountPtr); dropping the
+  // handles releases the ref and NVRHI's deferred-destruction queue
+  // reclaims the underlying Vulkan objects on the next garbage
+  // collection tick. Caller must have waited the device idle so no
+  // in-flight command buffer still references these.
+
+  // Mesh / instance / light / material / texture tables back to "slot
+  // 0 sentinel only", matching ctor.
+  _impl->meshes.clear();
+  _impl->meshes.emplace_back();
+  _impl->meshes[0].quarantined = true;
+
+  _impl->instances.clear();
+  _impl->instances.emplace_back();
+  _impl->instances[0].quarantined = true;
+
+  _impl->lights.clear();
+  _impl->lights.emplace_back();
+  _impl->lights[0].quarantined = true;
+
+  _impl->materials.clear();
+  _impl->textures.clear();
+
+  _impl->materialDescHashToHandle.clear();
+  _impl->textureKeyHashToHandle.clear();
+  _impl->meshDescHashToHandle.clear();
+
+  // GPU buffers: drop refs. CommitResources will lazily re-allocate
+  // on the first AcquireMaterial / AppendInstance / AddLight after
+  // Clear (the same lazy path used at scene-construction time).
+  _impl->materialGpuBuffer = nullptr;
+  _impl->materialsNeedGpuUpload = false;
+  _impl->instanceMaterialBuffer = nullptr;
+  _impl->lightsGpuBuffer = nullptr;
+  _impl->lightsNeedGpuUpload = false;
+  _impl->meshFaceNormalsBuffer = nullptr;
+  _impl->meshFaceOffsetsBuffer = nullptr;
+  _impl->meshFaceNormalsNeedUpload = false;
+  _impl->instanceMeshBuffer = nullptr;
+
+  // Sampler + missingTexture are scene-lifetime singletons that the
+  // first CommitResources after Clear will re-create on demand. Drop
+  // the refs so memory isn't held longer than needed across a reload.
+  _impl->bindlessSampler = nullptr;
+  _impl->missingTexture = nullptr;
+
+  // TLAS + camera + dirty flags.
+  _impl->tlas = nullptr;
+  _impl->tlasNeedsRebuild = false;
+  _impl->instanceMaterialNeedsUpload = false;
+  _impl->hasCamera = false;
+  _impl->cameraDesc = CameraDesc{};
+
+  // Per-frame stat counters back to zero. Cumulative counters
+  // (meshCount / instanceCount / etc.) recompute on read from the
+  // live tables so they don't need explicit reset here, but the
+  // FrameStats POD itself is replaced wholesale to clear bytes /
+  // pendingUploads / degraded / staleHandleDrops in one shot.
+  _impl->lastFrameStats = FrameStats{};
+}
+
 // ---- Frame boundary --------------------------------------------------------
 Expected<void> GpuScene::CommitResources(nvrhi::ICommandList* commandList) {
   // Zero the per-frame counters at the start of every commit so the
