@@ -1,0 +1,98 @@
+name: build
+
+# Pyxis Windows-only build with vcpkg + clang-cl. The primary purpose
+# of this workflow is to populate the GHA-backed vcpkg binary cache so
+# subsequent runs (and contributor first-clone builds, once they wire
+# the same x-gha source) skip the long ~30-90 minute USD compile.
+#
+# windows-latest runners do not expose a GPU, so the M2 byte-equal EXR
+# test (label `m2`) is excluded; the CPU-only test surface (CPU
+# profiler scopes, Configuration overlay, GpuScene handle tables,
+# SceneResolver, RenderGraph smoke, public-POD layout asserts) covers
+# the bulk of the §35 unit-test inventory.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  windows-build:
+    runs-on: windows-latest
+
+    env:
+      # x-gha = GitHub Actions cache backend for vcpkg's binary cache.
+      # `clear` drops the default `%LOCALAPPDATA%/vcpkg/archives` source
+      # since CI runners are ephemeral; `readwrite` lets this run both
+      # populate the cache (first time a port is built) and consume it
+      # (subsequent runs hit cache and skip the compile entirely).
+      VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+      # sccache uses GHA cache too — same backend as the vcpkg cache,
+      # different key namespace (per-translation-unit object cache vs
+      # per-port binary cache). Together they give us "no compile"
+      # behaviour across runs as long as nothing material changed.
+      SCCACHE_GHA_ENABLED: "true"
+      # CMake preset name — picks up VCPKG_BINARY_SOURCES via env above.
+      PYXIS_PRESET: ci
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Export GitHub Actions cache tokens so vcpkg's x-gha backend
+      # AND sccache's GHA backend both find them. They're only
+      # available to specific actions contexts by default; this script
+      # exports them as plain env vars to all subsequent steps.
+      - name: Export GHA cache tokens
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      # sccache (Mozilla) wraps every C/C++ compile so cache hits on
+      # unchanged TUs return in ms instead of recompiling. Reads/writes
+      # the GHA cache via SCCACHE_GHA_ENABLED. The Pyxis CMake auto-
+      # detects sccache via find_program (see CMakeLists.txt) and
+      # plugs it into CMAKE_C/CXX_COMPILER_LAUNCHER — no preset
+      # changes needed once sccache is on PATH.
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0.0.5
+
+      # Vulkan SDK — required by find_package(Vulkan) and the NVRHI
+      # Vulkan backend. Cached by the action so subsequent runs skip
+      # the SDK download.
+      - name: Install Vulkan SDK
+        uses: humbletim/install-vulkan-sdk@v1.2
+        with:
+          version: 1.4.341.1
+          cache: true
+
+      # Pin vcpkg to the same baseline SHA recorded in vcpkg.json so
+      # the cache key is deterministic across runs. The USD version
+      # is additionally pinned via vcpkg.json's `overrides` block so
+      # baseline bumps don't invalidate the (very expensive) USD
+      # binary-cache entry by accident.
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: bc71aa640f89933294f16e004b212c7fd3183eed
+
+      # MSVC + Ninja are pre-installed on windows-latest; clang-cl
+      # ships with the MSVC build tools.
+      - name: Configure CMake
+        run: cmake --preset $env:PYXIS_PRESET
+
+      - name: Build
+        run: cmake --build --preset $env:PYXIS_PRESET
+
+      # `-LE m2` excludes the M2.HeadlessByteEqualEXR test (label
+      # `m2`) which needs a GPU; everything else is CPU-only.
+      - name: Test (CPU-only suite)
+        run: ctest --preset $env:PYXIS_PRESET -LE m2
+
+      # Print sccache hit/miss stats so cache-effectiveness regressions
+      # are visible in the workflow log.
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats

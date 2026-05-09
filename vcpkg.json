@@ -71,6 +71,12 @@
     {
       "name": "flecs",
       "$comment": "ECS for SceneWorld. Linked PRIVATE into pyxis_renderer; no Flecs header escapes Public/. Plan §4 / §8 / §30.11. The vcpkg port builds Flecs's monolithic profile (FLECS_REST + FLECS_HTTP enabled at compile time), so the Explorer UI at http://localhost:27750 is reachable in any build — Pyxis still gates the *call* to flecs::Rest behind PYXIS_DEBUG_TOOLS so production builds don't bind the listen socket (§30.11)."
+    },
+    {
+      "name": "usd",
+      "default-features": false,
+      "features": ["imaging", "materialx"],
+      "$comment": "OpenUSD (M4+). `imaging` pulls Hd / UsdImaging (the Hydra delegate's host); `materialx` enables the open_pbr_surface / standard_surface networks pyxis_material_translation reads. Python deliberately off (plan §6 — we don't embed Python). Boost dropped in modern USD (26.x) so no Boost dep here. Linked PUBLIC into pyxis_hydra + pyxis_usd_ingest only; pyxis_renderer stays USD-free (§1 / §30.3). vcpkg builds USD as DLLs (port enforces ONLY_DYNAMIC_LIBRARY)."
     }
   ],
 
@@ -82,5 +88,11 @@
 
   "features": {},
 
-  "overrides": []
+  "overrides": [
+    {
+      "name": "usd",
+      "version": "26.3",
+      "$comment": "Pin USD explicitly so the binary-cache key stays stable across baseline bumps. USD is the ~hour-long compile in the dep graph; an unintended USD-version drift via builtin-baseline would invalidate the cache and force a rebuild. Bump deliberately when USD itself moves."
+    }
+  ]
 }

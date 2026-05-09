@@ -39,6 +39,10 @@
         "PYXIS_BUILD_TESTS":  "ON",
         "PYXIS_DEBUG_TOOLS":  "OFF",
         "PYXIS_BUILD_VIEWER": "OFF"
+      },
+      "environment": {
+        "VCPKG_FEATURE_FLAGS": "manifests,versions,binarycaching",
+        "VCPKG_BINARY_SOURCES": "clear;x-gha,readwrite"
       }
     }
   ],
