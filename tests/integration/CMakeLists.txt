@@ -81,3 +81,24 @@ set_tests_properties(M6.NativeInstancingExpandsPointInstancer PROPERTIES
     LABELS    "integration;m6"
     TIMEOUT   120  # Three USD-loading runs.
 )
+
+# §41 M7 — exercises the full M7-simple lighting path (UsdLux*
+# translation → light buffer upload → closesthit NdotL Lambert +
+# Dome ambient). The lit fixture authors a single triangle facing
+# the camera with a Sun (Distant -Z) + Sky (Dome) — its EXR must
+# differ from the unlit twin (same triangle, no lights). See
+# m7_lighting.cmake header for the full failure-mode catalogue.
+add_test(
+    NAME    M7.LightingMovesPixels
+    COMMAND ${CMAKE_COMMAND}
+            -DPYXIS_EXE=$<TARGET_FILE:pyxis>
+            -DFIXTURE_CONFIG=${CMAKE_SOURCE_DIR}/tests/fixtures/headless_triangle.json
+            -DLIT_SCENE=${CMAKE_SOURCE_DIR}/tests/fixtures/m7_lit_scene.usd
+            -DUNLIT_SCENE=${CMAKE_SOURCE_DIR}/tests/fixtures/m7_lit_scene_unlit.usd
+            -DOUTPUT_DIR=${CMAKE_BINARY_DIR}/tests/integration/m7_lighting
+            -P ${CMAKE_SOURCE_DIR}/tests/integration/m7_lighting.cmake
+)
+set_tests_properties(M7.LightingMovesPixels PROPERTIES
+    LABELS    "integration;m7"
+    TIMEOUT   120  # Three USD-loading runs.
+)

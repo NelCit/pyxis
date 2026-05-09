@@ -109,8 +109,19 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
         if (L.intensity <= 0.0) continue;  // sentinel / disabled
         const float3 Lcol = float3(L.colorR, L.colorG, L.colorB) * L.intensity;
         if (L.kind == LIGHT_KIND_DOME) {
-            // Half-strength ambient; no NdotL.
-            ambientSum += Lcol * 0.5;
+            // Dome ambient with NdotL against the world up axis.
+            // The proper hemispheric integral
+            //   ∫ radiance(ω) · max(0, dot(N, ω)) dω
+            // is what the M7-full alias-table importance sampler
+            // (§7) computes; the simplest approximation that
+            // responds to surface orientation is Lambert against the
+            // up axis: surfaces facing up get full dome, surfaces
+            // facing horizontally get zero, surfaces facing down get
+            // zero. Half-strength scale matches the M7-simple
+            // "ambient is half-bright" convention so a single dome
+            // doesn't out-bright a single sun.
+            const float NdotUp = max(0.0, dot(nWorld, float3(0.0, 1.0, 0.0)));
+            ambientSum += Lcol * 0.5 * NdotUp;
             totalContribution += L.intensity * 0.5;
             continue;
         }

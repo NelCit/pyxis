@@ -1,0 +1,59 @@
+#usda 1.0
+(
+    "Pyxis M7 unlit twin of m7_lit_scene.usd. Identical geometry +"
+    "material to the lit fixture but with NO lights authored — the"
+    "M7 integration test renders both and asserts they DIFFER."
+    "If they're byte-equal, the M7 lighting pipeline silently broke"
+    "(EmitLight regression, GPU upload skipped, closesthit normal"
+    "lookup OOB, etc.)."
+    upAxis = "Y"
+    metersPerUnit = 1.0
+    defaultPrim = "M7Fixture"
+    doc = "Pyxis M7 unlit twin (same geometry, no lights)."
+)
+
+def Xform "M7Fixture"
+{
+    def Mesh "Triangle"
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(-1.0, -0.8, 0), (1.0, -0.8, 0), (0.0, 0.8, 0)]
+        rel material:binding = </M7Fixture/Materials/Sunlit>
+    }
+
+    def Scope "Materials"
+    {
+        def Material "Sunlit"
+        {
+            token outputs:surface.connect = </M7Fixture/Materials/Sunlit/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.9, 0.9, 0.9)
+                float inputs:roughness = 0.5
+                float inputs:metallic = 0.0
+                token outputs:surface
+            }
+        }
+    }
+
+    # No /M7Fixture/Lights — closesthit's totalContribution stays 0,
+    # falling through to baseColor-only emission.
+
+    def Scope "Cameras"
+    {
+        def Camera "main"
+        {
+            float focalLength = 35
+            float horizontalAperture = 36
+            float verticalAperture = 24
+            float fStop = 0
+            float focusDistance = 4.0
+            float2 clippingRange = (0.1, 100)
+            matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 4, 1) )
+            uniform token[] xformOpOrder = ["xformOp:transform"]
+        }
+    }
+}
