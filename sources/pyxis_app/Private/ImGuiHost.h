@@ -90,13 +90,13 @@ class ImGuiHost {
   void* _instance = nullptr;        // VkInstance (borrowed) — kept for the function loader
   void* _physicalDevice = nullptr;  // VkPhysicalDevice (borrowed) — VRAM query in BuildFpsPanel
 
-  // Editor-panel state (M7 follow-up). The materials editor's
-  // "currently picked material" lives here so the slider position
-  // survives across frames; the lights editor enumerates all lights
-  // each frame so it doesn't need analogous state. Reset to 0 if
-  // the live-material count drops below the picked index between
-  // frames (catches DestroyMaterial happening between renders).
+  // Editor-panel state (M7 follow-up). The materials + lights
+  // editors' "currently picked entry" lives here so the combo
+  // selection survives across frames. Reset to 0 if the live count
+  // drops below the picked index between frames (catches
+  // DestroyMaterial / RemoveLight happening between renders).
   uint32_t _editorMaterialIndex = 0;
+  uint32_t _editorLightIndex    = 0;
 
   // Layout state (M7 follow-up). Scene's rendered height from the
   // PREVIOUS frame, used to position the Editor panel directly
@@ -104,6 +104,17 @@ class ImGuiHost {
   // we read the size right after BuildScenePanel and reuse it next
   // frame. First-frame fallback: 200 px (reasonable lower bound).
   float _layoutScenePanelHeight = 200.0f;
+
+  // Loading-time profile snapshot. Latched on the first BuildFpsPanel
+  // call where the FrameProfile reports a non-zero CPU time — that's
+  // effectively the load profile (mesh upload + BLAS build + TLAS
+  // rebuild + first PathTracePass dispatch all happen on frame 0).
+  // Displayed in the Performance panel's "Loading" CollapsingHeader
+  // so the user can see what the first-frame cost was even after
+  // many frames of steady-state rendering.
+  bool        _loadingProfileLatched = false;
+  float       _loadingCpuMs          = 0.0f;
+  float       _loadingGpuMs          = 0.0f;
 
   // Performance-panel rolling history. 240 frames @ 60 Hz = ~4 s of
   // visual context — enough to spot the per-pass cost shape of a

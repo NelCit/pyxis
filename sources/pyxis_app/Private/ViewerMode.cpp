@@ -331,10 +331,9 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
   // smoke under a second. The profiler ring drain doesn't matter for
   // the screenshot itself (we don't draw timing text any more).
   constexpr uint64_t SCREENSHOT_FRAME = 3;
-  // Cadence for the periodic profiler log line. Every 120 frames is
-  // ~1 s at 120 FPS — enough samples for the rolling FrameProfile to
-  // be representative without spamming stdout.
-  constexpr uint64_t PROFILER_LOG_INTERVAL = 120;
+  // (Periodic profiler-log cadence removed — the profile dump now
+  // fires once after the first frame completes, which captures the
+  // load profile without spamming stdout every N frames.)
 
   // ---- Frame loop ------------------------------------------------------
   uint64_t frameIndex = 0;
@@ -511,27 +510,32 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
     profiler.EndFrame();
     ++frameIndex;
 
-    // Periodic profiler dump: prints the rolling totals plus the
-    // pre-order scope tree, indented by depth. With FIF=1 the cpu
-    // number tracks wall-clock frame time and fps = 1000 / cpu.
-    if (frameIndex > 0 && frameIndex % PROFILER_LOG_INTERVAL == 0)
+    // One-shot profile dump after the first complete frame — this
+    // frame's CPU + GPU spend is effectively the LOAD profile (mesh
+    // upload, BLAS build, TLAS rebuild, first PathTracePass dispatch).
+    // Subsequent frames are just steady-state render work; logging
+    // them every 120 frames was the previous behaviour, which spammed
+    // the console. The Performance panel's Loading section keeps the
+    // same data visually for users who want to drill in.
+    if (frameIndex == 1)
     {
       const FrameProfile frameProfile = renderer.LastFrameProfile();
-      const double fps = frameProfile.cpuFrameMs > 0.0 ? 1000.0 / frameProfile.cpuFrameMs : 0.0;
+      const double fps = frameProfile.cpuFrameMs > 0.0
+                             ? 1000.0 / frameProfile.cpuFrameMs
+                             : 0.0;
       char buf[256];
-      std::snprintf(buf, sizeof(buf), "profiler: frame %llu  cpu %.3f ms  gpu %.3f ms  fps %.1f",
-                    static_cast<unsigned long long>(frameProfile.frameIndex),
+      std::snprintf(buf, sizeof(buf),
+                    "profiler: load complete — cpu %.3f ms  gpu %.3f ms  fps %.1f",
                     frameProfile.cpuFrameMs, frameProfile.gpuFrameMs, fps);
       log.Info(log::APP, buf);
       for (const FrameProfile::PassTiming& timing : frameProfile.passes)
       {
         const char* kind = (timing.kind == FrameProfile::ScopeKind::Cpu) ? "CPU" : "GPU";
         const std::string_view name = timing.name.View();
-        // Two spaces per depth level, "  CPU "/"  GPU " column.
         char line[256];
         std::snprintf(line, sizeof(line), "profiler:   %*s%s %.*s  %.3f ms",
-                      static_cast<int>(timing.depth * 2), "", kind, static_cast<int>(name.size()),
-                      name.data(), timing.durationMs);
+                      static_cast<int>(timing.depth * 2), "", kind,
+                      static_cast<int>(name.size()), name.data(), timing.durationMs);
         log.Info(log::APP, line);
       }
     }

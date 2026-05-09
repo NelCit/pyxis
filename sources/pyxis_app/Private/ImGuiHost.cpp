@@ -443,6 +443,17 @@ void ImGuiHost::BuildFpsPanel(const FrameProfile& frameProfile) noexcept {
   _gpuMsHistory[_historyHead] = frameProfile.gpuFrameMs;
   _historyHead = (_historyHead + 1) % PERF_HISTORY_SIZE;
 
+  // Latch the first non-zero CPU profile as the "loading" snapshot.
+  // The render thread submits the load (mesh upload + BLAS build +
+  // TLAS rebuild) on frame 0 — that frame's cpu/gpu cost IS the
+  // load profile; subsequent frames are steady-state render only.
+  if (!_loadingProfileLatched && frameProfile.cpuFrameMs > 0.0f)
+  {
+    _loadingCpuMs = frameProfile.cpuFrameMs;
+    _loadingGpuMs = frameProfile.gpuFrameMs;
+    _loadingProfileLatched = true;
+  }
+
   // Layout: Performance is the TOP-RIGHT panel. Anchor to the right
   // viewport edge with a per-frame SetNextWindowPos so the panel
   // stays glued to the right when the window resizes. AlwaysAutoResize
@@ -472,6 +483,27 @@ void ImGuiHost::BuildFpsPanel(const FrameProfile& frameProfile) noexcept {
     // PlotLines). NVIDIA-green CPU + cool-blue GPU on a shared Y-axis.
     DrawDualLineChart(_cpuMsHistory, _gpuMsHistory, PERF_HISTORY_SIZE,
                       _historyHead, "CPU", "GPU", 110.0f);
+
+    // ----- Loading (one-shot snapshot of the first frame's cost) ------
+    // The first frame includes mesh upload + BLAS build + TLAS
+    // rebuild + first PathTracePass dispatch — effectively the load
+    // profile. Subsequent frames are steady-state render only, so
+    // these values stay frozen after the first non-zero capture.
+    if (ImGui::CollapsingHeader("Loading"))
+    {
+      if (_loadingProfileLatched)
+      {
+        ImGui::Text("CPU load: %.3f ms", _loadingCpuMs);
+        ImGui::Text("GPU load: %.3f ms", _loadingGpuMs);
+        ImGui::TextDisabled(
+            "(captured on first frame; mesh upload + BLAS / TLAS build +\n"
+            "  first PathTracePass dispatch all happen here)");
+      }
+      else
+      {
+        ImGui::TextDisabled("(awaiting first non-zero frame profile)");
+      }
+    }
 
     // ----- CPU breakdown (collapsible like Lights/Materials) ----------
     if (ImGui::CollapsingHeader("CPU passes", ImGuiTreeNodeFlags_DefaultOpen))
@@ -750,6 +782,9 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
     }
 
     // ---- Lights section ----------------------------------------------
+    // Selector by kind+index since LightDesc has no name field today.
+    // Combo labels: "Light #N — Kind". The picked light's color +
+    // intensity edit beneath; UpdateLight pushes the change.
     if (ImGui::CollapsingHeader("Lights", ImGuiTreeNodeFlags_DefaultOpen))
     {
       const uint32_t lightCount = scene.GetLiveLightCount();
@@ -759,40 +794,64 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
       }
       else
       {
-        for (uint32_t i = 0; i < lightCount; ++i)
+        if (_editorLightIndex >= lightCount)
+          _editorLightIndex = 0;
+        // Build the preview label from the currently-selected light.
+        char previewLabel[64];
         {
-          const LightHandle handle = scene.GetLightHandleAt(i);
-          LightDesc desc = scene.GetLightDescAt(i);
-
-          // Distinct ImGui ID per light so widgets don't collide.
-          ImGui::PushID(static_cast<int>(i));
+          const LightDesc previewDesc = scene.GetLightDescAt(_editorLightIndex);
           const char* kindLabel = "Distant";
-          if (desc.kind == LightDesc::Kind::Dome) kindLabel = "Dome";
-          if (desc.kind == LightDesc::Kind::Rect) kindLabel = "Rect";
-          ImGui::Text("Light #%u  %s", i, kindLabel);
-          bool lightEdited = false;
-
-          float color[3] = {static_cast<float>(desc.color.x),
-                            static_cast<float>(desc.color.y),
-                            static_cast<float>(desc.color.z)};
-          if (ImGui::ColorEdit3("Color", color, ImGuiColorEditFlags_NoInputs))
-          {
-            desc.color = hlslpp::float3{color[0], color[1], color[2]};
-            lightEdited = true;
-          }
-          if (ImGui::SliderFloat("Intensity", &desc.intensity, 0.0f, 10.0f, "%.2f"))
-            lightEdited = true;
-
-          if (lightEdited && handle != LightHandle::Invalid)
-            scene.UpdateLight(handle, desc);
-
-          ImGui::Separator();
-          ImGui::PopID();
+          if (previewDesc.kind == LightDesc::Kind::Dome) kindLabel = "Dome";
+          if (previewDesc.kind == LightDesc::Kind::Rect) kindLabel = "Rect";
+          std::snprintf(previewLabel, sizeof(previewLabel), "Light #%u  %s",
+                        _editorLightIndex, kindLabel);
         }
+        if (ImGui::BeginCombo("Light", previewLabel))
+        {
+          for (uint32_t lightIdx = 0; lightIdx < lightCount; ++lightIdx)
+          {
+            const LightDesc itemDesc = scene.GetLightDescAt(lightIdx);
+            const char* kindLabel = "Distant";
+            if (itemDesc.kind == LightDesc::Kind::Dome) kindLabel = "Dome";
+            if (itemDesc.kind == LightDesc::Kind::Rect) kindLabel = "Rect";
+            char itemLabel[64];
+            std::snprintf(itemLabel, sizeof(itemLabel), "Light #%u  %s", lightIdx,
+                          kindLabel);
+            const bool isSelected = (lightIdx == _editorLightIndex);
+            if (ImGui::Selectable(itemLabel, isSelected))
+              _editorLightIndex = lightIdx;
+            if (isSelected)
+              ImGui::SetItemDefaultFocus();
+          }
+          ImGui::EndCombo();
+        }
+
+        // Edit the selected light.
+        const LightHandle handle = scene.GetLightHandleAt(_editorLightIndex);
+        LightDesc desc = scene.GetLightDescAt(_editorLightIndex);
+        bool lightEdited = false;
+
+        float color[3] = {static_cast<float>(desc.color.x),
+                          static_cast<float>(desc.color.y),
+                          static_cast<float>(desc.color.z)};
+        if (ImGui::ColorEdit3("Color", color, ImGuiColorEditFlags_NoInputs))
+        {
+          desc.color = hlslpp::float3{color[0], color[1], color[2]};
+          lightEdited = true;
+        }
+        if (ImGui::SliderFloat("Intensity", &desc.intensity, 0.0f, 10.0f, "%.2f"))
+          lightEdited = true;
+
+        if (lightEdited && handle != LightHandle::Invalid)
+          scene.UpdateLight(handle, desc);
       }
     }
 
     // ---- Materials section -------------------------------------------
+    // Selector by `sourcePrim` (UsdShadeMaterial path); we strip the
+    // path down to its last segment for brevity ("/Materials/RedFlat"
+    // → "RedFlat"). Anonymous / sourcePrim-empty materials fall back
+    // to "Material #N".
     if (ImGui::CollapsingHeader("Materials"))
     {
       const uint32_t matCount = scene.GetLiveMaterialCount();
@@ -802,16 +861,42 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
       }
       else
       {
-        // Pick one material at a time via a slider. Dropdown would
-        // need names, which we don't carry through OpenPBRMaterialDesc
-        // for v1 (sourcePrim is debug-only + per the §11 dedup rule
-        // not part of identity).
         if (_editorMaterialIndex >= matCount)
           _editorMaterialIndex = 0;
-        int picked = static_cast<int>(_editorMaterialIndex);
-        if (ImGui::SliderInt("Material #", &picked, 0, static_cast<int>(matCount) - 1))
+        // Helper: extract the final SdfPath segment from a string_view
+        // (everything after the last '/'). For "/Foo/Bar/Baz" returns
+        // "Baz"; for an empty path returns the synthesized index name.
+        auto materialLabel = [&](uint32_t liveIdx, char* buf, std::size_t bufSize) {
+          const OpenPBRMaterialDesc itemDesc = scene.GetMaterialDescAt(liveIdx);
+          const std::string_view path = itemDesc.sourcePrim;
+          if (path.empty())
+          {
+            std::snprintf(buf, bufSize, "Material #%u", liveIdx);
+            return;
+          }
+          const auto lastSlash = path.find_last_of('/');
+          const std::string_view leaf = (lastSlash == std::string_view::npos)
+                                            ? path
+                                            : path.substr(lastSlash + 1);
+          std::snprintf(buf, bufSize, "%.*s", static_cast<int>(leaf.size()),
+                        leaf.data());
+        };
+
+        char previewLabel[80];
+        materialLabel(_editorMaterialIndex, previewLabel, sizeof(previewLabel));
+        if (ImGui::BeginCombo("Material", previewLabel))
         {
-          _editorMaterialIndex = static_cast<uint32_t>(picked);
+          for (uint32_t matIdx = 0; matIdx < matCount; ++matIdx)
+          {
+            char itemLabel[80];
+            materialLabel(matIdx, itemLabel, sizeof(itemLabel));
+            const bool isSelected = (matIdx == _editorMaterialIndex);
+            if (ImGui::Selectable(itemLabel, isSelected))
+              _editorMaterialIndex = matIdx;
+            if (isSelected)
+              ImGui::SetItemDefaultFocus();
+          }
+          ImGui::EndCombo();
         }
 
         const MaterialHandle handle = scene.GetMaterialHandleAt(_editorMaterialIndex);
