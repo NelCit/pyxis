@@ -68,7 +68,14 @@ function(pyxis_thirdparty_setup)
     set(NVRHI_WITH_VULKAN    ON  CACHE BOOL "" FORCE)
     set(NVRHI_WITH_DX11      OFF CACHE BOOL "" FORCE)
     set(NVRHI_WITH_DX12      OFF CACHE BOOL "" FORCE)
-    set(NVRHI_WITH_RTXMU     OFF CACHE BOOL "" FORCE)
+    # RTXMU = NVIDIA RTX Memory Utility. With this on, NVRHI routes
+    # every BLAS through RTXMU's suballocation pool + scratch pool +
+    # async compaction queue (plan §16). NVRHI public API is
+    # unchanged; the consumer-side win is "we set ALLOW_COMPACTION
+    # at build time, RTXMU does the compaction copy when the GPU
+    # retires the build". RTXMU is vendored as a submodule inside
+    # nvrhi/rtxmu/ — no extra fetch needed.
+    set(NVRHI_WITH_RTXMU     ON  CACHE BOOL "" FORCE)
     set(NVRHI_WITH_VALIDATION ON CACHE BOOL "" FORCE)
 
     FetchContent_Declare(

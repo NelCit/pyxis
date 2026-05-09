@@ -141,11 +141,13 @@ All inputs (UsdPreviewSurface, MaterialX `open_pbr_surface` / `standard_surface`
 
 ---
 
-## BLAS / TLAS (§16) — split by mesh size
+## BLAS / TLAS (§16) — split by mesh size, RTXMU-managed
 
+- BLAS memory + scratch + async compaction delegated to **RTXMU** via NVRHI (`NVRHI_WITH_RTXMU=ON`). Pyxis-side code sets the build flags below; RTXMU honors them and runs the compaction copy automatically when the GPU retires the build. No query-size-then-copy on our side.
 - `triCount < 64k`: `PREFER_FAST_TRACE` only (no `ALLOW_UPDATE`, no compaction — animation post-v1).
-- `triCount >= 64k`: `PREFER_FAST_TRACE | ALLOW_COMPACTION`, no `ALLOW_UPDATE`.
-- TLAS rebuilt every frame if dirty; refit otherwise. Two-tier (static + dynamic), sharded by `(SdfPath hash mod K)` for >16M instances (§16.5). 24-bit `instanceCustomIndex` cap (16 777 215).
+- `triCount >= 64k`: `PREFER_FAST_TRACE | ALLOW_COMPACTION`, no `ALLOW_UPDATE`. RTXMU compacts asynchronously.
+- TLAS is **not** RTXMU-managed (RTXMU's pool is BLAS-only). Standard NVRHI path. Rebuilt every frame if dirty; refit otherwise. Two-tier (static + dynamic), sharded by `(SdfPath hash mod K)` for >16M instances (§16.5). 24-bit `instanceCustomIndex` cap (16 777 215).
+- v1 limitation: RTXMU doesn't support OMMs. `Feature::OpacityMicroMaps` is gated off; alpha-tested foliage at scale is post-v1 (§42).
 
 ---
 
@@ -257,7 +259,7 @@ KPIs (1080p hero camera, RTX 4080, post-warm): `pass.PathTrace < 12ms`, `frame.c
 - `pyxis_usd_ingest` is one-shot; no `UsdNotice` listener (live USD updates outside Hydra are post-v1).
 - One executable, two modes; headless built on `VkDeviceManagerHeadless`.
 - Linear RenderGraph in v1.
-- BLAS by `MeshHandle` (strict prototype sharing); compaction default-on for ≥64k tris.
+- BLAS by `MeshHandle` (strict prototype sharing); compaction default-on for ≥64k tris; RTXMU executes the compaction asynchronously.
 - Image is the only regression artefact v1.
 - Subdivision, volumes, curves, displacement, texture compression deferred (§42).
 - License: Apache 2.0.

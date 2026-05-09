@@ -628,6 +628,16 @@ Expected<void> GpuScene::CommitResources(nvrhi::ICommandList* commandList) {
   // §16 split rule: PreferFastTrace always, AllowCompaction for ≥
   // 64k tris. AllowUpdate is never set in v1 — animation is post-v1
   // (§42).
+  //
+  // BLAS memory + scratch + async compaction are RTXMU-managed
+  // behind NVRHI's `createAccelStruct` / `buildBottomLevelAccelStruct`
+  // (§16, NVRHI_WITH_RTXMU=ON in _cmake/Thirdparty.cmake). What that
+  // means for the code below: we set the AllowCompaction flag at
+  // build time, RTXMU sees the build complete on the GPU at queue-
+  // submit time, then RTXMU enqueues the compaction copy + recycles
+  // the original buffer when its post-build-info read retires. Pyxis
+  // does not query post-build sizes, does not allocate compacted
+  // copies, does not free originals — RTXMU owns the lifecycle.
   for (Impl::MeshEntry& entry : _impl->meshes)
   {
     if (!entry.live || entry.needsGpuUpload || !entry.needsBlasBuild)
