@@ -93,6 +93,64 @@ def _icosahedron(size: float) -> tuple[list[tuple[float, float, float]], list[tu
     return pts, tris
 
 
+def _icosphere(size: float, subdivisions: int
+               ) -> tuple[list[tuple[float, float, float]], list[tuple[int, int, int]]]:
+    """Subdivided icosahedron projected back onto a sphere of radius `size`.
+
+    subdivisions = 0 → 12 verts / 20 tris  (raw icosahedron)
+    subdivisions = 1 → 42 verts / 80 tris  (visibly spherical)
+    subdivisions = 2 → 162 verts / 320 tris (smooth sphere; ~10 KB inlined)
+
+    Each pass splits every triangle into 4 by adding edge-midpoints,
+    then normalises every vertex back to radius `size`. Edge-midpoints
+    are deduplicated via a (a, b) → index cache so neighbouring tris
+    share their split vertex; without dedup the vert count explodes
+    AND the rendered mesh shows seam cracks.
+    """
+    base_pts, base_tris = _icosahedron(size)
+    pts: list[list[float]] = [list(p) for p in base_pts]
+    tris: list[tuple[int, int, int]] = list(base_tris)
+
+    def _project(idx: int) -> None:
+        x, y, z = pts[idx]
+        length = math.sqrt(x * x + y * y + z * z)
+        if length > 1e-9:
+            scale = size / length
+            pts[idx] = [x * scale, y * scale, z * scale]
+
+    for vert_idx in range(len(pts)):
+        _project(vert_idx)
+
+    for _step in range(subdivisions):
+        midpoint_cache: dict[tuple[int, int], int] = {}
+
+        def _midpoint(vert_a: int, vert_b: int) -> int:
+            key = (min(vert_a, vert_b), max(vert_a, vert_b))
+            cached = midpoint_cache.get(key)
+            if cached is not None:
+                return cached
+            ax, ay, az = pts[vert_a]
+            bx, by, bz = pts[vert_b]
+            mid_idx = len(pts)
+            pts.append([(ax + bx) * 0.5, (ay + by) * 0.5, (az + bz) * 0.5])
+            _project(mid_idx)
+            midpoint_cache[key] = mid_idx
+            return mid_idx
+
+        new_tris: list[tuple[int, int, int]] = []
+        for (vert_a, vert_b, vert_c) in tris:
+            mid_ab = _midpoint(vert_a, vert_b)
+            mid_bc = _midpoint(vert_b, vert_c)
+            mid_ca = _midpoint(vert_c, vert_a)
+            new_tris.append((vert_a, mid_ab, mid_ca))
+            new_tris.append((vert_b, mid_bc, mid_ab))
+            new_tris.append((vert_c, mid_ca, mid_bc))
+            new_tris.append((mid_ab, mid_bc, mid_ca))
+        tris = new_tris
+
+    return [(p[0], p[1], p[2]) for p in pts], tris
+
+
 def _format_points(pts: list[tuple[float, float, float]]) -> str:
     return "[" + ", ".join(f"({x:.4f}, {y:.4f}, {z:.4f})" for (x, y, z) in pts) + "]"
 
@@ -130,6 +188,10 @@ def main() -> int:
     print("# ---- Tetrahedron ----")
     pts, tris = _tetrahedron(0.4)
     print(emit_mesh("Tetrahedron (extent=0.4)", pts, tris))
+
+    print("# ---- Icosphere (subdivision 1) ----")
+    pts, tris = _icosphere(0.45, subdivisions=1)
+    print(emit_mesh("Icosphere subdiv=1 (radius=0.45)", pts, tris))
 
     print("# ---- Icosahedron ----")
     pts, tris = _icosahedron(0.45)
