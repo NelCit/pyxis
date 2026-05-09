@@ -128,6 +128,59 @@ struct OpenPBRMaterialGPU {
     uint  _reserved0;
 };
 
+// LightGpu — packed light entry the closesthit reads via the
+// structured-buffer light table at binding 5 (M7). Same scalar-only
+// rule as OpenPBRMaterialGPU (avoids the hlslpp::float3 16-vs-12-byte
+// trap). Layout is 80 bytes (5 rows of 16).
+//
+// M7 ships a deliberately **simple shading model** (no NdotL, no
+// shadow rays, no NEE, no MIS, no importance sampling — see
+// closesthit.slang for the full closeup). Each light contributes
+// `color * intensity * weight` where weight is 1.0 for direct
+// (Distant / Rect) and 0.5 for ambient (Dome). The `direction` /
+// `position` / `axisU` / `axisV` fields are stored for the future
+// full M7 BSDF + NEE pass the user fills in; the M7-simple
+// closesthit ignores them.
+//
+// `kind` mirrors `pyxis::LightDesc::Kind` (0=Distant, 1=Dome, 2=Rect).
+struct LightGpu {
+    // Row 0 — color + intensity.
+    float colorR;
+    float colorG;
+    float colorB;
+    float intensity;        // 0 = sentinel / disabled (M7-simple skips)
+
+    // Row 1 — direction (Distant) + kind tag.
+    float dirX;
+    float dirY;
+    float dirZ;
+    uint  kind;             // 0=Distant, 1=Dome, 2=Rect
+
+    // Row 2 — Rect position (world).
+    float posX;
+    float posY;
+    float posZ;
+    uint  envMapTex;        // Dome's lat-long EXR bindless slot; ~0u if procedural
+
+    // Row 3 — Rect axisU.
+    float axisUx;
+    float axisUy;
+    float axisUz;
+    uint  doubleSided;      // 0 = single-sided, 1 = double-sided (Rect)
+
+    // Row 4 — Rect axisV.
+    float axisVx;
+    float axisVy;
+    float axisVz;
+    uint  _reserved0;
+};
+
+// Light kind enum mirroring pyxis::LightDesc::Kind. Closesthit
+// branches on this for the M7-simple per-kind weighting.
+static const uint LIGHT_KIND_DISTANT = 0;
+static const uint LIGHT_KIND_DOME    = 1;
+static const uint LIGHT_KIND_RECT    = 2;
+
 #ifdef __cplusplus
     // HitInfo is shader-only (see the `#ifndef __cplusplus` guard
     // above), so its size assert lives shader-side only too. Below

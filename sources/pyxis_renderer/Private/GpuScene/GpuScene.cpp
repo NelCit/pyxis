@@ -174,6 +174,48 @@ shaderinterop::OpenPBRMaterialGPU PackMaterialGpu(
   return gpu;
 }
 
+// M7: pack a LightDesc into the 80-byte GPU layout the closesthit
+// reads at binding 5. Mirrors LightDesc::Kind into the `kind` enum
+// the shader branches on. Direction is normalised here so the
+// shader doesn't need to. envMapTex is the bindless slot of the
+// dome's lat-long EXR (or INVALID_BINDLESS_TEXTURE for a
+// procedural dome — M7-simple ignores it; M7-full's IBL importance-
+// sampling lands when the user fills in the closesthit body).
+shaderinterop::LightGpu PackLightGpu(const LightDesc& desc,
+                                     std::uint32_t envMapSlot) noexcept {
+  shaderinterop::LightGpu gpu{};
+  gpu.colorR = static_cast<float>(desc.color.x);
+  gpu.colorG = static_cast<float>(desc.color.y);
+  gpu.colorB = static_cast<float>(desc.color.z);
+  gpu.intensity = desc.intensity;
+  // Normalise direction defensively — USD's UsdLuxDistantLight
+  // authoring conventions sometimes ship un-normalised vectors;
+  // the shader assumes unit length so the simple Lambert pass the
+  // user fills in at M7-full doesn't need to renormalise.
+  const auto dirX = static_cast<float>(desc.direction.x);
+  const auto dirY = static_cast<float>(desc.direction.y);
+  const auto dirZ = static_cast<float>(desc.direction.z);
+  const float dirLen = std::sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ);
+  const float dirInvLen = (dirLen > 1e-6f) ? (1.0f / dirLen) : 0.0f;
+  gpu.dirX = dirX * dirInvLen;
+  gpu.dirY = dirY * dirInvLen;
+  gpu.dirZ = dirZ * dirInvLen;
+  gpu.kind = static_cast<std::uint32_t>(desc.kind);
+  gpu.posX = static_cast<float>(desc.position.x);
+  gpu.posY = static_cast<float>(desc.position.y);
+  gpu.posZ = static_cast<float>(desc.position.z);
+  gpu.envMapTex = envMapSlot;
+  gpu.axisUx = static_cast<float>(desc.axisU.x);
+  gpu.axisUy = static_cast<float>(desc.axisU.y);
+  gpu.axisUz = static_cast<float>(desc.axisU.z);
+  gpu.doubleSided = desc.doubleSided ? 1u : 0u;
+  gpu.axisVx = static_cast<float>(desc.axisV.x);
+  gpu.axisVy = static_cast<float>(desc.axisV.y);
+  gpu.axisVz = static_cast<float>(desc.axisV.z);
+  gpu._reserved0 = 0;
+  return gpu;
+}
+
 // Resolve a TextureHandle to its bindless slot index, or to
 // INVALID_BINDLESS_TEXTURE for Invalid / out-of-range / dead handles.
 // Used at upload time when packing OpenPBRMaterialGPU entries.
@@ -322,6 +364,16 @@ struct GpuScene::Impl {
   bool                 materialsNeedGpuUpload = false;
   nvrhi::BufferHandle  instanceMaterialBuffer;
   nvrhi::SamplerHandle bindlessSampler;
+
+  // M7: structured buffer of LightGpu entries the closesthit reads
+  // via the simple per-light contribution loop at binding 5. Sized
+  // to the count of LIVE LightEntry slots (sparse storage with
+  // holes is fine — the closesthit iterates the buffer's full
+  // length, but we only emit live lights, so dead slots never
+  // appear in the upload). Re-uploaded whenever the dedicated
+  // dirty flag fires (AddLight / UpdateLight / RemoveLight).
+  nvrhi::BufferHandle  lightsGpuBuffer;
+  bool                 lightsNeedGpuUpload = false;
 
   // Magenta 4x4 fallback texture — slot 0 in the bindless table is
   // permanently the "missing texture" colour so any material whose
@@ -929,6 +981,7 @@ LightHandle GpuScene::AddLight(const LightDesc& lightDesc) {
   Impl::LightEntry& entry = _impl->lights[slot];
   entry.live = true;
   entry.descCopy = lightDesc;
+  _impl->lightsNeedGpuUpload = true;
   return static_cast<LightHandle>(HandleEncode(slot, entry.generation));
 }
 
@@ -936,6 +989,7 @@ void GpuScene::UpdateLight(LightHandle lightHandle, const LightDesc& lightDesc) 
   if (auto* entry = _impl->ResolveLight(lightHandle))
   {
     entry->descCopy = lightDesc;
+    _impl->lightsNeedGpuUpload = true;
   }
 }
 
@@ -953,6 +1007,7 @@ void GpuScene::RemoveLight(LightHandle lightHandle) {
   {
     ++entry->generation;
   }
+  _impl->lightsNeedGpuUpload = true;
 }
 
 // ---- Frame boundary --------------------------------------------------------
@@ -1271,6 +1326,57 @@ Expected<void> GpuScene::CommitResources(nvrhi::ICommandList* commandList) {
     _impl->materialsNeedGpuUpload = false;
   }
 
+  // ---- Pack + upload light table (M7) -------------------------------
+  // Packs every LIVE LightEntry into a tightly-packed LightGpu buffer
+  // bound at PathTracePass binding 5. Sparse / dead slots are
+  // omitted — the closesthit iterates the buffer's full length, so
+  // emitting only live lights keeps the per-hit loop tight. The
+  // simple shading model in closesthit.slang ignores `intensity ==
+  // 0` so a fallback 1-element zero buffer (used by PathTracePass
+  // when the scene has no lights) contributes nothing.
+  if (_impl->lightsNeedGpuUpload)
+  {
+    std::vector<shaderinterop::LightGpu> packedLights;
+    packedLights.reserve(_impl->lights.size());
+    for (const Impl::LightEntry& entry : _impl->lights)
+    {
+      if (!entry.live)
+        continue;
+      const std::uint32_t envMapSlot =
+          ResolveTextureBindlessSlot(entry.descCopy.envMap, _impl->textures);
+      packedLights.push_back(PackLightGpu(entry.descCopy, envMapSlot));
+    }
+    if (!packedLights.empty())
+    {
+      const std::size_t lightBytes =
+          packedLights.size() * sizeof(shaderinterop::LightGpu);
+      if (!_impl->lightsGpuBuffer
+          || _impl->lightsGpuBuffer->getDesc().byteSize < lightBytes)
+      {
+        nvrhi::BufferDesc bufDesc;
+        bufDesc.byteSize = lightBytes;
+        bufDesc.structStride = sizeof(shaderinterop::LightGpu);
+        bufDesc.canHaveRawViews = false;
+        bufDesc.canHaveTypedViews = false;
+        bufDesc.format = nvrhi::Format::UNKNOWN;
+        bufDesc.debugName = "scene.lights";
+        bufDesc.initialState = nvrhi::ResourceStates::ShaderResource;
+        bufDesc.keepInitialState = true;
+        _impl->lightsGpuBuffer = _impl->device->createBuffer(bufDesc);
+        if (!_impl->lightsGpuBuffer)
+        {
+          return std::unexpected{
+              PYXIS_ERROR(ErrorKind::OutOfMemoryGpu,
+                          "CommitResources: createBuffer(lights, %zu bytes) failed",
+                          lightBytes)};
+        }
+      }
+      commandList->writeBuffer(_impl->lightsGpuBuffer.Get(), packedLights.data(),
+                               lightBytes);
+    }
+    _impl->lightsNeedGpuUpload = false;
+  }
+
   // ---- Build pending BLAS -------------------------------------------
   // §16 split rule: PreferFastTrace always, AllowCompaction for ≥
   // 64k tris. AllowUpdate is never set in v1 — animation is post-v1
@@ -1488,6 +1594,10 @@ nvrhi::IBuffer* GpuScene::GetMaterialBuffer() const noexcept {
 
 nvrhi::IBuffer* GpuScene::GetInstanceMaterialBuffer() const noexcept {
   return _impl->instanceMaterialBuffer.Get();
+}
+
+nvrhi::IBuffer* GpuScene::GetLightBuffer() const noexcept {
+  return _impl->lightsGpuBuffer.Get();
 }
 
 // ---- Introspection ---------------------------------------------------------

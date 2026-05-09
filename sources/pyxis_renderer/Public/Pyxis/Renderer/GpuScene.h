@@ -165,6 +165,17 @@ public:
   // on the first CommitResources that built one; nullptr before that.
   [[nodiscard]] nvrhi::IBuffer*          GetInstanceMaterialBuffer() const noexcept;
 
+  // M7: structured buffer of `LightGpu` entries (resources/shaders/
+  // ShaderInterop.slang) packed from the LightDesc copies of every
+  // LIVE LightHandle. Sized to the live-light count (sparse / dead
+  // slots are omitted, NOT included as holes — the closesthit
+  // iterates the buffer's full length). Allocated lazily on the
+  // first CommitResources that observed at least one AddLight;
+  // nullptr before that — PathTracePass binds a 1-element zero
+  // sentinel fallback in that case so the closesthit never reads
+  // an unbound buffer.
+  [[nodiscard]] nvrhi::IBuffer*          GetLightBuffer() const noexcept;
+
 private:
   // PIMPL: NVRHI handles, entry-table vectors, per-frame ring slots
   // live behind this pointer so the public header stays NVRHI- and

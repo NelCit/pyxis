@@ -76,6 +76,14 @@ class PathTracePass final : public IRenderPass {
   // (the sentinel grey material).
   nvrhi::BufferHandle _fallbackInstanceMaterialBuffer;
 
+  // M7: 1-element fallback light buffer. Bound at binding 5 when
+  // GpuScene has no lights (no AddLight call yet). Holds a single
+  // LightGpu with intensity = 0 so the closesthit's per-light
+  // contribution loop sees one disabled entry and falls through to
+  // the M5/M6 baseColor-only path — preserving byte-equal across
+  // M5 + M6 fixtures that don't author lights.
+  nvrhi::BufferHandle _fallbackLightBuffer;
+
   // Output binding-set cache, keyed on the output texture pointer.
   // Bounded — a swapchain rebuild churns through up to ~3 swapchain
   // images, so 6 entries is more than enough headroom and the
@@ -95,6 +103,9 @@ class PathTracePass final : public IRenderPass {
   // build, so an empty scene that gains its first instance between
   // frames needs the cached binding sets thrown out.
   nvrhi::IBuffer* _lastSeenInstanceMaterialBuffer = nullptr;
+
+  // M7: same invalidation handle for the lights buffer at binding 5.
+  nvrhi::IBuffer* _lastSeenLightBuffer = nullptr;
 
   bool _shadersOk = false;  // true if ctor loaded all three shaders + built pipeline.
 };

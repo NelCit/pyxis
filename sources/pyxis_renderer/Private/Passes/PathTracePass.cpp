@@ -123,6 +123,7 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
       nvrhi::BindingLayoutItem::Texture_UAV(2),              // binding 2 output
       nvrhi::BindingLayoutItem::StructuredBuffer_SRV(3),     // binding 3 materials (M5)
       nvrhi::BindingLayoutItem::StructuredBuffer_SRV(4),     // binding 4 instance→material (M6)
+      nvrhi::BindingLayoutItem::StructuredBuffer_SRV(5),     // binding 5 lights (M7)
   };
   _bindingLayout = _device->createBindingLayout(layoutDesc);
   if (!_bindingLayout)
@@ -232,6 +233,26 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
     return;
   }
 
+  // M7: 1-element fallback lights buffer. Same shape as the material
+  // fallback — one disabled (intensity=0) LightGpu so the closesthit
+  // per-light loop sees one entry that contributes nothing → falls
+  // through to the M5/M6 baseColor-only path.
+  nvrhi::BufferDesc lightFallbackDesc;
+  lightFallbackDesc.byteSize = sizeof(shaderinterop::LightGpu);
+  lightFallbackDesc.structStride = sizeof(shaderinterop::LightGpu);
+  lightFallbackDesc.canHaveRawViews = false;
+  lightFallbackDesc.canHaveTypedViews = false;
+  lightFallbackDesc.format = nvrhi::Format::UNKNOWN;
+  lightFallbackDesc.debugName = "PathTrace.FallbackLights";
+  lightFallbackDesc.initialState = nvrhi::ResourceStates::ShaderResource;
+  lightFallbackDesc.keepInitialState = true;
+  _fallbackLightBuffer = _device->createBuffer(lightFallbackDesc);
+  if (!_fallbackLightBuffer)
+  {
+    Logging::Get().Error(log::RENDER, "PathTracePass: createBuffer(FallbackLights) failed");
+    return;
+  }
+
   _shadersOk = true;
   Logging::Get().Info(log::RENDER, "PathTracePass: initialised (RT pipeline + SBT ready)");
 }
@@ -239,19 +260,23 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
 PathTracePass::~PathTracePass() = default;
 
 nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(nvrhi::ITexture* output) {
-  // M5/M6: invalidate cache when EITHER the scene's material buffer
-  // OR its instance→material side-table flips. Both are lazy-
-  // allocated by GpuScene; a scene that started empty but gained
-  // its first instance/material between frames needs the cached
-  // binding sets thrown out.
+  // M5/M6/M7: invalidate cache when ANY of the scene's lazy buffers
+  // (materials, instance→material side-table, lights) flips. Each
+  // is lazy-allocated by GpuScene on the first relevant verb, so a
+  // scene that started empty but gained its first material /
+  // instance / light between frames needs the cached binding sets
+  // thrown out.
   nvrhi::IBuffer* sceneMaterials = _scene->GetMaterialBuffer();
   nvrhi::IBuffer* sceneInstanceMaterial = _scene->GetInstanceMaterialBuffer();
+  nvrhi::IBuffer* sceneLights = _scene->GetLightBuffer();
   if (sceneMaterials != _lastSeenMaterialBuffer
-      || sceneInstanceMaterial != _lastSeenInstanceMaterialBuffer)
+      || sceneInstanceMaterial != _lastSeenInstanceMaterialBuffer
+      || sceneLights != _lastSeenLightBuffer)
   {
     _bindingSetCache.clear();
     _lastSeenMaterialBuffer = sceneMaterials;
     _lastSeenInstanceMaterialBuffer = sceneInstanceMaterial;
+    _lastSeenLightBuffer = sceneLights;
   }
 
   if (auto cached = _bindingSetCache.find(output); cached != _bindingSetCache.end())
@@ -264,8 +289,8 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(nvrhi::ITexture* ou
     _bindingSetCache.clear();
   }
 
-  // Slot numbers match the BindingLayoutDesc above (0..4 with zero
-  // offsets) so NVRHI emits Vulkan bindings 0..4 to match the
+  // Slot numbers match the BindingLayoutDesc above (0..5 with zero
+  // offsets) so NVRHI emits Vulkan bindings 0..5 to match the
   // shaders' `[[vk::binding(N, 0)]]` declarations.
   // M5: binding 3 is the materials structured buffer — scene's own
   // (when AcquireMaterial has been called + CommitResources has
@@ -274,12 +299,19 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(nvrhi::ITexture* ou
   // M6: binding 4 is the instance→material side-table — scene's
   // own (when CommitResources has built a TLAS) or the 1-element
   // fallback (used by truly-empty scenes).
+  // M7: binding 5 is the lights buffer — scene's own (when AddLight
+  // has been called + CommitResources has run) or the 1-element
+  // intensity=0 sentinel fallback (used by unlit M5/M6 fixtures so
+  // the closesthit per-light loop falls through to baseColor-only).
   nvrhi::IBuffer* materialBuffer = _scene->GetMaterialBuffer();
   if (materialBuffer == nullptr)
     materialBuffer = _fallbackMaterialBuffer.Get();
   nvrhi::IBuffer* instanceMaterialBuffer = _scene->GetInstanceMaterialBuffer();
   if (instanceMaterialBuffer == nullptr)
     instanceMaterialBuffer = _fallbackInstanceMaterialBuffer.Get();
+  nvrhi::IBuffer* lightBuffer = _scene->GetLightBuffer();
+  if (lightBuffer == nullptr)
+    lightBuffer = _fallbackLightBuffer.Get();
 
   nvrhi::BindingSetDesc setDesc;
   setDesc.bindings = {
@@ -288,6 +320,7 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(nvrhi::ITexture* ou
       nvrhi::BindingSetItem::Texture_UAV(2, output),
       nvrhi::BindingSetItem::StructuredBuffer_SRV(3, materialBuffer),
       nvrhi::BindingSetItem::StructuredBuffer_SRV(4, instanceMaterialBuffer),
+      nvrhi::BindingSetItem::StructuredBuffer_SRV(5, lightBuffer),
   };
   nvrhi::BindingSetHandle set = _device->createBindingSet(setDesc, _bindingLayout);
   _bindingSetCache[output] = set;
@@ -376,6 +409,19 @@ void PathTracePass::Execute(nvrhi::ICommandList* commandList, const PassContext&
     commandList->writeBuffer(_fallbackInstanceMaterialBuffer.Get(),
                              &FALLBACK_INSTANCE_MATERIAL_ZERO,
                              sizeof(FALLBACK_INSTANCE_MATERIAL_ZERO));
+  }
+
+  // M7: same shape for the lights fallback. One zero-init LightGpu
+  // (intensity=0) so the closesthit per-light loop sees one disabled
+  // entry and falls through to the M5/M6 baseColor-only path —
+  // preserving byte-equal across M5 + M6 fixtures that don't author
+  // lights.
+  if (_scene->GetLightBuffer() == nullptr)
+  {
+    static const shaderinterop::LightGpu FALLBACK_LIGHT_DISABLED{};
+    commandList->writeBuffer(_fallbackLightBuffer.Get(),
+                             &FALLBACK_LIGHT_DISABLED,
+                             sizeof(FALLBACK_LIGHT_DISABLED));
   }
 
   // ---- Bind + dispatch ----------------------------------------------
