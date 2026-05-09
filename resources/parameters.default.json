@@ -25,5 +25,9 @@
 
   "paths": {
     "scene":           ""
+  },
+
+  "app": {
+    "ingest":          "hydra"
   }
 }

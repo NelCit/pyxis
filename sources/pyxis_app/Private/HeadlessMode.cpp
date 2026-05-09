@@ -7,6 +7,8 @@
 #include "Output/TextureReadback.h"
 #include "Render/AovTextures.h"
 #include "Render/HardcodedCubeScene.h"
+#include "Scene/SceneResolver.h"
+#include "UsdDirectEngine/UsdDirectEngine.h"
 #include "ViewerMode.h"
 
 #include <Pyxis/Platform/Device/DeviceCreationParams.h>
@@ -40,8 +42,11 @@ constexpr int EXIT_RUNTIME_FAIL = 4;      // Render-time failure: scene init, st
 
 }  // namespace
 
-int RunHeadless(const Configuration& config) noexcept {
+int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene) noexcept {
   auto& log = Logging::Get();
+  (void)resolvedScene;  // M4 P5d/P5e wire ingest engines; for now
+                        // the hardcoded cube fallback covers both
+                        // adapters.
 
   // §27 ValidateForHeadless: non-zero seed (§33.7), non-empty
   // output.image, non-zero render dims. Surfaces a config-fail exit
@@ -140,16 +145,39 @@ int RunHeadless(const Configuration& config) noexcept {
   gpuSceneDesc.framesInFlight = HEADLESS_FRAMES_IN_FLIGHT;
   GpuScene gpuScene{device, profiler, gpuSceneDesc};
 
-  // M3 hardcoded cube + camera + distant light. M3.5 + M4 replace
-  // this with USD-loaded scene content; until then it's the only
-  // thing that gets rendered.
-  if (auto cubeResult =
-          BuildHardcodedCubeScene(gpuScene, config.render.width, config.render.height);
-      !cubeResult)
+  // M4 ingest dispatch on `app.ingest`. UsdDirectEngine wires
+  // through pyxis_usd_ingest's StageWalker; HydraEngine wires
+  // through pyxis_hydra (P5d/P5e). Either engine failing or
+  // returning "nothing emitted" falls back to the M3 hardcoded
+  // cube so pyxis.exe always produces a renderable image (the
+  // §29.4.a "must produce a renderable image" contract).
+  bool sceneLoaded = false;
+  if (!resolvedScene.path.empty())
   {
-    log.Error(log::APP, "headless: " + cubeResult.error());
-    scene.Shutdown();
-    return EXIT_RUNTIME_FAIL;
+    if (config.app.ingest == "usd_direct")
+    {
+      UsdDirectEngine engine;
+      sceneLoaded = engine.Load(resolvedScene.path, gpuScene);
+    }
+    else if (config.app.ingest == "hydra")
+    {
+      // P5e: HydraEngine wires UsdImagingStageSceneIndex +
+      // HdRenderIndex + HdPyxisRenderDelegate here. Until then the
+      // Hydra path falls through to the cube fallback below.
+      log.Info(log::APP, "headless: app.ingest=hydra; HydraEngine wires at P5e — "
+                         "falling back to M3 cube for now.");
+    }
+  }
+  if (!sceneLoaded)
+  {
+    if (auto cubeResult =
+            BuildHardcodedCubeScene(gpuScene, config.render.width, config.render.height);
+        !cubeResult)
+    {
+      log.Error(log::APP, "headless: " + cubeResult.error());
+      scene.Shutdown();
+      return EXIT_RUNTIME_FAIL;
+    }
   }
 
   RendererCreateDesc rendererDesc{};
@@ -285,11 +313,12 @@ int RunHeadless(const Configuration& config) noexcept {
   return EXIT_OK;
 }
 
-int RunViewer(const Configuration& config, std::string_view screenshotPath) noexcept {
-  // Viewer keeps the M1 entrypoint shape — config feeds adapter +
-  // validation + render dims, screenshotPath is the orthogonal
-  // --screenshot capture flag.
-  return RunViewerLoop(config, screenshotPath);
+int RunViewer(const Configuration& config, const ResolvedScene& resolvedScene,
+              std::string_view screenshotPath) noexcept {
+  // Viewer keeps the M1 entrypoint shape; M4 P5d/P5e wires
+  // resolvedScene through to the engine dispatch inside
+  // RunViewerLoop.
+  return RunViewerLoop(config, resolvedScene, screenshotPath);
 }
 
 }  // namespace pyxis::app

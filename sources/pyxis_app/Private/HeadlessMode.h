@@ -12,14 +12,20 @@
 namespace pyxis::app {
 
 struct Configuration;
+struct ResolvedScene;
 
 // Returns the process exit code (§41: 0 ok, 2 device init fail).
-// Drives the offscreen render-target path + EXR writer.
-int RunHeadless(const Configuration& config) noexcept;
+// Drives the offscreen render-target path + EXR writer. `scene` is
+// the §29.4.a chain result; the mode dispatches on
+// `config.app.ingest` to pick the matching engine (HydraEngine /
+// UsdDirectEngine), or falls back to the M3 hardcoded cube if the
+// resolved path is unloadable.
+int RunHeadless(const Configuration& config, const ResolvedScene& scene) noexcept;
 
 // Viewer mode. screenshotPath is the M1 --screenshot debug capture
 // (non-empty -> render a few warmup frames, write a PNG, exit 0).
 // Empty = normal interactive viewer.
-int RunViewer(const Configuration& config, std::string_view screenshotPath) noexcept;
+int RunViewer(const Configuration& config, const ResolvedScene& scene,
+              std::string_view screenshotPath) noexcept;
 
 }  // namespace pyxis::app

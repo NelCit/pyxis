@@ -7,6 +7,8 @@
 #include "Output/TextureReadback.h"
 #include "Render/AovTextures.h"
 #include "Render/HardcodedCubeScene.h"
+#include "Scene/SceneResolver.h"
+#include "UsdDirectEngine/UsdDirectEngine.h"
 
 #include <Pyxis/Platform/Device/DeviceCreationParams.h>
 #include <Pyxis/Platform/Device/IDeviceManager.h>
@@ -137,7 +139,8 @@ bool CaptureBackbufferToPng(nvrhi::IDevice* device, nvrhi::ICommandList* command
 
 }  // namespace
 
-int RunViewerLoop(const Configuration& config, std::string_view screenshotPath) noexcept {
+int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScene,
+                  std::string_view screenshotPath) noexcept {
   auto& log = Logging::Get();
 
   // ---- Window ----------------------------------------------------------
@@ -213,7 +216,29 @@ int RunViewerLoop(const Configuration& config, std::string_view screenshotPath) 
   // M3 hardcoded cube + camera + distant light, identical to the
   // headless fixture. M3.5 + M4 replace this with the USD-loaded
   // scene chain.
-  if (auto cubeResult = BuildHardcodedCubeScene(gpuScene, winDesc.width, winDesc.height);
+  // M4 ingest dispatch on `app.ingest`. UsdDirectEngine wires
+  // through pyxis_usd_ingest's StageWalker; HydraEngine lands at
+  // M4 P5e. Either failing or returning "nothing emitted" falls
+  // back to the M3 hardcoded cube so pyxis.exe always renders.
+  bool sceneLoaded = false;
+  if (!resolvedScene.path.empty())
+  {
+    if (config.app.ingest == "usd_direct")
+    {
+      UsdDirectEngine engine;
+      sceneLoaded = engine.Load(resolvedScene.path, gpuScene);
+    }
+    else if (config.app.ingest == "hydra")
+    {
+      log.Info(log::APP, "ViewerMode: app.ingest=hydra; HydraEngine wires at P5e — "
+                         "falling back to M3 cube for now.");
+    }
+  }
+  if (sceneLoaded)
+  {
+    log.Info(log::APP, "ViewerMode: scene loaded via " + config.app.ingest + " adapter.");
+  }
+  else if (auto cubeResult = BuildHardcodedCubeScene(gpuScene, winDesc.width, winDesc.height);
       !cubeResult)
   {
     log.Error(log::APP, "ViewerMode: " + cubeResult.error());

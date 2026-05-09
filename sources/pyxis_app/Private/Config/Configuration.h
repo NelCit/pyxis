@@ -67,6 +67,25 @@ struct PathsConfig {
   std::string scene;
 };
 
+// ----- §27.app -----------------------------------------------------------
+// Application-wide knobs that don't fit the render / output / paths
+// buckets. M4 adds `ingest`; M5+ may add `theme`, `language`, etc.
+struct AppConfig {
+  // §3 / §25.O. Selects which ingest adapter the app drives at
+  // startup:
+  //   - "hydra"      → HydraEngine (UsdImagingStageSceneIndex +
+  //                     HdRenderIndex + HdPyxisRenderDelegate).
+  //                     The default — matches what DCCs (usdview,
+  //                     Solaris, Maya-USD) drive when they pick
+  //                     Pyxis through the Hd plugin registry.
+  //   - "usd_direct" → UsdDirectEngine (one-shot StageWalker,
+  //                     no Hydra dep). Lighter for headless farm
+  //                     workers and CI.
+  // Both adapters MUST produce byte-identical EXR output for the
+  // same .usd input (§25.O.3 P0 invariant).
+  std::string ingest = "hydra";
+};
+
 // ----- The whole tree ----------------------------------------------------
 struct Configuration {
   RenderConfig render;
@@ -74,8 +93,9 @@ struct Configuration {
   DiagnosticsConfig diagnostics;
   LimitsConfig limits;
   PathsConfig paths;
-  // M5+ sections (app.ingest, textures, geometry, hydra, profiling)
-  // land alongside the systems that consume them.
+  AppConfig app;
+  // M5+ sections (textures, geometry, hydra, profiling) land
+  // alongside the systems that consume them.
 };
 
 // Overlay a parameters.json document onto an existing Configuration.

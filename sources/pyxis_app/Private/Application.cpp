@@ -98,25 +98,22 @@ int Run(int argc, char** argv) noexcept {
   }
   const Configuration& config = *resolved;
 
-  // §29.4.a default-scene resolution. M3.5 logs the resolved-source
-  // line for support-ticket triage; M4+ feeds `scene.path` into the
-  // ingest layer. SceneResolver itself is non-failing — a None
-  // result means the install is broken (bundled default missing) and
-  // SceneResolver already logged an Error; the renderer continues
-  // with the M3 hardcoded cube fallback inside HeadlessMode /
-  // ViewerMode, so pyxis.exe still produces an image.
-  {
-    const ResolvedScene scene = ResolveScene(cli, config);
-    Logging::Get().Info(
-        log::APP, std::string{"scene.resolved.source = "}
-                      + std::string{SceneSourceLabel(scene.source)} + "  path = " + scene.path);
-  }
+  // §29.4.a default-scene resolution. M4 hands the resolved path to
+  // the ingest engine (HydraEngine / UsdDirectEngine selected via
+  // `config.app.ingest`); engine load failure falls back to the M3
+  // hardcoded cube path inside HeadlessMode / ViewerMode so
+  // pyxis.exe always produces an image.
+  const ResolvedScene scene = ResolveScene(cli, config);
+  Logging::Get().Info(
+      log::APP, std::string{"scene.resolved.source = "}
+                    + std::string{SceneSourceLabel(scene.source)} + "  path = " + scene.path);
+  Logging::Get().Info(log::APP, "app.ingest = " + config.app.ingest);
 
   if (cli.headless)
   {
-    return RunHeadless(config);
+    return RunHeadless(config, scene);
   }
-  return RunViewer(config, cli.screenshotPath);
+  return RunViewer(config, scene, cli.screenshotPath);
 }
 
 }  // namespace pyxis::app

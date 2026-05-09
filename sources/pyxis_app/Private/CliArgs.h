@@ -35,8 +35,9 @@ struct CliArgs {
 
   // ---- §26 config + scene --------------------------------------------
   std::string_view configPath;     // --config <path>
-  std::string_view scenePath;      // --scene <path>  (M2: stored, M4 wires)
+  std::string_view scenePath;      // --scene <path>  (M3.5 wires through SceneResolver)
   std::string_view cameraSdfPath;  // --camera <sdfPath>  (M2: stored)
+  std::string_view ingest;         // --ingest hydra|usd_direct  (overrides app.ingest)
 
   // ---- §26 render / output overrides ---------------------------------
   // Zero means "no override; defer to JSON or default". Non-zero
