@@ -47,6 +47,7 @@ APACHE2_COMPATIBLE = {
     "Zlib",
     "Unlicense",             # public domain
     "Public-Domain",
+    "CC0-1.0",               # Creative Commons Zero — public-domain dedication
 }
 
 # Explicitly forbidden licences (plan §48.3 — copyleft incompat with Apache-2.0).
@@ -196,6 +197,23 @@ COMPONENTS: list[Component] = [
 ]
 
 
+# Bundled scene assets (data files shipped under resources/, not linked
+# software). Same render shape as Component above so attribution lines
+# up; rendered into a dedicated "Bundled scene assets" section in the
+# NOTICE so consumers can see at a glance what's source vs data.
+BUNDLED_ASSETS: list[Component] = [
+    Component(
+        "Kloofendal 43d Clear PureSky (default_sky.exr)",
+        "https://polyhaven.com/a/kloofendal_43d_clear_puresky",
+        "CC0-1.0",
+        "pyxis_app (resources/scenes/default_sky.exr — bundled dome-light "
+        "environment for the §29.4.a default startup scene)",
+        "Authored by Greg Zaal for Poly Haven; redistributed under the "
+        "Creative Commons Zero (public-domain dedication) per polyhaven.com.",
+    ),
+]
+
+
 def validate_licences(components: Iterable[Component]) -> list[str]:
     """Return list of error strings for any forbidden / unknown licence."""
     errors: list[str] = []
@@ -213,7 +231,9 @@ def validate_licences(components: Iterable[Component]) -> list[str]:
     return errors
 
 
-def render_notice(components: Iterable[Component]) -> str:
+def render_notice(
+    components: Iterable[Component], bundled_assets: Iterable[Component]
+) -> str:
     header = """\
 Pyxis
 Copyright 2026 The Pyxis Project Authors
@@ -238,6 +258,19 @@ Boost-equivalent). No GPL, AGPL, or SSPL components are linked.
 """
     blocks = [c.render() for c in components]
     body = "\n\n".join(f"--------------------------------------------------------------------------------\n{b}" for b in blocks)
+
+    # Bundled scene assets — data files (HDRIs, textures, USD scenes)
+    # shipped under resources/. Distinct from the linked-software list
+    # above so consumers can see at a glance what's source vs data.
+    asset_section = ""
+    asset_blocks = [a.render() for a in bundled_assets]
+    if asset_blocks:
+        asset_section = "\n\n================================================================================\nBundled scene assets\n================================================================================\n\nData files (HDRIs, textures, default-scene USD) shipped under resources/.\nLicences are CC0 / public-domain unless noted otherwise.\n\n"
+        asset_section += "\n\n".join(
+            f"--------------------------------------------------------------------------------\n{b}"
+            for b in asset_blocks
+        )
+
     footer = """
 
 ================================================================================
@@ -262,7 +295,7 @@ NVIDIA Nsight Capture (optional)
 End of NOTICE
 ================================================================================
 """
-    return header + body + footer
+    return header + body + asset_section + footer
 
 
 def main() -> int:
@@ -275,7 +308,7 @@ def main() -> int:
                         help="Output path for generated NOTICE (default: NOTICE.generated).")
     args = parser.parse_args()
 
-    licence_errors = validate_licences(COMPONENTS)
+    licence_errors = validate_licences(COMPONENTS) + validate_licences(BUNDLED_ASSETS)
     if licence_errors:
         for e in licence_errors:
             print(f"license_audit: {e}", file=sys.stderr)
@@ -284,9 +317,11 @@ def main() -> int:
     if args.list:
         for c in COMPONENTS:
             print(f"{c.licence:24s}  {c.name}")
+        for a in BUNDLED_ASSETS:
+            print(f"{a.licence:24s}  {a.name}  (bundled asset)")
         return 0
 
-    generated = render_notice(COMPONENTS)
+    generated = render_notice(COMPONENTS, BUNDLED_ASSETS)
     args.out.write_text(generated, encoding="utf-8", newline="\n")
 
     if args.check:
