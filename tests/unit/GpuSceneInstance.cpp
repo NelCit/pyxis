@@ -272,3 +272,65 @@ TEST(GpuSceneInstance, LastFrameStatsTracksLiveInstanceCount) {
   fixture.scene.DestroyInstance(*second);
   EXPECT_EQ(fixture.scene.LastFrameStats().instanceCount, 0u);
 }
+
+// -----------------------------------------------------------------------------
+// §15 BLAS sharing rule, M6 P1: many TLAS instances of the same mesh
+// share one BLAS slot (one MeshEntry, one `entry.blas` allocation).
+// CommitResources can't run CPU-only (no device → createAccelStruct
+// would crash), so the GPU-side blasCount stays 0; what we DO pin is
+// the necessary upstream invariant: N AppendInstance calls against
+// one MeshHandle yield meshCount=1, instanceCount=N, and (since BLAS
+// is keyed on MeshHandle) blasCount can never exceed meshCount.
+//
+// Without this contract, a future refactor that accidentally
+// allocates a BLAS per AppendInstance instead of per MeshEntry
+// would blow GPU memory on Bistro-class scenes (10⁴ instances of the
+// same prototype mesh would mean 10⁴ duplicate BLAS).
+// -----------------------------------------------------------------------------
+TEST(GpuSceneInstance, ManyInstancesSharePrototypeMeshSlot) {
+  CpuOnlyScene fixture;
+  const MeshHandle prototype = fixture.MakeMesh();
+
+  constexpr int INSTANCE_COUNT = 100;
+  for (int i = 0; i < INSTANCE_COUNT; ++i)
+  {
+    const Expected<InstanceHandle> instance =
+        fixture.scene.AppendInstance(fixture.DescForMesh(prototype));
+    ASSERT_TRUE(instance.has_value()) << "AppendInstance " << i << " failed";
+  }
+
+  const auto stats = fixture.scene.LastFrameStats();
+  EXPECT_EQ(stats.meshCount, 1u)
+      << "100 instances must reference the single prototype MeshHandle, "
+         "not allocate one MeshEntry each";
+  EXPECT_EQ(stats.instanceCount, static_cast<uint64_t>(INSTANCE_COUNT));
+  // §15 BLAS sharing invariant: at most one BLAS per MeshEntry.
+  EXPECT_LE(stats.blasCount, stats.meshCount)
+      << "BLAS count must never exceed mesh count — §15 BLAS sharing rule";
+}
+
+// -----------------------------------------------------------------------------
+// §15 BLAS sharing rule, M6 P1: a scene with K distinct prototype
+// meshes + N instances of each yields meshCount=K, instanceCount=K*N,
+// and blasCount<=K. Pins the "one BLAS per prototype" rule from the
+// other direction (per-mesh allocation, not per-instance).
+// -----------------------------------------------------------------------------
+TEST(GpuSceneInstance, MultiplePrototypeMeshesEachOwnAtMostOneBlasSlot) {
+  CpuOnlyScene fixture;
+  const MeshHandle prototypeA = fixture.MakeMesh();
+  const MeshHandle prototypeB = fixture.MakeMesh();
+  const MeshHandle prototypeC = fixture.MakeMesh();
+
+  constexpr int INSTANCES_PER_PROTOTYPE = 30;
+  for (int i = 0; i < INSTANCES_PER_PROTOTYPE; ++i)
+  {
+    ASSERT_TRUE(fixture.scene.AppendInstance(fixture.DescForMesh(prototypeA)).has_value());
+    ASSERT_TRUE(fixture.scene.AppendInstance(fixture.DescForMesh(prototypeB)).has_value());
+    ASSERT_TRUE(fixture.scene.AppendInstance(fixture.DescForMesh(prototypeC)).has_value());
+  }
+
+  const auto stats = fixture.scene.LastFrameStats();
+  EXPECT_EQ(stats.meshCount, 3u);
+  EXPECT_EQ(stats.instanceCount, static_cast<uint64_t>(3 * INSTANCES_PER_PROTOTYPE));
+  EXPECT_LE(stats.blasCount, stats.meshCount);
+}
