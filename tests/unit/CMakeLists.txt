@@ -21,6 +21,7 @@ target_sources(pyxis_unit_tests PRIVATE
     GpuSceneLight.cpp
     GpuSceneCamera.cpp
     SceneResolver.cpp
+    UsdShadeToOpenPBR.cpp
 
     # The §9.2 RenderGraph + IRenderPass live in pyxis_renderer/Private
     # and don't cross the SHARED-DLL boundary. The unit-test harness is
@@ -48,12 +49,27 @@ target_include_directories(pyxis_unit_tests PRIVATE
 pyxis_set_target_compile_options(pyxis_unit_tests)
 pyxis_enable_exceptions_and_rtti(pyxis_unit_tests)
 
+find_package(pxr CONFIG REQUIRED)
+
 target_link_libraries(pyxis_unit_tests
     PRIVATE
         Pyxis::Platform
         Pyxis::Renderer
+        Pyxis::MaterialTranslation
+        usd
+        usdShade
+        sdf
+        tf
+        vt
+        gf
         GTest::gtest
         GTest::gtest_main
+)
+
+# UsdShadeToOpenPBR.cpp pulls USD's headers which trip C++20's
+# is_pod deprecation; same silence the ingest libs use.
+target_compile_definitions(pyxis_unit_tests PRIVATE
+    _SILENCE_CXX20_IS_POD_DEPRECATION_WARNING=1
 )
 
 include(GoogleTest)
