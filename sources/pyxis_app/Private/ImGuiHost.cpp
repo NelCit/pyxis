@@ -192,6 +192,11 @@ void ImGuiHost::BuildFpsPanel(const FrameProfile& frameProfile) noexcept {
   // (which grows when nested passes appear) without needing manual
   // sizing — sufficient for the M1 scope tree, replaced by an explicit
   // multi-column layout at M11.
+  // Default position top-left so it doesn't overlap the Scene panel
+  // (which opens at the right of it). FirstUseEver = the user can
+  // drag the window anywhere after first appearance and we won't
+  // teleport it back.
+  ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f), ImGuiCond_FirstUseEver);
   if (ImGui::Begin("Performance", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
   {
     const ImGuiIO& imguiIO = ImGui::GetIO();
@@ -252,6 +257,10 @@ void ImGuiHost::BuildScenePanel(const FrameStats& sceneStats) noexcept {
   };
   char bytesBuf[32];
 
+  // Default position to the right of the Performance panel so the
+  // two don't overlap on first launch. FirstUseEver lets the user
+  // drag freely after that.
+  ImGui::SetNextWindowPos(ImVec2(280.0f, 10.0f), ImGuiCond_FirstUseEver);
   if (ImGui::Begin("Scene", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
   {
     ImGui::Text("Counts");

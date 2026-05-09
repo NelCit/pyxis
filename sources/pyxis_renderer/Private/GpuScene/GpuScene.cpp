@@ -1952,11 +1952,17 @@ nvrhi::IBuffer* GpuScene::GetMeshFaceOffsetsBuffer() const noexcept {
 // ---- Introspection ---------------------------------------------------------
 FrameStats GpuScene::LastFrameStats() const {
   FrameStats stats = _impl->lastFrameStats;
-  // Recount live meshes / instances / lights / BLAS on read so
-  // stats reflect the current table state even before
-  // CommitResources lands.
+  // Recount live meshes / instances / lights / BLAS / materials /
+  // textures + their associated GPU memory on read so stats reflect
+  // the current table state even before CommitResources lands.
+  // Cumulative counters are derived here rather than maintained as
+  // delta increments because the cost (one walk over each table) is
+  // negligible at v1 scales (10⁴ entries max) and the derived form
+  // can never diverge from reality.
   uint64_t liveMeshCount = 0;
   uint64_t liveBlasCount = 0;
+  uint64_t vertexBytes = 0;
+  uint64_t indexBytes = 0;
   for (const Impl::MeshEntry& entry : _impl->meshes)
   {
     if (!entry.live)
@@ -1964,6 +1970,10 @@ FrameStats GpuScene::LastFrameStats() const {
     ++liveMeshCount;
     if (entry.blas)
       ++liveBlasCount;
+    if (entry.vertexBuffer)
+      vertexBytes += entry.vertexBuffer->getDesc().byteSize;
+    if (entry.indexBuffer)
+      indexBytes += entry.indexBuffer->getDesc().byteSize;
   }
   uint64_t liveInstanceCount = 0;
   for (const Impl::InstanceEntry& entry : _impl->instances)
@@ -1977,10 +1987,56 @@ FrameStats GpuScene::LastFrameStats() const {
     if (entry.live)
       ++liveLightCount;
   }
+  uint64_t liveMaterialCount = 0;
+  for (const Impl::MaterialEntry& entry : _impl->materials)
+  {
+    // Material slot 0 is the §19.7 sentinel — exclude it from the
+    // user-visible count.
+    if (entry.live)
+      ++liveMaterialCount;
+  }
+  uint64_t liveTextureCount = 0;
+  uint64_t textureBytes = 0;
+  for (const Impl::TextureEntry& entry : _impl->textures)
+  {
+    if (!entry.live)
+      continue;
+    ++liveTextureCount;
+    // Bytes per pixel by format. RGBA8 / SRGBA8 = 4; RGBA32_FLOAT = 16
+    // (HDR env-maps). Other formats fall through to 0 — add cases
+    // here when M8 introduces compressed / RGBA16F texture paths.
+    uint64_t bytesPerPixel = 0;
+    switch (entry.format)
+    {
+      case nvrhi::Format::RGBA8_UNORM:
+      case nvrhi::Format::SRGBA8_UNORM:
+        bytesPerPixel = 4;
+        break;
+      case nvrhi::Format::RGBA32_FLOAT:
+        bytesPerPixel = 16;
+        break;
+      default:
+        bytesPerPixel = 0;
+        break;
+    }
+    textureBytes += static_cast<uint64_t>(entry.width) * entry.height * bytesPerPixel;
+  }
   stats.meshCount = liveMeshCount;
   stats.blasCount = liveBlasCount;
   stats.instanceCount = liveInstanceCount;
   stats.lightCount = liveLightCount;
+  stats.materialCount = liveMaterialCount;
+  stats.textureCount = liveTextureCount;
+  stats.vertexBytes = vertexBytes;
+  stats.indexBytes = indexBytes;
+  stats.textureBytes = textureBytes;
+  // BLAS / TLAS byte counts are deferred — RTXMU's suballocation
+  // pool means individual `entry.blas->getDesc().byteSize` returns
+  // the LOGICAL build-info size, not the physical pool footprint.
+  // Reporting honest numbers needs an NVRHI hook into RTXMU's pool
+  // accounting — landing alongside the M8 perf-sweep work.
+  // Until then `blasBytes` / `tlasBytes` stay at 0 and the Scene
+  // panel shows them as such.
   return stats;
 }
 
