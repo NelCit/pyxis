@@ -1351,20 +1351,28 @@ Expected<void> GpuScene::CommitResources(nvrhi::ICommandList* commandList) {
         continue;
 
       nvrhi::rt::InstanceDesc desc;
-      // M5+ converts inst.worldFromLocal (column-vector float4x4
-      // with translation in last column) to NVRHI's 3x4 affine
-      // layout. The two layouts are nearly identical — drop pyxis
-      // row 3 (the [0,0,0,1] homogenous padding) and you get
-      // NVRHI's 12-float layout — but the packing helper lands when
-      // AppendInstance is exercised by real ingest. M3 ships
-      // identity for the cube fixture so the memcpy of
-      // c_IdentityTransform is correct unconditionally. NVRHI's
-      // AffineTransform is `float[12]` so we memcpy rather than
-      // assign.
-      std::memcpy(&desc.transform, &nvrhi::rt::c_IdentityTransform,
-                  sizeof(nvrhi::rt::AffineTransform));
+      // §10 row-major + column-vector float4x4 → NVRHI's 3x4 affine
+      // layout. NVRHI's AffineTransform is `float[12]` storing 3
+      // rows of 4 columns in row-major order — Pyxis's
+      // worldFromLocal rows 0..2 (drop row 3, the [0,0,0,1]
+      // homogeneous padding) are byte-equivalent. hlslpp::store
+      // writes 16 floats row-major; we keep the first 12.
+      float worldRowMajor[16];
+      hlslpp::store(worldRowMajor, inst.worldFromLocal);
+      std::memcpy(&desc.transform, worldRowMajor, sizeof(nvrhi::rt::AffineTransform));
       desc.instanceMask = 0xFF;
-      desc.instanceID = slot;
+      // §11 + plan §16 — instanceID is the closesthit's
+      // `InstanceID()`. We pack the MATERIAL slot here (24-bit cap
+      // matches §19.7's HANDLE_SLOT_BITS) so the closesthit can
+      // index materials[InstanceID()] directly without a separate
+      // instance→material lookup table. Slot 0 == sentinel /
+      // missing-material → magenta fallback already packed at
+      // CommitResources upload time.
+      const auto materialValue = static_cast<std::uint32_t>(inst.material);
+      const std::uint32_t materialSlot = (materialValue == 0)
+                                             ? 0u
+                                             : HandleSlot(materialValue);
+      desc.instanceID = materialSlot;
       desc.instanceContributionToHitGroupIndex = 0;
       desc.flags = nvrhi::rt::InstanceFlags::None;
       desc.bottomLevelAS = mesh.blas.Get();
@@ -1398,6 +1406,10 @@ const CameraDesc& GpuScene::GetCamera() const noexcept {
 
 bool GpuScene::HasCamera() const noexcept {
   return _impl->hasCamera;
+}
+
+nvrhi::IBuffer* GpuScene::GetMaterialBuffer() const noexcept {
+  return _impl->materialGpuBuffer.Get();
 }
 
 // ---- Introspection ---------------------------------------------------------

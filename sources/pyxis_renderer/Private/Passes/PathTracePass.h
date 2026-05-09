@@ -60,12 +60,27 @@ class PathTracePass final : public IRenderPass {
   // + viewFromClip inverses).
   nvrhi::BufferHandle _cameraUniformsBuffer;
 
+  // M5: 1-element fallback material buffer (the closesthit reads
+  // `materials[InstanceID()]` so the binding must always be a
+  // non-null buffer even when the scene has no materials yet).
+  // GpuScene's own materials buffer takes precedence at binding-set
+  // creation time when present; this fallback covers cube-fixture
+  // scenes that never call AcquireMaterial.
+  nvrhi::BufferHandle _fallbackMaterialBuffer;
+
   // Output binding-set cache, keyed on the output texture pointer.
   // Bounded — a swapchain rebuild churns through up to ~3 swapchain
   // images, so 6 entries is more than enough headroom and the
   // eviction-on-overflow keeps stale dangling pointers from
   // accumulating across re-init.
   std::unordered_map<nvrhi::ITexture*, nvrhi::BindingSetHandle> _bindingSetCache;
+
+  // M5: tracks the last-seen scene material-buffer pointer so the
+  // cache invalidates if the scene's lazy-allocated buffer flips
+  // from null (fallback) to non-null (real material table) between
+  // frames. Without this, the cached binding set would keep the
+  // stale fallback after the first AcquireMaterial.
+  nvrhi::IBuffer* _lastSeenMaterialBuffer = nullptr;
 
   bool _shadersOk = false;  // true if ctor loaded all three shaders + built pipeline.
 };

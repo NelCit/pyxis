@@ -55,6 +55,7 @@
 namespace nvrhi {
 class IDevice;
 class ICommandList;
+class IBuffer;
 namespace rt {
 class IAccelStruct;
 }  // namespace rt
@@ -145,6 +146,15 @@ public:
   [[nodiscard]] nvrhi::rt::IAccelStruct* GetTlas() const noexcept;
   [[nodiscard]] const CameraDesc&        GetCamera() const noexcept;
   [[nodiscard]] bool                     HasCamera() const noexcept;
+
+  // M5: structured buffer of OpenPBRMaterialGPU entries the
+  // closesthit reads via `materials[InstanceID()]` (resources/
+  // shaders/closesthit.slang binding 3). Allocated lazily on the
+  // first CommitResources that observed at least one
+  // AcquireMaterial — nullptr before that. The §11 packed layout
+  // is documented in resources/shaders/ShaderInterop.slang's
+  // `OpenPBRMaterialGPU` struct.
+  [[nodiscard]] nvrhi::IBuffer*          GetMaterialBuffer() const noexcept;
 
 private:
   // PIMPL: NVRHI handles, entry-table vectors, per-frame ring slots
