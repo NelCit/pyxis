@@ -1,19 +1,29 @@
 #!/usr/bin/env python3
-"""Pyxis — bootstrap generator for resources/scenes/default_sky.exr.
+"""Pyxis — fallback procedural generator for resources/scenes/default_sky.exr.
 
-Plan §29.4.a: a tiny 64×32 lat-long EXR shipped alongside default.usd
-that the bundled `UsdLuxDomeLight` references for indirect lighting +
-a recognisable horizon. Procedural overcast-sky gradient — desaturated
-warm horizon, cool blue-grey zenith, dark grey-green nadir hemisphere.
+Plan §29.4.a: the bundled `UsdLuxDomeLight` in default.usd references a
+lat-long EXR for indirect lighting + a recognisable horizon. The
+shipped `default_sky.exr` is the **CC0 Kloofendal 43d Clear PureSky**
+HDRI from Poly Haven (~5 MB, 1k lat-long, see NOTICE for attribution),
+not the procedural overcast this script generates.
+
+This script remains as a fallback / reference for offline / air-gapped
+re-bootstrap of the asset (e.g. if the Poly Haven CDN is unreachable
+during a clean-room rebuild). Procedural overcast — desaturated warm
+horizon, cool blue-grey zenith, dark grey-green nadir hemisphere.
 
 Run once from the repo root (the script is committed for
-reproducibility, the output binary is committed too):
+reproducibility; the bundled HDRI is the Poly Haven one, not this
+output):
 
     py _tools/gen_default_sky.py
 
 Output: resources/scenes/default_sky.exr (RGB half-float, ZIP scanline).
-At M3.5 this file is just bytes that ship; M5+/M7+ when DomeLight
-ingest goes online, the values feed the importance-sampling tables.
+**Running this overwrites the Poly Haven HDRI** — only do so if you
+intend to revert to the procedural fallback. M7-full's IBL importance-
+sampling tables consume the HDRI's actual radiance distribution; the
+procedural fallback works for M7-simple (uniform-NdotL ambient) but
+loses information at M7-full.
 """
 
 from __future__ import annotations

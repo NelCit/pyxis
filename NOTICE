@@ -128,6 +128,20 @@ GoogleTest
   Used by: pyxis_unit_tests.
 
 ================================================================================
+Bundled scene assets
+================================================================================
+
+Data files (HDRIs, textures, default-scene USD) shipped under resources/.
+Licences are CC0 / public-domain unless noted otherwise.
+
+--------------------------------------------------------------------------------
+Kloofendal 43d Clear PureSky (default_sky.exr)
+  https://polyhaven.com/a/kloofendal_43d_clear_puresky
+  CC0-1.0.
+  Used by: pyxis_app (resources/scenes/default_sky.exr — bundled dome-light environment for the §29.4.a default startup scene).
+  Authored by Greg Zaal for Poly Haven; redistributed under the Creative Commons Zero (public-domain dedication) per polyhaven.com.
+
+================================================================================
 Optional / build-time-only third-party components
 ================================================================================
 
