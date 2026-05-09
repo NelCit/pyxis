@@ -67,6 +67,111 @@ void ImGuiVulkanCheckResult(VkResult err) {
   log.Warn(pyxis::log::APP, msg);
 }
 
+// Pyxis theme — warm dark-grey background with a light-orange accent
+// (Pyxis is the "compass" constellation; the accent matches a sodium-
+// vapor / sunset orange glow against a dim instrument-panel background).
+// Same engineering-tool aesthetic as NVIDIA Donut, just our palette
+// instead of NVIDIA green.
+//
+// Pyxis accent palette (sRGB → linear-ish, ImGui takes 0..1 floats):
+//   Pyxis orange       0.961, 0.627, 0.290   (#f5a04a)
+//   Pyxis orange dim   .. with alpha 0.56
+//   Pyxis orange hot   1.000, 0.690, 0.400   (#ffb066)
+//   Window background  0.110, 0.110, 0.110   (#1c1c1c)
+//   Frame background   0.145, 0.145, 0.145   (#252525)
+//   Frame hovered      0.180, 0.180, 0.180   (#2e2e2e)
+//   Frame active       0.230, 0.230, 0.230   (#3a3a3a)
+//   Border             0.230, 0.230, 0.230   (#3a3a3a)
+//   Text               0.880, 0.880, 0.880   (#e0e0e0)
+//   Title BG active    0.227, 0.157, 0.078   (#3a2814) — orange-tinted
+void ApplyPyxisTheme() noexcept {
+  ImGuiStyle& style = ImGui::GetStyle();
+  ImVec4*     colors = style.Colors;
+
+  const ImVec4 pyxOrange       = ImVec4(0.961f, 0.627f, 0.290f, 1.000f);
+  const ImVec4 pyxOrangeDim    = ImVec4(0.961f, 0.627f, 0.290f, 0.560f);
+  const ImVec4 pyxOrangeHot    = ImVec4(1.000f, 0.690f, 0.400f, 1.000f);
+  const ImVec4 pyxOrangeMuted  = ImVec4(0.470f, 0.305f, 0.140f, 1.000f);
+  const ImVec4 windowBg        = ImVec4(0.110f, 0.110f, 0.110f, 1.000f);
+  const ImVec4 childBg         = ImVec4(0.090f, 0.090f, 0.090f, 1.000f);
+  const ImVec4 popupBg         = ImVec4(0.135f, 0.135f, 0.135f, 0.980f);
+  const ImVec4 frameBg         = ImVec4(0.145f, 0.145f, 0.145f, 1.000f);
+  const ImVec4 frameHover      = ImVec4(0.180f, 0.180f, 0.180f, 1.000f);
+  const ImVec4 frameActive     = ImVec4(0.230f, 0.230f, 0.230f, 1.000f);
+  const ImVec4 border          = ImVec4(0.230f, 0.230f, 0.230f, 1.000f);
+  const ImVec4 borderShadow    = ImVec4(0.000f, 0.000f, 0.000f, 0.000f);
+  const ImVec4 text            = ImVec4(0.880f, 0.880f, 0.880f, 1.000f);
+  const ImVec4 textDisabled    = ImVec4(0.500f, 0.500f, 0.500f, 1.000f);
+  const ImVec4 separator       = ImVec4(0.230f, 0.230f, 0.230f, 1.000f);
+  const ImVec4 headerBg        = ImVec4(0.180f, 0.180f, 0.180f, 1.000f);
+  const ImVec4 titleActive     = ImVec4(0.227f, 0.157f, 0.078f, 1.000f);
+
+  colors[ImGuiCol_Text]                  = text;
+  colors[ImGuiCol_TextDisabled]          = textDisabled;
+  colors[ImGuiCol_WindowBg]              = windowBg;
+  colors[ImGuiCol_ChildBg]               = childBg;
+  colors[ImGuiCol_PopupBg]               = popupBg;
+  colors[ImGuiCol_Border]                = border;
+  colors[ImGuiCol_BorderShadow]          = borderShadow;
+  colors[ImGuiCol_FrameBg]               = frameBg;
+  colors[ImGuiCol_FrameBgHovered]        = frameHover;
+  colors[ImGuiCol_FrameBgActive]         = frameActive;
+  colors[ImGuiCol_TitleBg]               = ImVec4(0.080f, 0.080f, 0.080f, 1.000f);
+  colors[ImGuiCol_TitleBgActive]         = titleActive;
+  colors[ImGuiCol_TitleBgCollapsed]      = ImVec4(0.080f, 0.080f, 0.080f, 0.760f);
+  colors[ImGuiCol_MenuBarBg]             = ImVec4(0.135f, 0.135f, 0.135f, 1.000f);
+  colors[ImGuiCol_ScrollbarBg]           = ImVec4(0.080f, 0.080f, 0.080f, 0.530f);
+  colors[ImGuiCol_ScrollbarGrab]         = ImVec4(0.310f, 0.310f, 0.310f, 1.000f);
+  colors[ImGuiCol_ScrollbarGrabHovered]  = ImVec4(0.410f, 0.410f, 0.410f, 1.000f);
+  colors[ImGuiCol_ScrollbarGrabActive]   = pyxOrange;
+  colors[ImGuiCol_CheckMark]             = pyxOrange;
+  colors[ImGuiCol_SliderGrab]            = pyxOrange;
+  colors[ImGuiCol_SliderGrabActive]      = pyxOrangeHot;
+  colors[ImGuiCol_Button]                = frameBg;
+  colors[ImGuiCol_ButtonHovered]         = pyxOrangeDim;
+  colors[ImGuiCol_ButtonActive]          = pyxOrange;
+  colors[ImGuiCol_Header]                = headerBg;
+  colors[ImGuiCol_HeaderHovered]         = pyxOrangeDim;
+  colors[ImGuiCol_HeaderActive]          = pyxOrange;
+  colors[ImGuiCol_Separator]             = separator;
+  colors[ImGuiCol_SeparatorHovered]      = pyxOrangeDim;
+  colors[ImGuiCol_SeparatorActive]       = pyxOrange;
+  colors[ImGuiCol_ResizeGrip]            = ImVec4(0.620f, 0.405f, 0.190f, 0.250f);
+  colors[ImGuiCol_ResizeGripHovered]     = pyxOrangeDim;
+  colors[ImGuiCol_ResizeGripActive]      = pyxOrange;
+  colors[ImGuiCol_Tab]                   = headerBg;
+  colors[ImGuiCol_TabHovered]            = pyxOrangeDim;
+  colors[ImGuiCol_TabSelected]           = pyxOrangeMuted;
+  colors[ImGuiCol_TabDimmed]             = ImVec4(0.080f, 0.080f, 0.080f, 0.970f);
+  colors[ImGuiCol_TabDimmedSelected]     = ImVec4(0.300f, 0.200f, 0.090f, 1.000f);
+  colors[ImGuiCol_PlotLines]             = pyxOrange;
+  colors[ImGuiCol_PlotLinesHovered]      = pyxOrangeHot;
+  colors[ImGuiCol_PlotHistogram]         = pyxOrange;
+  colors[ImGuiCol_PlotHistogramHovered]  = pyxOrangeHot;
+  colors[ImGuiCol_TextSelectedBg]        = ImVec4(0.470f, 0.305f, 0.140f, 0.350f);
+  colors[ImGuiCol_DragDropTarget]        = pyxOrange;
+  colors[ImGuiCol_NavCursor]             = pyxOrange;
+  colors[ImGuiCol_NavWindowingHighlight] = ImVec4(1.000f, 1.000f, 1.000f, 0.700f);
+  colors[ImGuiCol_NavWindowingDimBg]     = ImVec4(0.800f, 0.800f, 0.800f, 0.200f);
+  colors[ImGuiCol_ModalWindowDimBg]      = ImVec4(0.800f, 0.800f, 0.800f, 0.350f);
+
+  // Geometry: slim padding + small rounding for an engineering look.
+  style.WindowPadding     = ImVec2(8.0f, 8.0f);
+  style.WindowRounding    = 3.0f;
+  style.WindowBorderSize  = 1.0f;
+  style.FramePadding      = ImVec2(6.0f, 4.0f);
+  style.FrameRounding     = 3.0f;
+  style.FrameBorderSize   = 0.0f;
+  style.ItemSpacing       = ImVec2(8.0f, 4.0f);
+  style.ItemInnerSpacing  = ImVec2(6.0f, 4.0f);
+  style.IndentSpacing     = 16.0f;
+  style.ScrollbarSize     = 12.0f;
+  style.ScrollbarRounding = 3.0f;
+  style.GrabMinSize       = 8.0f;
+  style.GrabRounding      = 2.0f;
+  style.TabRounding       = 3.0f;
+}
+
 }  // namespace
 
 ImGuiHost::~ImGuiHost() {
@@ -105,6 +210,7 @@ bool ImGuiHost::Init(IWindow* window, IDeviceManager* deviceManager) noexcept {
   imguiIO.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 
   ImGui::StyleColorsDark();
+  ApplyPyxisTheme();
 
   // -- GLFW backend -----------------------------------------------------
   auto* glfwWindow = static_cast<GLFWwindow*>(window->NativeHandle());
@@ -197,91 +303,205 @@ void ImGuiHost::OnSwapchainRebuilt(uint32_t /*imageCount*/) noexcept {
   // stays for the future when ImGui upstream fixes the FIXME.
 }
 
+namespace {
+
+// ImPlot-style dual-line chart drawn directly via ImDrawList. Two
+// overlaid series (CPU green + GPU blue), auto-scaled Y axis with
+// 4 horizontal grid lines + tick labels, top-right legend. Reproduces
+// the visual of ImPlot::PlotLine without taking the dep — see the
+// $ImGui-1.92-incompat block in _cmake/Thirdparty.cmake for why.
+//
+// Reads from a single ring buffer per series, head-offset-aware so the
+// line "scrolls" left as new samples push in. Y range is computed
+// across both rings + rounded up to the next 5 ms bucket so a one-
+// frame spike doesn't rescale every other frame. ImGui ID via the
+// implicit window ID + DummyItem reserve so multiple instances per
+// window don't collide.
+void DrawDualLineChart(const float* seriesA, const float* seriesB,
+                       std::size_t sampleCount, std::size_t headOffset,
+                       const char* labelA, const char* labelB,
+                       float chartHeight) noexcept {
+  if (sampleCount == 0)
+    return;
+
+  // Reserve canvas space; ImGui assigns the rect.
+  const ImVec2 canvasOrigin = ImGui::GetCursorScreenPos();
+  const float  canvasWidth  = ImGui::GetContentRegionAvail().x;
+  const ImVec2 canvasSize(canvasWidth, chartHeight);
+  ImGui::Dummy(canvasSize);
+  ImDrawList* drawList = ImGui::GetWindowDrawList();
+
+  // Padding inside the canvas: leave room on the left for Y-axis tick
+  // labels and on the bottom for the X-axis baseline.
+  const float padLeft   = 38.0f;
+  const float padRight  =  6.0f;
+  const float padTop    =  6.0f;
+  const float padBottom = 14.0f;
+  const ImVec2 plotMin(canvasOrigin.x + padLeft, canvasOrigin.y + padTop);
+  const ImVec2 plotMax(canvasOrigin.x + canvasSize.x - padRight,
+                       canvasOrigin.y + canvasSize.y - padBottom);
+  const float  plotW = plotMax.x - plotMin.x;
+  const float  plotH = plotMax.y - plotMin.y;
+
+  // Background panel + frame.
+  const ImU32 bgColor      = IM_COL32(20, 20, 20, 255);
+  const ImU32 frameColor   = IM_COL32(58, 58, 58, 255);
+  const ImU32 gridColor    = IM_COL32(45, 45, 45, 255);
+  const ImU32 axisColor    = IM_COL32(90, 90, 90, 255);
+  const ImU32 textColor    = IM_COL32(180, 180, 180, 255);
+  const ImU32 cpuColor     = IM_COL32(245, 160, 74, 255);  // Pyxis orange
+  const ImU32 gpuColor     = IM_COL32( 95, 175, 240, 255); // cool blue
+  drawList->AddRectFilled(canvasOrigin,
+                          ImVec2(canvasOrigin.x + canvasSize.x, canvasOrigin.y + canvasSize.y),
+                          bgColor, 3.0f);
+  drawList->AddRect(canvasOrigin,
+                    ImVec2(canvasOrigin.x + canvasSize.x, canvasOrigin.y + canvasSize.y),
+                    frameColor, 3.0f);
+
+  // Auto-scale Y range. Combine both series for a single shared axis
+  // so CPU + GPU read at the same scale.
+  float maxMs = 1.0f;
+  for (std::size_t i = 0; i < sampleCount; ++i)
+  {
+    if (seriesA[i] > maxMs) maxMs = seriesA[i];
+    if (seriesB[i] > maxMs) maxMs = seriesB[i];
+  }
+  maxMs = std::ceil(maxMs / 5.0f) * 5.0f;
+  if (maxMs < 5.0f) maxMs = 5.0f;
+
+  // Y-axis grid + tick labels (4 ticks: 0, max/4, max/2, 3*max/4, max).
+  for (int tick = 0; tick <= 4; ++tick)
+  {
+    const float frac = static_cast<float>(tick) / 4.0f;
+    const float yPos = plotMax.y - frac * plotH;
+    const ImU32 lineCol = (tick == 0) ? axisColor : gridColor;
+    drawList->AddLine(ImVec2(plotMin.x, yPos), ImVec2(plotMax.x, yPos), lineCol, 1.0f);
+    char tickLabel[16];
+    std::snprintf(tickLabel, sizeof(tickLabel), "%.0fms", frac * maxMs);
+    const ImVec2 textSize = ImGui::CalcTextSize(tickLabel);
+    drawList->AddText(ImVec2(plotMin.x - textSize.x - 4.0f, yPos - textSize.y * 0.5f),
+                      textColor, tickLabel);
+  }
+
+  // X-axis baseline + frame's left edge.
+  drawList->AddLine(ImVec2(plotMin.x, plotMin.y),
+                    ImVec2(plotMin.x, plotMax.y), axisColor, 1.0f);
+
+  // Plot a single ring buffer as a polyline. headOffset = next-write
+  // index, so the OLDEST sample is at headOffset; we walk
+  // sampleCount steps wrapping mod sampleCount to render
+  // chronologically left→right.
+  auto plotSeries = [&](const float* series, ImU32 color) {
+    if (sampleCount < 2)
+      return;
+    std::vector<ImVec2> points;
+    points.reserve(sampleCount);
+    for (std::size_t i = 0; i < sampleCount; ++i)
+    {
+      const std::size_t idx = (headOffset + i) % sampleCount;
+      const float       value = series[idx];
+      const float lerp = static_cast<float>(i) / static_cast<float>(sampleCount - 1);
+      const float xPos = plotMin.x + lerp * plotW;
+      const float yPos = plotMax.y - (value / maxMs) * plotH;
+      points.emplace_back(xPos, yPos);
+    }
+    drawList->AddPolyline(points.data(), static_cast<int>(points.size()), color, 1.5f, 0);
+  };
+  plotSeries(seriesA, cpuColor);
+  plotSeries(seriesB, gpuColor);
+
+  // Legend (top-right): two color swatches + labels.
+  const float legendPad = 6.0f;
+  const ImVec2 legendOrigin(plotMax.x - 100.0f, plotMin.y + legendPad);
+  const float swatchW = 12.0f;
+  const float swatchH = 8.0f;
+  drawList->AddRectFilled(legendOrigin,
+                          ImVec2(legendOrigin.x + swatchW, legendOrigin.y + swatchH),
+                          cpuColor);
+  drawList->AddText(ImVec2(legendOrigin.x + swatchW + 4.0f, legendOrigin.y - 2.0f),
+                    textColor, labelA);
+  drawList->AddRectFilled(ImVec2(legendOrigin.x, legendOrigin.y + swatchH + 4.0f),
+                          ImVec2(legendOrigin.x + swatchW,
+                                 legendOrigin.y + swatchH + 4.0f + swatchH),
+                          gpuColor);
+  drawList->AddText(ImVec2(legendOrigin.x + swatchW + 4.0f,
+                           legendOrigin.y + swatchH + 2.0f),
+                    textColor, labelB);
+}
+
+}  // namespace
+
 void ImGuiHost::BuildFpsPanel(const FrameProfile& frameProfile) noexcept {
   if (!_ready)
     return;
 
   // Push the current frame's CPU + GPU ms into the rolling history
-  // ring. Read by ImGui::PlotLines below; the ring is sized to 240
+  // ring. Read by DrawDualLineChart below; the ring is sized to 240
   // frames (~4 s @ 60 Hz) — short enough to feel responsive,
   // long enough to spot a stutter without overwhelming the panel.
   _cpuMsHistory[_historyHead] = frameProfile.cpuFrameMs;
   _gpuMsHistory[_historyHead] = frameProfile.gpuFrameMs;
   _historyHead = (_historyHead + 1) % PERF_HISTORY_SIZE;
 
-  // Default position top-left so it doesn't overlap the Scene panel.
-  // FirstUseEver = the user can drag the window anywhere after first
-  // appearance and we won't teleport it back.
-  ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f), ImGuiCond_FirstUseEver);
-  ImGui::SetNextWindowSize(ImVec2(420.0f, 0.0f), ImGuiCond_FirstUseEver);
-  if (ImGui::Begin("Performance", nullptr, ImGuiWindowFlags_NoSavedSettings))
+  // Layout: Performance is the TOP-RIGHT panel. Anchor to the right
+  // viewport edge with a per-frame SetNextWindowPos so the panel
+  // stays glued to the right when the window resizes. AlwaysAutoResize
+  // sizes the window to its content; users still see the whole panel
+  // without scrollbars.
+  const ImGuiViewport* viewport = ImGui::GetMainViewport();
+  const float perfPanelW = 440.0f;
+  ImGui::SetNextWindowPos(
+      ImVec2(viewport->WorkPos.x + viewport->WorkSize.x - perfPanelW - 10.0f,
+             viewport->WorkPos.y + 10.0f),
+      ImGuiCond_Always);
+  ImGui::SetNextWindowSizeConstraints(ImVec2(perfPanelW, 0.0f),
+                                      ImVec2(perfPanelW, FLT_MAX));
+  if (ImGui::Begin("Performance", nullptr,
+                   ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse
+                       | ImGuiWindowFlags_NoSavedSettings))
   {
     const ImGuiIO& imguiIO = ImGui::GetIO();
     ImGui::Text("Frame: %llu",
                 static_cast<unsigned long long>(frameProfile.frameIndex));
     ImGui::SameLine(180.0f);
     ImGui::Text("FPS: %.1f", static_cast<double>(imguiIO.Framerate));
+    ImGui::Text("CPU: %.3f ms     GPU: %.3f ms", frameProfile.cpuFrameMs,
+                frameProfile.gpuFrameMs);
 
-    // Find the auto-scale upper bound for the graphs — max of CPU
-    // OR GPU history ring, clamped to a 1 ms floor so a flat-zero
-    // initial ring doesn't render as a single line at the top.
-    float maxMs = 1.0f;
-    for (std::size_t i = 0; i < PERF_HISTORY_SIZE; ++i)
-    {
-      maxMs = (_cpuMsHistory[i] > maxMs) ? _cpuMsHistory[i] : maxMs;
-      maxMs = (_gpuMsHistory[i] > maxMs) ? _gpuMsHistory[i] : maxMs;
-    }
-    // Round up to the next 5 ms so the y-axis label rounds to a
-    // human-friendly bucket and a one-frame spike doesn't rescale
-    // every other frame.
-    maxMs = std::ceil(maxMs / 5.0f) * 5.0f;
+    // Single combined CPU + GPU chart (replaces the two separate
+    // PlotLines). NVIDIA-green CPU + cool-blue GPU on a shared Y-axis.
+    DrawDualLineChart(_cpuMsHistory, _gpuMsHistory, PERF_HISTORY_SIZE,
+                      _historyHead, "CPU", "GPU", 110.0f);
 
-    // ----- CPU section ------------------------------------------------
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::TextColored(ImVec4(0.55f, 0.85f, 0.55f, 1.0f),
-                       "CPU      %.3f ms", frameProfile.cpuFrameMs);
-    char overlayCpu[32];
-    std::snprintf(overlayCpu, sizeof(overlayCpu), "CPU ms (max %.1f)", maxMs);
-    ImGui::PlotLines("##cpuMs", _cpuMsHistory, static_cast<int>(PERF_HISTORY_SIZE),
-                     static_cast<int>(_historyHead), overlayCpu, 0.0f, maxMs,
-                     ImVec2(0.0f, 60.0f));
-    for (const FrameProfile::PassTiming& timing : frameProfile.passes)
+    // ----- CPU breakdown (collapsible like Lights/Materials) ----------
+    if (ImGui::CollapsingHeader("CPU passes", ImGuiTreeNodeFlags_DefaultOpen))
     {
-      if (timing.kind != FrameProfile::ScopeKind::Cpu)
-        continue;
-      const std::string_view name = timing.name.View();
-      ImGui::Text("  %*s%.*s   %.3f ms", static_cast<int>(timing.depth * 2), "",
-                  static_cast<int>(name.size()), name.data(), timing.durationMs);
+      for (const FrameProfile::PassTiming& timing : frameProfile.passes)
+      {
+        if (timing.kind != FrameProfile::ScopeKind::Cpu)
+          continue;
+        const std::string_view name = timing.name.View();
+        ImGui::Text("  %*s%.*s   %.3f ms", static_cast<int>(timing.depth * 2), "",
+                    static_cast<int>(name.size()), name.data(), timing.durationMs);
+      }
     }
 
-    // ----- GPU section ------------------------------------------------
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::TextColored(ImVec4(0.55f, 0.70f, 0.95f, 1.0f),
-                       "GPU      %.3f ms", frameProfile.gpuFrameMs);
-    char overlayGpu[32];
-    std::snprintf(overlayGpu, sizeof(overlayGpu), "GPU ms (max %.1f)", maxMs);
-    ImGui::PlotLines("##gpuMs", _gpuMsHistory, static_cast<int>(PERF_HISTORY_SIZE),
-                     static_cast<int>(_historyHead), overlayGpu, 0.0f, maxMs,
-                     ImVec2(0.0f, 60.0f));
-    for (const FrameProfile::PassTiming& timing : frameProfile.passes)
+    // ----- GPU breakdown ----------------------------------------------
+    if (ImGui::CollapsingHeader("GPU passes", ImGuiTreeNodeFlags_DefaultOpen))
     {
-      if (timing.kind != FrameProfile::ScopeKind::Gpu)
-        continue;
-      const std::string_view name = timing.name.View();
-      ImGui::Text("  %*s%.*s   %.3f ms", static_cast<int>(timing.depth * 2), "",
-                  static_cast<int>(name.size()), name.data(), timing.durationMs);
+      for (const FrameProfile::PassTiming& timing : frameProfile.passes)
+      {
+        if (timing.kind != FrameProfile::ScopeKind::Gpu)
+          continue;
+        const std::string_view name = timing.name.View();
+        ImGui::Text("  %*s%.*s   %.3f ms", static_cast<int>(timing.depth * 2), "",
+                    static_cast<int>(name.size()), name.data(), timing.durationMs);
+      }
     }
 
-    // ----- System section ---------------------------------------------
-    // Process-level memory footprint. Working-set bytes = the bytes
-    // resident in RAM right now (not including paged-out code / data).
-    // VRAM lands at Phase 5 alongside the Vulkan VK_EXT_memory_budget
-    // query.
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Text("System");
+    // ----- System (RAM + VRAM) ----------------------------------------
+    if (ImGui::CollapsingHeader("System", ImGuiTreeNodeFlags_DefaultOpen))
+    {
 #if defined(_WIN32)
     PROCESS_MEMORY_COUNTERS_EX memCounters{};
     memCounters.cb = sizeof(memCounters);
@@ -356,6 +576,7 @@ void ImGuiHost::BuildFpsPanel(const FrameProfile& frameProfile) noexcept {
     {
       ImGui::Text("VRAM     (no physical device)");
     }
+    }  // end "System" CollapsingHeader
   }
   ImGui::End();
 }
@@ -398,11 +619,17 @@ void ImGuiHost::BuildScenePanel(const FrameStats& sceneStats) noexcept {
   };
   char bytesBuf[32];
 
-  // Default position to the right of the Performance panel so the
-  // two don't overlap on first launch. FirstUseEver lets the user
-  // drag freely after that.
-  ImGui::SetNextWindowPos(ImVec2(280.0f, 10.0f), ImGuiCond_FirstUseEver);
-  if (ImGui::Begin("Scene", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+  // Layout: Scene is the TOP-LEFT panel. Editor stacks below it.
+  // ImGuiCond_Always re-anchors every frame so the panel stays in
+  // place when the OS window resizes; AlwaysAutoResize sizes the
+  // window to its content (no scrollbars, no manual resize).
+  const ImGuiViewport* viewport = ImGui::GetMainViewport();
+  ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + 10.0f,
+                                 viewport->WorkPos.y + 10.0f),
+                          ImGuiCond_Always);
+  if (ImGui::Begin("Scene", nullptr,
+                   ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse
+                       | ImGuiWindowFlags_NoSavedSettings))
   {
     ImGui::Text("Counts");
     ImGui::Separator();
@@ -464,6 +691,9 @@ void ImGuiHost::BuildScenePanel(const FrameStats& sceneStats) noexcept {
     {
       ImGui::Text("Degraded            : no");
     }
+    // Capture the panel's rendered height so BuildEditorPanel can
+    // anchor itself below us next frame without overlap.
+    _layoutScenePanelHeight = ImGui::GetWindowHeight();
   }
   ImGui::End();
 }
@@ -472,11 +702,19 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
   if (!_ready)
     return;
 
-  // Default position: below the Scene panel (which is at 280, 10
-  // with autoresize ~280 px tall). Editor goes below at y=320.
-  ImGui::SetNextWindowPos(ImVec2(280.0f, 360.0f), ImGuiCond_FirstUseEver);
-  ImGui::SetNextWindowSize(ImVec2(360.0f, 0.0f), ImGuiCond_FirstUseEver);
-  if (ImGui::Begin("Editor", nullptr, ImGuiWindowFlags_NoSavedSettings))
+  // Layout: Editor sits directly under the Scene panel (top-left,
+  // anchored each frame using the height Scene reported the previous
+  // frame). AlwaysAutoResize so the user sees the entire panel
+  // without scrolling. NoCollapse + NoSavedSettings so the layout
+  // is stable across launches.
+  const ImGuiViewport* viewport = ImGui::GetMainViewport();
+  ImGui::SetNextWindowPos(
+      ImVec2(viewport->WorkPos.x + 10.0f,
+             viewport->WorkPos.y + 10.0f + _layoutScenePanelHeight + 6.0f),
+      ImGuiCond_Always);
+  if (ImGui::Begin("Editor", nullptr,
+                   ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse
+                       | ImGuiWindowFlags_NoSavedSettings))
   {
     // ---- Camera section ----------------------------------------------
     if (scene.HasCamera())

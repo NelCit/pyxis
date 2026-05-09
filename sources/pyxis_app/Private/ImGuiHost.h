@@ -98,6 +98,13 @@ class ImGuiHost {
   // frames (catches DestroyMaterial happening between renders).
   uint32_t _editorMaterialIndex = 0;
 
+  // Layout state (M7 follow-up). Scene's rendered height from the
+  // PREVIOUS frame, used to position the Editor panel directly
+  // beneath it without overlap. ImGui auto-sizes Scene each frame;
+  // we read the size right after BuildScenePanel and reuse it next
+  // frame. First-frame fallback: 200 px (reasonable lower bound).
+  float _layoutScenePanelHeight = 200.0f;
+
   // Performance-panel rolling history. 240 frames @ 60 Hz = ~4 s of
   // visual context — enough to spot the per-pass cost shape of a
   // brief stutter without overwhelming the panel with raw noise. Push
