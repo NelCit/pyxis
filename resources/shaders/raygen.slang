@@ -84,5 +84,35 @@ void main() {
              ray,
              payload);
 
-    gOutput[launchIndex] = float4(payload.color, 1.0f);
+    // M7-simple tone-map: ACES Filmic (Narkowicz approximation).
+    //
+    // The closesthit's NdotL Lambert + Dome ambient and the miss
+    // shader's HDRI sample both produce HDR values that can exceed
+    // 1.0 (Sun × NdotL × baseColor → ~1.2; HDRI sky pixels → up to
+    // ~10.0 in bright cloud / sun areas). The swapchain blit clamps
+    // anything above 1.0 to white, so without a tone-map the bright
+    // outdoor look of the bundled Poly Haven HDRI shows up as a
+    // featureless white background and over-bright surfaces.
+    //
+    // Narkowicz's ACES Fitted approximation (single rational
+    // function per channel) is the canonical production choice —
+    // used by Unreal, Unity HDRP, plus most real-time path tracers.
+    // Maps [0, ∞) → [0, 1] with a filmic shoulder + toe; preserves
+    // hue close enough that the §11 OpenPBR baseColor's perceptual
+    // identity survives. M9 swaps this for the proper ACES Fitted
+    // (RRT + ODT matrices) + OCIO display transform alongside the
+    // §9 ToneMapPass.
+    //
+    // Reference: Krzysztof Narkowicz, "ACES Filmic Tone Mapping
+    // Curve" (2015). Constants below are the published fit; do not
+    // touch without re-fitting against the ACES RRT + sRGB ODT.
+    const float3 x = payload.color;
+    const float aces_a = 2.51f;
+    const float aces_b = 0.03f;
+    const float aces_c = 2.43f;
+    const float aces_d = 0.59f;
+    const float aces_e = 0.14f;
+    const float3 toneMapped = saturate(
+        (x * (aces_a * x + aces_b)) / (x * (aces_c * x + aces_d) + aces_e));
+    gOutput[launchIndex] = float4(toneMapped, 1.0f);
 }
