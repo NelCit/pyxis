@@ -1,0 +1,184 @@
+#usda 1.0
+(
+    "Pyxis bundled default scene — plan §29.4.a."
+    "At M3.5 this file is resolved via the §29.4.a chain + logged but"
+    "not parsed (USD ingest is M4+). Composition matches the plan: a"
+    "flat grey ground, three 0.5 m spheres with three distinct"
+    "OpenPBR-target materials (plastic / metal / glass), a procedural"
+    "overcast dome (default_sky.exr sibling) + a key distant sun, all"
+    "framed by a single 35 mm pinhole camera. Contents kept tiny so the"
+    "file remains version-controlled and binary-identical across builds"
+    "(plan §29.4.a 'useful smoke-test asset')."
+    upAxis = "Y"
+    metersPerUnit = 1.0
+    defaultPrim = "PyxisDefault"
+    doc = "Pyxis default startup scene — plan §29.4.a"
+)
+
+def Xform "PyxisDefault"
+{
+    # ----------------------------------------------------------------------
+    # Ground — 10 m x 10 m grey quad, two triangles. Authored as a
+    # UsdGeomMesh per §29.4.a so M5+'s material translation has a real
+    # mesh to bind UsdPreviewSurface against.
+    # ----------------------------------------------------------------------
+    def Mesh "Ground"
+    {
+        int[] faceVertexCounts = [3, 3]
+        int[] faceVertexIndices = [0, 1, 2,  0, 2, 3]
+        point3f[] points = [(-5, 0, -5), (5, 0, -5), (5, 0, 5), (-5, 0, 5)]
+        normal3f[] primvars:normals = [(0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0)] (
+            interpolation = "vertex"
+        )
+        float2[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+            interpolation = "vertex"
+        )
+        rel material:binding = </PyxisDefault/Materials/GroundGrey>
+    }
+
+    # ----------------------------------------------------------------------
+    # Three hero spheres — UsdGeomSphere parametric prims, 0.5 m radius.
+    # Plan §29.4.a calls for UsdGeomMesh + UsdGeomPointInstancer of one
+    # prototype; we collapse to three independent UsdGeomSphere prims
+    # at M3.5 so the file stays hand-readable. M5+ may rewrite to the
+    # full instanced shape if the instancer machinery proves useful as
+    # a smoke-test of the §25.C flatten pass.
+    # ----------------------------------------------------------------------
+    def Xform "Spheres"
+    {
+        def Sphere "Plastic"
+        {
+            double radius = 0.5
+            matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-1.2, 0.5, 0, 1) )
+            uniform token[] xformOpOrder = ["xformOp:transform"]
+            rel material:binding = </PyxisDefault/Materials/RedPlastic>
+        }
+        def Sphere "Metal"
+        {
+            double radius = 0.5
+            matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0.5, 0, 1) )
+            uniform token[] xformOpOrder = ["xformOp:transform"]
+            rel material:binding = </PyxisDefault/Materials/PolishedMetal>
+        }
+        def Sphere "Glass"
+        {
+            double radius = 0.5
+            matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (1.2, 0.5, 0, 1) )
+            uniform token[] xformOpOrder = ["xformOp:transform"]
+            rel material:binding = </PyxisDefault/Materials/ClearGlass>
+        }
+    }
+
+    # ----------------------------------------------------------------------
+    # Materials — UsdPreviewSurface authored per §11; the M5
+    # `pyxis_material_translation` adapter converts each into an
+    # OpenPBRMaterialDesc at ingest time. Three lobes covered:
+    # diffuse-dominant plastic, metallic, transmissive glass.
+    # ----------------------------------------------------------------------
+    def Scope "Materials"
+    {
+        def Material "GroundGrey"
+        {
+            token outputs:surface.connect = </PyxisDefault/Materials/GroundGrey/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.5, 0.5, 0.5)
+                float inputs:roughness = 0.7
+                float inputs:metallic = 0.0
+                token outputs:surface
+            }
+        }
+
+        def Material "RedPlastic"
+        {
+            token outputs:surface.connect = </PyxisDefault/Materials/RedPlastic/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.85, 0.15, 0.12)
+                float inputs:roughness = 0.35
+                float inputs:metallic = 0.0
+                token outputs:surface
+            }
+        }
+
+        def Material "PolishedMetal"
+        {
+            token outputs:surface.connect = </PyxisDefault/Materials/PolishedMetal/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.95, 0.93, 0.88)
+                float inputs:roughness = 0.10
+                float inputs:metallic = 1.0
+                token outputs:surface
+            }
+        }
+
+        def Material "ClearGlass"
+        {
+            token outputs:surface.connect = </PyxisDefault/Materials/ClearGlass/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.95, 0.97, 0.98)
+                float inputs:roughness = 0.05
+                float inputs:metallic = 0.0
+                float inputs:opacity = 0.10
+                float inputs:ior = 1.5
+                token outputs:surface
+            }
+        }
+    }
+
+    # ----------------------------------------------------------------------
+    # Lights — distant sun + dome (lat-long EXR sibling). The dome
+    # references default_sky.exr via a relative asset path so the file
+    # resolves through USD's default ArResolver against the .usd's
+    # parent directory at M5+/M7+ when DomeLight ingestion lands.
+    # ----------------------------------------------------------------------
+    def Scope "Lights"
+    {
+        def DistantLight "Sun"
+        {
+            color3f inputs:color = (1.0, 0.95, 0.88)
+            float inputs:intensity = 4.0
+            float inputs:angle = 0.53
+            matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 0.7071, 0.7071, 0), (0, -0.7071, 0.7071, 0), (0, 0, 0, 1) )
+            uniform token[] xformOpOrder = ["xformOp:transform"]
+        }
+
+        def DomeLight "Sky"
+        {
+            asset inputs:texture:file = @./default_sky.exr@
+            token inputs:texture:format = "latlong"
+            color3f inputs:color = (1.0, 1.0, 1.0)
+            float inputs:intensity = 1.0
+        }
+    }
+
+    # ----------------------------------------------------------------------
+    # Camera — 35 mm pinhole framing the three spheres + a slice of
+    # ground. Positioned at (0, 1.4, 4.5) looking toward the origin
+    # (-Z forward in USD's right-handed Y-up convention).
+    # ----------------------------------------------------------------------
+    def Scope "Cameras"
+    {
+        def Camera "main"
+        {
+            float focalLength = 35
+            float horizontalAperture = 36
+            float verticalAperture = 24
+            float fStop = 0  # pinhole sentinel — DOF off (§43.3)
+            float focusDistance = 4.5
+            float2 clippingRange = (0.1, 1000)
+            matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 1.4, 4.5, 1) )
+            uniform token[] xformOpOrder = ["xformOp:transform"]
+        }
+    }
+}

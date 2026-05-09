@@ -26,6 +26,13 @@ struct CliArgs {
   bool showHelp = false;
   bool showVersion = false;
 
+  // ---- Tooling / introspection ---------------------------------------
+  // §29.4.a: print the absolute path of the bundled default scene
+  // (<exe-dir>/Resources/scenes/default.usd) and exit. Useful for
+  // tooling that wants to open the file in usdview / a text editor
+  // without grepping the install layout.
+  bool printDefaultScenePath = false;
+
   // ---- §26 config + scene --------------------------------------------
   std::string_view configPath;     // --config <path>
   std::string_view scenePath;      // --scene <path>  (M2: stored, M4 wires)

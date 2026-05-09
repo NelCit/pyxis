@@ -38,6 +38,13 @@
         "framesInFlight":  { "type": "integer", "minimum": 1, "maximum": 3, "description": "§33.1 cap; §33.7 raises headless to 3." }
       },
       "additionalProperties": true
+    },
+    "paths": {
+      "type": "object",
+      "properties": {
+        "scene":           { "type": "string", "description": "§29.4.a default-scene chain step 2; empty = fall through to bundled default." }
+      },
+      "additionalProperties": true
     }
   },
   "additionalProperties": true

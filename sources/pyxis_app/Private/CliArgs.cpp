@@ -85,6 +85,10 @@ CliArgs Parse(int argc, char** argv) noexcept {
     else if (Equals(arg, "--version"))
     {
       out.showVersion = true;
+    }
+    else if (Equals(arg, "--print-default-scene-path"))
+    {
+      out.printDefaultScenePath = true;
 
       // ---- §26 config + scene -----------------------------------------
     }
@@ -222,7 +226,11 @@ void PrintUsage() noexcept {
       "\n"
       "Help / version:\n"
       "  --version               Print version and exit.\n"
-      "  -h, --help              Show this help and exit.\n",
+      "  -h, --help              Show this help and exit.\n"
+      "\n"
+      "Tooling:\n"
+      "  --print-default-scene-path  Print <exe-dir>/Resources/scenes/default.usd\n"
+      "                              (the §29.4.a bundled default) and exit.\n",
       stdout);
 }
 

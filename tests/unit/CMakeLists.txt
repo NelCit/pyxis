@@ -20,6 +20,7 @@ target_sources(pyxis_unit_tests PRIVATE
     GpuSceneInstance.cpp
     GpuSceneLight.cpp
     GpuSceneCamera.cpp
+    SceneResolver.cpp
 
     # The §9.2 RenderGraph + IRenderPass live in pyxis_renderer/Private
     # and don't cross the SHARED-DLL boundary. The unit-test harness is
@@ -28,10 +29,17 @@ target_sources(pyxis_unit_tests PRIVATE
     # resolves the symbols locally instead of trying to import them
     # from pyxis_renderer.dll.
     ${CMAKE_SOURCE_DIR}/sources/pyxis_renderer/Private/RenderGraph/RenderGraph.cpp
+
+    # SceneResolver lives in pyxis_app's Private (the executable, not
+    # a DLL) so we recompile its .cpp directly here. CliArgs.h /
+    # Configuration.h are pure POD declarations — we don't need to
+    # drag the matching .cpp files in.
+    ${CMAKE_SOURCE_DIR}/sources/pyxis_app/Private/Scene/SceneResolver.cpp
 )
 
 target_include_directories(pyxis_unit_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/sources/pyxis_renderer/Private
+    ${CMAKE_SOURCE_DIR}/sources/pyxis_app/Private
 )
 
 # pyxis_unit_tests is the one place we *do* allow exceptions — gtest

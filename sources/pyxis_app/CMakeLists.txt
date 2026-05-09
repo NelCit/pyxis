@@ -29,6 +29,8 @@ target_sources(pyxis PRIVATE
     Private/Render/AovTextures.cpp
     Private/Render/HardcodedCubeScene.h
     Private/Render/HardcodedCubeScene.cpp
+    Private/Scene/SceneResolver.h
+    Private/Scene/SceneResolver.cpp
     Private/HeadlessMode.h
     Private/HeadlessMode.cpp
     Private/ViewerMode.h
@@ -65,10 +67,24 @@ add_custom_command(TARGET pyxis POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${_pyxis_app_resources_src}/parameters.schema.json"
         "${_pyxis_app_resources_dst}/parameters.schema.json"
+    # §29.4.a default-startup-scene + its sibling lat-long EXR. Both
+    # files ship version-controlled in resources/scenes/ and copy
+    # next to pyxis.exe so AssetLocator::LocateResource("scenes/...")
+    # finds them at runtime.
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+        "${_pyxis_app_resources_dst}/scenes"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${_pyxis_app_resources_src}/scenes/default.usd"
+        "${_pyxis_app_resources_dst}/scenes/default.usd"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${_pyxis_app_resources_src}/scenes/default_sky.exr"
+        "${_pyxis_app_resources_dst}/scenes/default_sky.exr"
     BYPRODUCTS
         "${_pyxis_app_resources_dst}/parameters.default.json"
         "${_pyxis_app_resources_dst}/parameters.schema.json"
-    COMMENT "Copying parameters.{default,schema}.json to <bin>/Resources/")
+        "${_pyxis_app_resources_dst}/scenes/default.usd"
+        "${_pyxis_app_resources_dst}/scenes/default_sky.exr"
+    COMMENT "Copying Resources/ (parameters.{default,schema}.json, scenes/default.usd + default_sky.exr) to <bin>/Resources/")
 unset(_pyxis_app_resources_src)
 unset(_pyxis_app_resources_dst)
 

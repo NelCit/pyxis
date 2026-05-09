@@ -275,7 +275,8 @@ CMake helpers under `_cmake/`: `Slang.cmake` (compiles `.slang` into SPIR-V), `V
 | Dep | Why |
 |---|---|
 | **OpenUSD (pxr)** | USD stage, `UsdImagingStageSceneIndex` + Hd 2.0 scene-index filters, SdfPath, UsdLux, UsdShade |
-| **NVRHI** | RHI; Vulkan backend only |
+| **NVRHI** | RHI; Vulkan backend only. Built with `NVRHI_WITH_RTXMU=ON` so BLAS memory + compaction route through RTXMU (§16). |
+| **RTXMU** | RTX Memory Utility — BLAS suballocation pool, scratch pool, async compaction. Vendored as a submodule inside NVRHI's source tree; no separate vcpkg / FetchContent declaration needed. |
 | **Vulkan SDK / Vulkan-Headers** | Vulkan 1.3, VK_KHR_ray_tracing_pipeline, VK_KHR_acceleration_structure, VK_EXT_descriptor_indexing |
 | **Slang** | Shader language + compiler; single source for raygen/closesthit/miss/compute |
 | **ShaderMake** | NVIDIA's shader build tool; drives Slang/DXC compilation, permutation expansion (`-D NAME={0,1}`), SPIR-V output, and dependency tracking |
@@ -1556,6 +1557,31 @@ extended to multiple pages.
 ## 16. BLAS / TLAS Build Strategy
 
 
+**Memory + lifecycle delegated to RTXMU.** Pyxis links NVRHI with
+`NVRHI_WITH_RTXMU=ON`, which routes every BLAS through NVIDIA's
+[RTXMU](https://github.com/NVIDIAGameWorks/RTXMU) (RTX Memory Utility,
+vendored as a submodule inside NVRHI). The public NVRHI API
+(`createAccelStruct`, `buildBottomLevelAccelStruct`,
+`buildTopLevelAccelStruct`) is unchanged — RTXMU sits behind it and
+handles three things we'd otherwise hand-roll:
+
+1. **BLAS suballocation pool.** RTXMU packs many BLAS into a small
+   number of large `VkBuffer`s rather than one buffer per BLAS. Cuts
+   the descriptor-set + allocation churn on Moana-scale scenes
+   dramatically (full Moana = ~10⁴ unique BLAS).
+2. **Scratch pool.** RTXMU sizes + reuses a single growable scratch
+   buffer; we never allocate one ourselves. `vkCmdBuildAccelerationStructuresKHR`
+   reads from the pool's slot picked by RTXMU.
+3. **Asynchronous compaction.** When a BLAS built with
+   `ALLOW_COMPACTION` finishes on the GPU (NVRHI feeds RTXMU the
+   build IDs at queue-submit time), RTXMU enqueues the compaction
+   copy + post-build-info query automatically. The old uncompacted
+   memory is reclaimed once the copy retires. **No
+   query-size-then-copy code lives on the Pyxis side.**
+
+What stays in Pyxis-side code: the **build-flag policy** below. RTXMU
+honors whatever flags we pass to NVRHI; it doesn't second-guess them.
+
 - BLAS build-flag policy is **split by mesh size**:
   - **Small / mid meshes (`triCount < 64 k`)** — `PREFER_FAST_TRACE` only, no
     `ALLOW_UPDATE`, no `ALLOW_COMPACTION`. v1 has no skinning, no animation
@@ -1573,21 +1599,32 @@ extended to multiple pages.
   - The 64 k threshold is configurable via `geometry.blasCompactionTriThreshold`
     (default 65 536); profile-driven changes are allowed (see §34's "measure first"
     rule).
-  - Build batched: collect all dirty meshes, allocate one large scratch buffer sized
-    to the batch maximum, build N-at-a-time to bound peak memory.
-  - Compaction: query sizes after build → allocate compacted → copy → free original.
   - Boolean toggle `geometry.compactBLAS` (§27) is a *master switch*: when `false`,
-    no mesh is compacted regardless of size (debug mode). The `ALLOW_UPDATE` flag
-    is not user-tunable in v1 — the size-split policy fully determines it (never
-    set in v1, since neither bucket needs it).
+    `ALLOW_COMPACTION` is stripped from the build flags before the NVRHI call
+    (debug mode — RTXMU only compacts ASes whose build flags allowed it). The
+    `ALLOW_UPDATE` flag is not user-tunable in v1 — the size-split policy fully
+    determines it (never set in v1, since neither bucket needs it).
 - TLAS:
   - Rebuilt every frame in v1 if any instance dirty; refit (`MODE_UPDATE`) otherwise.
     The TLAS itself is built with `ALLOW_UPDATE` (TLAS update is cheap and routinely
     used; this is independent of the BLAS policy above).
-  - Keep a single TLAS scratch buffer sized to peak instance count.
+  - **TLAS is not RTXMU-managed.** RTXMU's pool only suballocates
+    BLAS; the TLAS allocation goes through NVRHI's standard path
+    against a single dedicated `VkBuffer` sized to peak instance
+    count.
   - Optional: split TLAS into (static, dynamic) once dynamic exists; not in v1.
-- Build queues: BLAS builds submitted on the graphics queue (NVRHI doesn't expose async build
-  cleanly v1). Profiled with GPU timestamps.
+- Build queues: BLAS + TLAS builds submitted on the graphics queue
+  (NVRHI doesn't expose async build cleanly v1; RTXMU doesn't change
+  this — it's a memory-management library, not a queue-management
+  one). Profiled with GPU timestamps.
+
+**Limitation acknowledged: no Opacity Micromaps in v1.** RTXMU 0.30+
+explicitly does not support OMMs (`Feature::OpacityMicroMaps` is
+gated off when `NVRHI_WITH_RTXMU=ON`). Pyxis doesn't ship OMMs in
+v1 — alpha-tested foliage at Moana scale is a post-v1 polish item
+(§42 "displacement / alpha tessellation"). If/when OMMs land, the
+choice is to either drop RTXMU and hand-roll BLAS memory, or wait
+for upstream RTXMU OMM support.
 
 ### 16.5 TLAS partitioning policy (Moana-scale)
 
@@ -1625,7 +1662,10 @@ extended to multiple pages.
   AOVs, render targets, **nested-instancer flatten cache** (per-`(SdfPath, time)` keyed,
   invalidated only on `Dirty<Instancer>`; budget cap **2.5 GiB** v1 — a single
   full-Moana flatten is ~2.2 GiB so the cap leaves slack for the dirty-replace path).
-  Reported in spdlog and ImGui.
+  Reported in spdlog and ImGui. **BLAS + scratch counters are sourced from
+  RTXMU's pool stats** (`rtxmu::VkAccelStructManager::GetStats()` exposed
+  through NVRHI's `getDeviceMemoryStats` hook) rather than computed by
+  Pyxis — RTXMU owns those allocations now (§16).
 - Hard caps configurable in `parameters.json` (texture max resolution, etc.).
 - Staging ring buffer (e.g., 256 MB) reused frame-to-frame for uploads; oversize uploads
   fall back to one-shot allocations. **Outstanding one-shot bytes are capped** at
@@ -3469,7 +3509,7 @@ invocation processes one `--scene` and exits (§3, §27).
 
 Launching `pyxis.exe` with **no `--scene` argument** must produce a
 renderable image, not a black window or an error. Pyxis ships a tiny
-canonical USD scene as `pyxis_app/Resources/scenes/default.usda` and
+canonical USD scene as `pyxis_app/Resources/scenes/default.usd` and
 loads it by default.
 
 **Resolution order at startup**:
@@ -3478,12 +3518,13 @@ loads it by default.
 3. Most-recent entry in `%LOCALAPPDATA%/Pyxis/recent_scenes.json` whose
    file still exists, if `viewer.reopenLastScene = true` (default).
 4. The bundled **default scene** at
-   `<exe-dir>/Resources/scenes/default.usda`.
+   `<exe-dir>/Resources/scenes/default.usd`.
 
-The bundled file is small (< 8 KB `.usda` text), version-controlled, and
+The bundled file is small (< 8 KB USDA text under a `.usd` extension —
+USD's loader auto-detects the format), version-controlled, and
 binary-identical across builds so it is also a useful smoke-test asset.
 
-**Default scene contents** (`default.usda`):
+**Default scene contents** (`default.usd`):
 
 | Element | Detail |
 |---|---|
@@ -4538,7 +4579,7 @@ Build matrix: Debug + Release; both use Vulkan validation in Debug only.
 | M1 | Viewer triangle | hard-coded triangle, RenderGraph, ImGui setup, profiler scopes |
 | M2 | Headless triangle | `--headless --config` writes EXR; same render core |
 | M3 | Slang path-trace box | one cube, one camera, BLAS+TLAS, raygen/closesthit/miss, accum + tonemap |
-| M3.5 | Default startup scene | `pyxis_app/Resources/scenes/default.usda` ships in the build tree; `pyxis.exe` with no args resolves through the §29.4.a chain and renders the three-spheres-on-ground composition; bundled `default_sky.exr` loads correctly; resolved-source spdlog line emitted |
+| M3.5 | Default startup scene | `pyxis_app/Resources/scenes/default.usd` ships in the build tree; `pyxis.exe` with no args resolves through the §29.4.a chain and renders the three-spheres-on-ground composition; bundled `default_sky.exr` loads correctly; resolved-source spdlog line emitted |
 | M4 | Hydra delegate stub | `HdPyxisRenderDelegate` registered; usdview can pick it; renders one mesh |
 | M5 | UsdPreviewSurface→OpenPBR | textured cube via UsdPreviewSurface, OpenPBR shader |
 | M6 | Native instancing | instanced rocks, BLAS sharing, instance/material AOVs |
