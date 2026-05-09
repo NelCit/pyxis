@@ -745,14 +745,31 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
       {
         settings.debugView = imguiHost.GetDebugView();
       }
-      const int32_t mouseX = latestMousePixelX.load();
-      const int32_t mouseY = latestMousePixelY.load();
-      if (mouseX >= 0 && mouseY >= 0
-          && static_cast<uint32_t>(mouseX) < aovs.width
-          && static_cast<uint32_t>(mouseY) < aovs.height)
+      // Picker pin: when the editor has pinned the picker, the
+      // raygen keeps sampling the locked pixel regardless of cursor
+      // movement. Otherwise we feed the live cursor (clamped to the
+      // AOV bounds; out-of-bounds = sentinel "no pick").
+      if (imguiHost.IsReady() && imguiHost.IsPickerPinned())
       {
-        settings.mousePixelX = static_cast<uint32_t>(mouseX);
-        settings.mousePixelY = static_cast<uint32_t>(mouseY);
+        const uint32_t pinnedX = imguiHost.PickerPinnedX();
+        const uint32_t pinnedY = imguiHost.PickerPinnedY();
+        if (pinnedX < aovs.width && pinnedY < aovs.height)
+        {
+          settings.mousePixelX = pinnedX;
+          settings.mousePixelY = pinnedY;
+        }
+      }
+      else
+      {
+        const int32_t mouseX = latestMousePixelX.load();
+        const int32_t mouseY = latestMousePixelY.load();
+        if (mouseX >= 0 && mouseY >= 0
+            && static_cast<uint32_t>(mouseX) < aovs.width
+            && static_cast<uint32_t>(mouseY) < aovs.height)
+        {
+          settings.mousePixelX = static_cast<uint32_t>(mouseX);
+          settings.mousePixelY = static_cast<uint32_t>(mouseY);
+        }
       }
 
       renderer.RenderFrame(commandList, settings, targets);

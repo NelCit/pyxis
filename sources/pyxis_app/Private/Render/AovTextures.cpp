@@ -71,8 +71,10 @@ std::expected<AovTextures, std::string> AovTextures::Create(nvrhi::IDevice* devi
   // Pick-result buffer pair. The device-side buffer is the
   // RWStructuredBuffer the raygen writes; the staging buffer is
   // host-mapped after a per-frame copy for one-frame-stale CPU
-  // readback. 32 bytes per element matches shaderinterop::PickResult.
-  constexpr uint32_t PICK_RESULT_BYTES = 32;
+  // readback. 80 bytes per element matches shaderinterop::PickResult
+  // (5 rows of 16: color/depth, normal/instanceId, baseColor/materialId,
+  // worldHit/pad, pixelXY/pad).
+  constexpr uint32_t PICK_RESULT_BYTES = 80;
   nvrhi::BufferDesc pickDesc;
   pickDesc.byteSize = PICK_RESULT_BYTES;
   pickDesc.structStride = PICK_RESULT_BYTES;

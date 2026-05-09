@@ -389,8 +389,8 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
   // Pick-result fallback — 1-element RWStructuredBuffer, never read
   // back. Mirrors the AovTextures::pickResult layout.
   nvrhi::BufferDesc pickFbDesc;
-  pickFbDesc.byteSize = 32;        // sizeof(shaderinterop::PickResult)
-  pickFbDesc.structStride = 32;
+  pickFbDesc.byteSize = sizeof(pyxis::shaderinterop::PickResult);
+  pickFbDesc.structStride = sizeof(pyxis::shaderinterop::PickResult);
   pickFbDesc.canHaveUAVs = true;
   pickFbDesc.debugName = "PathTrace.FbPickResult";
   pickFbDesc.initialState = nvrhi::ResourceStates::UnorderedAccess;

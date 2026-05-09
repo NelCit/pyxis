@@ -127,9 +127,11 @@ static const uint PICK_PIXEL_NONE = 0xFFFFFFFFu;
 // PickResult — one-element RWStructuredBuffer the raygen writes when
 // the dispatched pixel matches camera.mousePixel. The viewer copies
 // this into a staging buffer each frame and reads back the previous
-// frame's value (one-frame stale; fine for human-paced UI).
+// frame's value (one-frame stale; fine for human-paced UI). Carries
+// EVERY AOV channel the inspector exposes plus the pixel coords so
+// the editor's hover readout doesn't need a second cbuffer.
 struct PickResult {
-    // Row 0 — final radiance (HDR, pre-tonemap).
+    // Row 0 — final radiance (HDR, pre-tonemap) + ray distance.
     float colorR;
     float colorG;
     float colorB;
@@ -140,6 +142,25 @@ struct PickResult {
     float normalY;
     float normalZ;
     uint  instanceId;   // 0xFFFFFFFF on miss
+
+    // Row 2 — raw OpenPBR baseColor (pre-shading) + material slot.
+    float baseColorR;
+    float baseColorG;
+    float baseColorB;
+    uint  materialId;   // 0xFFFFFFFF on miss
+
+    // Row 3 — world-space hit position + pad.
+    float worldHitX;
+    float worldHitY;
+    float worldHitZ;
+    uint  _pickPad0;
+
+    // Row 4 — pixel coords (mirrors camera.mousePixel{X,Y} so the
+    // editor doesn't have to track its own copy of the cursor).
+    uint  pixelX;
+    uint  pixelY;
+    uint  _pickPad1;
+    uint  _pickPad2;
 };
 
 // OpenPBRMaterialGPU — the bytewise layout the closesthit reads via
@@ -262,8 +283,8 @@ static const uint LIGHT_KIND_RECT    = 2;
                   "16-byte UI tail (see resources/shaders/ShaderInterop.slang).");
     static_assert(sizeof(CameraUniforms) % 16 == 0,
                   "CameraUniforms must be 16-byte aligned (cbuffer std140 rule).");
-    static_assert(sizeof(PickResult) == 32,
-                  "PickResult must be 32 bytes (2 rows of 16) — see "
+    static_assert(sizeof(PickResult) == 80,
+                  "PickResult must be 80 bytes (5 rows of 16) — see "
                   "resources/shaders/ShaderInterop.slang.");
     static_assert(sizeof(PickResult) % 16 == 0,
                   "PickResult must be 16-byte aligned (structured-buffer rule).");

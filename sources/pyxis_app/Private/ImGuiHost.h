@@ -188,6 +188,17 @@ class ImGuiHost {
   // Material combo to that entry. Sentinel ~0u = no pending click.
   uint32_t                              _editorPendingClickInstance = 0xFFFFFFFFu;
 
+  // Picker pin/follow toggle (M7 follow-up). When `_pickerPinned`
+  // is true, ViewerMode pushes `_pickerPinnedX/Y` to RenderSettings
+  // instead of the live cursor pixel — the readout in the Editor
+  // stays frozen at the pixel the user pinned, so they can move
+  // the camera and see how the values at that exact world point
+  // change. F-key toggles via ImGui::IsKeyPressed inside the AOV
+  // inspector.
+  bool                                  _pickerPinned = false;
+  uint32_t                              _pickerPinnedX = 0;
+  uint32_t                              _pickerPinnedY = 0;
+
  public:
   // Called by ViewerMode each frame; returns true and clears the
   // latched request iff the editor's "Reload shaders" button was
@@ -253,6 +264,15 @@ class ImGuiHost {
   void SetClickedInstance(uint32_t instanceSlot) noexcept {
     _editorPendingClickInstance = instanceSlot;
   }
+
+  // Picker pin accessors. ViewerMode reads these each frame to decide
+  // whether to push the cursor pixel or the pinned pixel into
+  // RenderSettings::mousePixel{X,Y}. When pinned, the raygen keeps
+  // sampling the same pixel even as the user moves the cursor / camera,
+  // so the picker readout reflects the world point the user locked in.
+  [[nodiscard]] bool IsPickerPinned() const noexcept { return _pickerPinned; }
+  [[nodiscard]] uint32_t PickerPinnedX() const noexcept { return _pickerPinnedX; }
+  [[nodiscard]] uint32_t PickerPinnedY() const noexcept { return _pickerPinnedY; }
 
   // ViewerMode drains a pending save-AOV path each frame. Returns
   // true and clears the latch iff the user clicked "Save AOV..." since

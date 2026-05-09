@@ -171,6 +171,18 @@ void main() {
         p.normalY    = payload.normalWorld.y;
         p.normalZ    = payload.normalWorld.z;
         p.instanceId = payload.instanceId;
+        p.baseColorR = payload.baseColor.x;
+        p.baseColorG = payload.baseColor.y;
+        p.baseColorB = payload.baseColor.z;
+        p.materialId = payload.materialId;
+        p.worldHitX  = payload.worldHit.x;
+        p.worldHitY  = payload.worldHit.y;
+        p.worldHitZ  = payload.worldHit.z;
+        p._pickPad0  = 0u;
+        p.pixelX     = launchIndex.x;
+        p.pixelY     = launchIndex.y;
+        p._pickPad1  = 0u;
+        p._pickPad2  = 0u;
         gPickResult[0] = p;
     }
 

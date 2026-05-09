@@ -1010,19 +1010,71 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
       }
 
       // Pixel picker — readout from the prior frame's PickResult.
+      // Shows EVERY AOV channel the inspector exposes (mirrors the
+      // PickResult struct that raygen filled), plus the pixel coords
+      // so users can correlate hover position against the image.
+      // F key toggles pin/follow: pinned mode freezes the sampled
+      // pixel so the user can move the camera and watch the values
+      // at that exact world point change. Toggle latches the CURRENT
+      // pick pixel (1-frame stale, but that matches everything else
+      // we display here).
       ImGui::Separator();
-      ImGui::Text("Picker (1-frame stale)");
       const PickResult& pick = _editorLastPick;
+      if (ImGui::IsKeyPressed(ImGuiKey_F))
+      {
+        if (!_pickerPinned && pick.pixelX != 0xFFFFFFFFu)
+        {
+          _pickerPinnedX = pick.pixelX;
+          _pickerPinnedY = pick.pixelY;
+          _pickerPinned = true;
+        }
+        else
+        {
+          _pickerPinned = false;
+        }
+      }
+      const bool pickerActive = (pick.pixelX != 0xFFFFFFFFu);
+      if (_pickerPinned)
+      {
+        ImGui::TextColored(ImVec4(1.0f, 0.62f, 0.26f, 1.0f),
+                           "Picker  PINNED @ (%u, %u)  [press F to follow mouse]",
+                           static_cast<unsigned int>(_pickerPinnedX),
+                           static_cast<unsigned int>(_pickerPinnedY));
+      }
+      else if (pickerActive)
+      {
+        ImGui::Text("Picker  following mouse @ (%u, %u)  [press F to pin]",
+                    static_cast<unsigned int>(pick.pixelX),
+                    static_cast<unsigned int>(pick.pixelY));
+      }
+      else
+      {
+        ImGui::Text("Picker  following mouse  [press F to pin]");
+      }
       const bool didHit = (pick.depth > 0.0f);
       if (didHit)
       {
-        ImGui::Text("  color    %.3f, %.3f, %.3f", static_cast<double>(pick.colorR),
-                    static_cast<double>(pick.colorG), static_cast<double>(pick.colorB));
-        ImGui::Text("  normal   %.3f, %.3f, %.3f", static_cast<double>(pick.normalX),
-                    static_cast<double>(pick.normalY), static_cast<double>(pick.normalZ));
-        ImGui::Text("  depth    %.3f", static_cast<double>(pick.depth));
-        ImGui::Text("  instance %u",
+        ImGui::Text("  color      %.3f, %.3f, %.3f",
+                    static_cast<double>(pick.colorR),
+                    static_cast<double>(pick.colorG),
+                    static_cast<double>(pick.colorB));
+        ImGui::Text("  normal     %.3f, %.3f, %.3f",
+                    static_cast<double>(pick.normalX),
+                    static_cast<double>(pick.normalY),
+                    static_cast<double>(pick.normalZ));
+        ImGui::Text("  depth      %.3f", static_cast<double>(pick.depth));
+        ImGui::Text("  instance   %u",
                     static_cast<unsigned int>(pick.instanceId));
+        ImGui::Text("  material   %u",
+                    static_cast<unsigned int>(pick.materialId));
+        ImGui::Text("  baseColor  %.3f, %.3f, %.3f",
+                    static_cast<double>(pick.baseColorR),
+                    static_cast<double>(pick.baseColorG),
+                    static_cast<double>(pick.baseColorB));
+        ImGui::Text("  worldPos   %.3f, %.3f, %.3f",
+                    static_cast<double>(pick.worldHitX),
+                    static_cast<double>(pick.worldHitY),
+                    static_cast<double>(pick.worldHitZ));
       }
       else
       {
@@ -1225,6 +1277,33 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
     // path down to its last segment for brevity ("/Materials/RedFlat"
     // → "RedFlat"). Anonymous / sourcePrim-empty materials fall back
     // to "Material #N".
+    // Click-to-select: drain ViewerMode's pending click latch BEFORE
+    // the CollapsingHeader so we can both (a) snap the Material combo
+    // index and (b) force-open the header even if the user had
+    // collapsed it. Without (b), clicking a sphere would update the
+    // combo behind a closed header — silent change, bad UX.
+    bool clickForceOpen = false;
+    if (_editorPendingClickInstance != 0xFFFFFFFFu)
+    {
+      const MaterialHandle clickedMat =
+          scene.LookupInstanceMaterialBySlot(_editorPendingClickInstance);
+      if (clickedMat != MaterialHandle::Invalid)
+      {
+        const uint32_t lookupCount = scene.GetLiveMaterialCount();
+        for (uint32_t walkIdx = 0; walkIdx < lookupCount; ++walkIdx)
+        {
+          if (scene.GetMaterialHandleAt(walkIdx) == clickedMat)
+          {
+            _editorMaterialIndex = walkIdx;
+            clickForceOpen = true;
+            break;
+          }
+        }
+      }
+      _editorPendingClickInstance = 0xFFFFFFFFu;
+    }
+    if (clickForceOpen)
+      ImGui::SetNextItemOpen(true, ImGuiCond_Always);
     if (ImGui::CollapsingHeader("Materials"))
     {
       const uint32_t matCount = scene.GetLiveMaterialCount();
@@ -1236,28 +1315,6 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
       {
         if (_editorMaterialIndex >= matCount)
           _editorMaterialIndex = 0;
-        // Click-to-select: ViewerMode pushed an instance slot from a
-        // recent left-button click. Look the bound MaterialHandle up
-        // via the scene, walk the live-material list to find its
-        // index, snap _editorMaterialIndex. Drained unconditionally
-        // (sentinel = no-op).
-        if (_editorPendingClickInstance != 0xFFFFFFFFu)
-        {
-          const MaterialHandle clickedMat =
-              scene.LookupInstanceMaterialBySlot(_editorPendingClickInstance);
-          if (clickedMat != MaterialHandle::Invalid)
-          {
-            for (uint32_t walkIdx = 0; walkIdx < matCount; ++walkIdx)
-            {
-              if (scene.GetMaterialHandleAt(walkIdx) == clickedMat)
-              {
-                _editorMaterialIndex = walkIdx;
-                break;
-              }
-            }
-          }
-          _editorPendingClickInstance = 0xFFFFFFFFu;
-        }
         // Helper: extract the final SdfPath segment from a string_view
         // (everything after the last '/'). For "/Foo/Bar/Baz" returns
         // "Baz"; for an empty path returns the synthesized index name.
