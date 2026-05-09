@@ -1,0 +1,26 @@
+{
+  "app": {
+    "ingest": "hydra"
+  },
+  "diagnostics": {
+    "aftermath": false,
+    "validationLayer": false
+  },
+  "limits": {
+    "framesInFlight": 3
+  },
+  "output": {
+    "effectiveConfig": "headless_triangle.effective.json",
+    "image": "headless_triangle.exr",
+    "ldr": ""
+  },
+  "paths": {
+    "scene": ""
+  },
+  "render": {
+    "height": 360,
+    "samplesPerFrame": 1,
+    "seed": 42,
+    "width": 640
+  }
+}

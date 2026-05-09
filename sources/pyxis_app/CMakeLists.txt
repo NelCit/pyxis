@@ -107,13 +107,29 @@ set(_pyxis_usd_plugin_src
     "$<IF:$<CONFIG:Debug>,${CMAKE_BINARY_DIR}/vcpkg_installed/x64-windows/debug/bin/usd,${CMAKE_BINARY_DIR}/vcpkg_installed/x64-windows/bin/usd>")
 set(_pyxis_usd_plugin_dst
     "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/$<CONFIG>/usd")
+
+# USD's PlugRegistry walks the path in PXR_PLUGINPATH_NAME for a
+# top-level `plugInfo.json` aggregator that lists per-plugin
+# subdirs via `Includes: ["*/resources/"]`. vcpkg ships that
+# aggregator at `lib/usd/plugInfo.json` (Linux convention) but the
+# actual plugin tree lives at `bin/usd/<plugin>/resources/` on
+# Windows; the aggregator's wildcard there resolves to nothing.
+# We write our own one-line aggregator next to the copied tree so
+# USD's wildcard finds the real per-plugin plugInfo.jsons.
+set(_pyxis_usd_aggregator "${CMAKE_CURRENT_BINARY_DIR}/usd_plugInfo.json")
+file(WRITE "${_pyxis_usd_aggregator}" "{\n    \"Includes\": [ \"*/resources/\" ]\n}\n")
+
 add_custom_command(TARGET pyxis POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different
         "${_pyxis_usd_plugin_src}"
         "${_pyxis_usd_plugin_dst}"
-    COMMENT "Copying vcpkg USD plugin tree (44 plugins, ~7 MB) to <bin>/usd/")
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${_pyxis_usd_aggregator}"
+        "${_pyxis_usd_plugin_dst}/plugInfo.json"
+    COMMENT "Copying vcpkg USD plugin tree (44 plugins, ~7 MB) + aggregator plugInfo.json to <bin>/usd/")
 unset(_pyxis_usd_plugin_src)
 unset(_pyxis_usd_plugin_dst)
+unset(_pyxis_usd_aggregator)
 
 # ImGui (with Vulkan + GLFW backends) — built lazily by the helper in
 # _cmake/Thirdparty.cmake. pyxis_app/ViewerMode is the only consumer
