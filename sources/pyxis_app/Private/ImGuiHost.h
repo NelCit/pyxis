@@ -10,6 +10,8 @@
 
 #include <Pyxis/Renderer/Descs/FrameProfile.h>
 #include <Pyxis/Renderer/Descs/FrameStats.h>
+#include <Pyxis/Renderer/Descs/PickResult.h>
+#include <Pyxis/Renderer/Descs/RenderSettings.h>
 
 #include <cstdint>
 #include <string>
@@ -155,6 +157,23 @@ class ImGuiHost {
   float                                 _ingestMeshLightCameraMs = 0.0f;
   std::string                           _ingestSourceLabel;
 
+  // M7 follow-up — AOV inspector + pixel picker.
+  // _editorDebugView mirrors RenderSettings::DebugView; ViewerMode
+  // reads it each frame to populate RenderSettings before
+  // PyxisRenderer::RenderFrame. Default Color so the viewer looks
+  // like the M7 baseline until the user picks a different AOV.
+  RenderSettings::DebugView             _editorDebugView =
+      RenderSettings::DebugView::Color;
+  // Latest pick readback the viewer pushed from PyxisRenderer's
+  // LastPickResult(); displayed in the Editor panel as a hover
+  // readout (color, normal, depth, instance id).
+  PickResult                            _editorLastPick{};
+  // "Save current AOV..." latch — set by the editor button to the
+  // requested file path; ViewerMode drains it via TakeSaveAovRequest()
+  // and dispatches a TextureReadback + ExrWriter write. Empty = no
+  // pending request.
+  std::string                           _editorPendingSaveAovPath;
+
  public:
   // Called by ViewerMode each frame; returns true and clears the
   // latched request iff the editor's "Reload shaders" button was
@@ -190,6 +209,29 @@ class ImGuiHost {
     float instancerPassMs   = 0.0f;
     float meshLightCameraMs = 0.0f;
   };
+
+  // M7 follow-up — AOV inspector accessors.
+  // ViewerMode reads this to populate RenderSettings::debugView
+  // each frame before PyxisRenderer::RenderFrame.
+  [[nodiscard]] RenderSettings::DebugView GetDebugView() const noexcept {
+    return _editorDebugView;
+  }
+
+  // ViewerMode pushes the renderer's LastPickResult() into the panel
+  // each frame; the Editor displays the hover-pixel values.
+  void SetLastPickResult(const PickResult& pick) noexcept { _editorLastPick = pick; }
+
+  // ViewerMode drains a pending save-AOV path each frame. Returns
+  // true and clears the latch iff the user clicked "Save AOV..." since
+  // the last call. The current debug view selects which AOV gets
+  // saved (Color/Normal/Depth/InstanceID).
+  [[nodiscard]] bool TakeSaveAovRequest(std::string& outPath) noexcept {
+    if (_editorPendingSaveAovPath.empty())
+      return false;
+    outPath = std::move(_editorPendingSaveAovPath);
+    _editorPendingSaveAovPath.clear();
+    return true;
+  }
 
   // Pushed by ViewerMode after each successful (or failed-with-fallback)
   // ingest run. `sourceLabel` is the §29.4.a label

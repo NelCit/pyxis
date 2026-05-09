@@ -8,6 +8,7 @@
 #pragma once
 
 #include <Pyxis/Renderer/Descs/FrameProfile.h>
+#include <Pyxis/Renderer/Descs/PickResult.h>
 #include <Pyxis/Renderer/Descs/RendererCreateDesc.h>
 #include <Pyxis/Renderer/Descs/RenderSettings.h>
 #include <Pyxis/Renderer/Descs/RenderTargets.h>
@@ -57,6 +58,15 @@ class PYXIS_RENDERER_API PyxisRenderer final {
 
   [[nodiscard]] FrameProfile LastFrameProfile() const;
 
+  // M7 follow-up — last successful pixel-pick readback. The renderer
+  // copies the GPU's pick UAV into a staging buffer at the end of
+  // each RenderFrame and maps it on the NEXT call, so the result
+  // returned here lags the cursor by one frame (acceptable for a
+  // hover readout). Caller must have supplied RenderTargets::pickResult
+  // for the picker to have run; otherwise this returns the default-
+  // constructed PickResult (depth=-1, instanceId=~0u).
+  [[nodiscard]] PickResult LastPickResult() const noexcept;
+
   // Re-load every render-pass's shaders from disk and rebuild the
   // pipeline-state objects. The Slang compiler isn't linked into the
   // runtime — the .spv files this picks up are produced by ShaderMake
@@ -71,6 +81,14 @@ class PYXIS_RENDERER_API PyxisRenderer final {
  private:
   Profiler* _profiler = nullptr;
   std::unique_ptr<RenderGraph> _graph;
+  // Borrowed pointer to the PathTracePass the graph owns — kept here
+  // so LastPickResult() can forward without a dynamic_cast or a graph-
+  // walk. Set in the ctor; cleared in the dtor (the RenderGraph
+  // unique_ptr drops its passes first by member-order).
+  // Forward-declared as IRenderPass* so the public header doesn't
+  // pull in the private PathTracePass header — the impl casts on
+  // demand.
+  class IRenderPass* _pathTracePass = nullptr;
   uint64_t _frameIndex = 0;
 };
 

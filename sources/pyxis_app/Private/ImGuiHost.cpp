@@ -179,6 +179,69 @@ void ApplyPyxisTheme() noexcept {
 }
 
 #if defined(_WIN32)
+// Modal Windows file-SAVE dialog. Returns the path the user picked (or
+// the typed-in path if they overrode the suggestion); empty on cancel.
+// Defaults to the supplied filename and EXR filter so the AOV save
+// flow always lands at <foo>.exr.
+std::string SaveFilePickerDialog(std::wstring_view defaultFileName) noexcept {
+  HRESULT comResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+  const bool weInitedCom = SUCCEEDED(comResult);
+
+  IFileSaveDialog* dialog = nullptr;
+  comResult = CoCreateInstance(CLSID_FileSaveDialog, nullptr, CLSCTX_ALL, IID_IFileSaveDialog,
+                               reinterpret_cast<void**>(&dialog));
+  if (FAILED(comResult) || !dialog)
+  {
+    if (weInitedCom)
+      CoUninitialize();
+    return {};
+  }
+
+  COMDLG_FILTERSPEC filterSpec[] = {
+      {L"OpenEXR (*.exr)", L"*.exr"},
+  };
+  dialog->SetFileTypes(static_cast<UINT>(std::size(filterSpec)), filterSpec);
+  dialog->SetTitle(L"Pyxis - Save AOV as EXR");
+  dialog->SetDefaultExtension(L"exr");
+  if (!defaultFileName.empty())
+  {
+    const std::wstring nameOwned{defaultFileName};
+    dialog->SetFileName(nameOwned.c_str());
+  }
+
+  comResult = dialog->Show(nullptr);
+  std::string result;
+  if (SUCCEEDED(comResult))
+  {
+    IShellItem* item = nullptr;
+    if (SUCCEEDED(dialog->GetResult(&item)) && item)
+    {
+      PWSTR widePath = nullptr;
+      if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &widePath)) && widePath)
+      {
+        const int byteCount =
+            WideCharToMultiByte(CP_UTF8, 0, widePath, -1, nullptr, 0, nullptr, nullptr);
+        if (byteCount > 1)
+        {
+          result.resize(static_cast<std::size_t>(byteCount - 1));
+          WideCharToMultiByte(CP_UTF8, 0, widePath, -1, result.data(), byteCount, nullptr,
+                              nullptr);
+        }
+        CoTaskMemFree(widePath);
+      }
+      item->Release();
+    }
+  }
+  dialog->Release();
+  if (weInitedCom)
+    CoUninitialize();
+  return result;
+}
+#else
+std::string SaveFilePickerDialog(std::wstring_view) noexcept { return {}; }
+#endif
+
+#if defined(_WIN32)
 // Modal Windows file-open dialog (IFileOpenDialog COM interface).
 // Returns the selected path on OK; empty string on Cancel / error /
 // the user dismissing the dialog. Filters to USD-family extensions
@@ -913,6 +976,81 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
                          "Pending scene reload: %s", _editorPendingScenePath.c_str());
     }
     ImGui::Spacing();
+
+    // ---- AOV inspector ------------------------------------------------
+    // Combo selects which raw AOV the raygen remaps into the BGRA8
+    // display target (Color = post-tonemap, Normal = (n*0.5+0.5),
+    // Depth = 1/depth grayscale, InstanceID = hashed palette). The
+    // pixel-picker readout below shows the RAW values at the cursor
+    // pulled from PyxisRenderer::LastPickResult() — one frame stale
+    // (acceptable for hover-feedback). Save button kicks an EXR save
+    // of the currently-selected RAW AOV.
+    if (ImGui::CollapsingHeader("AOV inspector"))
+    {
+      static const char* const AOV_LABELS[] = {"Color", "Normal", "Depth", "InstanceID"};
+      const int currentIdx = static_cast<int>(_editorDebugView);
+      const char* preview =
+          (currentIdx >= 0
+           && currentIdx < static_cast<int>(std::size(AOV_LABELS)))
+              ? AOV_LABELS[currentIdx]
+              : "?";
+      if (ImGui::BeginCombo("Display", preview))
+      {
+        for (int aovIdx = 0; aovIdx < static_cast<int>(std::size(AOV_LABELS)); ++aovIdx)
+        {
+          const bool isSelected = (aovIdx == currentIdx);
+          if (ImGui::Selectable(AOV_LABELS[aovIdx], isSelected))
+            _editorDebugView = static_cast<RenderSettings::DebugView>(aovIdx);
+          if (isSelected)
+            ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+      }
+
+      // Pixel picker — readout from the prior frame's PickResult.
+      ImGui::Separator();
+      ImGui::Text("Picker (1-frame stale)");
+      const PickResult& pick = _editorLastPick;
+      const bool didHit = (pick.depth > 0.0f);
+      if (didHit)
+      {
+        ImGui::Text("  color    %.3f, %.3f, %.3f", static_cast<double>(pick.colorR),
+                    static_cast<double>(pick.colorG), static_cast<double>(pick.colorB));
+        ImGui::Text("  normal   %.3f, %.3f, %.3f", static_cast<double>(pick.normalX),
+                    static_cast<double>(pick.normalY), static_cast<double>(pick.normalZ));
+        ImGui::Text("  depth    %.3f", static_cast<double>(pick.depth));
+        ImGui::Text("  instance %u",
+                    static_cast<unsigned int>(pick.instanceId));
+      }
+      else
+      {
+        ImGui::TextDisabled("  (cursor over background or outside viewport)");
+      }
+
+      // Save current AOV — pops a Win COM IFileSaveDialog filtered to
+      // *.exr; the picked path is latched into _editorPendingSaveAovPath
+      // and ViewerMode drains it via TakeSaveAovRequest() to perform
+      // the readback + EXR write of the currently-selected raw AOV.
+      ImGui::Separator();
+      if (ImGui::Button("Save current AOV..."))
+      {
+        std::wstring suggested = L"pyxis_aov_color.exr";
+        if (_editorDebugView == RenderSettings::DebugView::Normal)
+          suggested = L"pyxis_aov_normal.exr";
+        else if (_editorDebugView == RenderSettings::DebugView::Depth)
+          suggested = L"pyxis_aov_depth.exr";
+        else if (_editorDebugView == RenderSettings::DebugView::InstanceId)
+          suggested = L"pyxis_aov_instance.exr";
+        std::string picked = SaveFilePickerDialog(suggested);
+        if (!picked.empty())
+          _editorPendingSaveAovPath = std::move(picked);
+      }
+      if (!_editorPendingSaveAovPath.empty())
+      {
+        ImGui::TextColored(ImVec4(0.95f, 0.85f, 0.20f, 1.0f),
+                           "Pending save: %s", _editorPendingSaveAovPath.c_str());
+      }
+    }
 
     // ---- Camera section ----------------------------------------------
     if (scene.HasCamera())

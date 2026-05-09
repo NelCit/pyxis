@@ -151,4 +151,10 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
 
     payload.color = (totalContribution > 0.0) ? (baseColor * (directSum + ambientSum)) : baseColor;
     payload.hitT  = RayTCurrent();
+    // M7 follow-up — fields the raygen-side AOV inspector reads.
+    // Normal is the world-space face normal we already computed for
+    // the Lambert pass; instanceId is the per-instance slot the
+    // closesthit branched on for material lookup.
+    payload.normalWorld = nWorld;
+    payload.instanceId  = instanceId;
 }

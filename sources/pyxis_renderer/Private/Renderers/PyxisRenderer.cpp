@@ -25,7 +25,9 @@ PyxisRenderer::PyxisRenderer(nvrhi::IDevice* device, GpuScene& scene, Profiler& 
   // PathTracePass runs only when the supplied scene has a TLAS +
   // camera; before that (e.g. an empty scene), the pass early-outs
   // and the output buffer is left untouched.
-  _graph->AddPass(std::make_unique<PathTracePass>(device, scene));
+  auto pathTrace = std::make_unique<PathTracePass>(device, scene);
+  _pathTracePass = pathTrace.get();
+  _graph->AddPass(std::move(pathTrace));
   Logging::Get().Info(log::RENDER, "PyxisRenderer: initialised (PathTracePass registered)");
 }
 
@@ -74,6 +76,16 @@ bool PyxisRenderer::ReloadShaders() noexcept {
   if (!_graph)
     return false;
   return _graph->ReloadShaders();
+}
+
+PickResult PyxisRenderer::LastPickResult() const noexcept {
+  if (_pathTracePass == nullptr)
+    return {};
+  // Static cast safe: we constructed _pathTracePass as a PathTracePass*
+  // in the ctor and never reassign it. PathTracePass derives from
+  // IRenderPass non-virtually so the static cast round-trips cleanly
+  // (no RTTI involved — the renderer build forbids /GR via §30 anyway).
+  return static_cast<const PathTracePass*>(_pathTracePass)->GetLastPickResult();
 }
 
 }  // namespace pyxis

@@ -18,6 +18,7 @@
 #include "ShaderInterop.slang"
 
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <hlsl++.h>
 #include <ios>
@@ -35,9 +36,9 @@ namespace {
 // size on the C++ allocator below, the build fails here rather than
 // at runtime via a confusing validation error.
 using shaderinterop::CameraUniforms;
-static_assert(sizeof(CameraUniforms) == 128,
-              "CameraUniforms is two float4x4s = 128 bytes "
-              "(see resources/shaders/ShaderInterop.slang).");
+static_assert(sizeof(CameraUniforms) == 144,
+              "CameraUniforms is two float4x4s + 16-byte UI tail (mousePixel + "
+              "debugViewMode + pad). See resources/shaders/ShaderInterop.slang.");
 
 std::vector<char> ReadBinaryFile(std::string_view path) noexcept {
   std::ifstream stream(std::string{path}, std::ios::binary | std::ios::ate);
@@ -120,7 +121,7 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
   layoutDesc.bindings = {
       nvrhi::BindingLayoutItem::ConstantBuffer(0),           // binding 0 CameraUniforms
       nvrhi::BindingLayoutItem::RayTracingAccelStruct(1),    // binding 1 TLAS
-      nvrhi::BindingLayoutItem::Texture_UAV(2),              // binding 2 output
+      nvrhi::BindingLayoutItem::Texture_UAV(2),              // binding 2 output (BGRA8 display)
       nvrhi::BindingLayoutItem::StructuredBuffer_SRV(3),     // binding 3 materials (M5)
       nvrhi::BindingLayoutItem::StructuredBuffer_SRV(4),     // binding 4 instance→material (M6)
       nvrhi::BindingLayoutItem::StructuredBuffer_SRV(5),     // binding 5 lights (M7)
@@ -129,6 +130,12 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
       nvrhi::BindingLayoutItem::StructuredBuffer_SRV(8),     // binding 8 mesh face offsets (M7 NdotL)
       nvrhi::BindingLayoutItem::Texture_SRV(9),              // binding 9 dome env-map (M7-IBL)
       nvrhi::BindingLayoutItem::Sampler(10),                 // binding 10 dome sampler (M7-IBL)
+      // M7 follow-up — AOV inspector + picker.
+      nvrhi::BindingLayoutItem::Texture_UAV(11),             // binding 11 colorHdr AOV
+      nvrhi::BindingLayoutItem::Texture_UAV(12),             // binding 12 normal AOV
+      nvrhi::BindingLayoutItem::Texture_UAV(13),             // binding 13 depth AOV
+      nvrhi::BindingLayoutItem::Texture_UAV(14),             // binding 14 instanceId AOV
+      nvrhi::BindingLayoutItem::StructuredBuffer_UAV(15),    // binding 15 pickResult
   };
   _bindingLayout = _device->createBindingLayout(layoutDesc);
   if (!_bindingLayout)
@@ -343,6 +350,51 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
     return;
   }
 
+  // ---- M7 follow-up: tiny no-write fallbacks for the AOV inspector --
+  // The shader writes unconditionally to bindings 11..14 + 15, so when
+  // the caller doesn't supply RAW AOV textures (headless mode), bind a
+  // 1×1 UAV-capable scratch texture per format. Same trick as the
+  // dome fallback above: cheap, never read, just keeps the binding
+  // valid.
+  auto makeAovFallback = [&](nvrhi::Format fmt, const char* dbgName) -> nvrhi::TextureHandle {
+    nvrhi::TextureDesc fbDesc;
+    fbDesc.format = fmt;
+    fbDesc.width = 1;
+    fbDesc.height = 1;
+    fbDesc.dimension = nvrhi::TextureDimension::Texture2D;
+    fbDesc.isUAV = true;
+    fbDesc.debugName = dbgName;
+    fbDesc.initialState = nvrhi::ResourceStates::UnorderedAccess;
+    fbDesc.keepInitialState = true;
+    return _device->createTexture(fbDesc);
+  };
+  _fallbackColorHdrAov = makeAovFallback(nvrhi::Format::RGBA16_FLOAT, "PathTrace.FbColorHdrAov");
+  _fallbackNormalAov   = makeAovFallback(nvrhi::Format::RGBA16_FLOAT, "PathTrace.FbNormalAov");
+  _fallbackDepthAov    = makeAovFallback(nvrhi::Format::R32_FLOAT,    "PathTrace.FbDepthAov");
+  _fallbackInstanceAov = makeAovFallback(nvrhi::Format::R32_UINT,     "PathTrace.FbInstanceAov");
+  if (!_fallbackColorHdrAov || !_fallbackNormalAov
+      || !_fallbackDepthAov || !_fallbackInstanceAov)
+  {
+    Logging::Get().Error(log::RENDER, "PathTracePass: AOV fallback texture create failed");
+    return;
+  }
+
+  // Pick-result fallback — 1-element RWStructuredBuffer, never read
+  // back. Mirrors the AovTextures::pickResult layout.
+  nvrhi::BufferDesc pickFbDesc;
+  pickFbDesc.byteSize = 32;        // sizeof(shaderinterop::PickResult)
+  pickFbDesc.structStride = 32;
+  pickFbDesc.canHaveUAVs = true;
+  pickFbDesc.debugName = "PathTrace.FbPickResult";
+  pickFbDesc.initialState = nvrhi::ResourceStates::UnorderedAccess;
+  pickFbDesc.keepInitialState = true;
+  _fallbackPickResult = _device->createBuffer(pickFbDesc);
+  if (!_fallbackPickResult)
+  {
+    Logging::Get().Error(log::RENDER, "PathTracePass: createBuffer(FbPickResult) failed");
+    return;
+  }
+
   _shadersOk = true;
   Logging::Get().Info(log::RENDER, "PathTracePass: initialised (RT pipeline + SBT ready)");
 }
@@ -425,12 +477,15 @@ bool PathTracePass::ReloadShaders() noexcept {
   return true;
 }
 
-nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(nvrhi::ITexture* output) {
+nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(RenderTargets const& targets) {
+  nvrhi::ITexture* output = targets.color;
   // M5/M6/M7: invalidate cache when ANY of the scene's lazy buffers
   // flips. Each is lazy-allocated by GpuScene on the first relevant
   // verb, so a scene that started empty but gained its first
   // material / instance / light / mesh between frames needs the
   // cached binding sets thrown out.
+  // M7 follow-up: same for the caller-owned raw AOV textures + pick
+  // buffer — a resize swaps them out from under us.
   nvrhi::IBuffer* sceneMaterials = _scene->GetMaterialBuffer();
   nvrhi::IBuffer* sceneInstanceMaterial = _scene->GetInstanceMaterialBuffer();
   nvrhi::IBuffer* sceneLights = _scene->GetLightBuffer();
@@ -446,7 +501,12 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(nvrhi::ITexture* ou
       || sceneMeshFaceNormals != _lastSeenMeshFaceNormalsBuffer
       || sceneMeshFaceOffsets != _lastSeenMeshFaceOffsetsBuffer
       || sceneDomeTexture != _lastSeenDomeTexture
-      || sceneBindlessSampler != _lastSeenBindlessSampler)
+      || sceneBindlessSampler != _lastSeenBindlessSampler
+      || targets.colorHdr      != _lastSeenColorHdrAov
+      || targets.normalAov     != _lastSeenNormalAov
+      || targets.depthAov      != _lastSeenDepthAov
+      || targets.instanceIdAov != _lastSeenInstanceAov
+      || targets.pickResult    != _lastSeenPickResult)
   {
     _bindingSetCache.clear();
     _lastSeenMaterialBuffer = sceneMaterials;
@@ -457,6 +517,11 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(nvrhi::ITexture* ou
     _lastSeenMeshFaceOffsetsBuffer = sceneMeshFaceOffsets;
     _lastSeenDomeTexture = sceneDomeTexture;
     _lastSeenBindlessSampler = sceneBindlessSampler;
+    _lastSeenColorHdrAov = targets.colorHdr;
+    _lastSeenNormalAov = targets.normalAov;
+    _lastSeenDepthAov = targets.depthAov;
+    _lastSeenInstanceAov = targets.instanceIdAov;
+    _lastSeenPickResult = targets.pickResult;
   }
 
   if (auto cached = _bindingSetCache.find(output); cached != _bindingSetCache.end())
@@ -513,6 +578,21 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(nvrhi::ITexture* ou
   if (domeSampler == nullptr)
     domeSampler = _fallbackDomeSampler.Get();
 
+  // M7 follow-up — caller-owned raw AOVs + pick buffer. Each falls
+  // back to the 1×1 / 1-element scratch resource when the caller
+  // doesn't supply one (headless mode), so the shader's binding
+  // remains valid while the writes go to a discarded resource.
+  nvrhi::ITexture* colorHdrAov = targets.colorHdr;
+  if (colorHdrAov == nullptr) colorHdrAov = _fallbackColorHdrAov.Get();
+  nvrhi::ITexture* normalAov   = targets.normalAov;
+  if (normalAov == nullptr)   normalAov   = _fallbackNormalAov.Get();
+  nvrhi::ITexture* depthAov    = targets.depthAov;
+  if (depthAov == nullptr)    depthAov    = _fallbackDepthAov.Get();
+  nvrhi::ITexture* instanceAov = targets.instanceIdAov;
+  if (instanceAov == nullptr) instanceAov = _fallbackInstanceAov.Get();
+  nvrhi::IBuffer*  pickBuffer  = targets.pickResult;
+  if (pickBuffer == nullptr)  pickBuffer  = _fallbackPickResult.Get();
+
   nvrhi::BindingSetDesc setDesc;
   setDesc.bindings = {
       nvrhi::BindingSetItem::ConstantBuffer(0, _cameraUniformsBuffer),
@@ -526,6 +606,11 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(nvrhi::ITexture* ou
       nvrhi::BindingSetItem::StructuredBuffer_SRV(8, meshFaceOffsetsBuffer),
       nvrhi::BindingSetItem::Texture_SRV(9, domeTexture),
       nvrhi::BindingSetItem::Sampler(10, domeSampler),
+      nvrhi::BindingSetItem::Texture_UAV(11, colorHdrAov),
+      nvrhi::BindingSetItem::Texture_UAV(12, normalAov),
+      nvrhi::BindingSetItem::Texture_UAV(13, depthAov),
+      nvrhi::BindingSetItem::Texture_UAV(14, instanceAov),
+      nvrhi::BindingSetItem::StructuredBuffer_UAV(15, pickBuffer),
   };
   nvrhi::BindingSetHandle set = _device->createBindingSet(setDesc, _bindingLayout);
   _bindingSetCache[output] = set;
@@ -552,6 +637,24 @@ void PathTracePass::Execute(nvrhi::ICommandList* commandList, const PassContext&
 
   const Profiler::GpuScope gpuScope(*context.profiler, commandList, "pass.PathTrace");
 
+  // ---- Drain prior-frame pick staging -------------------------------
+  // M7 follow-up. The previous Execute() copied pickResult ->
+  // pickResultStaging on the same queue our renderer submits on; by
+  // now the GPU has retired that copy, so the host-mapped read here
+  // gets the prior frame's value. Skipped on the first Execute (no
+  // copy was issued yet, staging holds garbage).
+  if (_pickStagingHasFrame
+      && context.targets->pickResultStaging != nullptr)
+  {
+    const void* mapped = _device->mapBuffer(context.targets->pickResultStaging,
+                                            nvrhi::CpuAccessMode::Read);
+    if (mapped != nullptr)
+    {
+      std::memcpy(&_lastPickResult, mapped, sizeof(_lastPickResult));
+      _device->unmapBuffer(context.targets->pickResultStaging);
+    }
+  }
+
   // ---- Upload camera uniforms ----------------------------------------
   // Inverses are computed on the CPU each frame because the shader
   // wants worldFromView + viewFromClip, while GpuScene stores the
@@ -560,10 +663,23 @@ void PathTracePass::Execute(nvrhi::ICommandList* commandList, const PassContext&
   // convention correctly because it's a pure linear-algebra
   // operation that doesn't care about row-vector vs column-vector
   // semantics.
+  // M7 follow-up: also pack the per-frame UI tail (mouse pixel +
+  // debug-view mode) into the same cbuffer so the AOV inspector
+  // doesn't need a second binding for one struct's worth of data.
   const CameraDesc& camera = _scene->GetCamera();
   CameraUniforms cameraUniforms{};
   cameraUniforms.worldFromView = hlslpp::inverse(camera.viewFromWorld);
   cameraUniforms.viewFromClip = hlslpp::inverse(camera.projFromView);
+  cameraUniforms.mousePixelX = (context.settings != nullptr)
+                                   ? context.settings->mousePixelX
+                                   : RenderSettings::MOUSE_PIXEL_NONE;
+  cameraUniforms.mousePixelY = (context.settings != nullptr)
+                                   ? context.settings->mousePixelY
+                                   : RenderSettings::MOUSE_PIXEL_NONE;
+  cameraUniforms.debugViewMode = (context.settings != nullptr)
+                                     ? static_cast<uint32_t>(context.settings->debugView)
+                                     : 0u;
+  cameraUniforms._reservedDbg0 = 0u;
   commandList->writeBuffer(_cameraUniformsBuffer.Get(), &cameraUniforms, sizeof(cameraUniforms));
 
   // M5: write the fallback material if the scene has no materials of
@@ -676,7 +792,7 @@ void PathTracePass::Execute(nvrhi::ICommandList* commandList, const PassContext&
   }
 
   // ---- Bind + dispatch ----------------------------------------------
-  const nvrhi::BindingSetHandle bindingSet = GetOrCreateBindingSet(output);
+  const nvrhi::BindingSetHandle bindingSet = GetOrCreateBindingSet(*context.targets);
   if (!bindingSet)
     return;
 
@@ -686,6 +802,26 @@ void PathTracePass::Execute(nvrhi::ICommandList* commandList, const PassContext&
   // in the viewer / headless paths.
   commandList->setTextureState(output, nvrhi::AllSubresources,
                                nvrhi::ResourceStates::UnorderedAccess);
+  // Same transition for the M7 raw AOV outputs the raygen writes.
+  // keepInitialState on the AovTextures side means NVRHI re-syncs to
+  // UnorderedAccess automatically — but a no-op explicit barrier here
+  // documents intent and shields against future format / usage flips.
+  if (context.targets->colorHdr != nullptr)
+    commandList->setTextureState(context.targets->colorHdr,
+                                 nvrhi::AllSubresources,
+                                 nvrhi::ResourceStates::UnorderedAccess);
+  if (context.targets->normalAov != nullptr)
+    commandList->setTextureState(context.targets->normalAov,
+                                 nvrhi::AllSubresources,
+                                 nvrhi::ResourceStates::UnorderedAccess);
+  if (context.targets->depthAov != nullptr)
+    commandList->setTextureState(context.targets->depthAov,
+                                 nvrhi::AllSubresources,
+                                 nvrhi::ResourceStates::UnorderedAccess);
+  if (context.targets->instanceIdAov != nullptr)
+    commandList->setTextureState(context.targets->instanceIdAov,
+                                 nvrhi::AllSubresources,
+                                 nvrhi::ResourceStates::UnorderedAccess);
   commandList->commitBarriers();
 
   nvrhi::rt::State state;
@@ -698,6 +834,21 @@ void PathTracePass::Execute(nvrhi::ICommandList* commandList, const PassContext&
   args.height = output->getDesc().height;
   args.depth = 1;
   commandList->dispatchRays(args);
+
+  // ---- Submit pick-result staging copy -------------------------------
+  // M7 follow-up. After dispatchRays retires, copy the device pick
+  // buffer (just written by the raygen if mouse was over a pixel)
+  // into the host-readable staging buffer. The next Execute()'s
+  // top-of-frame map (gated on _pickStagingHasFrame) reads what we
+  // just submitted here.
+  if (context.targets->pickResult != nullptr
+      && context.targets->pickResultStaging != nullptr)
+  {
+    commandList->copyBuffer(context.targets->pickResultStaging, 0,
+                            context.targets->pickResult, 0,
+                            sizeof(PickResult));
+    _pickStagingHasFrame = true;
+  }
 }
 
 }  // namespace pyxis

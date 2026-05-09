@@ -45,9 +45,15 @@
 //
 // M3 carries one float3 colour + a hitT distance; expands later as
 // path tracing arrives (radiance, RNG state, throughput, etc.).
+//
+// M7 follow-up — extended with the data the AOV inspector needs.
+// Closesthit fills `normalWorld` + `instanceId`; miss leaves them at
+// the sentinel defaults (zero normal, ~0u instance id, hitT = -1).
 struct HitInfo {
     float3 color;
     float  hitT;     // ray-distance at hit; -1.0 sentinel from miss shader.
+    float3 normalWorld;  // populated by closesthit; (0,0,0) on miss
+    uint   instanceId;   // populated by closesthit; 0xFFFFFFFF on miss
 };
 #endif
 
@@ -70,6 +76,49 @@ struct HitInfo {
 struct CameraUniforms {
     float4x4 worldFromView;     // inverse of CameraDesc::viewFromWorld
     float4x4 viewFromClip;      // inverse of CameraDesc::projFromView
+    // Per-frame UI state — hitches a ride on this cbuffer to avoid a
+    // second binding for one struct's worth of viewer-only data.
+    // mousePixel is in pixel coords (top-left origin, matching
+    // DispatchRaysIndex); 0xFFFFFFFF means "mouse not over the
+    // viewport — skip the pick write". debugViewMode picks which
+    // raw AOV the raygen remaps into the display output (DEBUG_VIEW_*
+    // constants below). Three uint pads bring the struct to a
+    // 16-byte multiple.
+    uint mousePixelX;           // top-left origin pixel coord, or 0xFFFFFFFF if no hover
+    uint mousePixelY;
+    uint debugViewMode;         // DEBUG_VIEW_COLOR / NORMAL / DEPTH / INSTANCE_ID
+    uint _reservedDbg0;
+};
+
+// Debug-view selector mirrored on both sides. The combo in ImGuiHost's
+// Editor panel writes one of these into camera.debugViewMode; raygen
+// branches on it to compute the BGRA8 display output (gOutput) from
+// the raw per-AOV textures.
+static const uint DEBUG_VIEW_COLOR        = 0;  // post-tonemap radiance
+static const uint DEBUG_VIEW_NORMAL       = 1;  // world normal as (n*0.5+0.5)
+static const uint DEBUG_VIEW_DEPTH        = 2;  // 1/depth grayscale
+static const uint DEBUG_VIEW_INSTANCE_ID  = 3;  // hashed instance-id colour
+
+// Sentinel for camera.mousePixel{X,Y} meaning "mouse outside viewport".
+// Raygen short-circuits the pick-write when either component matches.
+static const uint PICK_PIXEL_NONE = 0xFFFFFFFFu;
+
+// PickResult — one-element RWStructuredBuffer the raygen writes when
+// the dispatched pixel matches camera.mousePixel. The viewer copies
+// this into a staging buffer each frame and reads back the previous
+// frame's value (one-frame stale; fine for human-paced UI).
+struct PickResult {
+    // Row 0 — final radiance (HDR, pre-tonemap).
+    float colorR;
+    float colorG;
+    float colorB;
+    float depth;        // ray distance at hit; -1 on miss
+
+    // Row 1 — world-space normal (xyz) + instance id.
+    float normalX;
+    float normalY;
+    float normalZ;
+    uint  instanceId;   // 0xFFFFFFFF on miss
 };
 
 // OpenPBRMaterialGPU — the bytewise layout the closesthit reads via
@@ -187,11 +236,16 @@ static const uint LIGHT_KIND_RECT    = 2;
     // we lock the layout of the structs that *do* cross the C++ /
     // SPIR-V boundary as memory blobs (CameraUniforms via cbuffer,
     // OpenPBRMaterialGPU via structured buffer).
-    static_assert(sizeof(CameraUniforms) == 128,
-                  "CameraUniforms must be 128 bytes — two 64-byte float4x4s "
-                  "(see resources/shaders/ShaderInterop.slang).");
+    static_assert(sizeof(CameraUniforms) == 144,
+                  "CameraUniforms must be 144 bytes — two 64-byte float4x4s + "
+                  "16-byte UI tail (see resources/shaders/ShaderInterop.slang).");
     static_assert(sizeof(CameraUniforms) % 16 == 0,
                   "CameraUniforms must be 16-byte aligned (cbuffer std140 rule).");
+    static_assert(sizeof(PickResult) == 32,
+                  "PickResult must be 32 bytes (2 rows of 16) — see "
+                  "resources/shaders/ShaderInterop.slang.");
+    static_assert(sizeof(PickResult) % 16 == 0,
+                  "PickResult must be 16-byte aligned (structured-buffer rule).");
     static_assert(sizeof(OpenPBRMaterialGPU) == 80,
                   "OpenPBRMaterialGPU must be 80 bytes (5 rows of 16).");
     static_assert(sizeof(OpenPBRMaterialGPU) % 16 == 0,

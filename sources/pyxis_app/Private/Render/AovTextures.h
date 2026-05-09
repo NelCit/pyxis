@@ -46,23 +46,37 @@ namespace pyxis::app {
 
 struct AovTextures {
   // §18.4 slots.
-  nvrhi::TextureHandle color;
-  // M5+ — uncomment + populate in Create() alongside their consumer
-  // passes. Kept here so the §18.4 slot list is visible at the point
-  // a future contributor goes looking for it:
-  //   nvrhi::TextureHandle depth;          // M5  R32F
-  //   nvrhi::TextureHandle normal;         // M5  RGB16F
-  //   nvrhi::TextureHandle albedo;         // M5  RGBA16F
-  //   nvrhi::TextureHandle motionVector;   // M11 RG16F
-  //   nvrhi::TextureHandle materialId;     // M6  R32_UINT
-  //   nvrhi::TextureHandle instanceId;     // M6  R32_UINT
+  nvrhi::TextureHandle color;          // BGRA8_UNORM display target
+
+  // M7 follow-up — AOV inspector + picker raw outputs. The raygen
+  // writes all four every frame from the same TraceRay payload so
+  // the inspector / Save EXR / pick buffer can read RAW data
+  // without a re-trace. Formats are storage-capable per Vulkan's
+  // VkFormatFeatureFlagBits VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT:
+  //   colorHdr      RGBA16_FLOAT (pre-tonemap radiance)
+  //   normal        RGBA16_FLOAT (world normal in xyz, w unused)
+  //   depth         R32_FLOAT    (primary-ray distance, 0 on miss)
+  //   instanceId    R32_UINT     (~0u on miss)
+  nvrhi::TextureHandle colorHdr;
+  nvrhi::TextureHandle normal;
+  nvrhi::TextureHandle depth;
+  nvrhi::TextureHandle instanceId;
+
+  // 1-element RWStructuredBuffer<PickResult> + a host-readable
+  // staging buffer for one-frame-stale CPU readback. PathTracePass
+  // copies device→staging at the end of each Execute(); the viewer
+  // maps the staging buffer the NEXT frame to read what the GPU
+  // wrote (mapping the same frame would block on a fence).
+  nvrhi::BufferHandle  pickResult;
+  nvrhi::BufferHandle  pickResultStaging;
 
   uint32_t width = 0;
   uint32_t height = 0;
 
-  // Allocate the M2 active set (color only). Returns the unexpected
-  // branch with a human-readable reason on null device, zero dims, or
-  // an NVRHI createTexture failure.
+  // Allocate every owned resource (display color + 4 AOVs + pick
+  // buffer pair). Returns the unexpected branch with a human-readable
+  // reason on null device, zero dims, or any createTexture / Buffer
+  // failure.
   [[nodiscard]] static std::expected<AovTextures, std::string> Create(nvrhi::IDevice* device,
                                                                       uint32_t width,
                                                                       uint32_t height) noexcept;

@@ -7,6 +7,7 @@
 #include "ImGuiHost.h"
 
 #include <imgui.h>
+#include "Output/ExrWriter.h"
 #include "Output/TextureReadback.h"
 #include "Render/AovTextures.h"
 #include "HydraEngine/HydraEngine.h"
@@ -56,6 +57,104 @@ constexpr int EXIT_DEVICE_INIT_FAIL = 2;
 // value has been 256 since GLFW 3.0 and matches USB HID Escape — stable
 // enough for "Escape closes the viewer" UX.
 constexpr int GLFW_ESCAPE_KEY_CODE = 256;
+
+// IEEE 754 binary16 -> binary32. Used by the AOV save path to unpack
+// the RGBA16_FLOAT staging texture into the float channels tinyexr
+// expects. Public-domain bit-fiddle: handles zero / subnormal / inf /
+// NaN correctly so an unexpected NaN sample doesn't poison the EXR.
+float HalfToFloat(uint16_t halfBits) noexcept {
+  const uint32_t sign     = (halfBits & 0x8000u) << 16;
+  const uint32_t exponent = (halfBits & 0x7C00u) >> 10;
+  const uint32_t mantissa = (halfBits & 0x03FFu);
+  uint32_t bits = sign;
+  if (exponent == 0)
+  {
+    if (mantissa != 0)
+    {
+      // Subnormal — normalise into a regular float.
+      uint32_t mant = mantissa;
+      uint32_t expo = 1;
+      while ((mant & 0x0400u) == 0)
+      {
+        mant <<= 1;
+        ++expo;
+      }
+      mant &= 0x03FFu;
+      bits |= ((127u - 15u - expo + 1u) << 23) | (mant << 13);
+    }
+  }
+  else if (exponent == 0x1Fu)
+  {
+    // Inf / NaN.
+    bits |= 0x7F800000u | (mantissa << 13);
+  }
+  else
+  {
+    bits |= ((exponent + (127u - 15u)) << 23) | (mantissa << 13);
+  }
+  float result;
+  std::memcpy(&result, &bits, sizeof(result));
+  return result;
+}
+
+// Convert one row of a freshly-readback staging texture into the
+// interleaved RGBA float32 layout WriteExrRgba32f wants. dispatches
+// on the texture's NVRHI format. Skips alpha-channel transforms —
+// alpha is always passed through (or set to 1.0 for single-channel
+// AOVs that had no alpha to begin with).
+void ConvertAovRowToRgba32f(nvrhi::Format format, const void* srcRow, uint32_t width,
+                            float* dstRgbaRow) noexcept {
+  switch (format)
+  {
+    case nvrhi::Format::RGBA16_FLOAT:
+    {
+      const auto* src = static_cast<const uint16_t*>(srcRow);
+      for (uint32_t col = 0; col < width; ++col)
+      {
+        dstRgbaRow[col * 4 + 0] = HalfToFloat(src[col * 4 + 0]);
+        dstRgbaRow[col * 4 + 1] = HalfToFloat(src[col * 4 + 1]);
+        dstRgbaRow[col * 4 + 2] = HalfToFloat(src[col * 4 + 2]);
+        dstRgbaRow[col * 4 + 3] = HalfToFloat(src[col * 4 + 3]);
+      }
+      break;
+    }
+    case nvrhi::Format::R32_FLOAT:
+    {
+      const auto* src = static_cast<const float*>(srcRow);
+      for (uint32_t col = 0; col < width; ++col)
+      {
+        const float depthVal = src[col];
+        dstRgbaRow[col * 4 + 0] = depthVal;
+        dstRgbaRow[col * 4 + 1] = depthVal;
+        dstRgbaRow[col * 4 + 2] = depthVal;
+        dstRgbaRow[col * 4 + 3] = 1.0f;
+      }
+      break;
+    }
+    case nvrhi::Format::R32_UINT:
+    {
+      const auto* src = static_cast<const uint32_t*>(srcRow);
+      for (uint32_t col = 0; col < width; ++col)
+      {
+        // EXR is float-only; cast the integer slot id to float.
+        // 0xFFFFFFFF (no-hit sentinel) saturates the float32 range
+        // but stays distinguishable from any real instance id (which
+        // are bounded by HANDLE_SLOT_BITS = 24-bit).
+        const float idAsFloat = static_cast<float>(src[col]);
+        dstRgbaRow[col * 4 + 0] = idAsFloat;
+        dstRgbaRow[col * 4 + 1] = idAsFloat;
+        dstRgbaRow[col * 4 + 2] = idAsFloat;
+        dstRgbaRow[col * 4 + 3] = 1.0f;
+      }
+      break;
+    }
+    default:
+      // Unsupported format — fill with zeros so the EXR still writes
+      // (caller logs the format mismatch).
+      std::memset(dstRgbaRow, 0, static_cast<std::size_t>(width) * 4u * sizeof(float));
+      break;
+  }
+}
 
 }  // namespace
 
@@ -171,12 +270,23 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
   // ImGuiHost::Init() chains ImGui's on top. Both fire each frame.
   std::atomic<bool> shouldClose{false};
   FlyCameraController cameraController;
+  // M7 follow-up — latest cursor pixel for the AOV picker. Updated
+  // by every MouseMove event below, clamped to the AOV size right
+  // before each RenderFrame. Sentinel = "no hover" until a move
+  // event lands.
+  std::atomic<int32_t> latestMousePixelX{-1};
+  std::atomic<int32_t> latestMousePixelY{-1};
   window->SetEventSink([&](const InputEvent& event) {
     if (event.kind == InputEventKind::WindowClose)
       shouldClose.store(true);
     if (event.kind == InputEventKind::KeyDown && event.key == GLFW_ESCAPE_KEY_CODE)
     {
       shouldClose.store(true);
+    }
+    if (event.kind == InputEventKind::MouseMove)
+    {
+      latestMousePixelX.store(static_cast<int32_t>(event.mouseX));
+      latestMousePixelY.store(static_cast<int32_t>(event.mouseY));
     }
 
     // Route mouse / keyboard to the fly camera ONLY if ImGui isn't
@@ -561,11 +671,49 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
       // trace finishes we copyTexture from AOV → swapchain.
       RenderTargets targets{};
       targets.color = aovs.color.Get();
+      // M7 follow-up — wire the raw AOV outputs + pick buffer pair so
+      // the AOV inspector / picker / Save EXR all have data to read.
+      // The pass tolerates nullptr (binds 1×1 fallbacks); we feed the
+      // real AovTextures handles unconditionally for the viewer path.
+      targets.colorHdr = aovs.colorHdr.Get();
+      targets.normalAov = aovs.normal.Get();
+      targets.depthAov = aovs.depth.Get();
+      targets.instanceIdAov = aovs.instanceId.Get();
+      targets.pickResult = aovs.pickResult.Get();
+      targets.pickResultStaging = aovs.pickResultStaging.Get();
+
       RenderSettings settings{};
       settings.width = aovs.width;
       settings.height = aovs.height;
+      // Push the AOV inspector state into the renderer. The ImGui
+      // Editor combo flips _editorDebugView; the cursor pump above
+      // captures latestMousePixelXY from MouseMove events and we
+      // clamp here to the viewport bounds (raygen treats the sentinel
+      // 0xFFFFFFFF as "no hover -> skip pick write").
+      if (imguiHost.IsReady())
+      {
+        settings.debugView = imguiHost.GetDebugView();
+      }
+      const int32_t mouseX = latestMousePixelX.load();
+      const int32_t mouseY = latestMousePixelY.load();
+      if (mouseX >= 0 && mouseY >= 0
+          && static_cast<uint32_t>(mouseX) < aovs.width
+          && static_cast<uint32_t>(mouseY) < aovs.height)
+      {
+        settings.mousePixelX = static_cast<uint32_t>(mouseX);
+        settings.mousePixelY = static_cast<uint32_t>(mouseY);
+      }
 
       renderer.RenderFrame(commandList, settings, targets);
+
+      // Push the (one-frame-stale) pick readback into the Editor so
+      // the AOV inspector's Picker readout updates each frame. Cheap
+      // copy of a 32-byte POD; safe even when the renderer hasn't
+      // produced a real pick yet (default-constructed = depth -1).
+      if (imguiHost.IsReady())
+      {
+        imguiHost.SetLastPickResult(renderer.LastPickResult());
+      }
 
       // Copy AOV color → swapchain backbuffer. NVRHI tracks the
       // transitions for both images via `keepInitialState`, so
@@ -616,6 +764,100 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
       const Profiler::CpuScope present(profiler, "app.dm.present");
       deviceManager->EndFrame();
     }
+
+    // ---- Save AOV (Editor "Save current AOV..." button) ---------------
+    // Drained AFTER the frame's main submit + present so the AOV holds
+    // freshly-written data. We open a one-shot command list, copy the
+    // selected raw AOV into a CpuAccessMode::Read staging texture, run
+    // it through executeCommandList + waitForIdle, then map + convert
+    // to RGBA32F + WriteExrRgba32f. Stalls the render loop briefly —
+    // acceptable for a one-click human action.
+    std::string saveAovPath;
+    if (imguiHost.IsReady() && imguiHost.TakeSaveAovRequest(saveAovPath))
+    {
+      const RenderSettings::DebugView pickedView = imguiHost.GetDebugView();
+      nvrhi::ITexture* sourceAov = nullptr;
+      const char* aovLabel = "color";
+      switch (pickedView)
+      {
+        case RenderSettings::DebugView::Color:
+          // Save HDR color (pre-tonemap), not the BGRA8 display copy.
+          sourceAov = aovs.colorHdr.Get();
+          aovLabel = "colorHdr";
+          break;
+        case RenderSettings::DebugView::Normal:
+          sourceAov = aovs.normal.Get();
+          aovLabel = "normal";
+          break;
+        case RenderSettings::DebugView::Depth:
+          sourceAov = aovs.depth.Get();
+          aovLabel = "depth";
+          break;
+        case RenderSettings::DebugView::InstanceId:
+          sourceAov = aovs.instanceId.Get();
+          aovLabel = "instanceId";
+          break;
+      }
+      if (sourceAov == nullptr)
+      {
+        log.Error(log::APP, "ViewerMode: save AOV: source texture is null");
+      }
+      else
+      {
+        nvrhi::ICommandList* saveCmd = commandListHandle.Get();
+        saveCmd->open();
+        auto readbackResult =
+            TextureReadback::RecordCopy(device, saveCmd, sourceAov, aovLabel);
+        saveCmd->close();
+        device->executeCommandList(saveCmd);
+        device->waitForIdle();
+        if (!readbackResult)
+        {
+          log.Error(log::APP, "ViewerMode: save AOV: " + readbackResult.error());
+        }
+        else
+        {
+          TextureReadback readback = std::move(*readbackResult);
+          if (auto mapResult = readback.Map(); !mapResult)
+          {
+            log.Error(log::APP, "ViewerMode: save AOV map: " + mapResult.error());
+          }
+          else
+          {
+            // Repack into contiguous RGBA32F via the per-format
+            // helper and hand to tinyexr.
+            const uint32_t aovWidth  = readback.Width();
+            const uint32_t aovHeight = readback.Height();
+            const std::size_t srcRowPitch = readback.RowPitch();
+            std::vector<float> rgbaFloats(
+                static_cast<std::size_t>(aovWidth) * aovHeight * 4u);
+            const auto* srcBytes = static_cast<const uint8_t*>(readback.Data());
+            for (uint32_t row = 0; row < aovHeight; ++row)
+            {
+              const void* srcRow = srcBytes + (static_cast<std::size_t>(row) * srcRowPitch);
+              float* dstRow = rgbaFloats.data() +
+                              (static_cast<std::size_t>(row) * aovWidth * 4u);
+              ConvertAovRowToRgba32f(readback.Format(), srcRow, aovWidth, dstRow);
+            }
+            const std::size_t dstRowPitch =
+                static_cast<std::size_t>(aovWidth) * 4u * sizeof(float);
+            if (auto writeResult = WriteExrRgba32f(saveAovPath, aovWidth, aovHeight,
+                                                   rgbaFloats.data(), dstRowPitch);
+                !writeResult)
+            {
+              log.Error(log::APP,
+                        "ViewerMode: save AOV write: " + writeResult.error());
+            }
+            else
+            {
+              log.Info(log::APP, "ViewerMode: save AOV (" + std::string{aovLabel}
+                                     + ") -> " + saveAovPath);
+            }
+          }
+        }
+      }
+    }
+
     // Drain NVRHI's deferred-destruction queue. nvrhi.h's contract is
     // explicit: "Call this method at least once per frame." Without
     // it, every CommandList submission's internal RefCountPtrs on

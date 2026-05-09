@@ -9,6 +9,7 @@
 
 namespace nvrhi {
 class ITexture;
+class IBuffer;
 }
 
 namespace pyxis {
@@ -36,6 +37,34 @@ struct RenderTargets {
   nvrhi::ITexture* motionVector = nullptr;
   nvrhi::ITexture* materialId = nullptr;
   nvrhi::ITexture* instanceId = nullptr;
+
+  // M7 follow-up — extra targets the AOV-inspector path writes.
+  // These complement `color`: the BGRA8 `color` carries the post-
+  // tonemap display output (whichever AOV the inspector picked) and
+  // these carry the RAW per-AOV data so the picker / save-EXR can
+  // pull untransformed values. All are caller-allocated and live
+  // alongside `color` in AovTextures (pyxis_app private).
+  //   colorHdr   : RGBA16F pre-tonemap radiance
+  //   normalAov  : RGBA16F world-space normal (xyz, w unused)
+  //   depthAov   : R32F    primary-ray hit distance (0 on miss)
+  //   instanceIdAov : R32_UINT InstanceID() at hit (~0u on miss)
+  // Required for v1 viewer; passes can no-op if any are null.
+  nvrhi::ITexture* colorHdr = nullptr;
+  nvrhi::ITexture* normalAov = nullptr;
+  nvrhi::ITexture* depthAov = nullptr;
+  nvrhi::ITexture* instanceIdAov = nullptr;
+
+  // 1-element RWStructuredBuffer<PickResult> the raygen writes when
+  // the dispatched pixel matches RenderSettings::mousePixel{X,Y}.
+  // Caller-owned; PathTracePass copies this into a staging buffer
+  // each frame for one-frame-stale CPU readback. Null = no picker.
+  nvrhi::IBuffer*  pickResult = nullptr;
+  // CpuAccessMode::Read staging buffer the renderer copies pickResult
+  // into at the end of each frame. The renderer maps this on the NEXT
+  // call to read what the GPU wrote (one-frame stale). Null = no
+  // readback (the picker still updates the device buffer for any
+  // GPU-side consumer).
+  nvrhi::IBuffer*  pickResultStaging = nullptr;
 };
 
 }  // namespace pyxis

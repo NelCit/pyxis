@@ -18,6 +18,8 @@
 
 #include "RenderGraph/IRenderPass.h"
 
+#include <Pyxis/Renderer/Descs/PickResult.h>
+
 #include <nvrhi/nvrhi.h>
 
 #include <string_view>
@@ -47,12 +49,22 @@ class PathTracePass final : public IRenderPass {
   // pre-reload pipeline is preserved and rendering continues unchanged.
   [[nodiscard]] bool ReloadShaders() noexcept override;
 
+  // M7 follow-up — picker readback. Returns the cached PickResult the
+  // last successful staging-buffer map copied out. Always returns the
+  // last-known-good value; no error path. Default-constructed (depth
+  // -1, instanceId ~0u) until the first frame's copy retires + the
+  // next Execute()'s map reads it. Caller (PyxisRenderer) just
+  // forwards this to the public LastPickResult() entry.
+  [[nodiscard]] PickResult GetLastPickResult() const noexcept { return _lastPickResult; }
+
  private:
-  // Build the binding set for the supplied output texture. Cached
-  // per `nvrhi::ITexture*` identity so we don't churn descriptor
-  // sets on every frame; a swapchain rebuild invalidates pointers
-  // and the cache is bounded so stale entries get evicted.
-  [[nodiscard]] nvrhi::BindingSetHandle GetOrCreateBindingSet(nvrhi::ITexture* output);
+  // Build the binding set for the supplied targets. Cached per
+  // `nvrhi::ITexture*` identity (the BGRA8 output) so we don't churn
+  // descriptor sets on every frame; a swapchain rebuild invalidates
+  // pointers and the cache is bounded so stale entries get evicted.
+  // Takes the full RenderTargets so the M7 raw AOV outputs + pick
+  // buffer get bound alongside the existing scene-side buffers.
+  [[nodiscard]] nvrhi::BindingSetHandle GetOrCreateBindingSet(struct RenderTargets const& targets);
 
   nvrhi::IDevice* _device = nullptr;
   GpuScene* _scene = nullptr;
@@ -147,6 +159,31 @@ class PathTracePass final : public IRenderPass {
   nvrhi::ISampler* _lastSeenBindlessSampler = nullptr;
 
   bool _shadersOk = false;  // true if ctor loaded all three shaders + built pipeline.
+
+  // M7 follow-up — AOV inspector + picker.
+  // Cache the raw-AOV / pick pointers from the last RenderTargets we
+  // saw; mismatch => binding-set cache invalidation (same pattern as
+  // the M5/M6/M7 scene-buffer trackers above).
+  nvrhi::ITexture* _lastSeenColorHdrAov  = nullptr;
+  nvrhi::ITexture* _lastSeenNormalAov    = nullptr;
+  nvrhi::ITexture* _lastSeenDepthAov     = nullptr;
+  nvrhi::ITexture* _lastSeenInstanceAov  = nullptr;
+  nvrhi::IBuffer*  _lastSeenPickResult   = nullptr;
+  // Tiny no-UAV fallback textures for each raw AOV format. Bound when
+  // the caller doesn't supply that AOV (headless mode + the M2-era
+  // color-only paths). Same lifetime as the existing fallbacks above.
+  nvrhi::TextureHandle _fallbackColorHdrAov;
+  nvrhi::TextureHandle _fallbackNormalAov;
+  nvrhi::TextureHandle _fallbackDepthAov;
+  nvrhi::TextureHandle _fallbackInstanceAov;
+  nvrhi::BufferHandle  _fallbackPickResult;
+
+  // Cached one-frame-stale picker readback. Updated at the top of
+  // each Execute() by mapping the staging buffer (if a copy was
+  // submitted in the prior frame). The first Execute returns the
+  // default-constructed value (depth -1, instanceId ~0u).
+  PickResult _lastPickResult{};
+  bool       _pickStagingHasFrame = false;
 };
 
 }  // namespace pyxis

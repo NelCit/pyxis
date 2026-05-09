@@ -31,4 +31,16 @@ namespace pyxis::app {
                                                              const void* bgra8Pixels,
                                                              std::size_t rowPitchBytes) noexcept;
 
+// Write an interleaved RGBA float32 buffer to <path> as a 4-channel
+// float EXR. Caller has already converted whatever native AOV format
+// (RGBA16F, R32F, R32_UINT, etc.) into 4 floats per pixel — see the
+// AOV save flow in ViewerMode for the per-format remap. rowPitchBytes
+// is the source row stride in BYTES (not floats); typically
+// `width * sizeof(float) * 4`. Same path-create + ZIP-compress
+// behaviour as WriteExrBgra8.
+[[nodiscard]] std::expected<void, std::string> WriteExrRgba32f(std::string_view filePath,
+                                                               uint32_t width, uint32_t height,
+                                                               const float* rgbaPixels,
+                                                               std::size_t rowPitchBytes) noexcept;
+
 }  // namespace pyxis::app

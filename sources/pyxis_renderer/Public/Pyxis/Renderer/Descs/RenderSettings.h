@@ -30,6 +30,25 @@ struct RenderSettings {
   struct Features {
     bool imguiOverlay = true;  // PYXIS_DEBUG_TOOLS-gated
   } features;
+
+  // M7 follow-up — viewer-driven AOV inspector + pixel picker. The
+  // raygen reads these out of CameraUniforms each frame. Mirrors the
+  // DEBUG_VIEW_* constants in resources/shaders/ShaderInterop.slang.
+  // Headless mode leaves these at defaults (Color, no mouse hover)
+  // so byte-equal regression artefacts stay stable.
+  enum class DebugView : uint32_t {
+    Color      = 0,   // post-tonemap radiance
+    Normal     = 1,   // (n*0.5+0.5)
+    Depth      = 2,   // 1/depth grayscale
+    InstanceId = 3,   // hashed colour per slot
+  };
+  DebugView debugView = DebugView::Color;
+
+  // Mouse pixel for the picker. 0xFFFFFFFF on either axis = "no
+  // hover"; raygen short-circuits the pick write.
+  static constexpr uint32_t MOUSE_PIXEL_NONE = 0xFFFFFFFFu;
+  uint32_t mousePixelX = MOUSE_PIXEL_NONE;
+  uint32_t mousePixelY = MOUSE_PIXEL_NONE;
 };
 
 }  // namespace pyxis

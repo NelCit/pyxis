@@ -46,6 +46,53 @@ std::expected<AovTextures, std::string> AovTextures::Create(nvrhi::IDevice* devi
   {
     return std::unexpected{std::string{"AovTextures::Create: createTexture(aov.color) failed"}};
   }
+
+  // Helper for the M7 raw-AOV textures: same dimension / UAV /
+  // initialState as `color`, just a different format + debug name.
+  auto makeAov = [&](nvrhi::Format fmt, const char* dbgName) -> nvrhi::TextureHandle {
+    nvrhi::TextureDesc aovDesc = desc;
+    aovDesc.format    = fmt;
+    aovDesc.debugName = dbgName;
+    return device->createTexture(aovDesc);
+  };
+  result.colorHdr   = makeAov(nvrhi::Format::RGBA16_FLOAT, "aov.colorHdr");
+  result.normal     = makeAov(nvrhi::Format::RGBA16_FLOAT, "aov.normal");
+  result.depth      = makeAov(nvrhi::Format::R32_FLOAT,    "aov.depth");
+  result.instanceId = makeAov(nvrhi::Format::R32_UINT,     "aov.instanceId");
+  if (!result.colorHdr || !result.normal || !result.depth || !result.instanceId)
+  {
+    return std::unexpected{std::string{"AovTextures::Create: createTexture(raw AOV) failed"}};
+  }
+
+  // Pick-result buffer pair. The device-side buffer is the
+  // RWStructuredBuffer the raygen writes; the staging buffer is
+  // host-mapped after a per-frame copy for one-frame-stale CPU
+  // readback. 32 bytes per element matches shaderinterop::PickResult.
+  constexpr uint32_t PICK_RESULT_BYTES = 32;
+  nvrhi::BufferDesc pickDesc;
+  pickDesc.byteSize = PICK_RESULT_BYTES;
+  pickDesc.structStride = PICK_RESULT_BYTES;
+  pickDesc.canHaveUAVs = true;
+  pickDesc.debugName = "aov.pickResult";
+  pickDesc.initialState = nvrhi::ResourceStates::UnorderedAccess;
+  pickDesc.keepInitialState = true;
+  result.pickResult = device->createBuffer(pickDesc);
+  if (!result.pickResult)
+  {
+    return std::unexpected{std::string{"AovTextures::Create: createBuffer(pickResult) failed"}};
+  }
+
+  nvrhi::BufferDesc stagingDesc;
+  stagingDesc.byteSize = PICK_RESULT_BYTES;
+  stagingDesc.cpuAccess = nvrhi::CpuAccessMode::Read;
+  stagingDesc.debugName = "aov.pickResult.staging";
+  result.pickResultStaging = device->createBuffer(stagingDesc);
+  if (!result.pickResultStaging)
+  {
+    return std::unexpected{
+        std::string{"AovTextures::Create: createBuffer(pickResult.staging) failed"}};
+  }
+
   result.width = width;
   result.height = height;
   return result;

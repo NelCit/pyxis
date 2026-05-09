@@ -32,7 +32,48 @@
 
 [[vk::binding(0, 0)]] ConstantBuffer<CameraUniforms>  gCamera;
 [[vk::binding(1, 0)]] RaytracingAccelerationStructure gTlas;
-[[vk::binding(2, 0)]] RWTexture2D<float4>             gOutput;
+[[vk::binding(2, 0)]] RWTexture2D<float4>             gOutput;             // BGRA8 display
+// AOV outputs (M7 follow-up). Raygen writes all four every frame from
+// the same TraceRay payload; the inspector picks which one the display
+// path remaps. Storage-capable formats only — RGBA16F for color/normal,
+// R32F for depth, R32_UINT for instance id. Bindings are appended past
+// the existing 0..10 to keep the §11 closesthit binding indices stable.
+[[vk::binding(11, 0)]] RWTexture2D<float4>            gOutColorHdr;        // RGBA16F radiance
+[[vk::binding(12, 0)]] RWTexture2D<float4>            gOutNormal;          // RGBA16F world normal
+[[vk::binding(13, 0)]] RWTexture2D<float>             gOutDepth;           // R32F  ray-distance
+[[vk::binding(14, 0)]] RWTexture2D<uint>              gOutInstanceId;      // R32U  instance slot
+[[vk::binding(15, 0)]] RWStructuredBuffer<PickResult> gPickResult;         // 1-elem pick latch
+
+// Narkowicz ACES Filmic — pulled out of main() so the display branch
+// for DEBUG_VIEW_COLOR can call it cleanly. Same constants as before;
+// see the M9 TODO above the call site for the eventual ToneMapPass
+// hand-off.
+float3 acesFilmic(float3 x) {
+    const float a = 2.51;
+    const float b = 0.03;
+    const float c = 2.43;
+    const float d = 0.59;
+    const float e = 0.14;
+    return saturate((x * (a * x + b)) / (x * (c * x + d) + e));
+}
+
+// Cheap integer hash → unit-interval float, used to recolor instance
+// IDs into a visually-distinct palette for the InstanceID debug view.
+// Murmur-style mix; avalanches enough that adjacent IDs land on
+// different hues without a lookup table.
+float3 hashInstanceColor(uint id) {
+    if (id == 0xFFFFFFFFu) return float3(0.0, 0.0, 0.0);
+    uint x = id * 2654435761u;
+    x ^= x >> 16;
+    x *= 2246822519u;
+    x ^= x >> 13;
+    x *= 3266489917u;
+    x ^= x >> 16;
+    const uint r = (x      ) & 0xFFu;
+    const uint g = (x >>  8) & 0xFFu;
+    const uint b = (x >> 16) & 0xFFu;
+    return float3(float(r), float(g), float(b)) * (1.0 / 255.0);
+}
 
 // Slang emits the SPIR-V `OpEntryPoint` name as `"main"` regardless
 // of the source-side function name (verified via spirv-dis); the C++
@@ -76,8 +117,10 @@ void main() {
     ray.TMax      = 10000.0f;
 
     HitInfo payload;
-    payload.color = float3(0, 0, 0);
-    payload.hitT  = -1.0f;
+    payload.color       = float3(0, 0, 0);
+    payload.hitT        = -1.0f;
+    payload.normalWorld = float3(0, 0, 0);
+    payload.instanceId  = 0xFFFFFFFFu;
 
     // RAY_FLAG_NONE — keep the door open for future shadow/opaque-only
     // refinements. instanceMask = 0xFF matches what GpuScene's TLAS
@@ -92,42 +135,67 @@ void main() {
              ray,
              payload);
 
-    // M7-simple tone-map: ACES Filmic (Narkowicz approximation).
-    //
-    // TODO(M9): REMOVE this block when the §9 ToneMapPass lands as
-    // a separate render-graph stage. The ToneMapPass owns the
-    // tone-map step end-to-end; leaving the operator inlined here
-    // would tone-map twice (raygen + ToneMapPass), crushing
-    // highlights and desaturating mid-tones. The grep marker is
-    // `M7-simple tone-map`.
-    //
-    // The closesthit's NdotL Lambert + Dome ambient and the miss
-    // shader's HDRI sample both produce HDR values that can exceed
-    // 1.0 (Sun × NdotL × baseColor → ~1.2; HDRI sky pixels → up to
-    // ~10.0 in bright cloud / sun areas). The swapchain blit clamps
-    // anything above 1.0 to white, so without a tone-map the bright
-    // outdoor look of the bundled Poly Haven HDRI shows up as a
-    // featureless white background and over-bright surfaces.
-    //
-    // Narkowicz's ACES Fitted approximation (single rational
-    // function per channel) is the canonical production choice —
-    // used by Unreal, Unity HDRP, plus most real-time path tracers.
-    // Maps [0, ∞) → [0, 1] with a filmic shoulder + toe; preserves
-    // hue close enough that the §11 OpenPBR baseColor's perceptual
-    // identity survives. M9 swaps this for the proper ACES Fitted
-    // (RRT + ODT matrices) + OCIO display transform alongside the
-    // §9 ToneMapPass.
-    //
-    // Reference: Krzysztof Narkowicz, "ACES Filmic Tone Mapping
-    // Curve" (2015). Constants below are the published fit; do not
-    // touch without re-fitting against the ACES RRT + sRGB ODT.
-    const float3 x = payload.color;
-    const float aces_a = 2.51f;
-    const float aces_b = 0.03f;
-    const float aces_c = 2.43f;
-    const float aces_d = 0.59f;
-    const float aces_e = 0.14f;
-    const float3 toneMapped = saturate(
-        (x * (aces_a * x + aces_b)) / (x * (aces_c * x + aces_d) + aces_e));
-    gOutput[launchIndex] = float4(toneMapped, 1.0f);
+    // ----- Raw AOVs -----------------------------------------------
+    // Written every frame regardless of debugViewMode so the AOV
+    // inspector + pixel picker + Save AOV can read RAW data — not
+    // the post-tonemap remap. The inspector branch below picks
+    // which one feeds the BGRA8 display output.
+    gOutColorHdr[launchIndex]   = float4(payload.color, 1.0f);
+    gOutNormal[launchIndex]     = float4(payload.normalWorld, 1.0f);
+    gOutDepth[launchIndex]      = (payload.hitT > 0.0f) ? payload.hitT : 0.0f;
+    gOutInstanceId[launchIndex] = payload.instanceId;
+
+    // ----- Pixel picker -------------------------------------------
+    // Write the raw values into the 1-element pick buffer when this
+    // dispatched pixel matches the cursor. The viewer kicks a copy
+    // into a staging buffer per frame and reads back next frame.
+    if (launchIndex.x == gCamera.mousePixelX && launchIndex.y == gCamera.mousePixelY)
+    {
+        PickResult p;
+        p.colorR     = payload.color.x;
+        p.colorG     = payload.color.y;
+        p.colorB     = payload.color.z;
+        p.depth      = payload.hitT;
+        p.normalX    = payload.normalWorld.x;
+        p.normalY    = payload.normalWorld.y;
+        p.normalZ    = payload.normalWorld.z;
+        p.instanceId = payload.instanceId;
+        gPickResult[0] = p;
+    }
+
+    // ----- Display output (BGRA8 backbuffer) ----------------------
+    // ACES tonemap on the Color path; (n*0.5+0.5) on Normal; 1/depth
+    // grayscale on Depth; hash-coloured palette on InstanceID. The
+    // M7 inline ACES is preserved on the Color branch only — see
+    // the standing M9 TODO ("ToneMapPass takeover") above.
+    float3 displayColor = float3(0.0, 0.0, 0.0);
+    if (gCamera.debugViewMode == DEBUG_VIEW_COLOR)
+    {
+        displayColor = acesFilmic(payload.color);
+    }
+    else if (gCamera.debugViewMode == DEBUG_VIEW_NORMAL)
+    {
+        // Miss is (0,0,0) in the Normal AOV; display as middle grey
+        // so the background isn't visually identical to a Z-aligned
+        // surface. Hit normals: standard half-encode.
+        displayColor = (payload.hitT > 0.0f)
+            ? (payload.normalWorld * 0.5f + 0.5f)
+            : float3(0.5f, 0.5f, 0.5f);
+    }
+    else if (gCamera.debugViewMode == DEBUG_VIEW_DEPTH)
+    {
+        // Inverse-depth grayscale: surfaces closer to the camera
+        // appear brighter, miss (= 0 sentinel) renders black.
+        // The 1/(1+d) curve avoids the divide-by-zero at d=0 and
+        // gives a smooth response across the typical [0.1, 50]
+        // viewer range without a configured min/max range.
+        const float d = payload.hitT;
+        const float intensity = (d > 0.0f) ? (1.0f / (1.0f + d * 0.1f)) : 0.0f;
+        displayColor = float3(intensity, intensity, intensity);
+    }
+    else if (gCamera.debugViewMode == DEBUG_VIEW_INSTANCE_ID)
+    {
+        displayColor = hashInstanceColor(payload.instanceId);
+    }
+    gOutput[launchIndex] = float4(displayColor, 1.0f);
 }

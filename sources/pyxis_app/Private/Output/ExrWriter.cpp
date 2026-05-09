@@ -6,6 +6,7 @@
 #include <Pyxis/Platform/Logging/LogCategories.h>
 
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <string>
 #include <tinyexr.h>
@@ -100,6 +101,66 @@ std::expected<void, std::string> WriteExrBgra8(std::string_view filePath, uint32
     return std::unexpected{message};
   }
   Logging::Get().Info(log::APP, "WriteExr: " + targetUtf8 + " (" + std::to_string(width) + "x"
+                                    + std::to_string(height) + " RGBA32F)");
+  return {};
+}
+
+std::expected<void, std::string> WriteExrRgba32f(std::string_view filePath, uint32_t width,
+                                                 uint32_t height, const float* rgbaPixels,
+                                                 std::size_t rowPitchBytes) noexcept {
+  if (filePath.empty())
+    return std::unexpected{std::string{"WriteExrRgba32f: empty path"}};
+  if (rgbaPixels == nullptr)
+    return std::unexpected{std::string{"WriteExrRgba32f: null source"}};
+  if (width == 0 || height == 0)
+    return std::unexpected{std::string{"WriteExrRgba32f: zero dim"}};
+  const std::size_t rowBytesMin = static_cast<std::size_t>(width) * 4u * sizeof(float);
+  if (rowPitchBytes < rowBytesMin)
+  {
+    return std::unexpected{std::string{"WriteExrRgba32f: rowPitch < width*4*sizeof(float)"}};
+  }
+
+  const fs::path target{std::string{filePath}};
+  if (target.has_parent_path())
+  {
+    std::error_code errorCode;
+    fs::create_directories(target.parent_path(), errorCode);
+  }
+
+  // Compact rows down to the contiguous tinyexr-expected layout if
+  // the source has padding (NVRHI staging buffers are tightly packed
+  // by default, so this is usually a no-op alias — but keeping the
+  // copy keeps the function safe for arbitrary rowPitch input).
+  std::vector<float> packed;
+  const float* dataPtr = rgbaPixels;
+  if (rowPitchBytes != rowBytesMin)
+  {
+    packed.resize(static_cast<std::size_t>(width) * height * 4u);
+    const auto* src = reinterpret_cast<const uint8_t*>(rgbaPixels);
+    for (uint32_t row = 0; row < height; ++row)
+    {
+      const auto* srcRow = src + (static_cast<std::size_t>(row) * rowPitchBytes);
+      std::memcpy(packed.data() + static_cast<std::size_t>(row) * width * 4u, srcRow,
+                  rowBytesMin);
+    }
+    dataPtr = packed.data();
+  }
+
+  const std::string targetUtf8 = target.generic_string();
+  const char* tinyExrError = nullptr;
+  const int saveResult = SaveEXR(dataPtr, static_cast<int>(width), static_cast<int>(height),
+                                 /*components*/ 4,
+                                 /*save_as_fp16*/ 0, targetUtf8.c_str(), &tinyExrError);
+  if (saveResult != TINYEXR_SUCCESS)
+  {
+    std::string message = "SaveEXR(\"" + targetUtf8 + "\") failed: ";
+    message += tinyExrError ? tinyExrError : "unknown";
+    if (tinyExrError)
+      FreeEXRErrorMessage(tinyExrError);
+    return std::unexpected{message};
+  }
+  Logging::Get().Info(log::APP, "WriteExrRgba32f: " + targetUtf8 + " ("
+                                    + std::to_string(width) + "x"
                                     + std::to_string(height) + " RGBA32F)");
   return {};
 }
