@@ -15,8 +15,9 @@ enum class InputEventKind : uint32_t {
   KeyDown = 3,
   KeyUp = 4,
   MouseMove = 5,
-  MouseButton = 6,
+  MouseButtonDown = 6,
   MouseScroll = 7,
+  MouseButtonUp = 8,
 };
 
 struct InputEvent {
@@ -31,7 +32,8 @@ struct InputEvent {
   uint32_t mods = 0;
 
   // MouseMove: cursor in window pixels.
-  // MouseButton: button index, with `key` set to GLFW button.
+  // MouseButtonDown / MouseButtonUp: button index, with `key` set to
+  // GLFW button (0 = left, 1 = right, 2 = middle).
   // MouseScroll: scroll dx/dy in dy = scroll-wheel notches.
   double mouseX = 0.0;
   double mouseY = 0.0;

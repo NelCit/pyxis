@@ -25,6 +25,8 @@ target_sources(pyxis PRIVATE
     Private/Output/ExrWriter.cpp
     Private/Output/TextureReadback.h
     Private/Output/TextureReadback.cpp
+    Private/Camera/FlyCameraController.h
+    Private/Camera/FlyCameraController.cpp
     Private/Render/AovTextures.h
     Private/Render/AovTextures.cpp
     Private/Render/HardcodedCubeScene.h
