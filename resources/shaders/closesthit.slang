@@ -48,6 +48,9 @@
 [[vk::binding(3, 0)]] StructuredBuffer<OpenPBRMaterialGPU> gMaterials;
 [[vk::binding(4, 0)]] StructuredBuffer<uint>               gInstanceMaterial;
 [[vk::binding(5, 0)]] StructuredBuffer<LightGpu>           gLights;
+[[vk::binding(6, 0)]] StructuredBuffer<uint>               gInstanceMesh;
+[[vk::binding(7, 0)]] StructuredBuffer<float4>             gMeshFaceNormals;
+[[vk::binding(8, 0)]] StructuredBuffer<uint>               gMeshFaceOffsets;
 
 // Slang emits the SPIR-V `OpEntryPoint` name as `"main"` regardless
 // of the source-side function name; the C++ side passes `"main"` to
@@ -62,27 +65,68 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
     const OpenPBRMaterialGPU mat = gMaterials[materialId];
     const float3 baseColor = float3(mat.baseColorR, mat.baseColorG, mat.baseColorB);
 
-    // M7-simple lighting. Loop over every authored light, accumulate
-    // `color * intensity * weight`. The no-lights case (PathTracePass
-    // binds a single intensity=0 sentinel) leaves `lightingSum`
-    // contributing zero → totalContribution == 0 → falls through to
-    // baseColor-only emission, preserving M5/M6 byte-equal.
+    // M7 NdotL: resolve the hit-triangle's object-space face normal
+    // via the M7 NdotL side-tables, then transform to world space
+    // using Vulkan's per-instance ObjectToWorld3x4 builtin.
+    //
+    // ObjectToWorld3x4() returns a column-major 3x4 affine; its
+    // upper-3x3 transforms direction vectors. For a uniform-scale +
+    // rotation transform (the M7 fixture cases) this is correct as-
+    // is. Non-uniform scale would need the inverse-transpose of the
+    // upper 3x3 (M9 polish).
+    const uint meshSlot = gInstanceMesh[instanceId];
+    const uint faceOffset = gMeshFaceOffsets[meshSlot];
+    const float3 nLocal = gMeshFaceNormals[faceOffset + PrimitiveIndex()].xyz;
+    const float3x4 objectToWorld = ObjectToWorld3x4();
+    const float3x3 worldFromObject3x3 = float3x3(
+        objectToWorld[0].xyz,
+        objectToWorld[1].xyz,
+        objectToWorld[2].xyz);
+    const float3 nWorld = normalize(mul(worldFromObject3x3, nLocal));
+
+    // M7-simple lighting + NdotL Lambert for direct lights. Loop
+    // over every authored light, accumulate the per-light Lambert
+    // contribution. The no-lights case (PathTracePass binds a single
+    // intensity=0 sentinel) leaves `directSum` zero → falls through
+    // to baseColor-only emission, preserving M5/M6 byte-equal.
+    //
+    // - Distant: lightDir = -L.direction (the world-space direction
+    //   the light's photons travel; NdotL uses the negated form
+    //   pointing FROM surface TO light source).
+    // - Rect: lightDir = normalize(L.position - hitWorld), treating
+    //   the rect as a point at its center (no area sampling).
+    // - Dome: uniform ambient (no NdotL — hemispheric integration
+    //   is what the user fills in at M7-full alongside the full BSDF).
     uint lightCount;
     uint _stride;
     gLights.GetDimensions(lightCount, _stride);
-    float3 lightingSum = float3(0.0, 0.0, 0.0);
+    float3 directSum = float3(0.0, 0.0, 0.0);
+    float3 ambientSum = float3(0.0, 0.0, 0.0);
     float  totalContribution = 0.0;
+    const float3 hitWorld = WorldRayOrigin() + RayTCurrent() * WorldRayDirection();
     for (uint i = 0; i < lightCount; ++i) {
         LightGpu L = gLights[i];
         if (L.intensity <= 0.0) continue;  // sentinel / disabled
-        // Dome counts as half-strength ambient; Distant + Rect as
-        // full-strength direct (no NdotL, no area sampling — the
-        // user fills both in alongside the full BSDF).
-        float weight = (L.kind == LIGHT_KIND_DOME) ? 0.5 : 1.0;
-        lightingSum += float3(L.colorR, L.colorG, L.colorB) * L.intensity * weight;
-        totalContribution += L.intensity * weight;
+        const float3 Lcol = float3(L.colorR, L.colorG, L.colorB) * L.intensity;
+        if (L.kind == LIGHT_KIND_DOME) {
+            // Half-strength ambient; no NdotL.
+            ambientSum += Lcol * 0.5;
+            totalContribution += L.intensity * 0.5;
+            continue;
+        }
+        float3 lightDir;
+        if (L.kind == LIGHT_KIND_RECT) {
+            const float3 toRect = float3(L.posX, L.posY, L.posZ) - hitWorld;
+            lightDir = normalize(toRect);
+        } else {
+            // Distant
+            lightDir = -float3(L.dirX, L.dirY, L.dirZ);
+        }
+        const float NdotL = max(0.0, dot(nWorld, lightDir));
+        directSum += Lcol * NdotL;
+        totalContribution += L.intensity;  // pre-NdotL — used only as the no-lights fallthrough sentinel
     }
 
-    payload.color = (totalContribution > 0.0) ? (baseColor * lightingSum) : baseColor;
+    payload.color = (totalContribution > 0.0) ? (baseColor * (directSum + ambientSum)) : baseColor;
     payload.hitT  = RayTCurrent();
 }

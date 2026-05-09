@@ -176,6 +176,23 @@ public:
   // an unbound buffer.
   [[nodiscard]] nvrhi::IBuffer*          GetLightBuffer() const noexcept;
 
+  // M7 NdotL: per-instance mesh slot side-table (parallel to the
+  // §15 instance→material side-table). Indexed by instance slot,
+  // value = mesh slot. The closesthit needs this to know which
+  // mesh's face-normal range to look up for the Lambert pass.
+  [[nodiscard]] nvrhi::IBuffer*          GetInstanceMeshBuffer() const noexcept;
+
+  // M7 NdotL: flat float4 buffer of object-space face normals,
+  // every live mesh's normals concatenated. Closesthit reads:
+  //   nLocal = gMeshFaceNormals[gMeshFaceOffsets[meshSlot]
+  //                            + PrimitiveIndex()].xyz
+  [[nodiscard]] nvrhi::IBuffer*          GetMeshFaceNormalsBuffer() const noexcept;
+
+  // M7 NdotL: per-mesh-slot start offsets into GetMeshFaceNormalsBuffer.
+  // Sized to the mesh table length so the closesthit's lookup is
+  // bounds-safe by construction.
+  [[nodiscard]] nvrhi::IBuffer*          GetMeshFaceOffsetsBuffer() const noexcept;
+
 private:
   // PIMPL: NVRHI handles, entry-table vectors, per-frame ring slots
   // live behind this pointer so the public header stays NVRHI- and

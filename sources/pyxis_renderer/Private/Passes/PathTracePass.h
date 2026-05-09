@@ -84,6 +84,15 @@ class PathTracePass final : public IRenderPass {
   // M5 + M6 fixtures that don't author lights.
   nvrhi::BufferHandle _fallbackLightBuffer;
 
+  // M7 NdotL: fallbacks for the three new normal-lookup buffers.
+  // Each holds a single zero-init element so an empty / not-yet-
+  // committed scene's closesthit invocations (rare — scenes with
+  // no meshes can't have hits anyway) resolve to face-normal (0,0,0)
+  // → NdotL=0 → unlit, but no out-of-bounds reads.
+  nvrhi::BufferHandle _fallbackInstanceMeshBuffer;
+  nvrhi::BufferHandle _fallbackMeshFaceNormalsBuffer;
+  nvrhi::BufferHandle _fallbackMeshFaceOffsetsBuffer;
+
   // Output binding-set cache, keyed on the output texture pointer.
   // Bounded — a swapchain rebuild churns through up to ~3 swapchain
   // images, so 6 entries is more than enough headroom and the
@@ -106,6 +115,11 @@ class PathTracePass final : public IRenderPass {
 
   // M7: same invalidation handle for the lights buffer at binding 5.
   nvrhi::IBuffer* _lastSeenLightBuffer = nullptr;
+
+  // M7 NdotL: invalidation handles for bindings 6/7/8.
+  nvrhi::IBuffer* _lastSeenInstanceMeshBuffer = nullptr;
+  nvrhi::IBuffer* _lastSeenMeshFaceNormalsBuffer = nullptr;
+  nvrhi::IBuffer* _lastSeenMeshFaceOffsetsBuffer = nullptr;
 
   bool _shadersOk = false;  // true if ctor loaded all three shaders + built pipeline.
 };

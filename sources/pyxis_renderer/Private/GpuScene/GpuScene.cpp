@@ -258,6 +258,15 @@ struct GpuScene::Impl {
     std::uint32_t                vertexCount = 0;
     std::uint32_t                indexCount  = 0;
     nvrhi::rt::AccelStructHandle blas;
+
+    // M7 NdotL: per-triangle face normals in object space, computed
+    // from positions + indices at CreateMesh time. Used by the
+    // closesthit's Lambert pass via the gMeshFaceNormals flat buffer
+    // (offset = gMeshFaceOffsets[meshSlot] + PrimitiveIndex()).
+    // float4 instead of float3 — std430-style 16-byte alignment +
+    // closesthit reads .xyz only; the w slot is reserved for an
+    // M9 per-face flag (alpha-test, double-sided override, etc.).
+    std::vector<hlslpp::float4>  faceNormals;
   };
 
   struct InstanceEntry {
@@ -374,6 +383,23 @@ struct GpuScene::Impl {
   // dirty flag fires (AddLight / UpdateLight / RemoveLight).
   nvrhi::BufferHandle  lightsGpuBuffer;
   bool                 lightsNeedGpuUpload = false;
+
+  // M7 NdotL: per-mesh face normals concatenated into one flat
+  // buffer + per-mesh-slot starting offsets. Closesthit reads:
+  //   nLocal = gMeshFaceNormals[gMeshFaceOffsets[meshSlot]
+  //                            + PrimitiveIndex()].xyz
+  // Then transforms via Vulkan's `ObjectToWorld3x4()` to get
+  // world-space N for the Lambert pass. Uploaded alongside BLAS
+  // builds (computed in CreateMesh; flushed at CommitResources
+  // when meshFaceNormalsNeedUpload is set).
+  // Plus gInstanceMeshBuffer: per-instance mesh slot, indexed by
+  // instance slot — the closesthit needs to know which mesh's
+  // face-normal range to look in. Same lifecycle / dirty-flag shape
+  // as instanceMaterialBuffer.
+  nvrhi::BufferHandle  meshFaceNormalsBuffer;
+  nvrhi::BufferHandle  meshFaceOffsetsBuffer;
+  bool                 meshFaceNormalsNeedUpload = false;
+  nvrhi::BufferHandle  instanceMeshBuffer;
 
   // Magenta 4x4 fallback texture — slot 0 in the bindless table is
   // permanently the "missing texture" colour so any material whose
@@ -552,6 +578,38 @@ Expected<MeshHandle> GpuScene::CreateMesh(const MeshDesc& meshDesc) {
   entry.tangents.assign(meshDesc.tangents.begin(), meshDesc.tangents.end());
   entry.uv0.assign(meshDesc.uv0.begin(), meshDesc.uv0.end());
   entry.debugName.assign(meshDesc.debugName);
+
+  // M7 NdotL: pre-compute object-space face normals (one per
+  // triangle). Closesthit reads `gMeshFaceNormals[offset +
+  // PrimitiveIndex()].xyz`, transforms to world via
+  // `ObjectToWorld3x4()`, and Lambert-shades against distant
+  // lights. Computed here (CreateMesh time) so we don't burn cycles
+  // re-deriving them at every CommitResources.
+  const std::size_t triangleCount = entry.indices.size() / 3;
+  entry.faceNormals.clear();
+  entry.faceNormals.reserve(triangleCount);
+  for (std::size_t tri = 0; tri < triangleCount; ++tri)
+  {
+    const std::uint32_t idx0 = entry.indices[tri * 3 + 0];
+    const std::uint32_t idx1 = entry.indices[tri * 3 + 1];
+    const std::uint32_t idx2 = entry.indices[tri * 3 + 2];
+    if (idx0 >= entry.positions.size() || idx1 >= entry.positions.size()
+        || idx2 >= entry.positions.size())
+    {
+      // Malformed index — emit zero normal so the closesthit's
+      // Lambert reads NdotL=0 and the triangle stays unlit.
+      entry.faceNormals.emplace_back(0.0f, 0.0f, 0.0f, 0.0f);
+      continue;
+    }
+    const hlslpp::float3 pos0 = entry.positions[idx0];
+    const hlslpp::float3 pos1 = entry.positions[idx1];
+    const hlslpp::float3 pos2 = entry.positions[idx2];
+    const hlslpp::float3 normal = hlslpp::normalize(hlslpp::cross(pos1 - pos0, pos2 - pos0));
+    entry.faceNormals.emplace_back(static_cast<float>(normal.x),
+                                   static_cast<float>(normal.y),
+                                   static_cast<float>(normal.z), 0.0f);
+  }
+  _impl->meshFaceNormalsNeedUpload = true;
 
   return static_cast<MeshHandle>(HandleEncode(slot, entry.generation));
 }
@@ -1570,7 +1628,124 @@ Expected<void> GpuScene::CommitResources(nvrhi::ICommandList* commandList) {
     }
     commandList->writeBuffer(_impl->instanceMaterialBuffer.Get(),
                              instanceMaterialTable.data(), instanceTableBytes);
+
+    // M7 NdotL — instance→mesh side-table. Same shape + lifecycle
+    // as instanceMaterialBuffer; piggy-backs on the same dirty flag
+    // because instance ↔ mesh changes only happen when the TLAS
+    // shape changes (AppendInstance / DestroyInstance / visibility
+    // flip — UpdateInstanceMaterial doesn't touch instance.mesh).
+    std::vector<std::uint32_t> instanceMeshTable(instanceTableEntries, 0u);
+    for (std::size_t entrySlot = 1; entrySlot < instanceTableEntries; ++entrySlot)
+    {
+      const Impl::InstanceEntry& inst = _impl->instances[entrySlot];
+      if (!inst.live)
+        continue;
+      const auto meshValue = static_cast<std::uint32_t>(inst.mesh);
+      instanceMeshTable[entrySlot] =
+          (meshValue == 0) ? 0u : HandleSlot(meshValue);
+    }
+    if (!_impl->instanceMeshBuffer
+        || _impl->instanceMeshBuffer->getDesc().byteSize < instanceTableBytes)
+    {
+      nvrhi::BufferDesc bufDesc;
+      bufDesc.byteSize = instanceTableBytes;
+      bufDesc.structStride = sizeof(std::uint32_t);
+      bufDesc.canHaveRawViews = false;
+      bufDesc.canHaveTypedViews = false;
+      bufDesc.format = nvrhi::Format::UNKNOWN;
+      bufDesc.debugName = "GpuScene.instanceMeshBuffer";
+      bufDesc.initialState = nvrhi::ResourceStates::ShaderResource;
+      bufDesc.keepInitialState = true;
+      _impl->instanceMeshBuffer = _impl->device->createBuffer(bufDesc);
+      if (!_impl->instanceMeshBuffer)
+      {
+        return std::unexpected{
+            PYXIS_ERROR(ErrorKind::OutOfMemoryGpu,
+                        "CommitResources: createBuffer(instanceMeshBuffer) failed")};
+      }
+    }
+    commandList->writeBuffer(_impl->instanceMeshBuffer.Get(),
+                             instanceMeshTable.data(), instanceTableBytes);
+
     _impl->instanceMaterialNeedsUpload = false;
+  }
+
+  // ---- Pack + upload mesh face normals (M7 NdotL) -------------------
+  // Concatenates every live mesh's per-triangle face normals into one
+  // flat float4 buffer + a per-mesh-slot start-offset table. The
+  // closesthit's NdotL Lambert pass reads:
+  //   offset = gMeshFaceOffsets[meshSlot]
+  //   nLocal = gMeshFaceNormals[offset + PrimitiveIndex()].xyz
+  // The +1 in the offsets sizing reserves slot 0 (the §19.7
+  // sentinel mesh handle) so the closesthit's "no mesh assigned"
+  // path resolves to offset 0 with a black/zero normal entry.
+  if (_impl->meshFaceNormalsNeedUpload && !_impl->meshes.empty())
+  {
+    std::vector<hlslpp::float4> packedNormals;
+    std::vector<std::uint32_t>  perMeshOffsets(_impl->meshes.size(), 0u);
+    for (std::size_t meshSlot = 0; meshSlot < _impl->meshes.size(); ++meshSlot)
+    {
+      perMeshOffsets[meshSlot] = static_cast<std::uint32_t>(packedNormals.size());
+      const Impl::MeshEntry& mesh = _impl->meshes[meshSlot];
+      if (!mesh.live)
+        continue;
+      packedNormals.insert(packedNormals.end(), mesh.faceNormals.begin(),
+                           mesh.faceNormals.end());
+    }
+    if (packedNormals.empty())
+    {
+      // Empty scene with no meshes registered yet — nothing to
+      // upload. The PathTracePass fallback handles this.
+      packedNormals.emplace_back(0.0f, 0.0f, 0.0f, 0.0f);
+    }
+    const std::size_t normalsBytes = packedNormals.size() * sizeof(hlslpp::float4);
+    const std::size_t offsetsBytes = perMeshOffsets.size() * sizeof(std::uint32_t);
+
+    if (!_impl->meshFaceNormalsBuffer
+        || _impl->meshFaceNormalsBuffer->getDesc().byteSize < normalsBytes)
+    {
+      nvrhi::BufferDesc bufDesc;
+      bufDesc.byteSize = normalsBytes;
+      bufDesc.structStride = sizeof(hlslpp::float4);
+      bufDesc.canHaveRawViews = false;
+      bufDesc.canHaveTypedViews = false;
+      bufDesc.format = nvrhi::Format::UNKNOWN;
+      bufDesc.debugName = "GpuScene.meshFaceNormalsBuffer";
+      bufDesc.initialState = nvrhi::ResourceStates::ShaderResource;
+      bufDesc.keepInitialState = true;
+      _impl->meshFaceNormalsBuffer = _impl->device->createBuffer(bufDesc);
+      if (!_impl->meshFaceNormalsBuffer)
+      {
+        return std::unexpected{
+            PYXIS_ERROR(ErrorKind::OutOfMemoryGpu,
+                        "CommitResources: createBuffer(meshFaceNormalsBuffer) failed")};
+      }
+    }
+    if (!_impl->meshFaceOffsetsBuffer
+        || _impl->meshFaceOffsetsBuffer->getDesc().byteSize < offsetsBytes)
+    {
+      nvrhi::BufferDesc bufDesc;
+      bufDesc.byteSize = offsetsBytes;
+      bufDesc.structStride = sizeof(std::uint32_t);
+      bufDesc.canHaveRawViews = false;
+      bufDesc.canHaveTypedViews = false;
+      bufDesc.format = nvrhi::Format::UNKNOWN;
+      bufDesc.debugName = "GpuScene.meshFaceOffsetsBuffer";
+      bufDesc.initialState = nvrhi::ResourceStates::ShaderResource;
+      bufDesc.keepInitialState = true;
+      _impl->meshFaceOffsetsBuffer = _impl->device->createBuffer(bufDesc);
+      if (!_impl->meshFaceOffsetsBuffer)
+      {
+        return std::unexpected{
+            PYXIS_ERROR(ErrorKind::OutOfMemoryGpu,
+                        "CommitResources: createBuffer(meshFaceOffsetsBuffer) failed")};
+      }
+    }
+    commandList->writeBuffer(_impl->meshFaceNormalsBuffer.Get(), packedNormals.data(),
+                             normalsBytes);
+    commandList->writeBuffer(_impl->meshFaceOffsetsBuffer.Get(), perMeshOffsets.data(),
+                             offsetsBytes);
+    _impl->meshFaceNormalsNeedUpload = false;
   }
 
   return {};
@@ -1598,6 +1773,18 @@ nvrhi::IBuffer* GpuScene::GetInstanceMaterialBuffer() const noexcept {
 
 nvrhi::IBuffer* GpuScene::GetLightBuffer() const noexcept {
   return _impl->lightsGpuBuffer.Get();
+}
+
+nvrhi::IBuffer* GpuScene::GetInstanceMeshBuffer() const noexcept {
+  return _impl->instanceMeshBuffer.Get();
+}
+
+nvrhi::IBuffer* GpuScene::GetMeshFaceNormalsBuffer() const noexcept {
+  return _impl->meshFaceNormalsBuffer.Get();
+}
+
+nvrhi::IBuffer* GpuScene::GetMeshFaceOffsetsBuffer() const noexcept {
+  return _impl->meshFaceOffsetsBuffer.Get();
 }
 
 // ---- Introspection ---------------------------------------------------------

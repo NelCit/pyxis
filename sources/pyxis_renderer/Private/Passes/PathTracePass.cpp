@@ -124,6 +124,9 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
       nvrhi::BindingLayoutItem::StructuredBuffer_SRV(3),     // binding 3 materials (M5)
       nvrhi::BindingLayoutItem::StructuredBuffer_SRV(4),     // binding 4 instance→material (M6)
       nvrhi::BindingLayoutItem::StructuredBuffer_SRV(5),     // binding 5 lights (M7)
+      nvrhi::BindingLayoutItem::StructuredBuffer_SRV(6),     // binding 6 instance→mesh (M7 NdotL)
+      nvrhi::BindingLayoutItem::StructuredBuffer_SRV(7),     // binding 7 mesh face normals (M7 NdotL)
+      nvrhi::BindingLayoutItem::StructuredBuffer_SRV(8),     // binding 8 mesh face offsets (M7 NdotL)
   };
   _bindingLayout = _device->createBindingLayout(layoutDesc);
   if (!_bindingLayout)
@@ -253,6 +256,50 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
     return;
   }
 
+  // M7 NdotL: 1-element fallbacks for the three normal-lookup
+  // buffers. instanceMesh + meshFaceOffsets are uint stride; the
+  // face-normals fallback is one float4 of zero (which the closesthit
+  // reads as nLocal=(0,0,0) → NdotL=0 for any light direction →
+  // unlit, but no OOB).
+  auto makeUintFallback = [&](const char* debugName) {
+    nvrhi::BufferDesc desc;
+    desc.byteSize = sizeof(std::uint32_t);
+    desc.structStride = sizeof(std::uint32_t);
+    desc.canHaveRawViews = false;
+    desc.canHaveTypedViews = false;
+    desc.format = nvrhi::Format::UNKNOWN;
+    desc.debugName = debugName;
+    desc.initialState = nvrhi::ResourceStates::ShaderResource;
+    desc.keepInitialState = true;
+    return _device->createBuffer(desc);
+  };
+  _fallbackInstanceMeshBuffer = makeUintFallback("PathTrace.FallbackInstanceMesh");
+  _fallbackMeshFaceOffsetsBuffer = makeUintFallback("PathTrace.FallbackMeshFaceOffsets");
+  if (!_fallbackInstanceMeshBuffer || !_fallbackMeshFaceOffsetsBuffer)
+  {
+    Logging::Get().Error(log::RENDER,
+                         "PathTracePass: createBuffer(Fallback{InstanceMesh,MeshFaceOffsets}) "
+                         "failed");
+    return;
+  }
+
+  nvrhi::BufferDesc faceNormalsFallbackDesc;
+  faceNormalsFallbackDesc.byteSize = sizeof(hlslpp::float4);
+  faceNormalsFallbackDesc.structStride = sizeof(hlslpp::float4);
+  faceNormalsFallbackDesc.canHaveRawViews = false;
+  faceNormalsFallbackDesc.canHaveTypedViews = false;
+  faceNormalsFallbackDesc.format = nvrhi::Format::UNKNOWN;
+  faceNormalsFallbackDesc.debugName = "PathTrace.FallbackMeshFaceNormals";
+  faceNormalsFallbackDesc.initialState = nvrhi::ResourceStates::ShaderResource;
+  faceNormalsFallbackDesc.keepInitialState = true;
+  _fallbackMeshFaceNormalsBuffer = _device->createBuffer(faceNormalsFallbackDesc);
+  if (!_fallbackMeshFaceNormalsBuffer)
+  {
+    Logging::Get().Error(log::RENDER,
+                         "PathTracePass: createBuffer(FallbackMeshFaceNormals) failed");
+    return;
+  }
+
   _shadersOk = true;
   Logging::Get().Info(log::RENDER, "PathTracePass: initialised (RT pipeline + SBT ready)");
 }
@@ -261,22 +308,30 @@ PathTracePass::~PathTracePass() = default;
 
 nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(nvrhi::ITexture* output) {
   // M5/M6/M7: invalidate cache when ANY of the scene's lazy buffers
-  // (materials, instance→material side-table, lights) flips. Each
-  // is lazy-allocated by GpuScene on the first relevant verb, so a
-  // scene that started empty but gained its first material /
-  // instance / light between frames needs the cached binding sets
-  // thrown out.
+  // flips. Each is lazy-allocated by GpuScene on the first relevant
+  // verb, so a scene that started empty but gained its first
+  // material / instance / light / mesh between frames needs the
+  // cached binding sets thrown out.
   nvrhi::IBuffer* sceneMaterials = _scene->GetMaterialBuffer();
   nvrhi::IBuffer* sceneInstanceMaterial = _scene->GetInstanceMaterialBuffer();
   nvrhi::IBuffer* sceneLights = _scene->GetLightBuffer();
+  nvrhi::IBuffer* sceneInstanceMesh = _scene->GetInstanceMeshBuffer();
+  nvrhi::IBuffer* sceneMeshFaceNormals = _scene->GetMeshFaceNormalsBuffer();
+  nvrhi::IBuffer* sceneMeshFaceOffsets = _scene->GetMeshFaceOffsetsBuffer();
   if (sceneMaterials != _lastSeenMaterialBuffer
       || sceneInstanceMaterial != _lastSeenInstanceMaterialBuffer
-      || sceneLights != _lastSeenLightBuffer)
+      || sceneLights != _lastSeenLightBuffer
+      || sceneInstanceMesh != _lastSeenInstanceMeshBuffer
+      || sceneMeshFaceNormals != _lastSeenMeshFaceNormalsBuffer
+      || sceneMeshFaceOffsets != _lastSeenMeshFaceOffsetsBuffer)
   {
     _bindingSetCache.clear();
     _lastSeenMaterialBuffer = sceneMaterials;
     _lastSeenInstanceMaterialBuffer = sceneInstanceMaterial;
     _lastSeenLightBuffer = sceneLights;
+    _lastSeenInstanceMeshBuffer = sceneInstanceMesh;
+    _lastSeenMeshFaceNormalsBuffer = sceneMeshFaceNormals;
+    _lastSeenMeshFaceOffsetsBuffer = sceneMeshFaceOffsets;
   }
 
   if (auto cached = _bindingSetCache.find(output); cached != _bindingSetCache.end())
@@ -312,6 +367,15 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(nvrhi::ITexture* ou
   nvrhi::IBuffer* lightBuffer = _scene->GetLightBuffer();
   if (lightBuffer == nullptr)
     lightBuffer = _fallbackLightBuffer.Get();
+  nvrhi::IBuffer* instanceMeshBuffer = _scene->GetInstanceMeshBuffer();
+  if (instanceMeshBuffer == nullptr)
+    instanceMeshBuffer = _fallbackInstanceMeshBuffer.Get();
+  nvrhi::IBuffer* meshFaceNormalsBuffer = _scene->GetMeshFaceNormalsBuffer();
+  if (meshFaceNormalsBuffer == nullptr)
+    meshFaceNormalsBuffer = _fallbackMeshFaceNormalsBuffer.Get();
+  nvrhi::IBuffer* meshFaceOffsetsBuffer = _scene->GetMeshFaceOffsetsBuffer();
+  if (meshFaceOffsetsBuffer == nullptr)
+    meshFaceOffsetsBuffer = _fallbackMeshFaceOffsetsBuffer.Get();
 
   nvrhi::BindingSetDesc setDesc;
   setDesc.bindings = {
@@ -321,6 +385,9 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(nvrhi::ITexture* ou
       nvrhi::BindingSetItem::StructuredBuffer_SRV(3, materialBuffer),
       nvrhi::BindingSetItem::StructuredBuffer_SRV(4, instanceMaterialBuffer),
       nvrhi::BindingSetItem::StructuredBuffer_SRV(5, lightBuffer),
+      nvrhi::BindingSetItem::StructuredBuffer_SRV(6, instanceMeshBuffer),
+      nvrhi::BindingSetItem::StructuredBuffer_SRV(7, meshFaceNormalsBuffer),
+      nvrhi::BindingSetItem::StructuredBuffer_SRV(8, meshFaceOffsetsBuffer),
   };
   nvrhi::BindingSetHandle set = _device->createBindingSet(setDesc, _bindingLayout);
   _bindingSetCache[output] = set;
@@ -422,6 +489,34 @@ void PathTracePass::Execute(nvrhi::ICommandList* commandList, const PassContext&
     commandList->writeBuffer(_fallbackLightBuffer.Get(),
                              &FALLBACK_LIGHT_DISABLED,
                              sizeof(FALLBACK_LIGHT_DISABLED));
+  }
+
+  // M7 NdotL: zero-init the three normal-lookup fallbacks if the
+  // scene hasn't built them. instanceMesh + meshFaceOffsets resolve
+  // to slot 0 (offset 0), and meshFaceNormals[0] = (0,0,0,0) — so
+  // the closesthit reads nLocal=(0,0,0) → NdotL=0, which combined
+  // with the lights fallback (intensity=0 above) routes to the
+  // baseColor-only path anyway.
+  if (_scene->GetInstanceMeshBuffer() == nullptr)
+  {
+    static const std::uint32_t FALLBACK_INSTANCE_MESH_ZERO = 0u;
+    commandList->writeBuffer(_fallbackInstanceMeshBuffer.Get(),
+                             &FALLBACK_INSTANCE_MESH_ZERO,
+                             sizeof(FALLBACK_INSTANCE_MESH_ZERO));
+  }
+  if (_scene->GetMeshFaceOffsetsBuffer() == nullptr)
+  {
+    static const std::uint32_t FALLBACK_MESH_FACE_OFFSETS_ZERO = 0u;
+    commandList->writeBuffer(_fallbackMeshFaceOffsetsBuffer.Get(),
+                             &FALLBACK_MESH_FACE_OFFSETS_ZERO,
+                             sizeof(FALLBACK_MESH_FACE_OFFSETS_ZERO));
+  }
+  if (_scene->GetMeshFaceNormalsBuffer() == nullptr)
+  {
+    static const float FALLBACK_MESH_FACE_NORMALS_ZERO[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    commandList->writeBuffer(_fallbackMeshFaceNormalsBuffer.Get(),
+                             FALLBACK_MESH_FACE_NORMALS_ZERO,
+                             sizeof(FALLBACK_MESH_FACE_NORMALS_ZERO));
   }
 
   // ---- Bind + dispatch ----------------------------------------------
