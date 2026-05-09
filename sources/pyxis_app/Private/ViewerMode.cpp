@@ -710,9 +710,15 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
       // the AOV inspector's Picker readout updates each frame. Cheap
       // copy of a 32-byte POD; safe even when the renderer hasn't
       // produced a real pick yet (default-constructed = depth -1).
+      // Also push the current AOV aspect so the Camera section can
+      // rebuild projFromView correctly when the user drags FOV /
+      // focal length / near / far. Re-sized AOVs flow through the
+      // same path on the next frame after a window resize.
       if (imguiHost.IsReady())
       {
         imguiHost.SetLastPickResult(renderer.LastPickResult());
+        imguiHost.SetRenderAspect(static_cast<float>(aovs.width)
+                                  / static_cast<float>(aovs.height));
       }
 
       // Copy AOV color → swapchain backbuffer. NVRHI tracks the

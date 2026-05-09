@@ -174,6 +174,13 @@ class ImGuiHost {
   // pending request.
   std::string                           _editorPendingSaveAovPath;
 
+  // Aspect ratio (renderWidth / renderHeight) of the AOV the renderer
+  // dispatches into. ViewerMode pushes this each frame via
+  // SetRenderAspect so the Camera section can rebuild projFromView
+  // from FOV + near/far when the user drags a slider. Defaults to 1.0
+  // (square) so the first frame's editor sliders don't divide by zero.
+  float                                 _renderAspect = 1.0f;
+
  public:
   // Called by ViewerMode each frame; returns true and clears the
   // latched request iff the editor's "Reload shaders" button was
@@ -220,6 +227,16 @@ class ImGuiHost {
   // ViewerMode pushes the renderer's LastPickResult() into the panel
   // each frame; the Editor displays the hover-pixel values.
   void SetLastPickResult(const PickResult& pick) noexcept { _editorLastPick = pick; }
+
+  // ViewerMode pushes the renderer's current AOV aspect ratio
+  // (width / height) each frame. The Camera section's FOV / focal-
+  // length sliders use this to rebuild projFromView on edit so the
+  // result matches the dispatched render dims at the time of the
+  // edit. Sub-1.0 floors at a tiny epsilon to avoid divide-by-zero
+  // before the first AOV is allocated.
+  void SetRenderAspect(float aspect) noexcept {
+    _renderAspect = (aspect > 1e-3f) ? aspect : 1.0f;
+  }
 
   // ViewerMode drains a pending save-AOV path each frame. Returns
   // true and clears the latch iff the user clicked "Save AOV..." since

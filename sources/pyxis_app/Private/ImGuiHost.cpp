@@ -1053,32 +1053,93 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
     }
 
     // ---- Camera section ----------------------------------------------
+    // Editing flow:
+    // - FOV (vertical, degrees) and Focal length (mm) are linked: a
+    //   change to either recomputes the other using a 24mm sensor
+    //   height (full-frame photographic standard). Both then trigger
+    //   a fresh projFromView build using the current render aspect.
+    // - Near / Far clip edits also rebuild projFromView (previously
+    //   stored on the desc but never applied — same root cause as the
+    //   focal-length bug the user reported).
+    // - Focus distance + aperture are stored but currently unused
+    //   downstream (DOF lands at M9+ per §43.3); the slider stays so
+    //   the value round-trips.
+    // Position / orientation stay out of the editor — FlyCameraController
+    // owns them in viewer mode and an editor slider would fight it
+    // every frame.
     if (scene.HasCamera())
     {
       if (ImGui::CollapsingHeader("Camera"))
       {
         CameraDesc cameraDesc = scene.GetCamera();
-        bool cameraEdited = false;
+        bool cameraEdited      = false;
+        bool projectionEdited  = false;
 
-        // Most useful camera knobs for an interactive viewer:
-        // focal length (FOV proxy), focus distance, near/far clip.
-        // Position/orientation come from the FlyCameraController in
-        // viewer mode — editing them via this panel would fight the
-        // controller every frame, so we leave those out.
+        // Derived FOV (vertical, in degrees) from the current focal
+        // length. 24mm = full-frame sensor height. Stored as a local
+        // ImGui slider value; on edit we round-trip back to focal
+        // length so both stay consistent regardless of which slider
+        // the user grabbed.
+        constexpr float SENSOR_HEIGHT_MM = 24.0f;
+        constexpr float DEG_PER_RAD      = 57.29577951308232f;  // 180/pi
+        constexpr float RAD_PER_DEG      =  0.01745329251994329f; // pi/180
+        float fovYDegrees =
+            2.0f * std::atan(SENSOR_HEIGHT_MM / (2.0f * cameraDesc.focalLengthMm))
+            * DEG_PER_RAD;
+
         ImGui::PushItemWidth(180.0f);
+        if (ImGui::SliderFloat("FOV (deg, vertical)", &fovYDegrees, 5.0f, 130.0f, "%.1f"))
+        {
+          // FOV moved -> recompute focal from FOV.
+          const float fovYRad = fovYDegrees * RAD_PER_DEG;
+          cameraDesc.focalLengthMm = (SENSOR_HEIGHT_MM * 0.5f) / std::tan(fovYRad * 0.5f);
+          cameraEdited = true;
+          projectionEdited = true;
+        }
         if (ImGui::SliderFloat("Focal length (mm)", &cameraDesc.focalLengthMm, 12.0f,
                                200.0f, "%.1f"))
+        {
           cameraEdited = true;
+          projectionEdited = true;
+        }
         if (ImGui::SliderFloat("Focus distance",    &cameraDesc.focusDistance,    0.1f,
                                50.0f, "%.2f"))
           cameraEdited = true;
         if (ImGui::SliderFloat("Near clip",         &cameraDesc.nearClip,         0.01f,
                                1.0f, "%.3f"))
+        {
           cameraEdited = true;
+          projectionEdited = true;
+        }
         if (ImGui::SliderFloat("Far clip",          &cameraDesc.farClip,          10.0f,
                                5000.0f, "%.0f"))
+        {
           cameraEdited = true;
+          projectionEdited = true;
+        }
         ImGui::PopItemWidth();
+
+        // Rebuild projFromView whenever any projection-affecting
+        // slider moved. Mirrors the row-major + column-vector Vulkan
+        // perspective matrix BuildProjMatrix() in HardcodedCubeScene.cpp
+        // — same convention (Y-flipped, depth [0,1], v_clip = P · v_view)
+        // so the editor doesn't drift from the cube / USD ingest path.
+        if (projectionEdited)
+        {
+          const float fovYRad = 2.0f * std::atan(
+              SENSOR_HEIGHT_MM / (2.0f * cameraDesc.focalLengthMm));
+          const float focal   = 1.0f / std::tan(fovYRad * 0.5f);
+          const float aspect  = _renderAspect;
+          const float nearZ   = cameraDesc.nearClip;
+          const float farZ    = cameraDesc.farClip;
+          const float nearMinusFar = nearZ - farZ;  // negative
+          cameraDesc.projFromView = hlslpp::float4x4(
+              hlslpp::float4(focal / aspect, 0.0f, 0.0f, 0.0f),
+              hlslpp::float4(0.0f,          -focal, 0.0f, 0.0f),
+              hlslpp::float4(0.0f, 0.0f, farZ / nearMinusFar,
+                             nearZ * farZ / nearMinusFar),
+              hlslpp::float4(0.0f, 0.0f, -1.0f, 0.0f));
+        }
 
         if (cameraEdited)
           scene.SetCamera(cameraDesc);
