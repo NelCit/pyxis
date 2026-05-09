@@ -55,14 +55,27 @@ struct LimitsConfig {
   uint32_t framesInFlight = 1;
 };
 
+// ----- §27.paths ---------------------------------------------------------
+// Filesystem inputs the app honours. M3.5 wires `scene` (the
+// §29.4.a default-startup-scene chain reads this); M5+ adds
+// `allowedRoots` for the §29.7 "Save Scene As USD" sandbox; M11+
+// adds `pipelineCache` etc.
+struct PathsConfig {
+  // Empty = defer to the §29.4.a fallback chain (CLI > config >
+  // recent_scenes > bundled default). Non-empty = explicit user
+  // override; SceneResolver picks this if --scene wasn't passed.
+  std::string scene;
+};
+
 // ----- The whole tree ----------------------------------------------------
 struct Configuration {
   RenderConfig render;
   OutputConfig output;
   DiagnosticsConfig diagnostics;
   LimitsConfig limits;
-  // M3+ sections (app.ingest, scene, textures, geometry, hydra,
-  // profiling) land alongside the systems that consume them.
+  PathsConfig paths;
+  // M5+ sections (app.ingest, textures, geometry, hydra, profiling)
+  // land alongside the systems that consume them.
 };
 
 // Overlay a parameters.json document onto an existing Configuration.

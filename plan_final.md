@@ -3469,7 +3469,7 @@ invocation processes one `--scene` and exits (§3, §27).
 
 Launching `pyxis.exe` with **no `--scene` argument** must produce a
 renderable image, not a black window or an error. Pyxis ships a tiny
-canonical USD scene as `pyxis_app/Resources/scenes/default.usda` and
+canonical USD scene as `pyxis_app/Resources/scenes/default.usd` and
 loads it by default.
 
 **Resolution order at startup**:
@@ -3478,12 +3478,13 @@ loads it by default.
 3. Most-recent entry in `%LOCALAPPDATA%/Pyxis/recent_scenes.json` whose
    file still exists, if `viewer.reopenLastScene = true` (default).
 4. The bundled **default scene** at
-   `<exe-dir>/Resources/scenes/default.usda`.
+   `<exe-dir>/Resources/scenes/default.usd`.
 
-The bundled file is small (< 8 KB `.usda` text), version-controlled, and
+The bundled file is small (< 8 KB USDA text under a `.usd` extension —
+USD's loader auto-detects the format), version-controlled, and
 binary-identical across builds so it is also a useful smoke-test asset.
 
-**Default scene contents** (`default.usda`):
+**Default scene contents** (`default.usd`):
 
 | Element | Detail |
 |---|---|
@@ -4538,7 +4539,7 @@ Build matrix: Debug + Release; both use Vulkan validation in Debug only.
 | M1 | Viewer triangle | hard-coded triangle, RenderGraph, ImGui setup, profiler scopes |
 | M2 | Headless triangle | `--headless --config` writes EXR; same render core |
 | M3 | Slang path-trace box | one cube, one camera, BLAS+TLAS, raygen/closesthit/miss, accum + tonemap |
-| M3.5 | Default startup scene | `pyxis_app/Resources/scenes/default.usda` ships in the build tree; `pyxis.exe` with no args resolves through the §29.4.a chain and renders the three-spheres-on-ground composition; bundled `default_sky.exr` loads correctly; resolved-source spdlog line emitted |
+| M3.5 | Default startup scene | `pyxis_app/Resources/scenes/default.usd` ships in the build tree; `pyxis.exe` with no args resolves through the §29.4.a chain and renders the three-spheres-on-ground composition; bundled `default_sky.exr` loads correctly; resolved-source spdlog line emitted |
 | M4 | Hydra delegate stub | `HdPyxisRenderDelegate` registered; usdview can pick it; renders one mesh |
 | M5 | UsdPreviewSurface→OpenPBR | textured cube via UsdPreviewSurface, OpenPBR shader |
 | M6 | Native instancing | instanced rocks, BLAS sharing, instance/material AOVs |

@@ -10,12 +10,14 @@
 #include "CliArgs.h"
 #include "Config/Configuration.h"
 #include "HeadlessMode.h"
+#include "Scene/SceneResolver.h"
 
 #include <Pyxis/Platform/Logging/Log.h>
 #include <Pyxis/Platform/Logging/LogCategories.h>
 #include <Pyxis/Renderer/Version.h>
 
 #include <cstdio>
+#include <string>
 
 namespace pyxis::app {
 
@@ -66,6 +68,23 @@ int Run(int argc, char** argv) noexcept {
     return EXIT_OK;
   }
 
+  // §29.4.a tooling: print the bundled default-scene path and exit
+  // (no logging spin-up, no device init). Empty result = the binary
+  // was deployed without its Resources/ tree; surface as exit-3 so
+  // tooling that pipes the output sees the failure.
+  if (cli.printDefaultScenePath)
+  {
+    const std::string path = BundledDefaultScenePath();
+    if (path.empty())
+    {
+      std::fprintf(stderr, "pyxis: bundled default scene not found "
+                           "(<exe-dir>/Resources/scenes/default.usd missing)\n");
+      return EXIT_CONFIG_FAIL;
+    }
+    std::fprintf(stdout, "%s\n", path.c_str());
+    return EXIT_OK;
+  }
+
   EmitVersionBanner();
 
   // §29.1 overlay: defaults -> exe-dir -> %LOCALAPPDATA% -> --config,
@@ -78,6 +97,20 @@ int Run(int argc, char** argv) noexcept {
     return EXIT_CONFIG_FAIL;
   }
   const Configuration& config = *resolved;
+
+  // §29.4.a default-scene resolution. M3.5 logs the resolved-source
+  // line for support-ticket triage; M4+ feeds `scene.path` into the
+  // ingest layer. SceneResolver itself is non-failing — a None
+  // result means the install is broken (bundled default missing) and
+  // SceneResolver already logged an Error; the renderer continues
+  // with the M3 hardcoded cube fallback inside HeadlessMode /
+  // ViewerMode, so pyxis.exe still produces an image.
+  {
+    const ResolvedScene scene = ResolveScene(cli, config);
+    Logging::Get().Info(
+        log::APP, std::string{"scene.resolved.source = "}
+                      + std::string{SceneSourceLabel(scene.source)} + "  path = " + scene.path);
+  }
 
   if (cli.headless)
   {

@@ -59,8 +59,12 @@ The user must specify which milestone to check (M0, M1, M2, …, M11). If unspec
 
 ### M3.5 — Default startup scene
 
-- [ ] `Resources/scenes/default.usda` exists
-- [ ] Resolves through §29.4.a chain
+- [ ] `Resources/scenes/default.usd` exists
+- [ ] `Resources/scenes/default_sky.exr` exists
+- [ ] §29.4.a chain implemented (CLI > config > recent > bundled; recent deferred to M4+)
+- [ ] `--print-default-scene-path` CLI exit-mode wired
+- [ ] `scene.resolved.source = ...` spdlog line emitted at startup
+- [ ] Resources copied next to pyxis.exe at build time
 
 ### M4 — Hydra delegate stub + USD-direct stub
 

@@ -21,5 +21,9 @@
 
   "limits": {
     "framesInFlight":  1
+  },
+
+  "paths": {
+    "scene":           ""
   }
 }

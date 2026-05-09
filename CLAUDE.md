@@ -177,7 +177,7 @@ KPIs (1080p hero camera, RTX 4080, post-warm): `pass.PathTrace < 12ms`, `frame.c
 | M1 | Viewer triangle | swapchain, RenderGraph, ImGui, profiler scopes |
 | M2 | Headless triangle | `--headless --config` writes deterministic EXR |
 | M3 | Slang path-trace box | one cube, BLAS+TLAS, raygen/closesthit/miss, accum + tonemap |
-| M3.5 | Default startup scene | `Resources/scenes/default.usda` resolves through §29.4.a chain |
+| M3.5 | Default startup scene | `Resources/scenes/default.usd` resolves through §29.4.a chain |
 | M4 | Hydra delegate stub + USD-direct stub | usdview picks the delegate; both adapters render the same tiny `.usda` byte-identically |
 | M5 | UsdPreviewSurface→OpenPBR | textured cube, OpenPBR shader |
 | M6 | Native instancing | 10k-instance scene, BLAS sharing, instance/material AOVs |

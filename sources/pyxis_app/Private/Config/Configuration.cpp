@@ -129,6 +129,11 @@ std::expected<void, std::string> OverlayConfiguration(Configuration& target,
     if (failure.empty())
       failure = ReadField(*limits, "framesInFlight", target.limits.framesInFlight);
   }
+  if (auto paths = document.find("paths"); paths != document.end() && paths->is_object())
+  {
+    if (failure.empty())
+      failure = ReadField(*paths, "scene", target.paths.scene);
+  }
   if (!failure.empty())
   {
     return std::unexpected{"parameters.json: " + failure};
@@ -320,6 +325,7 @@ std::expected<void, std::string> WriteEffectiveConfig(const Configuration& confi
   document["diagnostics"]["validationLayer"] = config.diagnostics.validationLayer;
   document["diagnostics"]["aftermath"] = config.diagnostics.aftermath;
   document["limits"]["framesInFlight"] = config.limits.framesInFlight;
+  document["paths"]["scene"] = config.paths.scene;
 
   std::ofstream stream(config.output.effectiveConfig, std::ios::binary | std::ios::trunc);
   if (!stream.is_open())
