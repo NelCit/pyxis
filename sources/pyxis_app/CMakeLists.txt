@@ -90,6 +90,31 @@ add_custom_command(TARGET pyxis POST_BUILD
 unset(_pyxis_app_resources_src)
 unset(_pyxis_app_resources_dst)
 
+# ----------------------------------------------------------------------------
+# USD plugin tree (M4). USD discovers its prim-type plugins (UsdGeom,
+# UsdLux, UsdShade, etc.) by walking `<dir-of-usd-DLLs>/usd/<plugin>/
+# resources/plugInfo.json`. vcpkg copies the usd_*.dll files next to
+# pyxis.exe but NOT the matching `usd/` plugin tree, so without this
+# copy step UsdStage::Open(...) hangs trying to resolve schema TfTypes.
+#
+# Debug vs Release: vcpkg ships separate trees under
+# vcpkg_installed/x64-windows/{,debug/}bin/usd/. Both trees are
+# structurally identical; only their referenced DLLs differ in linkage
+# (debug-vs-release CRT). copy_directory mirrors the right one based
+# on $<CONFIG>.
+# ----------------------------------------------------------------------------
+set(_pyxis_usd_plugin_src
+    "$<IF:$<CONFIG:Debug>,${CMAKE_BINARY_DIR}/vcpkg_installed/x64-windows/debug/bin/usd,${CMAKE_BINARY_DIR}/vcpkg_installed/x64-windows/bin/usd>")
+set(_pyxis_usd_plugin_dst
+    "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/$<CONFIG>/usd")
+add_custom_command(TARGET pyxis POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different
+        "${_pyxis_usd_plugin_src}"
+        "${_pyxis_usd_plugin_dst}"
+    COMMENT "Copying vcpkg USD plugin tree (44 plugins, ~7 MB) to <bin>/usd/")
+unset(_pyxis_usd_plugin_src)
+unset(_pyxis_usd_plugin_dst)
+
 # ImGui (with Vulkan + GLFW backends) — built lazily by the helper in
 # _cmake/Thirdparty.cmake. pyxis_app/ViewerMode is the only consumer
 # in M1; the FPS panel + dockspace land here. The helper assumes

@@ -12,11 +12,15 @@
 #include "HeadlessMode.h"
 #include "Scene/SceneResolver.h"
 
+#include <Pyxis/Platform/FileSystem/AssetLocator.h>
+#include <Pyxis/Platform/FileSystem/Path.h>
 #include <Pyxis/Platform/Logging/Log.h>
 #include <Pyxis/Platform/Logging/LogCategories.h>
 #include <Pyxis/Renderer/Version.h>
 
 #include <cstdio>
+#include <cstdlib>
+#include <filesystem>
 #include <string>
 
 namespace pyxis::app {
@@ -39,6 +43,39 @@ void EmitVersionBanner() noexcept {
   std::snprintf(banner, sizeof(banner), "Pyxis %s starting (encoded=0x%08X, sha=%s)",
                 pyxis::GetVersionString(), pyxis::GetVersionEncoded(), pyxis::GetVersionGitSha());
   log.Info(log::APP, banner);
+}
+
+// Point USD's PlugRegistry at <exe-dir>/usd/ so it finds the
+// vcpkg-shipped plugin tree (UsdGeom / UsdLux / UsdShade / etc.
+// schema definitions). Without this, UsdStage::Open hangs trying
+// to resolve TfTypes for the prim types it encounters. The pyxis
+// CMakeLists POST_BUILD copies the tree from
+// vcpkg_installed/x64-windows/{,debug/}bin/usd/ to
+// <bin>/$<CONFIG>/usd/, so this path is correct in both dev and
+// installed builds. Set with _putenv_s so the env var lives in
+// the process and is inherited by every USD-touching thread we
+// spawn later.
+void EnsureUsdPluginPath() noexcept {
+  const AssetLocator locator;
+  const Path& exeDir = locator.ExecutableDirectory();
+  if (exeDir.View().empty())
+    return;
+  const std::filesystem::path pluginRoot =
+      std::filesystem::path(std::string{exeDir.View()}) / "usd";
+  std::error_code errorCode;
+  if (!std::filesystem::exists(pluginRoot, errorCode))
+  {
+    Logging::Get().Warn(log::APP,
+                        "USD plugin tree not found at " + pluginRoot.string()
+                            + "; UsdStage::Open will likely hang. Confirm the "
+                              "pyxis_app CMake POST_BUILD copy ran.");
+    return;
+  }
+  const std::string pathString = pluginRoot.string();
+  // _putenv_s is the Windows-safe set; std::setenv would also work
+  // but _putenv_s avoids the POSIX-vs-MSVCRT split-path subtlety.
+  _putenv_s("PXR_PLUGINPATH_NAME", pathString.c_str());
+  Logging::Get().Info(log::APP, "PXR_PLUGINPATH_NAME = " + pathString);
 }
 
 }  // namespace
@@ -86,6 +123,7 @@ int Run(int argc, char** argv) noexcept {
   }
 
   EmitVersionBanner();
+  EnsureUsdPluginPath();
 
   // §29.1 overlay: defaults -> exe-dir -> %LOCALAPPDATA% -> --config,
   // then ApplyCliOverrides. ResolveConfiguration handles the chain;
