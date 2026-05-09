@@ -33,6 +33,8 @@ target_sources(pyxis PRIVATE
     Private/Scene/SceneResolver.cpp
     Private/UsdDirectEngine/UsdDirectEngine.h
     Private/UsdDirectEngine/UsdDirectEngine.cpp
+    Private/HydraEngine/HydraEngine.h
+    Private/HydraEngine/HydraEngine.cpp
     Private/HeadlessMode.h
     Private/HeadlessMode.cpp
     Private/ViewerMode.h
@@ -144,7 +146,8 @@ pyxis_thirdparty_require_imgui()
 target_link_libraries(pyxis PRIVATE
     Pyxis::Platform
     Pyxis::Renderer
-    Pyxis::UsdIngest                 # M4 — UsdDirectEngine wraps StageWalker.
+    Pyxis::UsdIngest                 # M4 — UsdDirectEngine + HydraEngine (M4 stub) wrap StageWalker.
+    Pyxis::Hydra                     # M4 — pyxis_hydra plugInfo.json + Sync impls register at process load.
     pyxis_imgui
     Vulkan::Vulkan        # vkCmdBeginRendering / vkCmdEndRendering / descriptor-pool calls
     nlohmann_json::nlohmann_json     # parameters.json + effective-config writer (§26 / §27)

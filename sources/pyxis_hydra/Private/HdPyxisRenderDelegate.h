@@ -14,7 +14,16 @@
 
 #include <pxr/imaging/hd/renderDelegate.h>
 
+#include <memory>
+
+namespace pyxis {
+class GpuScene;
+class Profiler;
+}  // namespace pyxis
+
 PXR_NAMESPACE_OPEN_SCOPE
+
+class HdPyxisRenderParam;
 
 class HdPyxisRenderDelegate final : public HdRenderDelegate {
  public:
@@ -24,6 +33,13 @@ class HdPyxisRenderDelegate final : public HdRenderDelegate {
 
   HdPyxisRenderDelegate(const HdPyxisRenderDelegate&) = delete;
   HdPyxisRenderDelegate& operator=(const HdPyxisRenderDelegate&) = delete;
+
+  // Pyxis-specific: HydraEngine calls this once after constructing the
+  // delegate to wire the per-render state (GpuScene + Profiler the
+  // Sync impls reach through). Sync impls cast the HdRenderParam* to
+  // HdPyxisRenderParam* and read the borrowed pointers. Both args
+  // must outlive every HdEngine::Execute call against this delegate.
+  void SetEngineState(pyxis::GpuScene* scene, pyxis::Profiler* profiler) noexcept;
 
   // ---- Supported-types reports -------------------------------------
   [[nodiscard]] const TfTokenVector& GetSupportedRprimTypes() const override;
@@ -59,6 +75,7 @@ class HdPyxisRenderDelegate final : public HdRenderDelegate {
 
  private:
   HdResourceRegistrySharedPtr _resourceRegistry;
+  std::unique_ptr<HdPyxisRenderParam> _renderParam;
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

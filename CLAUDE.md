@@ -180,7 +180,7 @@ KPIs (1080p hero camera, RTX 4080, post-warm): `pass.PathTrace < 12ms`, `frame.c
 | M2 | Headless triangle | `--headless --config` writes deterministic EXR |
 | M3 | Slang path-trace box | one cube, BLAS+TLAS, raygen/closesthit/miss, accum + tonemap |
 | M3.5 | Default startup scene | `Resources/scenes/default.usd` resolves through §29.4.a chain |
-| M4 | Hydra delegate stub + USD-direct stub | usdview picks the delegate; both adapters render the same tiny `.usda` byte-identically |
+| M4 | Hydra delegate stub + USD-direct stub | usdview picks the delegate; both adapters render the same tiny `.usda` byte-identically. M4 stub: HydraEngine wraps StageWalker for byte-equal parity (full HdEngine pipeline at M5+). |
 | M5 | UsdPreviewSurface→OpenPBR | textured cube, OpenPBR shader |
 | M6 | Native instancing | 10k-instance scene, BLAS sharing, instance/material AOVs |
 | M7 | Lighting | dome + distant + rect; NEE + MIS |
@@ -253,7 +253,7 @@ KPIs (1080p hero camera, RTX 4080, post-warm): `pass.PathTrace < 12ms`, `frame.c
 
 ## Decisions baked into the plan (do not relitigate without an RFC §44)
 
-- Two ingest adapters day 0; both produce byte-identical EXRs.
+- Two ingest adapters day 0; both produce byte-identical EXRs. M4 stub: HydraEngine wraps StageWalker for byte-equal parity; full HdEngine pipeline at M5+.
 - OpenPBR is canonical; one generic closesthit in v1.
 - Hydra 2.0 / Scene Indices only; legacy `UsdImagingDelegate` not used.
 - `pyxis_usd_ingest` is one-shot; no `UsdNotice` listener (live USD updates outside Hydra are post-v1).

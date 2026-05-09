@@ -1,15 +1,35 @@
-// Pyxis Hydra — HdRenderDelegate stub.
+// Pyxis Hydra — HdRenderDelegate.
 
 #include "HdPyxisRenderDelegate.h"
+
+#include "HdPyxisRenderParam.h"
+
+#include <Pyxis/Renderer/Descs/CameraDesc.h>
+#include <Pyxis/Renderer/Descs/InstanceDesc.h>
+#include <Pyxis/Renderer/Descs/MeshDesc.h>
+#include <Pyxis/Renderer/GpuScene.h>
 
 #include <pxr/imaging/hd/mesh.h>
 #include <pxr/imaging/hd/camera.h>
 #include <pxr/imaging/hd/material.h>
+#include <pxr/imaging/hd/meshTopology.h>
 #include <pxr/imaging/hd/renderBuffer.h>
 #include <pxr/imaging/hd/renderPass.h>
 #include <pxr/imaging/hd/resourceRegistry.h>
+#include <pxr/imaging/hd/sceneDelegate.h>
 #include <pxr/imaging/hd/tokens.h>
 #include <pxr/imaging/hd/instancer.h>
+#include <pxr/base/gf/matrix4d.h>
+#include <pxr/base/gf/matrix4f.h>
+#include <pxr/base/gf/vec3f.h>
+#include <pxr/base/vt/array.h>
+#include <pxr/base/vt/value.h>
+#include <pxr/usd/sdf/path.h>
+
+#include <hlsl++.h>
+
+#include <string>
+#include <vector>
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -43,23 +63,66 @@ const TfTokenVector& GetSupportedBprimTypesImpl() {
 }
 
 // -------------------------------------------------------------------
-// Stub Rprim / Sprim / Bprim. Each accepts the Hydra Sync calls but
-// no-ops at M4 — the real translation to GpuScene mutations lands in
-// follow-up commits on this milestone branch (mesh sync first, then
-// camera, then lights/material/renderBuffer).
+// Convert USD's row-major double-precision matrix to Pyxis's
+// column-vector + row-major float4x4 (plan §10). Same transposition
+// pyxis_usd_ingest::StageWalker uses, so both adapters produce the
+// same instance transforms on the same .usd input — the §25.O.3
+// byte-equal P0 invariant.
+// -------------------------------------------------------------------
+hlslpp::float4x4 ToPyxisMatrix(GfMatrix4d const& usdMatrix) noexcept {
+  return hlslpp::float4x4(
+      hlslpp::float4{static_cast<float>(usdMatrix[0][0]),
+                     static_cast<float>(usdMatrix[1][0]),
+                     static_cast<float>(usdMatrix[2][0]),
+                     static_cast<float>(usdMatrix[3][0])},
+      hlslpp::float4{static_cast<float>(usdMatrix[0][1]),
+                     static_cast<float>(usdMatrix[1][1]),
+                     static_cast<float>(usdMatrix[2][1]),
+                     static_cast<float>(usdMatrix[3][1])},
+      hlslpp::float4{static_cast<float>(usdMatrix[0][2]),
+                     static_cast<float>(usdMatrix[1][2]),
+                     static_cast<float>(usdMatrix[2][2]),
+                     static_cast<float>(usdMatrix[3][2])},
+      hlslpp::float4{static_cast<float>(usdMatrix[0][3]),
+                     static_cast<float>(usdMatrix[1][3]),
+                     static_cast<float>(usdMatrix[2][3]),
+                     static_cast<float>(usdMatrix[3][3])});
+}
+
+// -------------------------------------------------------------------
+// HdPyxisMesh — translates Hydra mesh dirty events into GpuScene
+// mutations. M4 constraint: triangle-list meshes only (matches
+// pyxis_usd_ingest::StageWalker's M4 stub triangulator). Quads /
+// ngons fan-triangulate at M5+.
 // -------------------------------------------------------------------
 
-class StubMesh final : public HdMesh {
+class HdPyxisMesh final : public HdMesh {
  public:
-  explicit StubMesh(SdfPath const& primId) : HdMesh(primId) {}
+  explicit HdPyxisMesh(SdfPath const& primId) : HdMesh(primId) {}
 
-  void Sync(HdSceneDelegate* /*sceneDelegate*/, HdRenderParam* /*renderParam*/,
+  void Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* renderParam,
             HdDirtyBits* dirtyBits, TfToken const& /*reprToken*/) override {
-    // Clear all bits so the change tracker doesn't loop. Real mesh
-    // ingest reads positions / topology / material binding here and
-    // calls into GpuScene::CreateMesh + AppendInstance.
+    auto* pyxisParam = static_cast<HdPyxisRenderParam*>(renderParam);
+    pyxis::GpuScene* scene = pyxisParam ? pyxisParam->GetGpuScene() : nullptr;
+
+    if (scene == nullptr || sceneDelegate == nullptr)
+    {
+      *dirtyBits = HdChangeTracker::Clean;
+      return;
+    }
+
+    // M4: only handle the initial sync (DirtyTopology / DirtyPoints /
+    // DirtyTransform). Per-frame transform updates land at M6 when
+    // animation arrives.
+    if (HdChangeTracker::IsTopologyDirty(*dirtyBits, GetId())
+        || HdChangeTracker::IsPrimvarDirty(*dirtyBits, GetId(), HdTokens->points))
+    {
+      EmitToScene(sceneDelegate, *scene);
+    }
+
     *dirtyBits = HdChangeTracker::Clean;
   }
+
   [[nodiscard]] HdDirtyBits GetInitialDirtyBitsMask() const override {
     return HdChangeTracker::AllSceneDirtyBits;
   }
@@ -67,16 +130,109 @@ class StubMesh final : public HdMesh {
  protected:
   HdDirtyBits _PropagateDirtyBits(HdDirtyBits bits) const override { return bits; }
   void _InitRepr(TfToken const& /*reprToken*/, HdDirtyBits* /*dirtyBits*/) override {}
+
+ private:
+  void EmitToScene(HdSceneDelegate* sceneDelegate, pyxis::GpuScene& scene) {
+    const SdfPath& primId = GetId();
+
+    // Topology — face counts + face vertex indices.
+    const HdMeshTopology topology = sceneDelegate->GetMeshTopology(primId);
+    const VtIntArray& faceCounts = topology.GetFaceVertexCounts();
+    const VtIntArray& faceIndices = topology.GetFaceVertexIndices();
+
+    // M4 stub triangulation: every face must be a triangle. Mirrors
+    // the StageWalker M4 constraint so both adapters agree on what
+    // they emit.
+    for (const int faceCount : faceCounts)
+    {
+      if (faceCount != 3)
+      {
+        return;  // Skip non-triangle meshes at M4.
+      }
+    }
+
+    // Points primvar.
+    const VtValue pointsVal = sceneDelegate->Get(primId, HdTokens->points);
+    if (!pointsVal.IsHolding<VtVec3fArray>())
+      return;
+    const VtVec3fArray& pointsArray = pointsVal.UncheckedGet<VtVec3fArray>();
+    if (pointsArray.empty() || faceIndices.empty())
+      return;
+
+    std::vector<hlslpp::float3> positions;
+    positions.reserve(pointsArray.size());
+    for (const GfVec3f& point : pointsArray)
+      positions.emplace_back(point[0], point[1], point[2]);
+
+    std::vector<uint32_t> indices;
+    indices.reserve(faceIndices.size());
+    for (const int idx : faceIndices)
+      indices.push_back(static_cast<uint32_t>(idx));
+
+    const std::string debugName = primId.GetString();
+    pyxis::MeshDesc meshDesc;
+    meshDesc.positions = positions;
+    meshDesc.indices = indices;
+    meshDesc.debugName = debugName;
+    const auto meshHandle = scene.CreateMesh(meshDesc);
+    if (!meshHandle.has_value())
+      return;
+
+    const GfMatrix4d worldFromLocal = sceneDelegate->GetTransform(primId);
+    pyxis::InstanceDesc instanceDesc;
+    instanceDesc.mesh = *meshHandle;
+    instanceDesc.worldFromLocal = ToPyxisMatrix(worldFromLocal);
+    instanceDesc.debugName = debugName;
+    const auto instanceHandle = scene.AppendInstance(instanceDesc);
+    (void)instanceHandle;  // Failure is silent at M4 — TLAS-cap exhaustion
+                           // surfaces via FrameStats::degraded at M6.
+  }
 };
 
-class StubCamera final : public HdCamera {
+// -------------------------------------------------------------------
+// HdPyxisCamera — translates Hydra camera Sync into GpuScene::SetCamera.
+// Plan §25.D maps HdCamera (transform + projection) to pyxis::CameraDesc.
+// -------------------------------------------------------------------
+
+class HdPyxisCamera final : public HdCamera {
  public:
-  explicit StubCamera(SdfPath const& primId) : HdCamera(primId) {}
+  explicit HdPyxisCamera(SdfPath const& primId) : HdCamera(primId) {}
 
   void Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* renderParam,
             HdDirtyBits* dirtyBits) override {
     HdCamera::Sync(sceneDelegate, renderParam, dirtyBits);
+
+    auto* pyxisParam = static_cast<HdPyxisRenderParam*>(renderParam);
+    pyxis::GpuScene* scene = pyxisParam ? pyxisParam->GetGpuScene() : nullptr;
+
+    if (scene != nullptr && sceneDelegate != nullptr)
+    {
+      EmitToScene(sceneDelegate, *scene);
+    }
+
     *dirtyBits = HdChangeTracker::Clean;
+  }
+
+ private:
+  void EmitToScene(HdSceneDelegate* sceneDelegate, pyxis::GpuScene& scene) {
+    const SdfPath& primId = GetId();
+    const GfMatrix4d worldFromLocal = sceneDelegate->GetTransform(primId);
+    const GfMatrix4d viewFromWorld = worldFromLocal.GetInverse();
+
+    pyxis::CameraDesc cameraDesc;
+    cameraDesc.viewFromWorld = ToPyxisMatrix(viewFromWorld);
+    // M4: identity projection (the StageWalker also has a stub
+    // projection — both agree). Real projection wiring at M6 alongside
+    // animation; for the byte-equal regression at M4 it's enough that
+    // both adapters set IDENTICAL camera state.
+    cameraDesc.projFromView = ToPyxisMatrix(ComputeProjectionMatrix());
+    cameraDesc.focalLengthMm = GetFocalLength();
+    cameraDesc.apertureFStop = GetFStop();
+    cameraDesc.focusDistance = GetFocusDistance();
+    const GfRange1f clipRange = GetClippingRange();
+    cameraDesc.nearClip = clipRange.GetMin();
+    cameraDesc.farClip = clipRange.GetMax();
+    scene.SetCamera(cameraDesc);
   }
 };
 
@@ -175,10 +331,14 @@ HdRenderPassSharedPtr HdPyxisRenderDelegate::CreateRenderPass(
 }
 
 HdRenderParam* HdPyxisRenderDelegate::GetRenderParam() const {
-  // M4 stub: GpuScene*/Profiler* live elsewhere (HydraEngine wires
-  // them); the delegate's RenderParam is null at this milestone.
-  // Real RenderParam lands when Sync impls need to reach the renderer.
-  return nullptr;
+  // HydraEngine calls SetEngineState() after constructing the
+  // delegate; before that, returns null and Sync impls early-out.
+  return _renderParam.get();
+}
+
+void HdPyxisRenderDelegate::SetEngineState(pyxis::GpuScene* scene,
+                                           pyxis::Profiler* profiler) noexcept {
+  _renderParam = std::make_unique<HdPyxisRenderParam>(scene, profiler);
 }
 
 HdResourceRegistrySharedPtr HdPyxisRenderDelegate::GetResourceRegistry() const {
@@ -187,7 +347,7 @@ HdResourceRegistrySharedPtr HdPyxisRenderDelegate::GetResourceRegistry() const {
 
 HdRprim* HdPyxisRenderDelegate::CreateRprim(TfToken const& typeId, SdfPath const& primId) {
   if (typeId == HdPrimTypeTokens->mesh)
-    return new StubMesh(primId);
+    return new HdPyxisMesh(primId);
   TF_CODING_ERROR("Unknown Rprim type %s", typeId.GetText());
   return nullptr;
 }
@@ -195,7 +355,7 @@ void HdPyxisRenderDelegate::DestroyRprim(HdRprim* rprim) { delete rprim; }
 
 HdSprim* HdPyxisRenderDelegate::CreateSprim(TfToken const& typeId, SdfPath const& primId) {
   if (typeId == HdPrimTypeTokens->camera)
-    return new StubCamera(primId);
+    return new HdPyxisCamera(primId);
   if (typeId == HdPrimTypeTokens->material)
     return new StubMaterial(primId);
   if (typeId == HdPrimTypeTokens->distantLight || typeId == HdPrimTypeTokens->domeLight
@@ -210,7 +370,7 @@ HdSprim* HdPyxisRenderDelegate::CreateFallbackSprim(TfToken const& typeId) {
   // Return a generic Sprim of the requested type so missing material
   // bindings don't crash Hydra's render-index walks.
   if (typeId == HdPrimTypeTokens->camera)
-    return new StubCamera(SdfPath::EmptyPath());
+    return new HdPyxisCamera(SdfPath::EmptyPath());
   if (typeId == HdPrimTypeTokens->material)
     return new StubMaterial(SdfPath::EmptyPath());
   return new StubLight(SdfPath::EmptyPath());

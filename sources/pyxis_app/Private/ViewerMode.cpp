@@ -6,6 +6,7 @@
 #include "ImGuiHost.h"
 #include "Output/TextureReadback.h"
 #include "Render/AovTextures.h"
+#include "HydraEngine/HydraEngine.h"
 #include "Render/HardcodedCubeScene.h"
 #include "Scene/SceneResolver.h"
 #include "UsdDirectEngine/UsdDirectEngine.h"
@@ -230,8 +231,8 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
     }
     else if (config.app.ingest == "hydra")
     {
-      log.Info(log::APP, "ViewerMode: app.ingest=hydra; HydraEngine wires at P5e — "
-                         "falling back to M3 cube for now.");
+      HydraEngine engine;
+      sceneLoaded = engine.Load(resolvedScene.path, gpuScene);
     }
   }
   if (sceneLoaded)

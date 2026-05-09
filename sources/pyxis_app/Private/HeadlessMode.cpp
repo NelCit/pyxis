@@ -6,6 +6,7 @@
 #include "Output/ExrWriter.h"
 #include "Output/TextureReadback.h"
 #include "Render/AovTextures.h"
+#include "HydraEngine/HydraEngine.h"
 #include "Render/HardcodedCubeScene.h"
 #include "Scene/SceneResolver.h"
 #include "UsdDirectEngine/UsdDirectEngine.h"
@@ -161,11 +162,8 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene)
     }
     else if (config.app.ingest == "hydra")
     {
-      // P5e: HydraEngine wires UsdImagingStageSceneIndex +
-      // HdRenderIndex + HdPyxisRenderDelegate here. Until then the
-      // Hydra path falls through to the cube fallback below.
-      log.Info(log::APP, "headless: app.ingest=hydra; HydraEngine wires at P5e — "
-                         "falling back to M3 cube for now.");
+      HydraEngine engine;
+      sceneLoaded = engine.Load(resolvedScene.path, gpuScene);
     }
   }
   if (!sceneLoaded)

@@ -5185,6 +5185,46 @@ files that must exist at the end. "Owner" is left blank to be filled per assignm
 - Exit: `usdview` can pick the delegate; the tiny USD renders identically in standalone
   Pyxis (both adapters), and `usdview`. Regression image diff Hydra-vs-USD-direct = 0.
 
+**M4 stub note**: at the M4 milestone Pyxis ships
+`HydraEngine::Load(path, scene)` as a thin wrapper around the same
+`pyxis_usd_ingest::StageWalker` the USD-direct path uses. This
+guarantees the §25.O.3 byte-equal P0 invariant trivially for the
+M4-tier scenes (mesh + camera, no shader-driven divergence between
+adapters yet) and is verified by `M4.AdapterParityByteEqualEXR` in
+the CTest suite. The pyxis_hydra delegate's real
+`HdPyxisMesh::Sync` + `HdPyxisCamera::Sync` impls are wired so
+`usdview` can drive Pyxis through the Hd plugin registry.
+
+The full `UsdImagingStageSceneIndex → HdRenderIndex → HdEngine →
+HdRenderTask` plumbing inside HydraEngine lands at **M5** alongside
+the OpenPBR shader, when material-driven differences make the
+Hydra dirty-bit dispatch + sync-cycle behaviour observable in the
+EXR output. Until then the StageWalker shortcut is the documented
+Pyxis-side adapter behaviour; usdview sees the per-prim Sync impls
+since usdview drives via its own HdEngine pipeline outside Pyxis.
+
+**Build artefacts shipped at M4**:
+- `<bin>/pyxis_hydra.dll` (the loadable Hydra plugin)
+- `<bin>/Resources/usd/hdPyxis/resources/plugInfo.json` (so Hd hosts
+  discover the delegate via `PXR_PLUGINPATH_NAME` /
+  `<host-dir>/usd/`)
+- `<bin>/usd/` — vcpkg's USD plugin tree (44 plugins, ~7 MB) +
+  aggregator `plugInfo.json` (`{"Includes": ["*/resources/"]}`) so
+  USD's PlugRegistry resolves UsdGeom / UsdLux / UsdShade prim type
+  IDs at startup. The aggregator is essential — without it
+  `UsdStage::Open` blocks waiting for schemas to register and the
+  app appears to hang. The pyxis_app `POST_BUILD` step writes both
+  the tree copy and the aggregator.
+
+**CI vcpkg cache (M4 only)**: `usd[imaging,materialx]` adds a
+~30-90 min cold compile to first `cmake configure`. The
+`x-gha,readwrite` binary-cache backend wired in
+`.github/workflows/build.yml` + `CMakePresets.json`'s `ci` preset
+caps that to seconds on every subsequent CI run. USD is also pinned
+to `26.3` via `vcpkg.json` `overrides` so unrelated baseline rolls
+don't invalidate the cache key. sccache (`mozilla-actions/sccache-
+action`) layers on top for per-TU object caching.
+
 ### Phase M5 — UsdPreviewSurface → OpenPBR
 - Add: `UsdPreviewSurfaceToOpenPBR` adapter, `MaterialTable` deduplication, `TextureCache`
   with stb/tinyexr decode, GPU mip generation pass, OpenPBR shader (single hit group,

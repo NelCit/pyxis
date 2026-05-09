@@ -24,3 +24,20 @@ set_tests_properties(M2.HeadlessByteEqualEXR PROPERTIES
     LABELS    "integration;m2"
     TIMEOUT   60   # M2 fixture is 640x360, two runs; finishes in seconds.
 )
+
+# §41 M4 exit: "the tiny USD renders identically in standalone Pyxis
+# (both adapters); regression image diff Hydra-vs-USD-direct = 0."
+# Drives the §29.4.a-resolved bundled default.usd through both
+# adapters and asserts byte-equal EXR output.
+add_test(
+    NAME    M4.AdapterParityByteEqualEXR
+    COMMAND ${CMAKE_COMMAND}
+            -DPYXIS_EXE=$<TARGET_FILE:pyxis>
+            -DFIXTURE=${CMAKE_SOURCE_DIR}/tests/fixtures/headless_triangle.json
+            -DOUTPUT_DIR=${CMAKE_BINARY_DIR}/tests/integration/m4_adapter_parity
+            -P ${CMAKE_SOURCE_DIR}/tests/integration/m4_adapter_parity.cmake
+)
+set_tests_properties(M4.AdapterParityByteEqualEXR PROPERTIES
+    LABELS    "integration;m4"
+    TIMEOUT   90   # Two USD-loading runs (~2-3 s each on a warm cache).
+)
