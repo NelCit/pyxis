@@ -181,6 +181,13 @@ class ImGuiHost {
   // (square) so the first frame's editor sliders don't divide by zero.
   float                                 _renderAspect = 1.0f;
 
+  // Click-to-select latch (M7 follow-up). ViewerMode pushes the
+  // §15 instance slot from a left-button click (NOT a drag — drag is
+  // reserved for the camera). BuildEditorPanel drains it once per
+  // frame, looks up the material via GpuScene, and snaps the
+  // Material combo to that entry. Sentinel ~0u = no pending click.
+  uint32_t                              _editorPendingClickInstance = 0xFFFFFFFFu;
+
  public:
   // Called by ViewerMode each frame; returns true and clears the
   // latched request iff the editor's "Reload shaders" button was
@@ -236,6 +243,15 @@ class ImGuiHost {
   // before the first AOV is allocated.
   void SetRenderAspect(float aspect) noexcept {
     _renderAspect = (aspect > 1e-3f) ? aspect : 1.0f;
+  }
+
+  // ViewerMode calls this on a left-button click that wasn't a drag
+  // (LMB-up displacement < small threshold). The slot comes from the
+  // most recent picker readback; BuildEditorPanel drains it next
+  // frame and snaps the Material combo to that instance's material.
+  // 0xFFFFFFFF = "no instance under cursor" — silently dropped.
+  void SetClickedInstance(uint32_t instanceSlot) noexcept {
+    _editorPendingClickInstance = instanceSlot;
   }
 
   // ViewerMode drains a pending save-AOV path each frame. Returns

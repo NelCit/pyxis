@@ -54,6 +54,24 @@ struct HitInfo {
     float  hitT;     // ray-distance at hit; -1.0 sentinel from miss shader.
     float3 normalWorld;  // populated by closesthit; (0,0,0) on miss
     uint   instanceId;   // populated by closesthit; 0xFFFFFFFF on miss
+    // M7 follow-up — extra AOV channels the inspector pipes into
+    // their own RWTextures. baseColor is the §11 OpenPBR baseColor
+    // straight from the material table (pre-shading); worldHit is
+    // WorldRayOrigin + RayTCurrent * WorldRayDirection cached so
+    // raygen doesn't re-derive it. Miss leaves them at zero.
+    //
+    // Payload size note: 68 bytes total — past the 32-byte register-
+    // only payload ceiling for DXR. The runtime spills to the on-
+    // chip ray stack on every TraceRay, costing latency per leaf
+    // traversal step. Acceptable for the M7 AOV inspector (one
+    // primary ray per pixel; AOV writes happen ONCE per dispatch);
+    // when the §9 multi-bounce path tracer + NEE land at M9+ the
+    // BSDF lobes will need to drop the AOV-only fields onto a
+    // payload-attribute attachment instead.
+    float3 baseColor;
+    uint   materialId;   // material slot from gInstanceMaterial[instanceId]
+    float3 worldHit;
+    uint   _hitInfoPad0;
 };
 #endif
 
@@ -98,6 +116,9 @@ static const uint DEBUG_VIEW_COLOR        = 0;  // post-tonemap radiance
 static const uint DEBUG_VIEW_NORMAL       = 1;  // world normal as (n*0.5+0.5)
 static const uint DEBUG_VIEW_DEPTH        = 2;  // 1/depth grayscale
 static const uint DEBUG_VIEW_INSTANCE_ID  = 3;  // hashed instance-id colour
+static const uint DEBUG_VIEW_MATERIAL_ID  = 4;  // hashed material-id colour
+static const uint DEBUG_VIEW_BASE_COLOR   = 5;  // raw OpenPBR baseColor (no shading)
+static const uint DEBUG_VIEW_WORLD_POS    = 6;  // worldHit / 10 then frac for visualisation
 
 // Sentinel for camera.mousePixel{X,Y} meaning "mouse outside viewport".
 // Raygen short-circuits the pick-write when either component matches.

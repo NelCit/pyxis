@@ -59,7 +59,11 @@ std::expected<AovTextures, std::string> AovTextures::Create(nvrhi::IDevice* devi
   result.normal     = makeAov(nvrhi::Format::RGBA16_FLOAT, "aov.normal");
   result.depth      = makeAov(nvrhi::Format::R32_FLOAT,    "aov.depth");
   result.instanceId = makeAov(nvrhi::Format::R32_UINT,     "aov.instanceId");
-  if (!result.colorHdr || !result.normal || !result.depth || !result.instanceId)
+  result.materialId = makeAov(nvrhi::Format::R32_UINT,     "aov.materialId");
+  result.baseColor  = makeAov(nvrhi::Format::RGBA16_FLOAT, "aov.baseColor");
+  result.worldPos   = makeAov(nvrhi::Format::RGBA32_FLOAT, "aov.worldPos");
+  if (!result.colorHdr || !result.normal || !result.depth || !result.instanceId
+      || !result.materialId || !result.baseColor || !result.worldPos)
   {
     return std::unexpected{std::string{"AovTextures::Create: createTexture(raw AOV) failed"}};
   }

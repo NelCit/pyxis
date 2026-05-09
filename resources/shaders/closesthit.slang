@@ -154,7 +154,13 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
     // M7 follow-up — fields the raygen-side AOV inspector reads.
     // Normal is the world-space face normal we already computed for
     // the Lambert pass; instanceId is the per-instance slot the
-    // closesthit branched on for material lookup.
+    // closesthit branched on for material lookup. baseColor /
+    // materialId / worldHit feed the new BaseColor / MaterialID /
+    // WorldPos AOVs respectively — all already in flight as locals.
     payload.normalWorld = nWorld;
     payload.instanceId  = instanceId;
+    payload.baseColor   = baseColor;
+    payload.materialId  = materialId;
+    payload.worldHit    = hitWorld;
+    payload._hitInfoPad0 = 0u;
 }

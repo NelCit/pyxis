@@ -61,6 +61,13 @@ struct AovTextures {
   nvrhi::TextureHandle normal;
   nvrhi::TextureHandle depth;
   nvrhi::TextureHandle instanceId;
+  // Second AOV batch (M7 follow-up).
+  //   materialId   R32_UINT     material slot (~0u on miss)
+  //   baseColor    RGBA16_FLOAT raw OpenPBR baseColor pre-shading
+  //   worldPos     RGBA32_FLOAT world-space hit position (precision)
+  nvrhi::TextureHandle materialId;
+  nvrhi::TextureHandle baseColor;
+  nvrhi::TextureHandle worldPos;
 
   // 1-element RWStructuredBuffer<PickResult> + a host-readable
   // staging buffer for one-frame-stale CPU readback. PathTracePass

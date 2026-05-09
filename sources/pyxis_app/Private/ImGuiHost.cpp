@@ -987,7 +987,9 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
     // of the currently-selected RAW AOV.
     if (ImGui::CollapsingHeader("AOV inspector"))
     {
-      static const char* const AOV_LABELS[] = {"Color", "Normal", "Depth", "InstanceID"};
+      static const char* const AOV_LABELS[] = {
+          "Color", "Normal", "Depth", "InstanceID",
+          "MaterialID", "BaseColor", "WorldPos"};
       const int currentIdx = static_cast<int>(_editorDebugView);
       const char* preview =
           (currentIdx >= 0
@@ -1041,6 +1043,12 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
           suggested = L"pyxis_aov_depth.exr";
         else if (_editorDebugView == RenderSettings::DebugView::InstanceId)
           suggested = L"pyxis_aov_instance.exr";
+        else if (_editorDebugView == RenderSettings::DebugView::MaterialId)
+          suggested = L"pyxis_aov_material.exr";
+        else if (_editorDebugView == RenderSettings::DebugView::BaseColor)
+          suggested = L"pyxis_aov_basecolor.exr";
+        else if (_editorDebugView == RenderSettings::DebugView::WorldPos)
+          suggested = L"pyxis_aov_worldpos.exr";
         std::string picked = SaveFilePickerDialog(suggested);
         if (!picked.empty())
           _editorPendingSaveAovPath = std::move(picked);
@@ -1228,6 +1236,28 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
       {
         if (_editorMaterialIndex >= matCount)
           _editorMaterialIndex = 0;
+        // Click-to-select: ViewerMode pushed an instance slot from a
+        // recent left-button click. Look the bound MaterialHandle up
+        // via the scene, walk the live-material list to find its
+        // index, snap _editorMaterialIndex. Drained unconditionally
+        // (sentinel = no-op).
+        if (_editorPendingClickInstance != 0xFFFFFFFFu)
+        {
+          const MaterialHandle clickedMat =
+              scene.LookupInstanceMaterialBySlot(_editorPendingClickInstance);
+          if (clickedMat != MaterialHandle::Invalid)
+          {
+            for (uint32_t walkIdx = 0; walkIdx < matCount; ++walkIdx)
+            {
+              if (scene.GetMaterialHandleAt(walkIdx) == clickedMat)
+              {
+                _editorMaterialIndex = walkIdx;
+                break;
+              }
+            }
+          }
+          _editorPendingClickInstance = 0xFFFFFFFFu;
+        }
         // Helper: extract the final SdfPath segment from a string_view
         // (everything after the last '/'). For "/Foo/Bar/Baz" returns
         // "Baz"; for an empty path returns the synthesized index name.

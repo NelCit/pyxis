@@ -169,6 +169,9 @@ class PathTracePass final : public IRenderPass {
   nvrhi::ITexture* _lastSeenDepthAov     = nullptr;
   nvrhi::ITexture* _lastSeenInstanceAov  = nullptr;
   nvrhi::IBuffer*  _lastSeenPickResult   = nullptr;
+  nvrhi::ITexture* _lastSeenMaterialAov  = nullptr;
+  nvrhi::ITexture* _lastSeenBaseColorAov = nullptr;
+  nvrhi::ITexture* _lastSeenWorldPosAov  = nullptr;
   // Tiny no-UAV fallback textures for each raw AOV format. Bound when
   // the caller doesn't supply that AOV (headless mode + the M2-era
   // color-only paths). Same lifetime as the existing fallbacks above.
@@ -176,6 +179,9 @@ class PathTracePass final : public IRenderPass {
   nvrhi::TextureHandle _fallbackNormalAov;
   nvrhi::TextureHandle _fallbackDepthAov;
   nvrhi::TextureHandle _fallbackInstanceAov;
+  nvrhi::TextureHandle _fallbackMaterialAov;
+  nvrhi::TextureHandle _fallbackBaseColorAov;
+  nvrhi::TextureHandle _fallbackWorldPosAov;
   nvrhi::BufferHandle  _fallbackPickResult;
 
   // Cached one-frame-stale picker readback. Updated at the top of

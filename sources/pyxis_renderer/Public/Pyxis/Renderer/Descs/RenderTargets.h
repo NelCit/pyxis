@@ -53,6 +53,15 @@ struct RenderTargets {
   nvrhi::ITexture* normalAov = nullptr;
   nvrhi::ITexture* depthAov = nullptr;
   nvrhi::ITexture* instanceIdAov = nullptr;
+  // Second AOV batch (M7 follow-up) — material id, baseColor,
+  // world-position. Same caller-allocation contract; PathTracePass
+  // binds 1×1 fallbacks when null.
+  //   materialIdAov : R32_UINT (~0u on miss)
+  //   baseColorAov  : RGBA16F  raw OpenPBR baseColor pre-shading
+  //   worldPosAov   : RGBA32F  world-space hit point (precision)
+  nvrhi::ITexture* materialIdAov = nullptr;
+  nvrhi::ITexture* baseColorAov  = nullptr;
+  nvrhi::ITexture* worldPosAov   = nullptr;
 
   // 1-element RWStructuredBuffer<PickResult> the raygen writes when
   // the dispatched pixel matches RenderSettings::mousePixel{X,Y}.

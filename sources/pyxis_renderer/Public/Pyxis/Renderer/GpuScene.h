@@ -162,6 +162,17 @@ public:
   [[nodiscard]] MaterialHandle           GetMaterialHandleAt(uint32_t liveIndex) const noexcept;
   [[nodiscard]] OpenPBRMaterialDesc      GetMaterialDescAt(uint32_t liveIndex) const noexcept;
 
+  // Click-to-select helper (M7 follow-up). The picker AOV writes the
+  // raw §15 instance-slot integer (24-bit `instanceCustomIndex`); the
+  // viewer takes that on click and asks the scene for the bound
+  // material so the Editor's Material combo can jump to it. Returns
+  // MaterialHandle::Invalid when the slot is 0 (sentinel), out of
+  // range, or points at a dead / quarantined entry — caller should
+  // treat that as "no selection". Generation-checked InstanceHandle
+  // lookup isn't possible here because the picker only carries the
+  // 24-bit slot, not the 8-bit generation.
+  [[nodiscard]] MaterialHandle LookupInstanceMaterialBySlot(uint32_t instanceSlot) const noexcept;
+
   // ---- Render-side accessors -----------------------------------------
   // Borrowed pointer / ref valid for the lifetime of the scene (the
   // TLAS is alive after the first CommitResources that observed at

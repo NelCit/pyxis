@@ -118,6 +118,12 @@ void ConvertAovRowToRgba32f(nvrhi::Format format, const void* srcRow, uint32_t w
       }
       break;
     }
+    case nvrhi::Format::RGBA32_FLOAT:
+    {
+      // Already RGBA32F — bytewise memcpy is the cheap path.
+      std::memcpy(dstRgbaRow, srcRow, static_cast<std::size_t>(width) * 4u * sizeof(float));
+      break;
+    }
     case nvrhi::Format::R32_FLOAT:
     {
       const auto* src = static_cast<const float*>(srcRow);
@@ -276,6 +282,17 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
   // event lands.
   std::atomic<int32_t> latestMousePixelX{-1};
   std::atomic<int32_t> latestMousePixelY{-1};
+  // Click-to-select state. LMB-down records the pixel; LMB-up
+  // compares the displacement to a small radius to distinguish a
+  // click from a camera drag. Threshold = 4 pixels matches the
+  // typical OS-level drag threshold (Windows DPI-default 4 px).
+  // pendingClickPixel{X,Y} latches the cursor on a confirmed click
+  // for the main thread to drain after RenderFrame retires.
+  constexpr int32_t CLICK_RADIUS_PX = 4;
+  std::atomic<int32_t> mouseDownPixelX{-1};
+  std::atomic<int32_t> mouseDownPixelY{-1};
+  std::atomic<int32_t> pendingClickPixelX{-1};
+  std::atomic<int32_t> pendingClickPixelY{-1};
   window->SetEventSink([&](const InputEvent& event) {
     if (event.kind == InputEventKind::WindowClose)
       shouldClose.store(true);
@@ -311,6 +328,37 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
       if (isKeyEvent && imguiIO->WantCaptureKeyboard)
         return;
     }
+
+    // Click-vs-drag detection (M7 follow-up). Only LMB is checked —
+    // RMB is reserved for FlyCameraController's orbit. On LMB-down,
+    // record the cursor pixel; on LMB-up, if the displacement is
+    // smaller than CLICK_RADIUS_PX, treat it as a click and latch
+    // the pixel. The main loop drains the latch after RenderFrame
+    // so it can read the renderer's just-produced pick result.
+    // Sentinel = -1 means "no down event in flight".
+    if (event.kind == InputEventKind::MouseButtonDown && event.key == 0)
+    {
+      mouseDownPixelX.store(latestMousePixelX.load());
+      mouseDownPixelY.store(latestMousePixelY.load());
+    }
+    else if (event.kind == InputEventKind::MouseButtonUp && event.key == 0)
+    {
+      const int32_t downX = mouseDownPixelX.exchange(-1);
+      const int32_t downY = mouseDownPixelY.exchange(-1);
+      if (downX >= 0 && downY >= 0)
+      {
+        const int32_t upX = latestMousePixelX.load();
+        const int32_t upY = latestMousePixelY.load();
+        const int32_t deltaX = upX - downX;
+        const int32_t deltaY = upY - downY;
+        if (deltaX * deltaX + deltaY * deltaY <= CLICK_RADIUS_PX * CLICK_RADIUS_PX)
+        {
+          pendingClickPixelX.store(upX);
+          pendingClickPixelY.store(upY);
+        }
+      }
+    }
+
     cameraController.HandleEvent(event);
   });
 
@@ -679,6 +727,9 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
       targets.normalAov = aovs.normal.Get();
       targets.depthAov = aovs.depth.Get();
       targets.instanceIdAov = aovs.instanceId.Get();
+      targets.materialIdAov = aovs.materialId.Get();
+      targets.baseColorAov  = aovs.baseColor.Get();
+      targets.worldPosAov   = aovs.worldPos.Get();
       targets.pickResult = aovs.pickResult.Get();
       targets.pickResultStaging = aovs.pickResultStaging.Get();
 
@@ -716,9 +767,26 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
       // same path on the next frame after a window resize.
       if (imguiHost.IsReady())
       {
-        imguiHost.SetLastPickResult(renderer.LastPickResult());
+        const PickResult pickThisFrame = renderer.LastPickResult();
+        imguiHost.SetLastPickResult(pickThisFrame);
         imguiHost.SetRenderAspect(static_cast<float>(aovs.width)
                                   / static_cast<float>(aovs.height));
+        // Drain the click latch the event sink set on a non-drag
+        // LMB release. The picker is one frame stale by design (raygen
+        // wrote pickResult last frame -> staging copy retired now ->
+        // map at top of this Execute), so the instance id we read
+        // here corresponds to the click pixel within ~16 ms — easily
+        // good enough for human "I clicked the orange sphere".
+        // Discards the latch when the picker reports "no hit"
+        // (instanceId == 0xFFFFFFFF) so clicking the background
+        // doesn't reset the Material combo to a stale selection.
+        const int32_t clickX = pendingClickPixelX.exchange(-1);
+        const int32_t clickY = pendingClickPixelY.exchange(-1);
+        if (clickX >= 0 && clickY >= 0
+            && pickThisFrame.instanceId != 0xFFFFFFFFu)
+        {
+          imguiHost.SetClickedInstance(pickThisFrame.instanceId);
+        }
       }
 
       // Copy AOV color → swapchain backbuffer. NVRHI tracks the
@@ -802,6 +870,18 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
         case RenderSettings::DebugView::InstanceId:
           sourceAov = aovs.instanceId.Get();
           aovLabel = "instanceId";
+          break;
+        case RenderSettings::DebugView::MaterialId:
+          sourceAov = aovs.materialId.Get();
+          aovLabel = "materialId";
+          break;
+        case RenderSettings::DebugView::BaseColor:
+          sourceAov = aovs.baseColor.Get();
+          aovLabel = "baseColor";
+          break;
+        case RenderSettings::DebugView::WorldPos:
+          sourceAov = aovs.worldPos.Get();
+          aovLabel = "worldPos";
           break;
       }
       if (sourceAov == nullptr)

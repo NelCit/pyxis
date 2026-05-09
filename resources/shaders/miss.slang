@@ -85,7 +85,13 @@ void main(inout HitInfo payload) {
     payload.hitT  = -1.0f;  // miss sentinel — raygen branches on this.
     // M7 follow-up — leave the AOV-inspector fields at sentinel
     // defaults so a primary-ray miss reads as (zero normal, no
-    // instance) in the Normal / InstanceID AOVs.
+    // instance) in the Normal / InstanceID AOVs. baseColor /
+    // materialId / worldHit added in the same M7 follow-up batch
+    // for the BaseColor / MaterialID / WorldPos AOVs.
     payload.normalWorld = float3(0.0, 0.0, 0.0);
     payload.instanceId  = 0xFFFFFFFFu;
+    payload.baseColor   = float3(0.0, 0.0, 0.0);
+    payload.materialId  = 0xFFFFFFFFu;
+    payload.worldHit    = float3(0.0, 0.0, 0.0);
+    payload._hitInfoPad0 = 0u;
 }

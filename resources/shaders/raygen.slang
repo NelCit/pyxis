@@ -43,6 +43,10 @@
 [[vk::binding(13, 0)]] RWTexture2D<float>             gOutDepth;           // R32F  ray-distance
 [[vk::binding(14, 0)]] RWTexture2D<uint>              gOutInstanceId;      // R32U  instance slot
 [[vk::binding(15, 0)]] RWStructuredBuffer<PickResult> gPickResult;         // 1-elem pick latch
+// M7 follow-up batch 2 — 3 more raw AOVs the inspector exposes.
+[[vk::binding(16, 0)]] RWTexture2D<uint>              gOutMaterialId;      // R32U  material slot
+[[vk::binding(17, 0)]] RWTexture2D<float4>            gOutBaseColor;       // RGBA16F OpenPBR baseColor
+[[vk::binding(18, 0)]] RWTexture2D<float4>            gOutWorldPos;        // RGBA32F world hit pos
 
 // Narkowicz ACES Filmic — pulled out of main() so the display branch
 // for DEBUG_VIEW_COLOR can call it cleanly. Same constants as before;
@@ -117,10 +121,14 @@ void main() {
     ray.TMax      = 10000.0f;
 
     HitInfo payload;
-    payload.color       = float3(0, 0, 0);
-    payload.hitT        = -1.0f;
-    payload.normalWorld = float3(0, 0, 0);
-    payload.instanceId  = 0xFFFFFFFFu;
+    payload.color        = float3(0, 0, 0);
+    payload.hitT         = -1.0f;
+    payload.normalWorld  = float3(0, 0, 0);
+    payload.instanceId   = 0xFFFFFFFFu;
+    payload.baseColor    = float3(0, 0, 0);
+    payload.materialId   = 0xFFFFFFFFu;
+    payload.worldHit     = float3(0, 0, 0);
+    payload._hitInfoPad0 = 0u;
 
     // RAY_FLAG_NONE — keep the door open for future shadow/opaque-only
     // refinements. instanceMask = 0xFF matches what GpuScene's TLAS
@@ -144,6 +152,9 @@ void main() {
     gOutNormal[launchIndex]     = float4(payload.normalWorld, 1.0f);
     gOutDepth[launchIndex]      = (payload.hitT > 0.0f) ? payload.hitT : 0.0f;
     gOutInstanceId[launchIndex] = payload.instanceId;
+    gOutMaterialId[launchIndex] = payload.materialId;
+    gOutBaseColor[launchIndex]  = float4(payload.baseColor, 1.0f);
+    gOutWorldPos[launchIndex]   = float4(payload.worldHit, 1.0f);
 
     // ----- Pixel picker -------------------------------------------
     // Write the raw values into the 1-element pick buffer when this
@@ -196,6 +207,31 @@ void main() {
     else if (gCamera.debugViewMode == DEBUG_VIEW_INSTANCE_ID)
     {
         displayColor = hashInstanceColor(payload.instanceId);
+    }
+    else if (gCamera.debugViewMode == DEBUG_VIEW_MATERIAL_ID)
+    {
+        // Same hash function as InstanceID — different identifier
+        // domains so the colour palette is independent. Reuses
+        // hashInstanceColor since the math is identity (uint -> hue).
+        displayColor = hashInstanceColor(payload.materialId);
+    }
+    else if (gCamera.debugViewMode == DEBUG_VIEW_BASE_COLOR)
+    {
+        // Raw OpenPBR baseColor straight off the material table —
+        // pre-shading albedo. saturate() clamps in case a (post-v1)
+        // emissive material's baseColor exceeds [0,1].
+        displayColor = saturate(payload.baseColor);
+    }
+    else if (gCamera.debugViewMode == DEBUG_VIEW_WORLD_POS)
+    {
+        // Visualise world-space hit position via a 10-unit-period
+        // fract pattern. Lets users verify camera<->scene alignment
+        // without a magnitude-dependent colour scale; (0..10) maps
+        // identically to (0..1) so a unit-cube object reads as a
+        // tenth-tone gradient. Miss (worldHit == 0) reads as black.
+        displayColor = (payload.hitT > 0.0f)
+            ? frac(payload.worldHit * 0.1f)
+            : float3(0.0, 0.0, 0.0);
     }
     gOutput[launchIndex] = float4(displayColor, 1.0f);
 }

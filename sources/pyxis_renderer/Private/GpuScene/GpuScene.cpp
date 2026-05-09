@@ -2093,6 +2093,18 @@ OpenPBRMaterialDesc GpuScene::GetMaterialDescAt(uint32_t liveIndex) const noexce
   return OpenPBRMaterialDesc{};
 }
 
+MaterialHandle GpuScene::LookupInstanceMaterialBySlot(uint32_t instanceSlot) const noexcept {
+  // Slot 0 is the §15 sentinel; the picker writes 0 when no instance
+  // was hit OR for a degenerate primitive that maps back to the
+  // permanent quarantine entry. Either way → no selection.
+  if (instanceSlot == 0 || instanceSlot >= _impl->instances.size())
+    return MaterialHandle::Invalid;
+  const Impl::InstanceEntry& entry = _impl->instances[instanceSlot];
+  if (!entry.live || entry.quarantined)
+    return MaterialHandle::Invalid;
+  return entry.material;
+}
+
 // ---- Introspection ---------------------------------------------------------
 FrameStats GpuScene::LastFrameStats() const {
   FrameStats stats = _impl->lastFrameStats;

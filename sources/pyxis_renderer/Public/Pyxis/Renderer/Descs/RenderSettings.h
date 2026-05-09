@@ -41,6 +41,9 @@ struct RenderSettings {
     Normal     = 1,   // (n*0.5+0.5)
     Depth      = 2,   // 1/depth grayscale
     InstanceId = 3,   // hashed colour per slot
+    MaterialId = 4,   // hashed colour per material
+    BaseColor  = 5,   // raw OpenPBR baseColor (pre-shading albedo)
+    WorldPos   = 6,   // 10-unit-period fract of world hit position
   };
   DebugView debugView = DebugView::Color;
 
