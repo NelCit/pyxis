@@ -70,13 +70,15 @@ The user must specify which milestone to check (M0, M1, M2, …, M11). If unspec
 
 - [ ] `pyxis_hydra` shared lib, `plugInfo.json`, `HdPyxisRendererPlugin`
 - [ ] `HdPyxisRenderDelegate` stub (mesh + camera + renderBuffer types only)
-- [ ] `HdPyxisRenderPass` + `HdPyxisRenderTask` calling `PyxisRenderer::RenderFrame`
+- [ ] `HdPyxisRenderPass` + `HdPyxisRenderTask` calling `PyxisRenderer::RenderFrame` (M5+ — at M4 the StageWalker shortcut suffices for byte-equal)
 - [ ] `pyxis_usd_ingest` shared lib, `StageWalker` + `Geom/Mesh` + `Camera`
 - [ ] `pyxis_material_translation` static lib, used by both adapters
-- [ ] `HydraEngine` and `UsdDirectEngine` selectable via `app.ingest`
-- [ ] `usdview` can pick the delegate
-- [ ] Tiny USD renders identically across standalone Pyxis (both adapters) and `usdview`
-- [ ] Regression image diff Hydra-vs-USD-direct = 0 (run `/ingest-parity-check`)
+- [ ] `HydraEngine` and `UsdDirectEngine` selectable via `app.ingest = "hydra" | "usd_direct"`
+- [ ] `--ingest <hydra|usd_direct>` CLI override
+- [ ] `usdview` can pick the delegate (registration via plugInfo.json)
+- [ ] Vcpkg USD plugin tree copied to `<bin>/usd/` + aggregator `plugInfo.json` written at build time (USD's PlugRegistry hangs without it)
+- [ ] Tiny USD renders identically across standalone Pyxis (both adapters)
+- [ ] Regression image diff Hydra-vs-USD-direct = 0 (`M4.AdapterParityByteEqualEXR` CTest passes)
 
 ### M5 — UsdPreviewSurface → OpenPBR
 

@@ -31,7 +31,9 @@
 namespace pyxis::app {
 
 struct Configuration;
+struct ResolvedScene;
 
-int RunViewerLoop(const Configuration& config, std::string_view screenshotPath) noexcept;
+int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScene,
+                  std::string_view screenshotPath) noexcept;
 
 }  // namespace pyxis::app

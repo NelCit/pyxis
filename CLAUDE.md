@@ -6,7 +6,7 @@
 
 ## What Pyxis is
 
-C++23 real-time path tracer (NVRHI/Vulkan, Slang shaders, Windows-only v1) inspired by Autodesk Aurora. Primary target: render Disney Moana Island USD scene end-to-end on a single Windows workstation.
+C++23 real-time path tracer (NVRHI/Vulkan, Slang shaders, Windows-only v1) inspired by Autodesk Aurora. Primary target: render the Amazon Lumberyard Bistro USD scene end-to-end on a single Windows workstation (8 GB-class GPU).
 
 **Not**: production renderer, network/farm renderer, animation playback, full color management, volumetrics. Out-of-scope additions go through the §44 RFC process.
 
@@ -126,7 +126,7 @@ GPU-execution-only. CPU staging / upload draining / AS builds happen earlier, in
 
 ## Bindless layout (§5)
 
-Single `BindlessLayout`: `RawBuffer_SRV(space=1)` (256 slots — vertex/index/material pages) + `Texture_SRV(space=2)` (~80 000 slots — Moana hero textures + UDIM tiles).
+Single `BindlessLayout`: `RawBuffer_SRV(space=1)` (256 slots — vertex/index/material pages) + `Texture_SRV(space=2)` (~80 000 slots — Bistro uses ~2–3 k slots in v1; remaining capacity is headroom for post-v1 production-class scenes with UDIM tiles at scale).
 
 ## OpenPBR (§11) — canonical material
 
@@ -165,7 +165,7 @@ All inputs (UsdPreviewSurface, MaterialX `open_pbr_surface` / `standard_surface`
 - **Load-time** (one-shot per scene load, coarse) → spdlog summary, Chrome-tracing JSON, viewer Load Timeline panel.
 - **Per-frame** (every frame, 240-frame ring, fine) → Performance panel, CSV, Tracy (optional), in-process Profiler panel.
 
-KPIs (1080p hero camera, RTX 4080, post-warm): `pass.PathTrace < 12ms`, `frame.cpu.commitResources < 2ms`, p99/p50 < 1.4. Time-to-first-image on Moana subset (M8a) < 30s on lab machine.
+KPIs (1080p hero camera, RTX 4080, post-warm): `pass.PathTrace < 12ms`, `frame.cpu.commitResources < 2ms`, p99/p50 < 1.4. Time-to-first-image on Bistro (M8a) < 15s on lab machine.
 
 **Measure before you optimise.** PRs without profile evidence are rejected.
 
@@ -180,14 +180,14 @@ KPIs (1080p hero camera, RTX 4080, post-warm): `pass.PathTrace < 12ms`, `frame.c
 | M2 | Headless triangle | `--headless --config` writes deterministic EXR |
 | M3 | Slang path-trace box | one cube, BLAS+TLAS, raygen/closesthit/miss, accum + tonemap |
 | M3.5 | Default startup scene | `Resources/scenes/default.usd` resolves through §29.4.a chain |
-| M4 | Hydra delegate stub + USD-direct stub | usdview picks the delegate; both adapters render the same tiny `.usda` byte-identically |
+| M4 | Hydra delegate stub + USD-direct stub | usdview picks the delegate; both adapters render the same tiny `.usda` byte-identically. M4 stub: HydraEngine wraps StageWalker for byte-equal parity (full HdEngine pipeline at M5+). |
 | M5 | UsdPreviewSurface→OpenPBR | textured cube, OpenPBR shader |
 | M6 | Native instancing | 10k-instance scene, BLAS sharing, instance/material AOVs |
 | M7 | Lighting | dome + distant + rect; NEE + MIS |
-| M8a | Moana subset render | one island region (≤1M tris, ≤~50 mats), nightly regression seed |
-| M8b | Full Moana load | full USD opens to first commit without OOM on 24 GB GPU |
-| M9 | Moana visually correct | dome alignment, UDIM, normals/tangents fallbacks, emissive |
-| M10 | Moana headless + regression | nightly subset-Moana regression green |
+| M8a | Bistro render | full Bistro USD loads + renders headless and viewer; visually plausible; nightly regression seed |
+| M8b | Bistro performance pass | Bistro hero camera meets §34 KPIs (`pass.PathTrace < 12ms`, `commitResources < 2ms`, time-to-first-image < 15s) on RTX 4080 |
+| M9 | Bistro visually correct | dome+sun alignment, normals/tangents fallbacks, emissive sampling, MaterialX coverage gaps closed |
+| M10 | Bistro headless + regression | nightly Bistro regression test green; per-test KPIs CSV |
 | M11 | Profiling polish | full reports + ImGui panels; profiling overhead < 1% Release |
 
 ---
@@ -253,7 +253,7 @@ KPIs (1080p hero camera, RTX 4080, post-warm): `pass.PathTrace < 12ms`, `frame.c
 
 ## Decisions baked into the plan (do not relitigate without an RFC §44)
 
-- Two ingest adapters day 0; both produce byte-identical EXRs.
+- Two ingest adapters day 0; both produce byte-identical EXRs. M4 stub: HydraEngine wraps StageWalker for byte-equal parity; full HdEngine pipeline at M5+.
 - OpenPBR is canonical; one generic closesthit in v1.
 - Hydra 2.0 / Scene Indices only; legacy `UsdImagingDelegate` not used.
 - `pyxis_usd_ingest` is one-shot; no `UsdNotice` listener (live USD updates outside Hydra are post-v1).

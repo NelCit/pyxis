@@ -15,6 +15,29 @@ cmake_minimum_required(VERSION 3.27)
 list(PREPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/_cmake")
 include(Version)
 
+# -----------------------------------------------------------------------------
+# Compiler launcher (sccache) — auto-detect, opt-out via -DPYXIS_DISABLE_SCCACHE=ON.
+# Wraps every C/C++ compile with sccache when present so incremental builds,
+# branch switches, and CI runs reuse compiled object files instead of
+# recompiling from scratch. Independent of vcpkg's binary cache (vcpkg's
+# cache is per-port; sccache is per-translation-unit).
+#
+# CI workflow installs sccache via mozilla-actions/sccache-action and sets
+# SCCACHE_GHA_ENABLED=true so sccache uses GitHub Actions cache as backend.
+# Local dev: install sccache from https://github.com/mozilla/sccache (or
+# `winget install Mozilla.sccache`) and it is picked up automatically; no
+# environment fiddling required.
+# -----------------------------------------------------------------------------
+option(PYXIS_DISABLE_SCCACHE "Skip the auto-detected sccache compiler launcher." OFF)
+if(NOT PYXIS_DISABLE_SCCACHE)
+    find_program(PYXIS_SCCACHE_PROGRAM sccache)
+    if(PYXIS_SCCACHE_PROGRAM)
+        set(CMAKE_C_COMPILER_LAUNCHER   "${PYXIS_SCCACHE_PROGRAM}")
+        set(CMAKE_CXX_COMPILER_LAUNCHER "${PYXIS_SCCACHE_PROGRAM}")
+        message(STATUS "Pyxis: sccache compiler launcher enabled (${PYXIS_SCCACHE_PROGRAM})")
+    endif()
+endif()
+
 # Read version.txt so project() gets the right number.
 pyxis_read_version()
 
@@ -93,13 +116,22 @@ include(Thirdparty)
 
 pyxis_thirdparty_setup()
 
-# Subdirectories — only the M0-active modules wire in for now. Later
-# milestones add the rest behind their respective options:
-#   M3  — pyxis_renderer/Private/Shaders/, Slang FetchContent
-#   M4  — pyxis_hydra (PYXIS_BUILD_HYDRA_DELEGATE), pyxis_usd_ingest, pyxis_material_translation
-#   M5  — TextureCache + OpenPBR + the rest of pyxis_renderer
+# Subdirectories. Active modules and their landing milestone:
+#   M0–M3.5  — pyxis_platform, pyxis_renderer, pyxis_app
+#   M4       — pyxis_material_translation, pyxis_hydra, pyxis_usd_ingest
+#   M5       — TextureCache + OpenPBR shader expansion (existing module fills)
 add_subdirectory(sources/pyxis_platform)
 add_subdirectory(sources/pyxis_renderer)
+
+# M4 ingest stack. material_translation must precede hydra +
+# usd_ingest because both depend on it. All three pull OpenUSD via
+# vcpkg (the ~hour-long compile that lands at M4 — see vcpkg.json's
+# `usd[imaging,materialx]` entry + the GHA cache wiring in
+# .github/workflows/build.yml).
+add_subdirectory(sources/pyxis_material_translation)
+add_subdirectory(sources/pyxis_hydra)
+add_subdirectory(sources/pyxis_usd_ingest)
+
 add_subdirectory(sources/pyxis_app)
 
 if(PYXIS_BUILD_TESTS)

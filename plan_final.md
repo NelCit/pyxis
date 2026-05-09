@@ -1,7 +1,7 @@
 # Pyxis — Engineering Plan
 
 A C++23 real-time path tracer inspired by Autodesk Aurora. NVRHI/Vulkan, Slang shaders, Windows-only v1.
-Primary target: render the Disney Moana Island USD scene end-to-end.
+Primary target: render the Amazon Lumberyard Bistro USD scene end-to-end on an 8 GB-class GPU.
 
 **Design philosophy: the architecture below is the final-state design and ships day 0.**
 There is no v1-shim phase: the Flecs ECS world, the four-layer stack, the public API
@@ -14,7 +14,7 @@ wired into systems and passes*, not a decision about the architecture itself —
 
 **What Pyxis is *not*.** Pyxis is not a production renderer. It is not a
 Arnold/RenderMan/Cycles competitor. It is a USD-native real-time path tracer for
-*previewing* Moana-class assets at editorial quality on a single Windows workstation.
+*previewing* production-shaped USD assets at editorial quality on a single Windows workstation.
 No network rendering, no AOVs-for-comp pipeline, no production color management,
 no volumetrics, no animation playback v1. Anything outside that scope goes through the
 RFC process (§45) before being added.
@@ -127,7 +127,7 @@ Pyxis/
 ├─ _cmake/                        # CMake helpers (Slang.cmake, Vulkan.cmake, Compiler.cmake, Install.cmake, Version.cmake)
 │  ├─ All.cmake, Compiler.cmake, Slang.cmake, Utils.cmake, Version.cmake
 ├─ _tools/
-│  ├─ run_moana_headless.cmd
+│  ├─ run_bistro_headless.cmd
 │  ├─ run_regression.py
 ├─ _documentation/
 │  ├─ overview.md, openpbr.md, hydra_delegate.md, profiling.md, parameters.md
@@ -314,7 +314,8 @@ mgmt only), OIDN/OptiX denoiser (deferred).
   for staging uploads.
 - Bindless: a single large `BindlessLayout` with `RawBuffer_SRV(space=1)` and
   `Texture_SRV(space=2)`. Capacities are asymmetric: `Texture_SRV(s=2)` reserves
-  ~80 k slots (covers Moana's hero textures + UDIM tiles + room for
+  ~80 k slots (Bistro uses ~2–3 k slots in v1; the remaining capacity is headroom
+  for post-v1 production-class scenes with UDIM tiles at scale, and for room for
   growth), while `RawBuffer_SRV(s=1)` reserves only **256** slots (vertex/index/
   material pages from §14.5 occupy the first ~7; the remainder is headroom for
   future scratch / cluster / animation tables). Both numbers are upper bounds, not
@@ -459,20 +460,20 @@ pyxis_platform/Device/
 
 ---
 
-## 6. OpenUSD / Hydra Setup for Moana
+## 6. OpenUSD / Hydra Setup
 
 
 - Pin OpenUSD to a specific commit (target: v25.x release branch tip; SHA recorded in
   `_cmake/Thirdparty.cmake` — §49). Build USD with: `--no-python` (we won't embed
   Python), MaterialX support enabled, Hd / UsdImaging enabled, Vulkan/Imaging not required.
-- USD assets resolved via `ArResolver`; respect Moana's relative paths and USD asset resolver
+- USD assets resolved via `ArResolver`; respect relative paths and USD asset resolver
   contexts; honor `USD_DEFAULT_RESOLVER_SEARCH_PATH`-style env vars.
-- For Moana 15 GB package: do NOT preload all USDs. Use lazy population (default UsdImaging).
+- For larger production-class packages (post-v1): do NOT preload all USDs. Use lazy population (default UsdImaging). Bistro at v1 fits comfortably in memory.
 - **Use Hydra 2.0 / Scene Indices** (`UsdImagingStageSceneIndex` + scene-index filters), not
   the legacy `UsdImagingDelegate`. Rationale: Scene Indices is the supported forward path in
   modern USD, gives a flat, queryable scene representation, removes the legacy adapter
   registry, plays better with MaterialX-as-canonical material networks, and matches what
-  Aurora-class renderers target. We accept a slightly less mature "Moana mileage" in
+  Aurora-class renderers target. We accept a slightly less mature production-mileage in
   exchange for a future-proof base.
 - Compose: `UsdImagingStageSceneIndex` → flatten + prototype-propagating + material-binding
   filters → `HdsiSceneGlobalsSceneIndex` → our renderer's input. We feed it to a
@@ -1139,7 +1140,7 @@ pattern matches the standard `donut`-style RenderGraph layout used in NVRHI samp
 2. Call `_renderGraph.ImportTexture(name, ptr, initialState)` for each — this
    bumps the `identityRevision` of the matching `TexEntry`.
 3. Call `_renderGraph.Compile()` to rebuild the cached barrier lists. (This is
-   cheap — a few hundred microseconds on Moana; it does not allocate the pass
+   cheap — a few hundred microseconds even on production-shaped scenes; it does not allocate the pass
    table.)
 4. Pass binding sets rebuild lazily on the *next* `Execute` because
    `BindingsInvalidated` returns true on identity-revision mismatch.
@@ -1414,7 +1415,7 @@ selects a 32-bit random word. Same inputs → byte-identical EXR.
 - Owen scramble seed = `HashCombine(pixelXY, seed)`; gives per-pixel decorrelation
   while keeping the low-discrepancy property within a pixel.
 - Cost: 4–6 % vs PCG32 on RTX 4080. Convergence: ~1.5–2× fewer samples for the same
-  RMSE on smooth Moana surfaces; roughly even on glossy hair / fuzz.
+  RMSE on smooth diffuse surfaces; roughly even on glossy hair / fuzz.
 
 ### 12.3 Why not `xorshift` / `wang_hash` only
 
@@ -1459,7 +1460,7 @@ section.
 - Lazy load: textures referenced by an `OpenPBRMaterialDesc` are only opened on first use,
   then submitted to an asynchronous decode + upload pipeline.
 - Mip generation: GPU mip generation via a compute pass for non-pre-mipped formats; EXR can be
-  pre-mipped on disk if available (Moana ships `.tex` and `.exr`; `.tex` is RenderMan-only —
+  pre-mipped on disk if available (some production assets ship `.tex` and `.exr`; `.tex` is RenderMan-only —
   we look for `.exr` siblings, otherwise rasterize a fallback).
 - sRGB vs linear: derived from role; `BaseColor`, `Emission` are sRGB; `NormalMap`,
   `RoughnessMetallic` are linear. Color management is `basic` in v1 (gamma 2.2 / linear sRGB).
@@ -1469,12 +1470,14 @@ section.
   we accept the larger texture footprint v1 and rely on `textures.maxResolution` to
   cap memory.
 - UDIM: detected by `<UDIM>` token in resolved path. v1 strategy: **one bindless
-  `Texture2D` per UDIM tile** (varying tile sizes are common in Moana — hero islands
-  ship at 4K, distant rocks at 512). The shader looks up
+  `Texture2D` per UDIM tile** (varying tile sizes are common in production assets — hero
+  meshes ship at 4K, distant rocks at 512). Bistro doesn't use UDIM at v1, so this path is
+  exercised by a small synthetic UDIM fixture (§35); the architecture is in place for
+  post-v1 production-class scenes. The shader looks up
   `(materialId, udimTile) → bindlessSlot` via a per-material UDIM lookup table
   (small structured buffer, ~256 entries per material). Rejected alternative: a flat
   `Texture2DArray` requires every layer at the asset's max resolution, which inflates
-  Moana texture memory by roughly 4× with no quality benefit.
+  texture memory by roughly 4× with no quality benefit.
 - Missing texture: fallback color from `parameters.json` `textures.missingTextureColor`.
 - Bindless: each `TextureHandle` is a slot index in a single `Texture_SRV` bindless table.
 - Resolution clamp: `textures.maxResolution` clamps decode size; LOD0 capped, lower mips kept.
@@ -1495,7 +1498,7 @@ section.
   of ≤ 4 GiB** so each page fits inside `VkPhysicalDeviceLimits::maxStorageBufferRange`
   (4 GiB on most desktop hardware). Bindless SRVs are issued one per page; the mesh's
   `Geom` component carries `(pageIndex, vertexOffset, indexOffset)`. Page count is
-  bounded (Moana fits in ≤ 2 vertex pages, ≤ 1 index page on a 24 GB card). Requires
+  bounded (Bistro fits in 1 vertex page, 1 index page on an 8 GB card; production-class scenes fit in ≤ 2 vertex pages, ≤ 1 index page on a 24 GB card). Requires
   Vulkan 1.3 or `VK_KHR_maintenance4` for the > 4 GiB allocation; both are mandatory
   in §5.
 
@@ -1521,17 +1524,17 @@ extended to multiple pages.
   picked for symmetry with NVIDIA's `Falcor` / `Donut` conventions and matches what
   RTXMU expects. Extra primvars optional.
 - Degenerate triangles dropped during topology conversion; counted in stats.
-- Static-geometry assumption (Moana): the Moana adapter never re-uploads positions
+- Static-geometry assumption (v1): neither ingest adapter re-uploads positions
   after first sync. The public API does expose `GpuScene::UpdateMesh` (§18.5);
   internally it is implemented as `DestroyMesh` + `CreateMesh` in v1 (the `MeshHandle`
   stays valid; the BLAS for that mesh is rebuilt). It exists for tests and future
-  animation work, not because Moana exercises it. Material parameters, by contrast,
+  animation work, not because v1 scenes exercise it. Material parameters, by contrast,
   *can* be changed in-place via `UpdateMaterial` (§18.5) without disturbing the
   BLAS / TLAS.
 - Skipping for v1: subdivision (rendered as polymesh hulls in v1 — the actual
   `pxOsd::Tokens->none` token is set inside the Hydra adapter, see §25.B);
   curves/points/volumes/nurbs likewise deferred. **Subdivision skipping is acceptable**
-  for first Moana visuals.
+  for first Bistro visuals.
 
 ---
 
@@ -1541,7 +1544,7 @@ extended to multiple pages.
 - Honor `HdInstancer` (native Hydra instancing), including nested instancing.
 - For each Rprim: walk `instancerId` chain, accumulate `instanceTransforms`,
   flatten into the `InstanceTable`. Cache the flattened transform array per dirty cycle.
-- One BLAS per **prototype mesh**; many TLAS instances reference it — exactly the Moana case.
+- One BLAS per **prototype mesh**; many TLAS instances reference it — the canonical instanced-foliage / scattered-prop case Bistro and any production-shaped scene rely on.
 - BLAS sharing rule: BLAS keyed on `MeshHandle`. If the same SdfPath mesh is consumed by N
   instancers, all share one BLAS. Unique BLAS only when the underlying mesh data differs
   (different topology hash).
@@ -1567,8 +1570,8 @@ handles three things we'd otherwise hand-roll:
 
 1. **BLAS suballocation pool.** RTXMU packs many BLAS into a small
    number of large `VkBuffer`s rather than one buffer per BLAS. Cuts
-   the descriptor-set + allocation churn on Moana-scale scenes
-   dramatically (full Moana = ~10⁴ unique BLAS).
+   the descriptor-set + allocation churn on production-scale scenes
+   dramatically (Bistro = ~10³ unique BLAS; full production-class scenes can hit ~10⁴).
 2. **Scratch pool.** RTXMU sizes + reuses a single growable scratch
    buffer; we never allocate one ourselves. `vkCmdBuildAccelerationStructuresKHR`
    reads from the pool's slot picked by RTXMU.
@@ -1591,7 +1594,7 @@ honors whatever flags we pass to NVRHI; it doesn't second-guess them.
     bucket flips to `PREFER_FAST_TRACE | ALLOW_UPDATE`.
   - **Heavy meshes (`triCount >= 64 k`)** — `PREFER_FAST_TRACE | ALLOW_COMPACTION`,
     no `ALLOW_UPDATE`. Compaction routinely shaves 25–55 % off BLAS memory on
-    Moana hero foliage. The Vulkan spec permits both bits at build time, but a
+    dense foliage / vegetation. The Vulkan spec permits both bits at build time, but a
     compacted AS may not be updated afterwards (`vkCmdCopyAccelerationStructureKHR`
     with `MODE_COMPACT_KHR` discards the update-source data) — since v1 ships no
     in-place position updates anyway, omitting `ALLOW_UPDATE` simplifies
@@ -1621,16 +1624,20 @@ honors whatever flags we pass to NVRHI; it doesn't second-guess them.
 **Limitation acknowledged: no Opacity Micromaps in v1.** RTXMU 0.30+
 explicitly does not support OMMs (`Feature::OpacityMicroMaps` is
 gated off when `NVRHI_WITH_RTXMU=ON`). Pyxis doesn't ship OMMs in
-v1 — alpha-tested foliage at Moana scale is a post-v1 polish item
+v1 — alpha-tested foliage at production scale is a post-v1 polish item
 (§42 "displacement / alpha tessellation"). If/when OMMs land, the
 choice is to either drop RTXMU and hand-roll BLAS memory, or wait
 for upstream RTXMU OMM support.
 
-### 16.5 TLAS partitioning policy (Moana-scale)
+### 16.5 TLAS partitioning policy (post-v1 production-scale headroom)
 
 `VkAccelerationStructureInstanceKHR` ships a 24-bit `instanceCustomIndex` — a hard
-16 777 215 cap on instances inside one TLAS. Moana's flattened scene exceeds that
-(~28 M instances after instancer flattening of foliage and beach detail). v1 strategy:
+16 777 215 cap on instances inside one TLAS. Bistro at v1 sits comfortably under this cap
+(~10⁴ instances), so the sharding path described below is **dormant in v1** — `K=1`,
+single static + single dynamic TLAS. The architecture is preserved as headroom for
+post-v1 production-class scenes whose flattened instance count exceeds the cap (e.g.
+Moana-class assets at ~28 M instances after instancer flattening of foliage and beach
+detail). Strategy:
 
 1. **Two-tier TLAS**: one *static* TLAS holding all `Static` instances (built once,
    never refit) and one *dynamic* TLAS holding `Dynamic` instances (rebuilt each
@@ -1640,8 +1647,8 @@ for upstream RTXMU OMM support.
 2. **Static-TLAS sharding by `(SdfPath` hash mod K`)** when instance count > 16 M.
    Each shard is its own `TLAS_k`, all bound bindlessly; the closesthit performs K
    `RayQuery::Proceed` calls and keeps the closest hit. K is chosen so each shard
-   holds < 12 M instances (headroom). Moana subset (M8a) uses K=1; full Moana (M8b)
-   uses K=2 or K=3.
+   holds < 12 M instances (headroom). Bistro (M8a–M10) uses K=1; post-v1 production-scale scenes
+   would use K=2 or K=3.
 3. **Cull-then-flatten**: instancer flattening is performed *after* a coarse
    per-instancer-region visibility cull driven by `parameters.json.hydra.purpose`
    and a configurable `geometry.maxInstancesPerTlas` cap. Anything beyond the cap
@@ -1660,8 +1667,9 @@ for upstream RTXMU OMM support.
 
 - A `BudgetTracker` aggregates: vertex/index, textures, BLAS, TLAS, scratch, staging,
   AOVs, render targets, **nested-instancer flatten cache** (per-`(SdfPath, time)` keyed,
-  invalidated only on `Dirty<Instancer>`; budget cap **2.5 GiB** v1 — a single
-  full-Moana flatten is ~2.2 GiB so the cap leaves slack for the dirty-replace path).
+  invalidated only on `Dirty<Instancer>`; budget cap **2.5 GiB** v1 — Bistro's flatten is
+  well under 100 MiB, and the cap is sized as headroom for post-v1 production-class scenes
+  (a full Moana-class flatten is ~2.2 GiB so the cap leaves slack for the dirty-replace path).
   Reported in spdlog and ImGui. **BLAS + scratch counters are sourced from
   RTXMU's pool stats** (`rtxmu::VkAccelStructManager::GetStats()` exposed
   through NVRHI's `getDeviceMemoryStats` hook) rather than computed by
@@ -2538,7 +2546,7 @@ bump (§22.1); never remove flags.
 
 ### 19.2 Cancellation token
 
-`CommitResources` and the initial USD walk on Moana take minutes. A cancellation
+`CommitResources` and the initial USD walk can take minutes on production-class scenes (Bistro is faster, ~tens of seconds). A cancellation
 token lets hosts abort cleanly:
 
 ```cpp
@@ -2668,7 +2676,7 @@ struct PickResult {
 ```cpp
 // 32-bit handle layout (applies to MeshHandle / MaterialHandle / TextureHandle /
 // InstanceHandle / LightHandle):
-//   bits  0..23   slot index  (16 777 216 unique slots — covers Moana's TLAS cap)
+//   bits  0..23   slot index  (16 777 216 unique slots — generous headroom; Bistro uses ~10⁴, matches a TLAS-cap-sized scene for post-v1 production-class)
 //   bits 24..31   generation  (256 reuses before wrap; on wrap the slot is
 //                              quarantined and the handle is allocated from a
 //                              fresh slot).
@@ -2802,7 +2810,7 @@ frame.
 |---|---|---|
 | `accumulationFrameLimit` | `0` | When non-zero, accumulation freezes after N frames; in headless mode the EXR is written and `pyxis` exits 0. |
 | `russianRouletteStartBounce` | `3` | Russian-roulette termination starts at this bounce depth; 0 disables RR (full `maxBounces` walk). Lower values → noisier but faster. |
-| `fireflyClampLuminance` | `50.0` | Per-bounce returned-radiance clamp in scene-linear sRGB; 0 disables. Removes the long-tail spikes typical of MIS-without-NEE on Moana hero foliage. |
+| `fireflyClampLuminance` | `50.0` | Per-bounce returned-radiance clamp in scene-linear sRGB; 0 disables. Removes the long-tail spikes typical of MIS-without-NEE on dense foliage. |
 | `lowDiscrepancySampling` | `false` | When true, replaces the PCG32 sampler with Sobol+Owen (§12); 4–6 % CPU cost on the camera-sample stage, ~1.5–2× faster convergence on smooth surfaces. |
 | `seed` | `0` | RNG stream seed; zero → derived from frame count for non-deterministic viewer mode, fixed for headless. |
 
@@ -2961,20 +2969,20 @@ loaded DLL. PATCH mismatch is logged at info level only.
 | Material network change (`HdMaterial::Sync`) | rerun OpenPBR conversion | rehash → maybe new MaterialHandle |
 | `HdRenderBuffer::Sync` (Bprim) | resize | reallocate AOV texture |
 
-For a static Moana load, only the **initial** sync triggers heavy paths
+For a static scene load (Bistro), only the **initial** sync triggers heavy paths
 (`DirtyTopology`/`DirtyPoints`/`DirtyMaterialId`/`DirtyInstancer`); subsequent frames mostly
 toggle `DirtyTransform`/`DirtyParams` for the camera and reset accumulation.
 
 ---
 
-## 25. Scene Imaging — Moana-Specific Detail (Hydra adapter §25.A–N; USD-direct adapter §25.O)
+## 25. Scene Imaging — Adapter Detail (Hydra adapter §25.A–N; USD-direct adapter §25.O)
 
 
 ### A. Hydra primitive support
 - Rprim: `HdPrimTypeTokens->mesh` only. Skip points, basisCurves, volume, NURBS in v1.
 - Sprim: `camera`, `distantLight`, `domeLight`, `rectLight`, `material`. Skip
   `extComputation`, `simpleLight`, `cylinderLight`, `sphereLight` (mapped to rect/distant fallbacks
-  if Moana uses any).
+  if scenes use any).
 - Bprim: `renderBuffer` for AOVs. Skip texture-resource-as-Bprim (we manage textures
   ourselves through the `TextureCache`).
 - Instancer: native + nested.
@@ -2993,15 +3001,15 @@ toggle `DirtyTransform`/`DirtyParams` for the camera and reset accumulation.
 - Visibility: filters in/out of TLAS.
 - Purpose: configurable via `parameters.json` `hydra.purpose`. Default `["default","render"]`.
 - Refinement: `pxOsd::Tokens->none` (adaptive=0) at the Hydra-adapter boundary;
-  subdivision **deferred** — Moana hero meshes will look faceted on silhouette in v1.
+  subdivision **deferred** — subdiv hero meshes will look faceted on silhouette in v1.
   Acknowledged; tracked as known limitation. (The renderer itself stays USD-free per
   §1/§30.3; this token is only consumed inside `pyxis_hydra`.)
 - Bounds: `GetExtent()` used for culling stats only (path tracing doesn't frustum-cull).
 - Degenerate tris: dropped in topology conversion, counted.
 - Large mesh upload: chunked staging copy; mesh > 256 MB split across multiple staging fills.
-- Static assumption: positions never updated after first sync in Moana.
-- Will-break-Moana-if-skipped: subsets (yes — Moana relies on per-face material binding for
-  many assets), instancer (yes), UVs (some materials), normals fallback (yes, Moana ships
+- Static assumption: positions never updated after first sync in v1.
+- Will-break-Bistro-if-skipped: subsets (yes — many production assets rely on per-face material binding
+  through subsets), instancer (yes), UVs (most materials), normals fallback (yes, Bistro ships
   authored normals on most meshes).
 
 ### C. Instancing
@@ -3037,12 +3045,12 @@ toggle `DirtyTransform`/`DirtyParams` for the camera and reset accumulation.
 - Rect light: position + axes + emission.
 - Mesh emissive: handled implicitly by `OpenPBRMaterialDesc::emission*`; sampled via
   emissive-triangle alias table. v1: simple uniform sampling over emissive triangles.
-- Moana likely needs: dome light (sky), distant light (sun), and emissive-mesh sampling.
+- Bistro needs: dome light (sky), distant light (sun), and rect/area lights for interior fixtures.
 
 ### H. Volumes & atmosphere
 - Detect any `HdVolume` Rprim. v1: log once, skip from TLAS.
 - Optional homogeneous fog approximated via `parameters.json` via render settings (constant
-  extinction). Acknowledged that Moana's volumetric look will be lost — deferred.
+  extinction). Acknowledged that any authored volumetric look will be lost — deferred.
 
 ### I. AOVs
 - Required: `color` (RGBA16F).
@@ -3093,11 +3101,13 @@ v1 is **scene-linear sRGB end-to-end**. No ACES / OCIO. Concretely:
      artifact — always linear so RMSE compares apples to apples.
    - PNG / swapchain: **sRGB-encoded** (gamma 2.2 if `toneMap=Linear`, ACES ODT
      output curve otherwise).
-5. **Moana caveat**: Moana ships ACEScg-tagged textures. v1 ignores the tag and treats
-   them as sRGB-or-linear-by-role; reference images will look slightly desaturated
-   versus a true ACES pipeline. This is logged in `unsupported_features.json` and
-   tracked as a post-1.0 task. A future `render.outputColorSpace = "linearSrgb" |
-   "acesCg"` config field is *reserved* in `parameters.json` but pinned to `linearSrgb`.
+5. **ACES-tagged content caveat**: some production assets ship ACEScg-tagged textures.
+   v1 ignores the tag and treats them as sRGB-or-linear-by-role; reference images will
+   look slightly desaturated versus a true ACES pipeline. This is logged in
+   `unsupported_features.json` and tracked as a post-1.0 task. A future
+   `render.outputColorSpace = "linearSrgb" | "acesCg"` config field is *reserved* in
+   `parameters.json` but pinned to `linearSrgb`. Bistro is sRGB-tagged, so this
+   caveat does not affect v1 reference images.
 
 ### J. Dirty bits — see §24.
 
@@ -3227,7 +3237,7 @@ single update contract; no parallel notice-driven mapping lives inside
 #### O.3 Determinism contract
 
 Both adapters MUST emit instances in `SdfPath`-sorted order. The shared regression
-harness (§35) opens the same Moana subset through `pyxis_hydra` and `pyxis_usd_ingest`
+harness (§35) opens the same Bistro scene through `pyxis_hydra` and `pyxis_usd_ingest`
 and asserts RMSE = 0 between the two output EXRs. Any divergence is a P0 bug.
 
 ### L. GpuScene design — see §8.
@@ -3238,7 +3248,7 @@ and asserts RMSE = 0 between the two output EXRs. Any divergence is a P0 bug.
 - Compaction default-on.
 - Bindless via `RawBuffer_SRV(space=1)` + `Texture_SRV(space=2)`.
 - Large buffer allocations go through NVRHI; for very large vertex/index pools, we use
-  multiple buffers of ≤ 2 GiB each on platforms where it matters; Moana stays under.
+  multiple buffers of ≤ 2 GiB each on platforms where it matters; Bistro stays well under.
 - Staging strategy: ring + one-shot for oversize.
 - Queue sync: graphics + transfer + compute; a single `CommandList` per pass v1.
 - Image layouts: NVRHI tracks via `keepInitialState`/`setInitialState`; we use the
@@ -3246,7 +3256,7 @@ and asserts RMSE = 0 between the two output EXRs. Any divergence is a P0 bug.
 - Debug labels via `commandList->beginMarker(...)` per pass.
 - Aftermath / Nsight Graphics Capture optional, Debug-only Windows-only via CMake flag.
 
-### N. Moana-specific risks (mitigations)
+### N. Production-scene risks (mitigations)
 | Risk | Mitigation |
 |---|---|
 | Startup time (USD pop) | progress reporting via spdlog, lazy texture decode, profiled |
@@ -3254,7 +3264,7 @@ and asserts RMSE = 0 between the two output EXRs. Any divergence is a P0 bug.
 | Heavy texture memory | resolution clamp, lazy decode, missing-texture fallback (no BC compression v1) |
 | Complex material networks | OpenPBR conversion + fallback material; unsupported nodes logged |
 | Volumetrics | logged + skipped v1 |
-| Unsupported USD features | catalog in `out/moana_unsupported_features.json` |
+| Unsupported USD features | catalog in `out/scene_unsupported_features.json` |
 | Memory budget | budget tracker, configurable caps |
 | Long BLAS build | batch + compaction + GPU timestamp report |
 | Need for progress | per-stage spdlog with prim counts |
@@ -3284,8 +3294,8 @@ and asserts RMSE = 0 between the two output EXRs. Any divergence is a P0 bug.
 - Same loader is used for viewer, headless, profiling and tests — no special test config.
 
 Example configs in `_documentation/parameters.md`:
-- `parameters.moana_viewer.json`
-- `parameters.moana_headless.json`
+- `parameters.bistro_viewer.json`
+- `parameters.bistro_headless.json`
 - `parameters.regression_tiny.json`
 - `parameters.profile_benchmark.json`
 
@@ -3327,9 +3337,10 @@ included verbatim in the docs.
   `pyxis_hydra.dll`) or `"usd_direct"` (`pyxis_usd_ingest.dll`). Both adapters are
   shipped in v1; their EXR outputs must match byte-for-byte on the regression
   fixtures (§25.O.3).
-- `limits.budgetGiB` is normative for a 24 GiB target GPU (RTX 4080); the sum
-  (23.75 GiB) leaves 0.25 GiB for swapchain + ImGui + driver overhead. On smaller
-  GPUs the application scales every category proportionally.
+- `limits.budgetGiB` is normative for a 16 GiB target GPU (RTX 4080); the sum
+  leaves headroom for swapchain + ImGui + driver overhead. v1 hero scene (Bistro) fits
+  comfortably under 8 GiB; the 16 GiB target leaves slack for post-v1 production-class
+  scenes. On smaller GPUs the application scales every category proportionally.
 - `Configuration` C++ struct mirrors this 1:1 with `[[nodiscard]] static std::expected<Configuration, Error> parse(const Json&);`
 - Schema validation: required-field check, type check, enum check, range check. One pass.
 - The shipped `parameters.schema.json` is the authoritative document; the C++ parser
@@ -3337,7 +3348,7 @@ included verbatim in the docs.
   immediately.
 - Headless mode `mkdir -p`s the parent directories of `output.image`, `output.ldr`,
   `output.effectiveConfig` and `profiling.output*` before opening the file; missing
-  directories must never abort a 30-minute Moana render.
+  directories must never abort a long render.
 - CLI overrides: each CLI arg maps to a JSON pointer; applied after parse, before validate.
 
 ---
@@ -3365,7 +3376,7 @@ Hosts that need a one-click vsync toggle bind it directly to `presentMode`.
   `fifo` if the requested mode is unavailable, with a one-shot log line.
 - `targetFps > 0` enables a CPU-side limiter that sleeps to the next frame
   boundary; combined with `mailbox` it caps power draw without tearing.
-- `interactiveLatencyMode = true` is the recommended "Moana viewer" setting:
+- `interactiveLatencyMode = true` is the recommended "production-scene viewer" setting:
   during camera motion the renderer drops to `IMMEDIATE` to minimise lag,
   and snaps back to `FIFO` when the camera is idle for ≥ 250 ms. This is
   off by default because tearing during motion confuses screen-recording.
@@ -3549,7 +3560,7 @@ binary-identical across builds so it is also a useful smoke-test asset.
   a magenta sphere, or a missing horizon line each indicates a
   specific subsystem regression.
 - Provides a stable composition for the M1–M3 viewer regression
-  thumbnail (§35) without needing the Moana asset locally.
+  thumbnail (§35) without needing the Bistro asset locally.
 
 **Behaviour**:
 - The default scene is read-only on disk; "Save Scene As USD…" (§29.7)
@@ -4249,7 +4260,7 @@ Pyxis follows one rule: **measure, then optimise.** Both regimes feed it:
   - `frame.cpu.commitResources` < 2 ms steady state
   - p99 / p50 frame ratio < 1.4 (catches stalls / GC)
 - **Load-time KPIs**:
-  - `render.frame.timeToFirstImage` for Moana subset (M8a) < 30 s on the
+  - `render.frame.timeToFirstImage` for Bistro (M8a) < 15 s on the
     lab machine
   - `assets.texture.decode` parallelism ≥ 6 of 8 worker threads sustained
   - `render.blas.build` ≥ 4 builds in flight at peak
@@ -4313,8 +4324,8 @@ Tracked once at end-of-load and once per second in steady state:
   quad, UV cube, multi-subset cube, double-sided plane, native-instanced cubes,
   point-instanced rocks, BLAS-sharing scene, UsdPreviewSurface, MaterialX standard_surface,
   MaterialX open_pbr_surface, RmanFallback, missing-texture, unsupported-node.
-- Moana subset(s): a hand-picked low-cost camera frame with a small sub-region of the island,
-  used for nightly regression. Full Moana only on local/manual.
+- Bistro: full Bistro USD (interior + exterior) used for nightly regression at a hero
+  camera. Full production-class scenes (Moana, ALab, etc.) are post-v1 / local-manual only.
 - Camera selection via `scene.camera` SdfPath.
 
 #### Test-fixture intent (what each fixture proves)
@@ -4344,16 +4355,16 @@ Tracked once at end-of-load and once per second in steady state:
 | `emissive_mesh.usda` | Emissive-triangle alias-table sampling |
 | `large_mesh_chunked.usda` | Mesh > stagingRing/4 oversize one-shot upload path |
 | `aov_all_seven.usda` | Every supported AOV (`color`, `depth`, `normal`, `albedo`, `motionVector`, `materialId`, `instanceId` — §18.4 `AovFlag`) and format negotiation path (§25.I.1). The Python harness sweeps `HdAovDescriptor::format` across `{HdFormatFloat32Vec4, HdFormatFloat16Vec4, HdFormatFloat32, HdFormatFloat16Vec2, HdFormatInt32}` and asserts the renderer either accepts the request or returns `ErrorKind::AovFormatUnsupported` — never silently substitutes a wider format. v1 USD is single-frame (no animation, §42); the motionVector slice is exercised by the harness calling `RenderFrame` twice with a deliberate camera pan between calls and asserting (a) frame-0 motion vectors are all-zero (no prev camera — §18.6) and (b) frame-1 motion vectors match the pan magnitude within tolerance. |
-| `moana_subset/` | Real-world Moana fragment — nightly regression seed (M8a) |
+| `bistro/` | Full Amazon Lumberyard Bistro USD — v1 hero scene, nightly regression seed (M8a) |
 
 A PR adding a new public-API verb or a new MaterialX coverage path **must** add or
 update a fixture above; reviewers check this before approval.
 
 ### CI / nightly
 - CI: builds + unit tests + tiny-scene regressions, target wall-clock ≤ 10 minutes.
-- Nightly (separate pipeline, not gating CI): subset-Moana regressions. Full Moana
-  renders are local/manual; gated by env var `PYXIS_MOANA_DATASET_PATH`. Missing
-  dataset → skip with clear message.
+- Nightly (separate pipeline, not gating CI): Bistro regressions. Production-class
+  scenes (Moana, ALab, etc.) are local/manual; gated by env var `PYXIS_BISTRO_DATASET_PATH`
+  (and per-scene env vars for post-v1 datasets). Missing dataset → skip with clear message.
 - Performance regression tracking: harness records per-test
   `frame.firstFrame`, `frame.cpu`, **`frame.timeToFirstImage`** (wall-clock from
   `pyxis.exe` invocation to first pixel written — the customer-perceived metric),
@@ -4561,7 +4572,7 @@ an S1 incident.
 | Tiny image regression | Python harness | RMSE > tolerance |
 | NVRHI validation (Debug) | Vulkan validation layer | Any error or perf warning |
 | Memory leak (Debug) | VMA `vmaCalculateStatistics` at process exit (intra-process GPU allocation tracking; `VkPhysicalDeviceMemoryBudget` reports system-wide pressure and cannot detect leaks) + `BudgetTracker` post-run delta | Non-zero leak |
-| Nightly | Subset-Moana headless | RMSE > tolerance, peak GPU > +10% baseline |
+| Nightly | Bistro headless | RMSE > tolerance, peak GPU > +10% baseline |
 
 CI lives under `_pipelines/pyxis_ci.yml`.
 Build matrix: Debug + Release; both use Vulkan validation in Debug only.
@@ -4584,10 +4595,10 @@ Build matrix: Debug + Release; both use Vulkan validation in Debug only.
 | M5 | UsdPreviewSurface→OpenPBR | textured cube via UsdPreviewSurface, OpenPBR shader |
 | M6 | Native instancing | instanced rocks, BLAS sharing, instance/material AOVs |
 | M7 | Lighting | dome + distant + rect lights; importance sampling |
-| M8a | Moana subset render | one island region (≤1M tris, ≤~50 materials) loads + renders headless; visually plausible |
-| M8b | Full Moana load | full USD opens to first commit without OOM on a 24 GB GPU; any single camera frame renders even if visually wrong; load profile written |
-| M9 | Moana visually correct | dome-light alignment, UDIM, normals/tangents fallbacks, emissive sampling — hero camera converges to a recognizable, color-correct image |
-| M10 | Moana headless + regression | nightly subset-Moana regression test green |
+| M8a | Bistro render | full Bistro USD (interior + exterior) loads + renders headless and viewer; visually plausible; nightly regression seed |
+| M8b | Bistro performance pass | Bistro hero camera meets §34.3 KPIs (`pass.PathTrace < 12 ms`, `frame.cpu.commitResources < 2 ms`, `timeToFirstImage < 15 s`) on RTX 4080 reference; per-frame profile written |
+| M9 | Bistro visually correct | dome+sun alignment, normals/tangents fallbacks, emissive sampling, MaterialX coverage gaps closed for Bistro hero assets — hero camera converges to a recognizable, color-correct image |
+| M10 | Bistro headless + regression | nightly Bistro regression test green; per-test KPIs CSV emitted |
 | M11 | Profiling/reporting polish | full spdlog summary, ImGui profiler panel, JSON/CSV reports |
 
 ---
@@ -4620,7 +4631,7 @@ Build matrix: Debug + Release; both use Vulkan validation in Debug only.
 14. `HdPyxisMesh`, `HdPyxisInstancer`, `HdPyxisCamera`, `HdPyxisRenderBuffer`.
 15. UsdPreviewSurface → OpenPBR adapter; texture cache; first textured Hydra render → M5.
 16. Lights (distant, dome, rect) → M7.
-17. Moana stage open via `UsdImagingStageSceneIndex` (Hydra 2.0); attach flatten,
+17. Bistro stage open via `UsdImagingStageSceneIndex` (Hydra 2.0); attach flatten,
     prototype-propagating, material-binding scene-index filters; subsets, instancers,
     large texture handling → M8a/M8b/M9.
 18. Headless mode polish; deterministic seeding; EXR writer; exit codes.
@@ -4631,7 +4642,7 @@ Build matrix: Debug + Release; both use Vulkan validation in Debug only.
     M4 onward. Same `MeshDesc`/`InstanceDesc`/`OpenPBRMaterialDesc` outputs; shares
     `pyxis_material_translation`. The walker emits prims in **`SdfPath`-sorted order**
     so instance IDs match the Hydra adapter byte-for-byte. M8a is gated on **both**
-    adapters loading the Moana subset and producing RMSE-zero regression images.
+    adapters loading Bistro and producing RMSE-zero regression images.
 
 ---
 
@@ -4653,7 +4664,7 @@ actually is.
   no v1 stand-in, no scheduled refactor. Once a system is registered in M0/M3, its
   schedule slot is final.
 - **Both ingest adapters** (`pyxis_hydra` and `pyxis_usd_ingest`) ship from M0 and
-  are at parity: each Moana regression image is rendered *twice* in CI (once per
+  are at parity: each Bistro regression image is rendered *twice* in CI (once per
   adapter) and they must match byte-for-byte.
 - The folder layout (§2), all CMake targets (§3), all third-party deps (§4), the
   threading model (§31), the error contract (§18.6).
@@ -4851,7 +4862,7 @@ what it must not foreclose.
   uploads textures in their native format and clamps with
   `textures.maxResolution`.
 - **Mip streaming / partial residency.** Sparse-binding for huge texture
-  sets (Moana hero foliage). Bind only the mip pyramid above the current
+  sets (production-class hero foliage). Bind only the mip pyramid above the current
   screen-size estimate; promote/demote on visibility change. Requires
   `VK_KHR_sparse_*` and a residency-budget controller.
 - **OpenColorIO 2 colour management.** Per-texture input colour space (USD
@@ -5068,7 +5079,7 @@ Each milestone has a corresponding verification step:
    timestamps appear, verify barriers don't crash NVRHI validation.
 4. Tiny `.usda` fixtures rendered headless → image diff vs in-tree baseline EXR
    (RMSE < per-test tolerance).
-5. Moana subset test (nightly): renders, diff vs baseline, profiles within ±10% of
+5. Bistro test (nightly): renders, diff vs baseline, profiles within ±10% of
    reference timings.
 6. spdlog summary at end of each headless run is parsed and asserted to contain all
    required fields (no silent missing scopes).
@@ -5097,7 +5108,7 @@ Each milestone has a corresponding verification step:
 - **BLAS by MeshHandle** (strict prototype sharing); compaction default-on.
 - **Profiling is first-class infra**; ImGui/spdlog/JSON/CSV are output backends.
 - **Image is the only regression artifact** v1.
-- **Subdivision, volumes, curves, displacement deferred** — Moana will be approximated.
+- **Subdivision, volumes, curves, displacement deferred** — affected hero meshes will be approximated.
 - **Texture compression deferred** — native formats only v1; rely on resolution clamp.
 - **MaterialX in scope, scoped** to `open_pbr_surface` (canonical 1:1) and
   `standard_surface` (translation shim); arbitrary node graphs logged-and-skipped.
@@ -5117,7 +5128,7 @@ All four open questions from the previous draft have been resolved:
 
 1. **Subdivision in v1?** → Deferred. Render polymesh hulls; revisit after M11.
 2. **Texture compression?** → Deferred. Upload textures in their native format; rely on
-   `textures.maxResolution` to cap GPU footprint. Revisit if Moana exceeds memory budget.
+   `textures.maxResolution` to cap GPU footprint. Revisit if v1 hero scene (Bistro) or post-v1 production-class scenes exceed memory budget.
 3. **MaterialX coverage v1?** → In scope, scoped to `open_pbr_surface` (canonical 1:1 mapping)
    plus `standard_surface` as a translation shim into OpenPBR. Arbitrary node graphs are
    logged-and-skipped with constant-default fallback, not baked.
@@ -5185,6 +5196,46 @@ files that must exist at the end. "Owner" is left blank to be filled per assignm
 - Exit: `usdview` can pick the delegate; the tiny USD renders identically in standalone
   Pyxis (both adapters), and `usdview`. Regression image diff Hydra-vs-USD-direct = 0.
 
+**M4 stub note**: at the M4 milestone Pyxis ships
+`HydraEngine::Load(path, scene)` as a thin wrapper around the same
+`pyxis_usd_ingest::StageWalker` the USD-direct path uses. This
+guarantees the §25.O.3 byte-equal P0 invariant trivially for the
+M4-tier scenes (mesh + camera, no shader-driven divergence between
+adapters yet) and is verified by `M4.AdapterParityByteEqualEXR` in
+the CTest suite. The pyxis_hydra delegate's real
+`HdPyxisMesh::Sync` + `HdPyxisCamera::Sync` impls are wired so
+`usdview` can drive Pyxis through the Hd plugin registry.
+
+The full `UsdImagingStageSceneIndex → HdRenderIndex → HdEngine →
+HdRenderTask` plumbing inside HydraEngine lands at **M5** alongside
+the OpenPBR shader, when material-driven differences make the
+Hydra dirty-bit dispatch + sync-cycle behaviour observable in the
+EXR output. Until then the StageWalker shortcut is the documented
+Pyxis-side adapter behaviour; usdview sees the per-prim Sync impls
+since usdview drives via its own HdEngine pipeline outside Pyxis.
+
+**Build artefacts shipped at M4**:
+- `<bin>/pyxis_hydra.dll` (the loadable Hydra plugin)
+- `<bin>/Resources/usd/hdPyxis/resources/plugInfo.json` (so Hd hosts
+  discover the delegate via `PXR_PLUGINPATH_NAME` /
+  `<host-dir>/usd/`)
+- `<bin>/usd/` — vcpkg's USD plugin tree (44 plugins, ~7 MB) +
+  aggregator `plugInfo.json` (`{"Includes": ["*/resources/"]}`) so
+  USD's PlugRegistry resolves UsdGeom / UsdLux / UsdShade prim type
+  IDs at startup. The aggregator is essential — without it
+  `UsdStage::Open` blocks waiting for schemas to register and the
+  app appears to hang. The pyxis_app `POST_BUILD` step writes both
+  the tree copy and the aggregator.
+
+**CI vcpkg cache (M4 only)**: `usd[imaging,materialx]` adds a
+~30-90 min cold compile to first `cmake configure`. The
+`x-gha,readwrite` binary-cache backend wired in
+`.github/workflows/build.yml` + `CMakePresets.json`'s `ci` preset
+caps that to seconds on every subsequent CI run. USD is also pinned
+to `26.3` via `vcpkg.json` `overrides` so unrelated baseline rolls
+don't invalidate the cache key. sccache (`mozilla-actions/sccache-
+action`) layers on top for per-TU object caching.
+
 ### Phase M5 — UsdPreviewSurface → OpenPBR
 - Add: `UsdPreviewSurfaceToOpenPBR` adapter, `MaterialTable` deduplication, `TextureCache`
   with stb/tinyexr decode, GPU mip generation pass, OpenPBR shader (single hit group,
@@ -5204,31 +5255,34 @@ files that must exist at the end. "Owner" is left blank to be filled per assignm
 - Exit: a Cornell-box-equivalent scene with all three light types converges to a known
   reference within RMSE tolerance.
 
-### Phase M8a — Moana subset render
-- Add: hand-picked island sub-region (one hero asset, < 1 M tris, fewer than ~50 unique
-  materials) shipped via `tests/fixtures/moana_subset/`.
-- Wire `UsdImagingStageSceneIndex` ingestion against this subset only; subsets, native
-  instancing, large-texture handling exercised at modest scale.
-- Exit: subset renders headless and viewer; recognizable visuals; profile written.
+### Phase M8a — Bistro render
+- Add: full Amazon Lumberyard Bistro USD (interior + exterior) shipped via
+  `tests/fixtures/bistro/` (or fetched via `PYXIS_BISTRO_DATASET_PATH`).
+- Wire `UsdImagingStageSceneIndex` ingestion against the full Bistro stage; scene-index
+  filters (flatten + prototype-propagating + material-binding), native instancing,
+  subsets, large-texture handling exercised on real-shipped game-asset content.
+- Exit: Bistro renders headless and viewer; recognizable visuals; load profile written.
   Used as the nightly regression seed (§35).
 
-### Phase M8b — Full Moana load (no OOM)
-- Add: scene-index filters (flatten + prototype-propagating + material-binding),
-  large-mesh chunked staging, lazy texture decode at scale, progress logging,
-  `unsupported_features.json` writer, budget tracker hard caps active.
-- Exit: full Moana opens to first commit without OOM on a 24 GB GPU; any single camera
-  frame renders — may be visually wrong (lighting, UDIM, materials still rough); load
-  profile written.
+### Phase M8b — Bistro performance pass
+- Tighten: lazy texture decode at scale, large-mesh chunked staging where needed, progress
+  logging, `unsupported_features.json` writer, budget tracker hard caps active. No new
+  features beyond M8a; pure perf + observability work driven by §34 profiles.
+- Exit: Bistro hero camera meets §34.3 KPIs on RTX 4080 reference (`pass.PathTrace < 12 ms`,
+  `pass.Accumulation+ToneMap+AovResolve < 2 ms`, `frame.cpu.commitResources < 2 ms`,
+  `timeToFirstImage < 15 s`, p99/p50 < 1.4); per-frame profile written; load profile
+  written.
 
-### Phase M9 — Moana visually correct
-- Polish: dome-light alignment, UDIM sampling, normals/tangents fallbacks, double-sided,
-  emissive triangles, MaterialX coverage gaps closed for hero assets.
-- Exit: visually recognizable, color-correct Moana frame on the hero camera; AOV outputs
+### Phase M9 — Bistro visually correct
+- Polish: dome+sun alignment, normals/tangents fallbacks, double-sided, emissive
+  triangles, MaterialX coverage gaps closed for Bistro hero assets, small synthetic
+  UDIM fixture green (UDIM path validated even though Bistro itself doesn't use UDIM).
+- Exit: visually recognizable, color-correct Bistro frame on the hero camera; AOV outputs
   valid; accumulation converges.
 
-### Phase M10 — Moana headless + regression
+### Phase M10 — Bistro headless + regression
 - Add: Python regression harness, fixtures, CI pipeline (build + unit + tiny regressions),
-  nightly subset-Moana job.
+  nightly Bistro job.
 - Exit: nightly green; per-test KPIs CSV emitted.
 
 ### Phase M11 — Profiling polish
@@ -5490,7 +5544,7 @@ and `/plan.md` are dual-owned by `@pyxis-renderer-team` *and* `@pyxis-maintainer
 - **Severity classes**:
   - **S1** — main branch fails to build, or the headless smoke-test crashes.
     Revert-or-fix within 24 h. Block all merges to main until green.
-  - **S2** — nightly subset-Moana RMSE regression > 2× tolerance, or peak GPU
+  - **S2** — nightly Bistro RMSE regression > 2× tolerance, or peak GPU
     > +20 % baseline. Tracking issue + assignment within 48 h.
   - **S3** — flaky test, perf jitter inside ±10 % budget. Logged; addressed in
     the next maintenance sprint.
@@ -5599,7 +5653,7 @@ Aftermath (§33.9) covers GPU device-lost. CPU crashes need a separate path.
 
 - File: `%LOCALAPPDATA%/Pyxis/Logs/pyxis-<pid>-YYYYMMDD.log`.
 - Rotation: 64 MiB per file, 10 files retained per `<pid>` ⇒ ≤ 640 MiB per
-  process. Sized to absorb a Moana ingest run with chatty unsupported-feature
+  process. Sized to absorb a long ingest run with chatty unsupported-feature
   warnings without truncating the tail.
 - Process-exit cleanup: log files older than 30 days are deleted on startup
   (best-effort; failures swallowed).

@@ -163,12 +163,20 @@ void GlfwWindow::OnKey(GLFWwindow* window, int key, int /*scancode*/, int action
   self->_sink(event);
 }
 
-void GlfwWindow::OnMouseButton(GLFWwindow* window, int button, int /*action*/, int mods) {
+void GlfwWindow::OnMouseButton(GLFWwindow* window, int button, int action, int mods) {
   auto* self = From(window);
   if (!self || !self->_sink)
     return;
   InputEvent event{};
-  event.kind = InputEventKind::MouseButton;
+  // GLFW emits action == GLFW_PRESS, GLFW_RELEASE, or GLFW_REPEAT (the
+  // last only for held-key autorepeat, not buttons; treat it as a no-op
+  // on the mouse path so consumers don't see synthetic Down events).
+  if (action == GLFW_PRESS)
+    event.kind = InputEventKind::MouseButtonDown;
+  else if (action == GLFW_RELEASE)
+    event.kind = InputEventKind::MouseButtonUp;
+  else
+    return;
   event.key = button;
   event.mods = static_cast<uint32_t>(mods);
   self->_sink(event);

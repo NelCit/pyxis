@@ -45,6 +45,13 @@
         "scene":           { "type": "string", "description": "§29.4.a default-scene chain step 2; empty = fall through to bundled default." }
       },
       "additionalProperties": true
+    },
+    "app": {
+      "type": "object",
+      "properties": {
+        "ingest":          { "type": "string", "enum": ["hydra", "usd_direct"], "description": "§3 / §25.O ingest adapter selector. Both produce byte-identical EXR (§25.O.3)." }
+      },
+      "additionalProperties": true
     }
   },
   "additionalProperties": true

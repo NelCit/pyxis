@@ -134,6 +134,11 @@ std::expected<void, std::string> OverlayConfiguration(Configuration& target,
     if (failure.empty())
       failure = ReadField(*paths, "scene", target.paths.scene);
   }
+  if (auto appNode = document.find("app"); appNode != document.end() && appNode->is_object())
+  {
+    if (failure.empty())
+      failure = ReadField(*appNode, "ingest", target.app.ingest);
+  }
   if (!failure.empty())
   {
     return std::unexpected{"parameters.json: " + failure};
@@ -278,6 +283,10 @@ void ApplyCliOverrides(Configuration& config, const CliArgs& cli) noexcept {
     log.Info(log::APP, std::string{"--profile "} + std::string{cli.profilePath}
                            + " parsed but ignored (M11 profiling polish).");
   }
+  if (!cli.ingest.empty())
+  {
+    config.app.ingest = std::string{cli.ingest};
+  }
 }
 
 std::expected<void, std::string> ValidateForHeadless(const Configuration& config) noexcept {
@@ -294,6 +303,12 @@ std::expected<void, std::string> ValidateForHeadless(const Configuration& config
   if (config.render.width == 0 || config.render.height == 0)
   {
     return std::unexpected{std::string{"render.width / render.height must be > 0"}};
+  }
+  if (config.app.ingest != "hydra" && config.app.ingest != "usd_direct")
+  {
+    return std::unexpected{
+        std::string{"app.ingest must be \"hydra\" or \"usd_direct\" (got \""}
+        + config.app.ingest + "\")"};
   }
   return {};
 }
@@ -326,6 +341,7 @@ std::expected<void, std::string> WriteEffectiveConfig(const Configuration& confi
   document["diagnostics"]["aftermath"] = config.diagnostics.aftermath;
   document["limits"]["framesInFlight"] = config.limits.framesInFlight;
   document["paths"]["scene"] = config.paths.scene;
+  document["app"]["ingest"] = config.app.ingest;
 
   std::ofstream stream(config.output.effectiveConfig, std::ios::binary | std::ios::trunc);
   if (!stream.is_open())

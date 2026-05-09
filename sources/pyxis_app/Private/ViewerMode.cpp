@@ -2,11 +2,15 @@
 
 #include "ViewerMode.h"
 
+#include "Camera/FlyCameraController.h"
 #include "Config/Configuration.h"
 #include "ImGuiHost.h"
 #include "Output/TextureReadback.h"
 #include "Render/AovTextures.h"
+#include "HydraEngine/HydraEngine.h"
 #include "Render/HardcodedCubeScene.h"
+#include "Scene/SceneResolver.h"
+#include "UsdDirectEngine/UsdDirectEngine.h"
 
 #include <Pyxis/Platform/Device/DeviceCreationParams.h>
 #include <Pyxis/Platform/Device/IDeviceManager.h>
@@ -28,7 +32,9 @@
 // stb_image_write's IMPLEMENTATION lives in its own TU
 // (Private/StbImageWrite.cpp) — see the comment there. Here we only
 // need the header API.
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -137,7 +143,8 @@ bool CaptureBackbufferToPng(nvrhi::IDevice* device, nvrhi::ICommandList* command
 
 }  // namespace
 
-int RunViewerLoop(const Configuration& config, std::string_view screenshotPath) noexcept {
+int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScene,
+                  std::string_view screenshotPath) noexcept {
   auto& log = Logging::Get();
 
   // ---- Window ----------------------------------------------------------
@@ -161,6 +168,7 @@ int RunViewerLoop(const Configuration& config, std::string_view screenshotPath) 
   // *our* GLFW callbacks first (via SetEventSink → GlfwWindow), then
   // ImGuiHost::Init() chains ImGui's on top. Both fire each frame.
   std::atomic<bool> shouldClose{false};
+  FlyCameraController cameraController;
   window->SetEventSink([&](const InputEvent& event) {
     if (event.kind == InputEventKind::WindowClose)
       shouldClose.store(true);
@@ -168,6 +176,7 @@ int RunViewerLoop(const Configuration& config, std::string_view screenshotPath) 
     {
       shouldClose.store(true);
     }
+    cameraController.HandleEvent(event);
   });
 
   // ---- Device manager --------------------------------------------------
@@ -213,7 +222,29 @@ int RunViewerLoop(const Configuration& config, std::string_view screenshotPath) 
   // M3 hardcoded cube + camera + distant light, identical to the
   // headless fixture. M3.5 + M4 replace this with the USD-loaded
   // scene chain.
-  if (auto cubeResult = BuildHardcodedCubeScene(gpuScene, winDesc.width, winDesc.height);
+  // M4 ingest dispatch on `app.ingest`. UsdDirectEngine wires
+  // through pyxis_usd_ingest's StageWalker; HydraEngine lands at
+  // M4 P5e. Either failing or returning "nothing emitted" falls
+  // back to the M3 hardcoded cube so pyxis.exe always renders.
+  bool sceneLoaded = false;
+  if (!resolvedScene.path.empty())
+  {
+    if (config.app.ingest == "usd_direct")
+    {
+      UsdDirectEngine engine;
+      sceneLoaded = engine.Load(resolvedScene.path, gpuScene);
+    }
+    else if (config.app.ingest == "hydra")
+    {
+      HydraEngine engine;
+      sceneLoaded = engine.Load(resolvedScene.path, gpuScene);
+    }
+  }
+  if (sceneLoaded)
+  {
+    log.Info(log::APP, "ViewerMode: scene loaded via " + config.app.ingest + " adapter.");
+  }
+  else if (auto cubeResult = BuildHardcodedCubeScene(gpuScene, winDesc.width, winDesc.height);
       !cubeResult)
   {
     log.Error(log::APP, "ViewerMode: " + cubeResult.error());
@@ -286,12 +317,39 @@ int RunViewerLoop(const Configuration& config, std::string_view screenshotPath) 
   // 0 means "never seen one yet"; the very first BeginFrame after
   // device manager bringup will report 1, and we'll notify ImGuiHost.
   uint32_t lastSeenSwapchainGeneration = 0;
+
+  // Per-frame dt clock for the fly-camera controller. steady_clock
+  // because we don't want wall-clock jumps (NTP resyncs, DST) to
+  // teleport the camera. Initialised inside the loop on first frame
+  // so the first dt isn't a multi-second startup spike.
+  std::chrono::steady_clock::time_point lastFrameTime{};
+  bool haveLastFrameTime = false;
   while (!window->ShouldClose() && !shouldClose.load())
   {
     profiler.BeginFrame();
     {
       const Profiler::CpuScope poll(profiler, "app.poll");
       window->PollEvents();
+    }
+    {
+      // Fly-camera controller: compute dt, integrate WASD/ZQSD held
+      // keys + mouse-look delta, push the new viewFromWorld into
+      // GpuScene before the renderer reads the camera. First frame
+      // dt is clamped to 0 so an unboxed startup time doesn't fling
+      // the camera across the scene.
+      const Profiler::CpuScope camera(profiler, "app.camera.update");
+      const auto now = std::chrono::steady_clock::now();
+      float dtSeconds = 0.0f;
+      if (haveLastFrameTime)
+      {
+        const auto delta = now - lastFrameTime;
+        dtSeconds = std::chrono::duration<float>(delta).count();
+        // Clamp to 100ms so an editor-stall doesn't fling the camera.
+        dtSeconds = std::min(dtSeconds, 0.1f);
+      }
+      lastFrameTime = now;
+      haveLastFrameTime = true;
+      cameraController.Update(dtSeconds, gpuScene);
     }
     {
       const Profiler::CpuScope tick(profiler, "app.scene.tick");

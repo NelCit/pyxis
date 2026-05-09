@@ -25,12 +25,18 @@ target_sources(pyxis PRIVATE
     Private/Output/ExrWriter.cpp
     Private/Output/TextureReadback.h
     Private/Output/TextureReadback.cpp
+    Private/Camera/FlyCameraController.h
+    Private/Camera/FlyCameraController.cpp
     Private/Render/AovTextures.h
     Private/Render/AovTextures.cpp
     Private/Render/HardcodedCubeScene.h
     Private/Render/HardcodedCubeScene.cpp
     Private/Scene/SceneResolver.h
     Private/Scene/SceneResolver.cpp
+    Private/UsdDirectEngine/UsdDirectEngine.h
+    Private/UsdDirectEngine/UsdDirectEngine.cpp
+    Private/HydraEngine/HydraEngine.h
+    Private/HydraEngine/HydraEngine.cpp
     Private/HeadlessMode.h
     Private/HeadlessMode.cpp
     Private/ViewerMode.h
@@ -88,6 +94,47 @@ add_custom_command(TARGET pyxis POST_BUILD
 unset(_pyxis_app_resources_src)
 unset(_pyxis_app_resources_dst)
 
+# ----------------------------------------------------------------------------
+# USD plugin tree (M4). USD discovers its prim-type plugins (UsdGeom,
+# UsdLux, UsdShade, etc.) by walking `<dir-of-usd-DLLs>/usd/<plugin>/
+# resources/plugInfo.json`. vcpkg copies the usd_*.dll files next to
+# pyxis.exe but NOT the matching `usd/` plugin tree, so without this
+# copy step UsdStage::Open(...) hangs trying to resolve schema TfTypes.
+#
+# Debug vs Release: vcpkg ships separate trees under
+# vcpkg_installed/x64-windows/{,debug/}bin/usd/. Both trees are
+# structurally identical; only their referenced DLLs differ in linkage
+# (debug-vs-release CRT). copy_directory mirrors the right one based
+# on $<CONFIG>.
+# ----------------------------------------------------------------------------
+set(_pyxis_usd_plugin_src
+    "$<IF:$<CONFIG:Debug>,${CMAKE_BINARY_DIR}/vcpkg_installed/x64-windows/debug/bin/usd,${CMAKE_BINARY_DIR}/vcpkg_installed/x64-windows/bin/usd>")
+set(_pyxis_usd_plugin_dst
+    "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/$<CONFIG>/usd")
+
+# USD's PlugRegistry walks the path in PXR_PLUGINPATH_NAME for a
+# top-level `plugInfo.json` aggregator that lists per-plugin
+# subdirs via `Includes: ["*/resources/"]`. vcpkg ships that
+# aggregator at `lib/usd/plugInfo.json` (Linux convention) but the
+# actual plugin tree lives at `bin/usd/<plugin>/resources/` on
+# Windows; the aggregator's wildcard there resolves to nothing.
+# We write our own one-line aggregator next to the copied tree so
+# USD's wildcard finds the real per-plugin plugInfo.jsons.
+set(_pyxis_usd_aggregator "${CMAKE_CURRENT_BINARY_DIR}/usd_plugInfo.json")
+file(WRITE "${_pyxis_usd_aggregator}" "{\n    \"Includes\": [ \"*/resources/\" ]\n}\n")
+
+add_custom_command(TARGET pyxis POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different
+        "${_pyxis_usd_plugin_src}"
+        "${_pyxis_usd_plugin_dst}"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${_pyxis_usd_aggregator}"
+        "${_pyxis_usd_plugin_dst}/plugInfo.json"
+    COMMENT "Copying vcpkg USD plugin tree (44 plugins, ~7 MB) + aggregator plugInfo.json to <bin>/usd/")
+unset(_pyxis_usd_plugin_src)
+unset(_pyxis_usd_plugin_dst)
+unset(_pyxis_usd_aggregator)
+
 # ImGui (with Vulkan + GLFW backends) — built lazily by the helper in
 # _cmake/Thirdparty.cmake. pyxis_app/ViewerMode is the only consumer
 # in M1; the FPS panel + dockspace land here. The helper assumes
@@ -101,6 +148,8 @@ pyxis_thirdparty_require_imgui()
 target_link_libraries(pyxis PRIVATE
     Pyxis::Platform
     Pyxis::Renderer
+    Pyxis::UsdIngest                 # M4 — UsdDirectEngine + HydraEngine (M4 stub) wrap StageWalker.
+    Pyxis::Hydra                     # M4 — pyxis_hydra plugInfo.json + Sync impls register at process load.
     pyxis_imgui
     Vulkan::Vulkan        # vkCmdBeginRendering / vkCmdEndRendering / descriptor-pool calls
     nlohmann_json::nlohmann_json     # parameters.json + effective-config writer (§26 / §27)

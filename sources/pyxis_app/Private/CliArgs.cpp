@@ -118,6 +118,15 @@ CliArgs Parse(int argc, char** argv) noexcept {
         out.invalidArg = arg;
         return out;
       }
+    }
+    else if (Equals(arg, "--ingest"))
+    {
+      if (!TakeValue(argc, argv, i, out.ingest))
+      {
+        out.invalid = true;
+        out.invalidArg = arg;
+        return out;
+      }
 
       // ---- §26 render / output overrides ------------------------------
     }
@@ -214,6 +223,7 @@ void PrintUsage() noexcept {
       "                          embedded-defaults -> exe-dir -> user -> --config.\n"
       "  --scene <path>          Override scene.path.\n"
       "  --camera <sdfPath>      Override scene.camera.\n"
+      "  --ingest <hydra|usd_direct>  Override app.ingest (§3 / §25.O).\n"
       "  --width <int>           Override render.width.\n"
       "  --height <int>          Override render.height.\n"
       "  --samples <int>         Override render.samplesPerFrame.\n"
