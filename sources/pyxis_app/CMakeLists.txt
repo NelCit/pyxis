@@ -156,6 +156,13 @@ target_link_libraries(pyxis PRIVATE
     unofficial::tinyexr::tinyexr     # headless EXR writer (§41 M2)
 )
 
+# Windows-only system libs. psapi (Process Status API) — used by
+# ImGuiHost's perf-panel RAM row (GetProcessMemoryInfo). Available on
+# every Windows SDK; no third-party dep needed.
+if(WIN32)
+    target_link_libraries(pyxis PRIVATE psapi)
+endif()
+
 # stb_image_write is header-only; vcpkg's `Stb` config exports the
 # include dir as Stb_INCLUDE_DIR but no link target. ViewerMode.cpp's
 # --screenshot path #defines STB_IMAGE_WRITE_IMPLEMENTATION in exactly

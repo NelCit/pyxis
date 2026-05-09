@@ -15,6 +15,19 @@
 #include <cstdio>
 #include <cstring>
 #include <imgui.h>
+
+// Windows process-memory query for the perf panel's RAM row.
+// Pyxis is Windows-only v1 (plan §3); this stays inside an #ifdef
+// so a future cross-platform port can fan out to mach_task_basic_info
+// (macOS) or /proc/self/status VmRSS (Linux) without disturbing the
+// existing path.
+#if defined(_WIN32)
+    #ifndef WIN32_LEAN_AND_MEAN
+        #define WIN32_LEAN_AND_MEAN
+    #endif
+    #include <windows.h>
+    #include <psapi.h>
+#endif
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_vulkan.h>
 
@@ -72,6 +85,7 @@ bool ImGuiHost::Init(IWindow* window, IDeviceManager* deviceManager) noexcept {
   }
 
   _instance = vulkanContext.instance;
+  _physicalDevice = vulkanContext.physicalDevice;
   auto vkInstance = static_cast<VkInstance>(vulkanContext.instance);
   auto vkPhys = static_cast<VkPhysicalDevice>(vulkanContext.physicalDevice);
   auto vkDevice = static_cast<VkDevice>(vulkanContext.device);
@@ -253,6 +267,89 @@ void ImGuiHost::BuildFpsPanel(const FrameProfile& frameProfile) noexcept {
       const std::string_view name = timing.name.View();
       ImGui::Text("  %*s%.*s   %.3f ms", static_cast<int>(timing.depth * 2), "",
                   static_cast<int>(name.size()), name.data(), timing.durationMs);
+    }
+
+    // ----- System section ---------------------------------------------
+    // Process-level memory footprint. Working-set bytes = the bytes
+    // resident in RAM right now (not including paged-out code / data).
+    // VRAM lands at Phase 5 alongside the Vulkan VK_EXT_memory_budget
+    // query.
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Text("System");
+#if defined(_WIN32)
+    PROCESS_MEMORY_COUNTERS_EX memCounters{};
+    memCounters.cb = sizeof(memCounters);
+    if (GetProcessMemoryInfo(GetCurrentProcess(),
+                             reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memCounters),
+                             sizeof(memCounters)))
+    {
+      const double currentMiB =
+          static_cast<double>(memCounters.WorkingSetSize) / (1024.0 * 1024.0);
+      const double peakMiB =
+          static_cast<double>(memCounters.PeakWorkingSetSize) / (1024.0 * 1024.0);
+      const double commitMiB =
+          static_cast<double>(memCounters.PrivateUsage) / (1024.0 * 1024.0);
+      ImGui::Text("RAM      %7.1f MiB  (peak %.1f, commit %.1f)", currentMiB, peakMiB,
+                  commitMiB);
+    }
+    else
+    {
+      ImGui::Text("RAM      query failed");
+    }
+#else
+    ImGui::Text("RAM      (not implemented on this platform)");
+#endif
+    // VRAM — sum DEVICE_LOCAL heaps for total; query
+    // VK_EXT_memory_budget for per-heap "in-use" if the extension is
+    // available. The extension is enabled by default by NVRHI on
+    // recent NVIDIA / AMD drivers; on a driver that didn't expose
+    // it, the budget pNext gets ignored and we fall back to total
+    // only.
+    if (_physicalDevice != nullptr)
+    {
+      auto vkPhys = static_cast<VkPhysicalDevice>(_physicalDevice);
+      VkPhysicalDeviceMemoryBudgetPropertiesEXT budgetProps{};
+      budgetProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT;
+      VkPhysicalDeviceMemoryProperties2 memProps2{};
+      memProps2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2;
+      memProps2.pNext = &budgetProps;
+      vkGetPhysicalDeviceMemoryProperties2(vkPhys, &memProps2);
+
+      uint64_t totalBytes = 0;
+      uint64_t usedBytes = 0;
+      uint64_t budgetBytes = 0;
+      const auto& memProps = memProps2.memoryProperties;
+      for (uint32_t heapIdx = 0; heapIdx < memProps.memoryHeapCount; ++heapIdx)
+      {
+        if ((memProps.memoryHeaps[heapIdx].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) == 0)
+          continue;
+        totalBytes += memProps.memoryHeaps[heapIdx].size;
+        usedBytes += budgetProps.heapUsage[heapIdx];
+        budgetBytes += budgetProps.heapBudget[heapIdx];
+      }
+      const double totalMiB =
+          static_cast<double>(totalBytes) / (1024.0 * 1024.0);
+      if (usedBytes > 0)
+      {
+        // Budget extension populated — show used / budget / total.
+        const double usedMiB =
+            static_cast<double>(usedBytes) / (1024.0 * 1024.0);
+        const double budgetMiB =
+            static_cast<double>(budgetBytes) / (1024.0 * 1024.0);
+        ImGui::Text("VRAM     %7.1f MiB used / %.1f MiB budget / %.1f MiB total",
+                    usedMiB, budgetMiB, totalMiB);
+      }
+      else
+      {
+        // Extension unavailable — fall back to total only.
+        ImGui::Text("VRAM     %7.1f MiB total  (per-process used: ext unavailable)",
+                    totalMiB);
+      }
+    }
+    else
+    {
+      ImGui::Text("VRAM     (no physical device)");
     }
   }
   ImGui::End();

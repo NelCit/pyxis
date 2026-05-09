@@ -73,7 +73,8 @@ class ImGuiHost {
 
  private:
   bool _ready = false;
-  void* _instance = nullptr;  // VkInstance (borrowed) — kept for the function loader
+  void* _instance = nullptr;        // VkInstance (borrowed) — kept for the function loader
+  void* _physicalDevice = nullptr;  // VkPhysicalDevice (borrowed) — VRAM query in BuildFpsPanel
 
   // Performance-panel rolling history. 240 frames @ 60 Hz = ~4 s of
   // visual context — enough to spot the per-pass cost shape of a
