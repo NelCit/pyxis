@@ -131,6 +131,24 @@ public:
   // ---- Introspection -------------------------------------------------
   [[nodiscard]] FrameStats LastFrameStats() const;
 
+  // Editor-side enumeration (M7 follow-up). The viewer's editor panel
+  // walks live lights / materials to populate dropdowns + sliders;
+  // the engine never iterates these tables itself, so the surface is
+  // intentionally simple — `Count()` returns the live entry count
+  // and `At(i)` returns the i-th live entry's handle / desc-copy
+  // (skipping dead + quarantined slots). The pair (handle + desc)
+  // is enough for the panel to (a) display current values, (b) push
+  // edits back via the matching Update verb. Index validity is
+  // bounded by Count() at the moment of call; callers that mutate
+  // the scene mid-iteration must re-query.
+  [[nodiscard]] uint32_t                 GetLiveLightCount() const noexcept;
+  [[nodiscard]] LightHandle              GetLightHandleAt(uint32_t liveIndex) const noexcept;
+  [[nodiscard]] LightDesc                GetLightDescAt(uint32_t liveIndex) const noexcept;
+
+  [[nodiscard]] uint32_t                 GetLiveMaterialCount() const noexcept;
+  [[nodiscard]] MaterialHandle           GetMaterialHandleAt(uint32_t liveIndex) const noexcept;
+  [[nodiscard]] OpenPBRMaterialDesc      GetMaterialDescAt(uint32_t liveIndex) const noexcept;
+
   // ---- Render-side accessors -----------------------------------------
   // Borrowed pointer / ref valid for the lifetime of the scene (the
   // TLAS is alive after the first CommitResources that observed at

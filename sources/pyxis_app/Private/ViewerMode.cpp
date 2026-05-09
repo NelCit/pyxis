@@ -415,6 +415,7 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
       imguiHost.BeginFrame();
       imguiHost.BuildFpsPanel(frameProfile);
       imguiHost.BuildScenePanel(sceneStats);
+      imguiHost.BuildEditorPanel(gpuScene);
       imguiHost.Render();
     }
 

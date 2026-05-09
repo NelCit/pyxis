@@ -7,6 +7,11 @@
 #include <Pyxis/Platform/Logging/Log.h>
 #include <Pyxis/Platform/Logging/LogCategories.h>
 #include <Pyxis/Platform/Window/IWindow.h>
+#include <Pyxis/Renderer/Descs/CameraDesc.h>
+#include <Pyxis/Renderer/Descs/LightDesc.h>
+#include <Pyxis/Renderer/Descs/OpenPBRMaterialDesc.h>
+#include <Pyxis/Renderer/Forward.h>
+#include <Pyxis/Renderer/GpuScene.h>
 
 #include <nvrhi/nvrhi.h>
 #include <vulkan/vulkan.h>
@@ -458,6 +463,152 @@ void ImGuiHost::BuildScenePanel(const FrameStats& sceneStats) noexcept {
     else
     {
       ImGui::Text("Degraded            : no");
+    }
+  }
+  ImGui::End();
+}
+
+void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
+  if (!_ready)
+    return;
+
+  // Default position: below the Scene panel (which is at 280, 10
+  // with autoresize ~280 px tall). Editor goes below at y=320.
+  ImGui::SetNextWindowPos(ImVec2(280.0f, 360.0f), ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowSize(ImVec2(360.0f, 0.0f), ImGuiCond_FirstUseEver);
+  if (ImGui::Begin("Editor", nullptr, ImGuiWindowFlags_NoSavedSettings))
+  {
+    // ---- Camera section ----------------------------------------------
+    if (scene.HasCamera())
+    {
+      if (ImGui::CollapsingHeader("Camera", ImGuiTreeNodeFlags_DefaultOpen))
+      {
+        CameraDesc cameraDesc = scene.GetCamera();
+        bool cameraEdited = false;
+
+        // Most useful camera knobs for an interactive viewer:
+        // focal length (FOV proxy), focus distance, near/far clip.
+        // Position/orientation come from the FlyCameraController in
+        // viewer mode — editing them via this panel would fight the
+        // controller every frame, so we leave those out.
+        ImGui::PushItemWidth(180.0f);
+        if (ImGui::SliderFloat("Focal length (mm)", &cameraDesc.focalLengthMm, 12.0f,
+                               200.0f, "%.1f"))
+          cameraEdited = true;
+        if (ImGui::SliderFloat("Focus distance",    &cameraDesc.focusDistance,    0.1f,
+                               50.0f, "%.2f"))
+          cameraEdited = true;
+        if (ImGui::SliderFloat("Near clip",         &cameraDesc.nearClip,         0.01f,
+                               1.0f, "%.3f"))
+          cameraEdited = true;
+        if (ImGui::SliderFloat("Far clip",          &cameraDesc.farClip,          10.0f,
+                               5000.0f, "%.0f"))
+          cameraEdited = true;
+        ImGui::PopItemWidth();
+
+        if (cameraEdited)
+          scene.SetCamera(cameraDesc);
+      }
+    }
+
+    // ---- Lights section ----------------------------------------------
+    if (ImGui::CollapsingHeader("Lights", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+      const uint32_t lightCount = scene.GetLiveLightCount();
+      if (lightCount == 0)
+      {
+        ImGui::TextDisabled("(no lights authored)");
+      }
+      else
+      {
+        for (uint32_t i = 0; i < lightCount; ++i)
+        {
+          const LightHandle handle = scene.GetLightHandleAt(i);
+          LightDesc desc = scene.GetLightDescAt(i);
+
+          // Distinct ImGui ID per light so widgets don't collide.
+          ImGui::PushID(static_cast<int>(i));
+          const char* kindLabel = "Distant";
+          if (desc.kind == LightDesc::Kind::Dome) kindLabel = "Dome";
+          if (desc.kind == LightDesc::Kind::Rect) kindLabel = "Rect";
+          ImGui::Text("Light #%u  %s", i, kindLabel);
+          bool lightEdited = false;
+
+          float color[3] = {static_cast<float>(desc.color.x),
+                            static_cast<float>(desc.color.y),
+                            static_cast<float>(desc.color.z)};
+          if (ImGui::ColorEdit3("Color", color, ImGuiColorEditFlags_NoInputs))
+          {
+            desc.color = hlslpp::float3{color[0], color[1], color[2]};
+            lightEdited = true;
+          }
+          if (ImGui::SliderFloat("Intensity", &desc.intensity, 0.0f, 10.0f, "%.2f"))
+            lightEdited = true;
+
+          if (lightEdited && handle != LightHandle::Invalid)
+            scene.UpdateLight(handle, desc);
+
+          ImGui::Separator();
+          ImGui::PopID();
+        }
+      }
+    }
+
+    // ---- Materials section -------------------------------------------
+    if (ImGui::CollapsingHeader("Materials"))
+    {
+      const uint32_t matCount = scene.GetLiveMaterialCount();
+      if (matCount == 0)
+      {
+        ImGui::TextDisabled("(no materials authored)");
+      }
+      else
+      {
+        // Pick one material at a time via a slider. Dropdown would
+        // need names, which we don't carry through OpenPBRMaterialDesc
+        // for v1 (sourcePrim is debug-only + per the §11 dedup rule
+        // not part of identity).
+        if (_editorMaterialIndex >= matCount)
+          _editorMaterialIndex = 0;
+        int picked = static_cast<int>(_editorMaterialIndex);
+        if (ImGui::SliderInt("Material #", &picked, 0, static_cast<int>(matCount) - 1))
+        {
+          _editorMaterialIndex = static_cast<uint32_t>(picked);
+        }
+
+        const MaterialHandle handle = scene.GetMaterialHandleAt(_editorMaterialIndex);
+        OpenPBRMaterialDesc desc = scene.GetMaterialDescAt(_editorMaterialIndex);
+        bool matEdited = false;
+
+        float baseColor[3] = {static_cast<float>(desc.baseColor.x),
+                              static_cast<float>(desc.baseColor.y),
+                              static_cast<float>(desc.baseColor.z)};
+        if (ImGui::ColorEdit3("Base color", baseColor, ImGuiColorEditFlags_NoInputs))
+        {
+          desc.baseColor = hlslpp::float3{baseColor[0], baseColor[1], baseColor[2]};
+          matEdited = true;
+        }
+        if (ImGui::SliderFloat("Roughness", &desc.roughness, 0.0f, 1.0f, "%.3f"))
+          matEdited = true;
+        if (ImGui::SliderFloat("Metalness", &desc.metalness, 0.0f, 1.0f, "%.3f"))
+          matEdited = true;
+        if (ImGui::SliderFloat("Opacity",   &desc.opacity,   0.0f, 1.0f, "%.3f"))
+          matEdited = true;
+        if (ImGui::SliderFloat("Specular IoR", &desc.specularIor, 1.0f, 3.0f, "%.3f"))
+          matEdited = true;
+
+        if (matEdited && handle != MaterialHandle::Invalid)
+          scene.UpdateMaterial(handle, desc);
+      }
+    }
+
+    // ---- Scene loader (placeholder) ----------------------------------
+    if (ImGui::CollapsingHeader("Scene"))
+    {
+      ImGui::TextDisabled(
+          "Scene-reload (file picker + GpuScene::Clear) lands at the\n"
+          "Phase-6 follow-up. Path overrides + restart-to-reload via\n"
+          "`pyxis.exe --scene <path>` are the v1 workflow.");
     }
   }
   ImGui::End();

@@ -21,6 +21,7 @@ class ITexture;
 namespace pyxis {
 class IDeviceManager;
 class IWindow;
+class GpuScene;
 }  // namespace pyxis
 
 namespace pyxis::app {
@@ -61,6 +62,19 @@ class ImGuiHost {
   // handle drops, degraded sentinel). Reads from the snapshot the
   // caller pulled via GpuScene::LastFrameStats().
   void BuildScenePanel(const FrameStats& sceneStats) noexcept;
+
+  // Editor panel — live-edit camera + dome / lights + materials.
+  // Reads the current state from GpuScene's introspection accessors
+  // (GetCamera / GetLightDescAt / GetMaterialDescAt) and pushes
+  // edits back via the matching Update verbs. Mutations are
+  // synchronous against the supplied scene; the renderer picks up
+  // the changes the next CommitResources tick.
+  //
+  // Takes a non-const reference because the editor calls SetCamera /
+  // UpdateLight / UpdateMaterial. Caller must ensure the scene is
+  // accessed only from the render thread (single-writer §31; in
+  // viewer mode this is the main thread = render thread).
+  void BuildEditorPanel(GpuScene& scene) noexcept;
   void Render() noexcept;
 
   // Notify the ImGui Vulkan backend that the swapchain was recreated
@@ -75,6 +89,14 @@ class ImGuiHost {
   bool _ready = false;
   void* _instance = nullptr;        // VkInstance (borrowed) — kept for the function loader
   void* _physicalDevice = nullptr;  // VkPhysicalDevice (borrowed) — VRAM query in BuildFpsPanel
+
+  // Editor-panel state (M7 follow-up). The materials editor's
+  // "currently picked material" lives here so the slider position
+  // survives across frames; the lights editor enumerates all lights
+  // each frame so it doesn't need analogous state. Reset to 0 if
+  // the live-material count drops below the picked index between
+  // frames (catches DestroyMaterial happening between renders).
+  uint32_t _editorMaterialIndex = 0;
 
   // Performance-panel rolling history. 240 frames @ 60 Hz = ~4 s of
   // visual context — enough to spot the per-pass cost shape of a

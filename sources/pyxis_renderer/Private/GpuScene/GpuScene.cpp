@@ -1949,6 +1949,86 @@ nvrhi::IBuffer* GpuScene::GetMeshFaceOffsetsBuffer() const noexcept {
   return _impl->meshFaceOffsetsBuffer.Get();
 }
 
+// ---- Editor introspection (M7 follow-up) -----------------------------------
+// All four At() helpers walk the table in slot order, count live
+// non-quarantined entries, and return the `liveIndex`-th one's
+// handle / desc copy. Out-of-range or all-dead returns Invalid /
+// default-init. v1 uses these only from the viewer's editor panel
+// (call frequency = once per frame) so the linear walk is fine.
+uint32_t GpuScene::GetLiveLightCount() const noexcept {
+  uint32_t count = 0;
+  for (const Impl::LightEntry& entry : _impl->lights)
+  {
+    if (entry.live)
+      ++count;
+  }
+  return count;
+}
+
+LightHandle GpuScene::GetLightHandleAt(uint32_t liveIndex) const noexcept {
+  uint32_t walked = 0;
+  for (uint32_t slot = 0; slot < _impl->lights.size(); ++slot)
+  {
+    const Impl::LightEntry& entry = _impl->lights[slot];
+    if (!entry.live)
+      continue;
+    if (walked == liveIndex)
+      return static_cast<LightHandle>(HandleEncode(slot, entry.generation));
+    ++walked;
+  }
+  return LightHandle::Invalid;
+}
+
+LightDesc GpuScene::GetLightDescAt(uint32_t liveIndex) const noexcept {
+  uint32_t walked = 0;
+  for (const Impl::LightEntry& entry : _impl->lights)
+  {
+    if (!entry.live)
+      continue;
+    if (walked == liveIndex)
+      return entry.descCopy;
+    ++walked;
+  }
+  return LightDesc{};
+}
+
+uint32_t GpuScene::GetLiveMaterialCount() const noexcept {
+  uint32_t count = 0;
+  for (const Impl::MaterialEntry& entry : _impl->materials)
+  {
+    if (entry.live)
+      ++count;
+  }
+  return count;
+}
+
+MaterialHandle GpuScene::GetMaterialHandleAt(uint32_t liveIndex) const noexcept {
+  uint32_t walked = 0;
+  for (uint32_t slot = 0; slot < _impl->materials.size(); ++slot)
+  {
+    const Impl::MaterialEntry& entry = _impl->materials[slot];
+    if (!entry.live)
+      continue;
+    if (walked == liveIndex)
+      return static_cast<MaterialHandle>(HandleEncode(slot, entry.generation));
+    ++walked;
+  }
+  return MaterialHandle::Invalid;
+}
+
+OpenPBRMaterialDesc GpuScene::GetMaterialDescAt(uint32_t liveIndex) const noexcept {
+  uint32_t walked = 0;
+  for (const Impl::MaterialEntry& entry : _impl->materials)
+  {
+    if (!entry.live)
+      continue;
+    if (walked == liveIndex)
+      return entry.descCopy;
+    ++walked;
+  }
+  return OpenPBRMaterialDesc{};
+}
+
 // ---- Introspection ---------------------------------------------------------
 FrameStats GpuScene::LastFrameStats() const {
   FrameStats stats = _impl->lastFrameStats;
