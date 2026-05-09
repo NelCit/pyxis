@@ -35,6 +35,10 @@ constexpr uint32_t operator|(MaterialFlag lhs, MaterialFlag rhs) noexcept {
 constexpr uint32_t operator|(uint32_t lhs, MaterialFlag rhs) noexcept {
   return lhs | static_cast<uint32_t>(rhs);
 }
+constexpr uint32_t& operator|=(uint32_t& lhs, MaterialFlag rhs) noexcept {
+  lhs = lhs | static_cast<uint32_t>(rhs);
+  return lhs;
+}
 constexpr uint32_t operator&(uint32_t lhs, MaterialFlag rhs) noexcept {
   return lhs & static_cast<uint32_t>(rhs);
 }

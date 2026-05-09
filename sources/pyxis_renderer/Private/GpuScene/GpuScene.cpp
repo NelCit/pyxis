@@ -20,6 +20,8 @@
 
 #include <Pyxis/Renderer/GpuScene.h>
 
+#include <Pyxis/Platform/Logging/Log.h>
+#include <Pyxis/Platform/Logging/LogCategories.h>
 #include <Pyxis/Renderer/Descs/FrameStats.h>
 #include <Pyxis/Renderer/Forward.h>
 #include <Pyxis/Renderer/Profiler.h>
@@ -35,6 +37,8 @@
 #include "ShaderInterop.slang"
 
 #include <nvrhi/nvrhi.h>
+
+#include <stb_image.h>
 
 #include <cstdint>
 #include <cstring>
@@ -135,6 +139,57 @@ std::uint64_t HashTextureKey(const TextureKey& key) noexcept {
   hash = (hash ^ HashBytes(key.resolvedPath.data(), key.resolvedPath.size()))
          * FNV1A_64_PRIME;
   return hash;
+}
+
+// Pack an OpenPBRMaterialDesc + computed flag bits into the §11
+// 80-byte GPU layout the closesthit reads. `baseColorTex` etc. are
+// the BINDLESS slot indices the caller resolved (or
+// INVALID_BINDLESS_TEXTURE for "no texture for this lobe").
+shaderinterop::OpenPBRMaterialGPU PackMaterialGpu(
+    const OpenPBRMaterialDesc& desc, std::uint32_t flags,
+    std::uint32_t baseColorSlot, std::uint32_t normalSlot, std::uint32_t metallicSlot,
+    std::uint32_t roughnessSlot, std::uint32_t emissionSlot, std::uint32_t opacitySlot,
+    std::uint32_t transmissionSlot, std::uint32_t coatRoughnessSlot) noexcept {
+  shaderinterop::OpenPBRMaterialGPU gpu{};
+  gpu.baseColorR = static_cast<float>(desc.baseColor.x);
+  gpu.baseColorG = static_cast<float>(desc.baseColor.y);
+  gpu.baseColorB = static_cast<float>(desc.baseColor.z);
+  gpu.flags = flags;
+  gpu.baseColorTex = baseColorSlot;
+  gpu.normalTex = normalSlot;
+  gpu.metallicTex = metallicSlot;
+  gpu.roughnessTex = roughnessSlot;
+  gpu.roughness = desc.roughness;
+  gpu.metalness = desc.metalness;
+  gpu.opacity = desc.opacity;
+  gpu.specularIor = desc.specularIor;
+  gpu.coatWeight = desc.coatWeight;
+  gpu.coatRoughness = desc.coatRoughness;
+  gpu.emissionLuminance = desc.emissionLuminance;
+  gpu.emissionTex = emissionSlot;
+  gpu.opacityTex = opacitySlot;
+  gpu.transmissionTex = transmissionSlot;
+  gpu.coatRoughnessTex = coatRoughnessSlot;
+  gpu._reserved0 = 0;
+  return gpu;
+}
+
+// Resolve a TextureHandle to its bindless slot index, or to
+// INVALID_BINDLESS_TEXTURE for Invalid / out-of-range / dead handles.
+// Used at upload time when packing OpenPBRMaterialGPU entries.
+template <typename TextureEntryVector>
+std::uint32_t ResolveTextureBindlessSlot(TextureHandle handle,
+                                         const TextureEntryVector& textures) noexcept {
+  const auto value = static_cast<std::uint32_t>(handle);
+  if (value == 0)
+    return shaderinterop::INVALID_BINDLESS_TEXTURE;
+  const std::uint32_t slot = HandleSlot(value);
+  if (slot == 0 || slot >= textures.size())
+    return shaderinterop::INVALID_BINDLESS_TEXTURE;
+  const auto& entry = textures[slot];
+  if (!entry.live || entry.quarantined || entry.generation != HandleGeneration(value))
+    return shaderinterop::INVALID_BINDLESS_TEXTURE;
+  return entry.bindlessSlot;
 }
 
 }  // namespace
@@ -949,6 +1004,241 @@ Expected<void> GpuScene::CommitResources(nvrhi::ICommandList* commandList) {
     commandList->writeBuffer(entry.vertexBuffer.Get(), entry.positions.data(), vertexBytes);
     commandList->writeBuffer(entry.indexBuffer.Get(), entry.indices.data(), indexBytes);
     entry.needsGpuUpload = false;
+  }
+
+  // ---- M5: lazy-init missing-texture + bindless sampler -------------
+  // The magenta 4×4 fallback lives in slot 0 of the bindless texture
+  // table; every material whose resolved path failed to decode
+  // points at it via INVALID_BINDLESS_TEXTURE → fallback gating in
+  // the closesthit. Created once on the first commit that has a
+  // device, reused for the lifetime of the scene.
+  if (!_impl->missingTexture)
+  {
+    nvrhi::TextureDesc missingDesc;
+    missingDesc.width = 4;
+    missingDesc.height = 4;
+    missingDesc.format = nvrhi::Format::RGBA8_UNORM;
+    missingDesc.dimension = nvrhi::TextureDimension::Texture2D;
+    missingDesc.debugName = "scene.missingTexture";
+    missingDesc.initialState = nvrhi::ResourceStates::ShaderResource;
+    missingDesc.keepInitialState = true;
+    _impl->missingTexture = _impl->device->createTexture(missingDesc);
+    if (!_impl->missingTexture)
+    {
+      return std::unexpected{
+          PYXIS_ERROR(ErrorKind::OutOfMemoryGpu,
+                      "CommitResources: createTexture(missingTexture 4x4) failed")};
+    }
+    // Magenta + black checker — visibly broken to debug eyes.
+    static constexpr std::uint8_t MAGENTA[4] = {255, 0, 255, 255};
+    static constexpr std::uint8_t BLACK[4]   = {0, 0, 0, 255};
+    std::uint8_t pixels[4 * 4 * 4];
+    for (std::size_t row = 0; row < 4; ++row)
+    {
+      for (std::size_t col = 0; col < 4; ++col)
+      {
+        const auto& src = ((col ^ row) & 1u) ? MAGENTA : BLACK;
+        std::memcpy(&pixels[(row * 4u + col) * 4u], src, 4);
+      }
+    }
+    commandList->writeTexture(_impl->missingTexture.Get(), 0, 0, pixels,
+                              static_cast<std::size_t>(4u * 4u));
+  }
+  if (!_impl->bindlessSampler)
+  {
+    nvrhi::SamplerDesc samplerDesc;
+    samplerDesc.minFilter = true;
+    samplerDesc.magFilter = true;
+    samplerDesc.mipFilter = true;
+    samplerDesc.addressU = nvrhi::SamplerAddressMode::Wrap;
+    samplerDesc.addressV = nvrhi::SamplerAddressMode::Wrap;
+    samplerDesc.addressW = nvrhi::SamplerAddressMode::Wrap;
+    _impl->bindlessSampler = _impl->device->createSampler(samplerDesc);
+  }
+
+  // ---- M5: decode + upload pending textures -------------------------
+  // Synchronous stb_image decode on the render thread. The §31
+  // async I/O pool wires at M8 when texture-load latency starts to
+  // dominate frame time; for the M5 stub textured cube one
+  // texture per scene is the realistic upper bound.
+  for (Impl::TextureEntry& entry : _impl->textures)
+  {
+    if (!entry.live || !entry.needsGpuUpload || entry.resolvedPath.empty())
+      continue;
+
+    int width = 0;
+    int height = 0;
+    int channelsInFile = 0;
+    // stbi_load returns 4-channel RGBA8 since we request 4. The
+    // pointer is malloc-allocated; we copy into entry.pixelData
+    // and free immediately.
+    stbi_uc* decoded = stbi_load(entry.resolvedPath.c_str(), &width, &height,
+                                 &channelsInFile, 4);
+    if (decoded == nullptr || width <= 0 || height <= 0)
+    {
+      Logging::Get().Warn(log::RENDER,
+                          std::string{"TextureCache: stbi_load failed for "}
+                              + entry.resolvedPath
+                              + " — falling back to missing-texture (slot 0).");
+      entry.needsGpuUpload = false;
+      entry.bindlessSlot = 0;  // points at missingTexture
+      if (decoded)
+        stbi_image_free(decoded);
+      continue;
+    }
+
+    const auto pixelByteCount = static_cast<std::size_t>(width) * height * 4;
+    entry.pixelData.assign(decoded, decoded + pixelByteCount);
+    stbi_image_free(decoded);
+    entry.width = static_cast<std::uint32_t>(width);
+    entry.height = static_cast<std::uint32_t>(height);
+    // BaseColor + Emission go through the sRGB→linear EOTF on
+    // sample; everything else is linear data (normal maps, ORM
+    // packs, etc.). §13 colorspace rule.
+    entry.format = (entry.keyCopy.role == TextureKey::Role::BaseColor
+                    || entry.keyCopy.role == TextureKey::Role::Emission)
+                       ? nvrhi::Format::SRGBA8_UNORM
+                       : nvrhi::Format::RGBA8_UNORM;
+
+    nvrhi::TextureDesc texDesc;
+    texDesc.width = entry.width;
+    texDesc.height = entry.height;
+    texDesc.format = entry.format;
+    texDesc.dimension = nvrhi::TextureDimension::Texture2D;
+    texDesc.debugName = entry.resolvedPath;
+    texDesc.initialState = nvrhi::ResourceStates::ShaderResource;
+    texDesc.keepInitialState = true;
+    entry.texture = _impl->device->createTexture(texDesc);
+    if (!entry.texture)
+    {
+      return std::unexpected{PYXIS_ERROR(ErrorKind::OutOfMemoryGpu,
+                                         "CommitResources: createTexture failed for '%s'",
+                                         entry.resolvedPath.c_str())};
+    }
+    commandList->writeTexture(entry.texture.Get(), 0, 0, entry.pixelData.data(),
+                              static_cast<std::size_t>(entry.width) * 4u);
+    // Drop the CPU copy now that the GPU upload is queued — staging
+    // ring + the §31 deletion guard ensure the bytes survive the
+    // submit. Frees ~width*height*4 bytes per texture.
+    entry.pixelData.clear();
+    entry.pixelData.shrink_to_fit();
+    entry.needsGpuUpload = false;
+  }
+
+  // ---- M5: pack + upload material GPU buffer ------------------------
+  // Re-uploaded whenever any material was added or updated this
+  // frame (or when the materials vector grew). Small enough at v1
+  // (~80 bytes per material × hundreds-of-thousands materials cap
+  // = a few MiB worst case) that we always re-upload the whole
+  // table rather than tracking dirty ranges.
+  if (_impl->materialsNeedGpuUpload && _impl->materials.size() > 1)
+  {
+    std::vector<shaderinterop::OpenPBRMaterialGPU> packed;
+    packed.resize(_impl->materials.size());
+    for (std::uint32_t slot = 0; slot < _impl->materials.size(); ++slot)
+    {
+      const Impl::MaterialEntry& entry = _impl->materials[slot];
+      if (slot == 0 || !entry.live)
+      {
+        // Sentinel slot 0 + dead materials → magenta-fallback
+        // material so the closesthit reads valid bytes regardless.
+        packed[slot] = PackMaterialGpu(
+            OpenPBRMaterialDesc{},
+            static_cast<std::uint32_t>(MaterialFlag::None),
+            shaderinterop::INVALID_BINDLESS_TEXTURE,
+            shaderinterop::INVALID_BINDLESS_TEXTURE,
+            shaderinterop::INVALID_BINDLESS_TEXTURE,
+            shaderinterop::INVALID_BINDLESS_TEXTURE,
+            shaderinterop::INVALID_BINDLESS_TEXTURE,
+            shaderinterop::INVALID_BINDLESS_TEXTURE,
+            shaderinterop::INVALID_BINDLESS_TEXTURE,
+            shaderinterop::INVALID_BINDLESS_TEXTURE);
+        continue;
+      }
+      // Compute MaterialFlag bits from the desc + the texture
+      // handles. The closesthit reads `flags` to short-circuit the
+      // bindless lookup so a missing texture renders the scalar
+      // fallback rather than the magenta missingTexture.
+      std::uint32_t flags = 0;
+      if (entry.descCopy.opacity < 1.0f) flags |= MaterialFlag::AlphaTested;
+      if (entry.descCopy.coatWeight > 0.0f) flags |= MaterialFlag::CoatEnabled;
+      if (entry.descCopy.transmissionWeight > 0.0f)
+        flags |= MaterialFlag::TransmissionEnabled;
+      if (entry.descCopy.emissionLuminance > 0.0f) flags |= MaterialFlag::Emissive;
+
+      const std::uint32_t baseColorSlot =
+          ResolveTextureBindlessSlot(entry.descCopy.baseColorMap, _impl->textures);
+      const std::uint32_t normalSlot =
+          ResolveTextureBindlessSlot(entry.descCopy.normalMap, _impl->textures);
+      const std::uint32_t metallicSlot =
+          ResolveTextureBindlessSlot(entry.descCopy.metallicMap, _impl->textures);
+      const std::uint32_t roughnessSlot =
+          ResolveTextureBindlessSlot(entry.descCopy.roughnessMap, _impl->textures);
+      const std::uint32_t emissionSlot =
+          ResolveTextureBindlessSlot(entry.descCopy.emissionMap, _impl->textures);
+      const std::uint32_t opacitySlot =
+          ResolveTextureBindlessSlot(entry.descCopy.opacityMap, _impl->textures);
+      const std::uint32_t transmissionSlot =
+          ResolveTextureBindlessSlot(entry.descCopy.transmissionMap, _impl->textures);
+      const std::uint32_t coatRoughnessSlot =
+          ResolveTextureBindlessSlot(entry.descCopy.coatRoughnessMap, _impl->textures);
+
+      if (baseColorSlot != shaderinterop::INVALID_BINDLESS_TEXTURE)
+        flags |= MaterialFlag::HasBaseColorMap;
+      if (normalSlot != shaderinterop::INVALID_BINDLESS_TEXTURE)
+        flags |= MaterialFlag::HasNormalMap;
+      if (metallicSlot != shaderinterop::INVALID_BINDLESS_TEXTURE)
+        flags |= MaterialFlag::HasMetallicMap;
+      if (roughnessSlot != shaderinterop::INVALID_BINDLESS_TEXTURE)
+        flags |= MaterialFlag::HasRoughnessMap;
+      if (emissionSlot != shaderinterop::INVALID_BINDLESS_TEXTURE)
+        flags |= MaterialFlag::HasEmissionMap;
+      if (opacitySlot != shaderinterop::INVALID_BINDLESS_TEXTURE)
+        flags |= MaterialFlag::HasOpacityMap;
+      if (transmissionSlot != shaderinterop::INVALID_BINDLESS_TEXTURE)
+        flags |= MaterialFlag::HasTransmissionMap;
+      if (coatRoughnessSlot != shaderinterop::INVALID_BINDLESS_TEXTURE)
+        flags |= MaterialFlag::HasCoatRoughnessMap;
+
+      packed[slot] = PackMaterialGpu(
+          entry.descCopy, flags,
+          baseColorSlot, normalSlot, metallicSlot, roughnessSlot,
+          emissionSlot, opacitySlot, transmissionSlot, coatRoughnessSlot);
+    }
+
+    const std::size_t bufferBytes = packed.size() * sizeof(shaderinterop::OpenPBRMaterialGPU);
+    // (Re)create the GPU buffer if it doesn't exist or grew. M5 stub
+    // grows monotonically — DestroyMaterial leaves a hole rather
+    // than reclaiming the slot index. M8 perf sweep adds compaction.
+    if (!_impl->materialGpuBuffer
+        || _impl->materialGpuBuffer->getDesc().byteSize < bufferBytes)
+    {
+      nvrhi::BufferDesc bufDesc;
+      bufDesc.byteSize = bufferBytes;
+      bufDesc.structStride = sizeof(shaderinterop::OpenPBRMaterialGPU);
+      bufDesc.canHaveRawViews = false;
+      bufDesc.canHaveTypedViews = false;
+      bufDesc.format = nvrhi::Format::UNKNOWN;
+      bufDesc.debugName = "scene.materials";
+      bufDesc.initialState = nvrhi::ResourceStates::ShaderResource;
+      bufDesc.keepInitialState = true;
+      _impl->materialGpuBuffer = _impl->device->createBuffer(bufDesc);
+      if (!_impl->materialGpuBuffer)
+      {
+        return std::unexpected{
+            PYXIS_ERROR(ErrorKind::OutOfMemoryGpu,
+                        "CommitResources: createBuffer(materials, %zu bytes) failed",
+                        bufferBytes)};
+      }
+    }
+    commandList->writeBuffer(_impl->materialGpuBuffer.Get(), packed.data(), bufferBytes);
+    // Per-entry needsGpuUpload flags are advisory only since we
+    // always re-upload the whole table; clearing them keeps the
+    // bookkeeping consistent so a future incremental-upload path
+    // (M8+) can drop into place without semantic changes.
+    for (Impl::MaterialEntry& entry : _impl->materials)
+      entry.needsGpuUpload = false;
+    _impl->materialsNeedGpuUpload = false;
   }
 
   // ---- Build pending BLAS -------------------------------------------
