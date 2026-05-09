@@ -63,20 +63,20 @@ void main(inout HitInfo payload) {
     }
 
     // Sample the HDRI at the primary ray's miss direction. The
-    // PathTracePass's 1×1 black fallback covers the no-bound-dome
-    // case — the texture sample returns (0,0,0,0), so without an
-    // authored dome we keep the soft-blue fallback above; with an
-    // authored dome the (color × intensity) modulates the HDRI.
+    // PathTracePass's 1×1 WHITE fallback covers the no-HDRI case
+    // (color-only dome OR failed EXR decode) — sample returns
+    // (1,1,1) so `hdri × tint × scale` collapses to `tint × scale`,
+    // i.e. the dome's authored colour. With a real HDRI bound, the
+    // hdri value carries the radiance distribution; tint × scale
+    // lets the .usd modulate it without re-baking the EXR.
     const float3 dir = normalize(WorldRayDirection());
     const float2 uv  = latLongUv(dir);
     const float3 hdri = gDomeEnvMap.SampleLevel(gDomeSampler, uv, 0).rgb;
 
-    // If a dome is authored: HDRI × tint × scale. The HDRI carries
-    // the radiance distribution; tint × scale lets the .usd modulate
-    // it without re-baking the EXR.
-    // If no dome: keep the legacy sky-blue (HDRI sample is
-    // 0 × 0.55,0.65,0.85 = 0 from the fallback texture, so we want
-    // the unscaled tint).
+    // No-dome scenes (M3 cube / M5 m5_three_materials / M6 m6_
+    // instanced_grid — all author no UsdLuxDomeLight) keep the
+    // M3-era soft sky-blue. Dome-authored scenes use the HDRI
+    // sample modulated by tint × scale.
     const float3 background = domeFound
         ? hdri * domeTint * domeScale
         : domeTint;

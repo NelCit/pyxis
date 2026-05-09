@@ -33,15 +33,26 @@
 // raygen / miss shaders share the same set 0; binding numbers stay
 // stable across stages so the single binding set covers all three.
 //
-//   set=0, binding=0 : CameraUniforms cbuffer (raygen-only)
-//   set=0, binding=1 : RaytracingAccelerationStructure TLAS (raygen)
-//   set=0, binding=2 : RWTexture2D<float4> output image (raygen)
-//   set=0, binding=3 : StructuredBuffer<OpenPBRMaterialGPU> materials
-//                      (closesthit — added at M5)
-//   set=0, binding=4 : StructuredBuffer<uint> instance→material slot
-//                      (closesthit — added at M6, plan §15)
-//   set=0, binding=5 : StructuredBuffer<LightGpu> lights
-//                      (closesthit — added at M7-simple)
+//   set=0, binding=0  : CameraUniforms cbuffer (raygen-only)
+//   set=0, binding=1  : RaytracingAccelerationStructure TLAS (raygen)
+//   set=0, binding=2  : RWTexture2D<float4> output image (raygen)
+//   set=0, binding=3  : StructuredBuffer<OpenPBRMaterialGPU> materials
+//                       (closesthit — added at M5)
+//   set=0, binding=4  : StructuredBuffer<uint> instance→material slot
+//                       (closesthit — added at M6, plan §15)
+//   set=0, binding=5  : StructuredBuffer<LightGpu> lights
+//                       (closesthit + miss — added at M7-simple)
+//   set=0, binding=6  : StructuredBuffer<uint> instance→mesh slot
+//                       (closesthit — added at M7 NdotL)
+//   set=0, binding=7  : StructuredBuffer<float4> mesh face normals
+//                       (closesthit — added at M7 NdotL; flat
+//                        per-mesh concatenation, indexed via offset 8)
+//   set=0, binding=8  : StructuredBuffer<uint> mesh face-normal offsets
+//                       (closesthit — added at M7 NdotL)
+//   set=0, binding=9  : Texture2D<float4> dome HDRI env-map
+//                       (miss — added at M7 IBL)
+//   set=0, binding=10 : SamplerState dome HDRI sampler
+//                       (miss — added at M7 IBL)
 
 #include "ShaderInterop.slang"
 

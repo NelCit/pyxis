@@ -16,9 +16,17 @@
 // binding-number space under -target spirv, so we use explicit
 // `[[vk::binding(N, S)]]` attributes to lock the slot assignment.
 //
-//   set=0, binding=0 : CameraUniforms cbuffer
-//   set=0, binding=1 : RaytracingAccelerationStructure (TLAS)
-//   set=0, binding=2 : RWTexture2D<float4> (output colour)
+// Raygen consumes only the first three bindings; bindings 3..10 are
+// declared by closesthit.slang + miss.slang (full list in
+// closesthit.slang's header comment) and bound across all three
+// stages by the shared layout (visibility = AllRayTracing).
+//
+//   set=0, binding=0 : CameraUniforms cbuffer (raygen)
+//   set=0, binding=1 : RaytracingAccelerationStructure (raygen)
+//   set=0, binding=2 : RWTexture2D<float4> output (raygen)
+//   set=0, binding=3..8 : materials / instance side-tables / lights /
+//                         per-mesh normals — see closesthit.slang
+//   set=0, binding=9..10: dome HDRI texture + sampler — see miss.slang
 
 #include "ShaderInterop.slang"
 
@@ -85,6 +93,13 @@ void main() {
              payload);
 
     // M7-simple tone-map: ACES Filmic (Narkowicz approximation).
+    //
+    // TODO(M9): REMOVE this block when the §9 ToneMapPass lands as
+    // a separate render-graph stage. The ToneMapPass owns the
+    // tone-map step end-to-end; leaving the operator inlined here
+    // would tone-map twice (raygen + ToneMapPass), crushing
+    // highlights and desaturating mid-tones. The grep marker is
+    // `M7-simple tone-map`.
     //
     // The closesthit's NdotL Lambert + Dome ambient and the miss
     // shader's HDRI sample both produce HDR values that can exceed

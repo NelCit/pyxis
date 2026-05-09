@@ -95,10 +95,11 @@ add_test(
             -DFIXTURE_CONFIG=${CMAKE_SOURCE_DIR}/tests/fixtures/headless_triangle.json
             -DLIT_SCENE=${CMAKE_SOURCE_DIR}/tests/fixtures/m7_lit_scene.usd
             -DUNLIT_SCENE=${CMAKE_SOURCE_DIR}/tests/fixtures/m7_lit_scene_unlit.usd
+            -DCOLOR_DOME_SCENE=${CMAKE_SOURCE_DIR}/tests/fixtures/m7_color_only_dome.usd
             -DOUTPUT_DIR=${CMAKE_BINARY_DIR}/tests/integration/m7_lighting
             -P ${CMAKE_SOURCE_DIR}/tests/integration/m7_lighting.cmake
 )
 set_tests_properties(M7.LightingMovesPixels PROPERTIES
     LABELS    "integration;m7"
-    TIMEOUT   120  # Three USD-loading runs.
+    TIMEOUT   180  # Four USD-loading runs (lit ×2 + unlit + color-dome).
 )

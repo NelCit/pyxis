@@ -42,6 +42,9 @@ endif()
 if(NOT DEFINED UNLIT_SCENE)
     message(FATAL_ERROR "m7_lighting: -DUNLIT_SCENE=<m7_lit_scene_unlit.usd> required")
 endif()
+if(NOT DEFINED COLOR_DOME_SCENE)
+    message(FATAL_ERROR "m7_lighting: -DCOLOR_DOME_SCENE=<m7_color_only_dome.usd> required")
+endif()
 if(NOT DEFINED OUTPUT_DIR)
     message(FATAL_ERROR "m7_lighting: -DOUTPUT_DIR=<work-dir> required")
 endif()
@@ -49,9 +52,10 @@ endif()
 file(REMOVE_RECURSE "${OUTPUT_DIR}")
 file(MAKE_DIRECTORY "${OUTPUT_DIR}")
 
-set(_litA_exr   "${OUTPUT_DIR}/lit_a.exr")
-set(_litB_exr   "${OUTPUT_DIR}/lit_b.exr")
-set(_unlit_exr  "${OUTPUT_DIR}/unlit.exr")
+set(_litA_exr      "${OUTPUT_DIR}/lit_a.exr")
+set(_litB_exr      "${OUTPUT_DIR}/lit_b.exr")
+set(_unlit_exr     "${OUTPUT_DIR}/unlit.exr")
+set(_colorDome_exr "${OUTPUT_DIR}/color_only_dome.exr")
 
 # ----- Run A: lit fixture -------------------------------------------
 execute_process(
@@ -144,6 +148,73 @@ if(_rcSameAsUnlit EQUAL 0)
         "ObjectToWorld3x4 normal transform broken, or face-normal lookup OOB.")
 endif()
 
+# ----- Run color-only-dome (audit closeout) -------------------------
+# Same triangle + sun as m7_lit_scene.usd, but the Dome here has NO
+# `inputs:texture:file` — only an authored color × intensity. Pre-fix
+# (PathTracePass dome fallback texture initialised to BLACK) the
+# rendered EXR collapsed to a black background because the miss
+# shader's `hdri × tint × scale` chain multiplied 0 × tint × scale.
+# Post-fix (fallback initialised to WHITE) the chain collapses to
+# `tint × scale` so the Dome's authored color shows through.
+#
+# Test asserts:
+#   * the run produced an EXR larger than the implausible-empty floor
+#   * the EXR DIFFERS from the unlit-twin (lights still moving pixels)
+#   * the EXR DIFFERS from the bundled-HDRI lit fixture (this fixture's
+#     magenta sky vs lit_scene's HDRI background must not collide)
+execute_process(
+    COMMAND "${PYXIS_EXE}" --headless --config "${FIXTURE_CONFIG}"
+                            --scene "${COLOR_DOME_SCENE}"
+                            --ingest usd_direct --output "${_colorDome_exr}"
+    WORKING_DIRECTORY "${OUTPUT_DIR}"
+    RESULT_VARIABLE   _rcCD
+    OUTPUT_VARIABLE   _outCD
+    ERROR_VARIABLE    _outCD)
+if(NOT _rcCD EQUAL 0)
+    message(FATAL_ERROR
+        "m7_lighting: color-only-dome run failed (rc=${_rcCD})\n${_outCD}")
+endif()
+if(NOT EXISTS "${_colorDome_exr}")
+    message(FATAL_ERROR
+        "m7_lighting: color-only-dome run produced no EXR at ${_colorDome_exr}")
+endif()
+
+file(SIZE "${_colorDome_exr}" _szCD)
+if(_szCD LESS _min_plausible_bytes)
+    message(FATAL_ERROR
+        "m7_lighting: color-only-dome EXR is implausibly small "
+        "(${_szCD} bytes < ${_min_plausible_bytes}); render likely produced "
+        "an empty file.")
+endif()
+
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E compare_files "${_colorDome_exr}" "${_unlit_exr}"
+    RESULT_VARIABLE _rcCDvsUnlit)
+if(_rcCDvsUnlit EQUAL 0)
+    message(FATAL_ERROR
+        "m7_lighting: color-only-dome EXR is byte-identical to the "
+        "unlit-twin EXR. The dome's authored color is not reaching the "
+        "rendered pixels — most likely the PathTracePass dome-texture "
+        "fallback is back to zero-init (black), making the miss shader's "
+        "`hdri × tint × scale` collapse to 0, OR the lights buffer wasn't "
+        "uploaded.")
+endif()
+
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E compare_files "${_colorDome_exr}" "${_litA_exr}"
+    RESULT_VARIABLE _rcCDvsLit)
+if(_rcCDvsLit EQUAL 0)
+    message(FATAL_ERROR
+        "m7_lighting: color-only-dome EXR is byte-identical to the "
+        "HDRI-lit EXR. That can't be right — one fixture has the magenta "
+        "color-only dome, the other has the HDRI Sky. Most likely the "
+        "miss shader is reading from a stale bound texture, or "
+        "GetDomeEnvMapTexture mis-resolves which dome's texture is "
+        "active across the two runs.")
+endif()
+
 message(STATUS
-    "m7_lighting OK: lit EXR (${_szA} bytes) is deterministic across re-runs "
-    "and visibly differs from the unlit-twin render.")
+    "m7_lighting OK: lit EXR (${_szA} bytes) is deterministic across "
+    "re-runs and visibly differs from the unlit-twin AND the color-only-"
+    "dome render (${_szCD} bytes). Lights, NdotL Lambert, HDRI sampling, "
+    "and the white-fallback dome-texture path all moving pixels.")

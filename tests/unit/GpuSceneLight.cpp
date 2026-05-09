@@ -25,6 +25,7 @@ using pyxis::HANDLE_SLOT_MASK;
 using pyxis::LightDesc;
 using pyxis::LightHandle;
 using pyxis::Profiler;
+using pyxis::TextureHandle;
 
 namespace {
 
@@ -143,4 +144,66 @@ TEST(GpuSceneLight, LastFrameStatsTracksLiveLightCount) {
 
   fixture.scene.RemoveLight(second);
   EXPECT_EQ(fixture.scene.LastFrameStats().lightCount, 0u);
+}
+
+// -----------------------------------------------------------------------------
+// M7 audit closeout — verify the three LightDesc::Kind variants
+// (Distant / Dome / Rect) all round-trip through AddLight and bump
+// `lightCount`. Pre-M7 only Distant was tested; the M7 EmitLight path
+// emits Dome (color + envMap) and Rect (position + axes) as well. A
+// regression that drops one kind silently would leave its handle
+// returned Invalid; this test catches that.
+// -----------------------------------------------------------------------------
+TEST(GpuSceneLight, AddLightDomeKindReturnsLiveHandle) {
+  CpuOnlyScene fixture;
+  LightDesc desc;
+  desc.kind = LightDesc::Kind::Dome;
+  desc.color = hlslpp::float3{0.95f, 0.10f, 0.65f};  // recognisable magenta
+  desc.intensity = 1.0f;
+  desc.envMap = TextureHandle::Invalid;  // color-only dome (M7 audit case)
+  const LightHandle handle = fixture.scene.AddLight(desc);
+  EXPECT_NE(handle, LightHandle::Invalid);
+  EXPECT_EQ(fixture.scene.LastFrameStats().lightCount, 1u);
+}
+
+TEST(GpuSceneLight, AddLightRectKindReturnsLiveHandle) {
+  CpuOnlyScene fixture;
+  LightDesc desc;
+  desc.kind = LightDesc::Kind::Rect;
+  desc.color = hlslpp::float3{1.0f, 1.0f, 1.0f};
+  desc.intensity = 2.0f;
+  desc.position = hlslpp::float3{0.0f, 2.0f, 0.0f};
+  desc.axisU = hlslpp::float3{1.0f, 0.0f, 0.0f};
+  desc.axisV = hlslpp::float3{0.0f, 0.0f, 1.0f};
+  desc.doubleSided = true;
+  const LightHandle handle = fixture.scene.AddLight(desc);
+  EXPECT_NE(handle, LightHandle::Invalid);
+  EXPECT_EQ(fixture.scene.LastFrameStats().lightCount, 1u);
+}
+
+// All three kinds in one scene — `lightCount` reaches 3 + each handle
+// is distinct. Mirrors the multi-kind layout that
+// `m7_lit_scene.usd` + the bundled `default.usd` author at runtime.
+TEST(GpuSceneLight, AddLightAllThreeKindsCoexistInTable) {
+  CpuOnlyScene fixture;
+
+  LightDesc distant;
+  distant.kind = LightDesc::Kind::Distant;
+  const LightHandle distantHandle = fixture.scene.AddLight(distant);
+
+  LightDesc dome;
+  dome.kind = LightDesc::Kind::Dome;
+  const LightHandle domeHandle = fixture.scene.AddLight(dome);
+
+  LightDesc rect;
+  rect.kind = LightDesc::Kind::Rect;
+  const LightHandle rectHandle = fixture.scene.AddLight(rect);
+
+  EXPECT_NE(distantHandle, LightHandle::Invalid);
+  EXPECT_NE(domeHandle,    LightHandle::Invalid);
+  EXPECT_NE(rectHandle,    LightHandle::Invalid);
+  EXPECT_NE(distantHandle, domeHandle);
+  EXPECT_NE(domeHandle,    rectHandle);
+  EXPECT_NE(distantHandle, rectHandle);
+  EXPECT_EQ(fixture.scene.LastFrameStats().lightCount, 3u);
 }

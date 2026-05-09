@@ -1,0 +1,82 @@
+#usda 1.0
+(
+    "Pyxis M7 audit closeout — color-only Dome (no texture:file)."
+    "Same triangle + sun as m7_lit_scene.usd, but the Dome here has NO"
+    "inputs:texture:file authored — only a color × intensity. Exercises"
+    "the PathTracePass white-fallback texture path: miss shader's"
+    "`hdri × tint × scale` collapses to `tint × scale` so the rendered"
+    "background = the Dome's authored color × intensity."
+    "Pre-fix this fixture rendered a BLACK background because the"
+    "fallback texture was zero-init. The audit closeout test asserts"
+    "the EXR is NOT byte-equal to a black-only render."
+    upAxis = "Y"
+    metersPerUnit = 1.0
+    defaultPrim = "M7Fixture"
+    doc = "Pyxis M7 color-only-dome audit fixture."
+)
+
+def Xform "M7Fixture"
+{
+    def Mesh "Triangle" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(-1.0, -0.8, 0), (1.0, -0.8, 0), (0.0, 0.8, 0)]
+        rel material:binding = </M7Fixture/Materials/Sunlit>
+    }
+
+    def Scope "Materials"
+    {
+        def Material "Sunlit"
+        {
+            token outputs:surface.connect = </M7Fixture/Materials/Sunlit/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.9, 0.9, 0.9)
+                float inputs:roughness = 0.5
+                float inputs:metallic = 0.0
+                token outputs:surface
+            }
+        }
+    }
+
+    def Scope "Lights"
+    {
+        def DistantLight "Sun"
+        {
+            color3f inputs:color = (1.0, 0.95, 0.85)
+            float inputs:intensity = 1.0
+            matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+            uniform token[] xformOpOrder = ["xformOp:transform"]
+        }
+
+        # Color-only Dome — distinctive saturated magenta so the rendered
+        # background is unambiguous if the audit-fix works (and obviously
+        # broken if the fallback texture is still black). NO
+        # `inputs:texture:file` authored — that's the whole point.
+        def DomeLight "Sky"
+        {
+            color3f inputs:color = (0.95, 0.10, 0.65)
+            float inputs:intensity = 1.0
+        }
+    }
+
+    def Scope "Cameras"
+    {
+        def Camera "main"
+        {
+            float focalLength = 35
+            float horizontalAperture = 36
+            float verticalAperture = 24
+            float fStop = 0
+            float focusDistance = 4.0
+            float2 clippingRange = (0.1, 100)
+            matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 4, 1) )
+            uniform token[] xformOpOrder = ["xformOp:transform"]
+        }
+    }
+}

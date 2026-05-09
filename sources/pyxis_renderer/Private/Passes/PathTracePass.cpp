@@ -581,13 +581,20 @@ void PathTracePass::Execute(nvrhi::ICommandList* commandList, const PassContext&
                              sizeof(FALLBACK_MESH_FACE_NORMALS_ZERO));
   }
 
-  // M7-IBL: zero-init the 1×1 dome fallback texture if the scene
+  // M7-IBL: WHITE-init the 1×1 dome fallback texture if the scene
   // hasn't bound a real env-map. RGBA32_FLOAT, 16 bytes — sample
-  // returns (0,0,0,0) so the miss shader's "use authored color"
-  // branch is the visible result.
+  // returns (1,1,1,1) so the miss shader's `hdri × tint × scale`
+  // collapses to `tint × scale` (the dome's authored color), which
+  // is the right answer when the dome is color-only or when EXR
+  // decode failed.
+  //
+  // White (not black) on purpose. A zero fallback combined with the
+  // miss shader's `hdri × tint × scale` branch turns any color-only
+  // dome / failed-HDRI into a black sky, dropping the author's
+  // intent — see the M7 audit closeout for the exact reproducer.
   if (_scene->GetDomeEnvMapTexture() == nullptr)
   {
-    static const float FALLBACK_DOME_PIXEL[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    static const float FALLBACK_DOME_PIXEL[4] = {1.0f, 1.0f, 1.0f, 1.0f};
     commandList->writeTexture(_fallbackDomeTexture.Get(), 0, 0, FALLBACK_DOME_PIXEL,
                               sizeof(FALLBACK_DOME_PIXEL));
   }
