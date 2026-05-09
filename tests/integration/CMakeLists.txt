@@ -61,3 +61,23 @@ set_tests_properties(M5.MaterialPathRendersDistinctColors PROPERTIES
     LABELS    "integration;m5"
     TIMEOUT   120  # Three USD-loading runs.
 )
+
+# §41 M6 — exercises the UsdGeomPointInstancer expansion path. The
+# fixture authors a single instancer with 100 instances of one cube
+# prototype; a working M6 emits 100 AppendInstance calls all
+# referencing one BLAS (per §15 sharing rule). See
+# m6_native_instancing.cmake header for the full failure-mode
+# catalogue.
+add_test(
+    NAME    M6.NativeInstancingExpandsPointInstancer
+    COMMAND ${CMAKE_COMMAND}
+            -DPYXIS_EXE=$<TARGET_FILE:pyxis>
+            -DFIXTURE_CONFIG=${CMAKE_SOURCE_DIR}/tests/fixtures/headless_triangle.json
+            -DINSTANCED_SCENE=${CMAKE_SOURCE_DIR}/tests/fixtures/m6_instanced_grid.usd
+            -DOUTPUT_DIR=${CMAKE_BINARY_DIR}/tests/integration/m6_native_instancing
+            -P ${CMAKE_SOURCE_DIR}/tests/integration/m6_native_instancing.cmake
+)
+set_tests_properties(M6.NativeInstancingExpandsPointInstancer PROPERTIES
+    LABELS    "integration;m6"
+    TIMEOUT   120  # Three USD-loading runs.
+)
