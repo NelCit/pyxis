@@ -24,11 +24,22 @@
 #include <Pyxis/Renderer/Forward.h>
 #include <Pyxis/Renderer/Profiler.h>
 
+#include "Materials/MaterialFlag.h"
+
+// ShaderInterop.slang lives in resources/shaders/ — the
+// pyxis_renderer target's PRIVATE include path puts that directory
+// on the search path so the C++ side here gets the same
+// OpenPBRMaterialGPU layout the closesthit reads. See pyxis_renderer/
+// CMakeLists.txt (`target_include_directories ... PRIVATE
+// ${CMAKE_SOURCE_DIR}/resources/shaders`) for the wiring rationale.
+#include "ShaderInterop.slang"
+
 #include <nvrhi/nvrhi.h>
 
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -62,6 +73,69 @@ constexpr std::size_t TLAS_MAX_INSTANCES = 256u;
 // §16 split rule threshold: BLAS for meshes ≥ 64k tris adds
 // AllowCompaction to the build flags.
 constexpr uint32_t BLAS_COMPACTION_TRIANGLE_THRESHOLD = 64u * 1024u;
+
+// FNV1a-64 hash. Plan §11 calls for XXH3_64bits long-term; this M5
+// stub uses FNV1a so the dedup table works without pulling xxhash
+// into the renderer for one milestone. The table doesn't outlive a
+// process so a swap to XXH3 at M8 (when Bistro-scale dedup quality
+// matters) is mechanical — only the hash function changes.
+constexpr std::uint64_t FNV1A_64_OFFSET = 0xcbf29ce484222325ULL;
+constexpr std::uint64_t FNV1A_64_PRIME  = 0x100000001b3ULL;
+
+std::uint64_t HashBytes(const void* data, std::size_t size) noexcept {
+  const auto* bytes = static_cast<const std::uint8_t*>(data);
+  std::uint64_t hash = FNV1A_64_OFFSET;
+  for (std::size_t i = 0; i < size; ++i)
+  {
+    hash ^= bytes[i];
+    hash *= FNV1A_64_PRIME;
+  }
+  return hash;
+}
+
+// Hash an OpenPBRMaterialDesc for dedup. We exclude the
+// `sourcePrim` view (diagnostics-only, not part of the material
+// identity per §18.5) so two materials authored from different USD
+// prims with identical fields collapse to the same handle. The
+// `_reserved[16]` trailing slot is included since two
+// minor-version-different layouts MUST hash differently — once the
+// reserved slots get populated by §22.3 future fields, the hash
+// reflects that automatically.
+std::uint64_t HashMaterialDesc(const OpenPBRMaterialDesc& desc) noexcept {
+  // Hash the bytes of the struct *excluding* the sourcePrim view
+  // (which is a pointer + length pair into caller-owned storage,
+  // unstable across calls). We hash the prefix up to sourcePrim
+  // and the suffix after it, which on the M5 layout are the body
+  // and the _reserved[16] tail respectively.
+  const auto* base = reinterpret_cast<const std::uint8_t*>(&desc);
+  const std::size_t prefixSize = offsetof(OpenPBRMaterialDesc, sourcePrim);
+  const std::size_t reservedOff = offsetof(OpenPBRMaterialDesc, _reserved);
+  const std::size_t reservedSize = sizeof(desc._reserved);
+
+  std::uint64_t hash = HashBytes(base, prefixSize);
+  // Mix in source enum (1 byte at the same offset prefixSize would
+  // already be covered if it preceded sourcePrim; in the current
+  // layout `Source source` sits BEFORE sourcePrim so prefixSize
+  // already covers it — see OpenPBRMaterialDesc.h).
+  hash = (hash ^ HashBytes(base + reservedOff, reservedSize)) * FNV1A_64_PRIME;
+  return hash;
+}
+
+// Hash a TextureKey. The key body is small + has no pointer-bearing
+// fields besides the path string_view, which we hash as bytes
+// independently.
+std::uint64_t HashTextureKey(const TextureKey& key) noexcept {
+  std::uint64_t hash = FNV1A_64_OFFSET;
+  // Role + colorspace are small enums; hash their bytes directly.
+  const auto roleByte = static_cast<std::uint8_t>(key.role);
+  const auto cspByte = static_cast<std::uint8_t>(key.colorspace);
+  hash ^= roleByte; hash *= FNV1A_64_PRIME;
+  hash ^= cspByte;  hash *= FNV1A_64_PRIME;
+  // Resolved path string contents — caller-owned span, hash bytes.
+  hash = (hash ^ HashBytes(key.resolvedPath.data(), key.resolvedPath.size()))
+         * FNV1A_64_PRIME;
+  return hash;
+}
 
 }  // namespace
 
@@ -107,6 +181,44 @@ struct GpuScene::Impl {
     LightDesc    descCopy{};
   };
 
+  // M5: material entry. Holds the CPU-side OpenPBRMaterialDesc copy
+  // + the slot index inside the material GPU buffer (the bindless
+  // table the closesthit reads via instanceCustomIndex). `descHash`
+  // is the FNV1a-64 hash of the descriptor body and is used by the
+  // dedup map; identical descs collapse to the same MaterialHandle
+  // per the §11 dedup rule.
+  struct MaterialEntry {
+    bool                 live           = false;
+    bool                 quarantined    = false;
+    bool                 needsGpuUpload = false;
+    std::uint8_t         generation     = 0;
+    OpenPBRMaterialDesc  descCopy{};
+    std::uint64_t        descHash       = 0;
+    std::string          sourcePrim;       // owned copy of descCopy.sourcePrim
+  };
+
+  // M5: texture entry. The TextureKey copy + the NVRHI texture +
+  // the bindless slot index used by the closesthit's
+  // `baseColorMaps[material.baseColorTex]` lookup. Decode is
+  // synchronous at M5 (the §31 async decode pool wires at M8 when
+  // texture-load latency starts to dominate); CPU-side decoded
+  // pixels are dropped after the GPU upload retires.
+  struct TextureEntry {
+    bool                 live           = false;
+    bool                 quarantined    = false;
+    bool                 needsGpuUpload = false;
+    std::uint8_t         generation     = 0;
+    TextureKey           keyCopy{};
+    std::uint64_t        keyHash        = 0;
+    std::string          resolvedPath;     // owned copy of keyCopy.resolvedPath
+    nvrhi::TextureHandle texture;
+    std::uint32_t        bindlessSlot   = 0;
+    std::uint32_t        width          = 0;
+    std::uint32_t        height         = 0;
+    nvrhi::Format        format         = nvrhi::Format::UNKNOWN;
+    std::vector<std::uint8_t> pixelData;   // dropped after upload commits
+  };
+
   nvrhi::IDevice*    device   = nullptr;  // borrowed; outlives this scene.
   Profiler*          profiler = nullptr;  // borrowed.
   GpuSceneCreateDesc desc{};
@@ -122,6 +234,39 @@ struct GpuScene::Impl {
   std::vector<MeshEntry>     meshes;
   std::vector<InstanceEntry> instances;
   std::vector<LightEntry>    lights;
+  std::vector<MaterialEntry> materials;
+  std::vector<TextureEntry>  textures;
+
+  // M5 dedup maps: hash → handle. AcquireMaterial / AcquireTexture
+  // hash their input desc / key, look up here, and return the
+  // existing handle on a hit. The §11 OpenPBR architecture rule
+  // ("hashed via XXH3_64bits, deduplicated") relies on these maps
+  // collapsing identical materials in a Bistro-scale scene where
+  // the same UsdShadeMaterial is bound to thousands of meshes.
+  // M5 stub uses FNV1a-64 (10-line inline impl below); XXH3
+  // upgrade is on the M8 perf-sweep checklist.
+  std::unordered_map<std::uint64_t, MaterialHandle> materialDescHashToHandle;
+  std::unordered_map<std::uint64_t, TextureHandle>  textureKeyHashToHandle;
+
+  // M5 GPU pools.
+  // - materialGpuBuffer: structured buffer of OpenPBRMaterialGPU,
+  //   indexed by instance custom index (which we set to the
+  //   material slot at AppendInstance time). Re-uploaded on every
+  //   commit if any material has needsGpuUpload — small enough
+  //   (M5 stub: <1 MiB) that we don't bother with partial updates.
+  // - bindlessSampler: a single shared linear-clamp sampler. Per-
+  //   role samplers (sRGB filtering, anisotropic for tangent maps,
+  //   etc.) are an M9 polish item.
+  nvrhi::BufferHandle  materialGpuBuffer;
+  bool                 materialsNeedGpuUpload = false;
+  nvrhi::SamplerHandle bindlessSampler;
+
+  // Magenta 4x4 fallback texture — slot 0 in the bindless table is
+  // permanently the "missing texture" colour so any material whose
+  // resolved path failed to decode renders visibly-broken instead
+  // of black-or-undefined-memory. The texture is created on first
+  // CommitResources and reused for the lifetime of the scene.
+  nvrhi::TextureHandle missingTexture;
 
   bool       hasCamera = false;
   CameraDesc cameraDesc{};
@@ -346,28 +491,210 @@ bool GpuScene::HasMesh(MeshHandle meshHandle) const {
 }
 
 // ---- Material --------------------------------------------------------------
-MaterialHandle GpuScene::AcquireMaterial(const OpenPBRMaterialDesc& /*materialDesc*/) {
-  return MaterialHandle::Invalid;
+MaterialHandle GpuScene::AcquireMaterial(const OpenPBRMaterialDesc& materialDesc) {
+  // §11 dedup: hash → existing handle if present, else allocate
+  // a new slot. Lazy-init the materials vector with slot 0
+  // reserved (the §19.7 invalid-handle sentinel) so `materialId =
+  // 0` in the closesthit unambiguously means "no material".
+  if (_impl->materials.empty())
+    _impl->materials.emplace_back();  // sentinel slot 0
+
+  const std::uint64_t hash = HashMaterialDesc(materialDesc);
+  if (auto found = _impl->materialDescHashToHandle.find(hash);
+      found != _impl->materialDescHashToHandle.end())
+  {
+    // Cache hit — return the existing handle. (Hash collisions
+    // are theoretically possible at FNV1a-64; in practice
+    // material counts in v1 are small enough that the
+    // birthday-paradox risk is negligible. M8 XXH3 swap revisits.)
+    return found->second;
+  }
+
+  uint32_t slot = 0;
+  for (uint32_t candidate = 1; candidate < _impl->materials.size(); ++candidate)
+  {
+    auto& entry = _impl->materials[candidate];
+    if (!entry.live && !entry.quarantined)
+    {
+      slot = candidate;
+      break;
+    }
+  }
+  if (slot == 0)
+  {
+    if (_impl->materials.size() >= (1u << HANDLE_SLOT_BITS))
+      return MaterialHandle::Invalid;  // slot space exhausted
+    _impl->materials.emplace_back();
+    slot = static_cast<uint32_t>(_impl->materials.size() - 1);
+  }
+
+  Impl::MaterialEntry& entry = _impl->materials[slot];
+  entry.live = true;
+  entry.needsGpuUpload = true;
+  entry.descCopy = materialDesc;
+  entry.descHash = hash;
+  entry.sourcePrim.assign(materialDesc.sourcePrim);
+  entry.descCopy.sourcePrim = entry.sourcePrim;  // re-point at owned copy
+
+  const auto handle = static_cast<MaterialHandle>(HandleEncode(slot, entry.generation));
+  _impl->materialDescHashToHandle.emplace(hash, handle);
+  _impl->materialsNeedGpuUpload = true;
+  return handle;
 }
 
-void GpuScene::UpdateMaterial(MaterialHandle /*materialHandle*/,
-                              const OpenPBRMaterialDesc& /*materialDesc*/) {}
+void GpuScene::UpdateMaterial(MaterialHandle materialHandle,
+                              const OpenPBRMaterialDesc& materialDesc) {
+  const auto value = static_cast<uint32_t>(materialHandle);
+  if (value == 0)
+    return;
+  const uint32_t slot = HandleSlot(value);
+  if (slot == 0 || slot >= _impl->materials.size())
+  {
+    ++_impl->lastFrameStats.staleHandleDrops;
+    return;
+  }
+  Impl::MaterialEntry& entry = _impl->materials[slot];
+  if (!entry.live || entry.quarantined || entry.generation != HandleGeneration(value))
+  {
+    ++_impl->lastFrameStats.staleHandleDrops;
+    return;
+  }
+  // Re-hash + dedup-map maintenance: drop the old hash entry, add
+  // the new one. If the new hash already maps to a different live
+  // material, we leave that alone (Update doesn't merge handles —
+  // semantics: this material's *fields* changed in place).
+  _impl->materialDescHashToHandle.erase(entry.descHash);
+  entry.descCopy = materialDesc;
+  entry.descHash = HashMaterialDesc(materialDesc);
+  entry.sourcePrim.assign(materialDesc.sourcePrim);
+  entry.descCopy.sourcePrim = entry.sourcePrim;
+  entry.needsGpuUpload = true;
+  _impl->materialDescHashToHandle.emplace(entry.descHash, materialHandle);
+  _impl->materialsNeedGpuUpload = true;
+}
 
-void GpuScene::DestroyMaterial(MaterialHandle /*materialHandle*/) {}
+void GpuScene::DestroyMaterial(MaterialHandle materialHandle) {
+  const auto value = static_cast<uint32_t>(materialHandle);
+  if (value == 0)
+    return;
+  const uint32_t slot = HandleSlot(value);
+  if (slot == 0 || slot >= _impl->materials.size())
+  {
+    ++_impl->lastFrameStats.staleHandleDrops;
+    return;
+  }
+  Impl::MaterialEntry& entry = _impl->materials[slot];
+  if (!entry.live || entry.quarantined || entry.generation != HandleGeneration(value))
+  {
+    ++_impl->lastFrameStats.staleHandleDrops;
+    return;
+  }
+  _impl->materialDescHashToHandle.erase(entry.descHash);
+  entry.live = false;
+  entry.descCopy = OpenPBRMaterialDesc{};
+  entry.sourcePrim.clear();
+  if (entry.generation == HANDLE_GENERATION_QUARANTINE)
+    entry.quarantined = true;
+  else
+    ++entry.generation;
+}
 
-bool GpuScene::HasMaterial(MaterialHandle /*materialHandle*/) const {
-  return false;
+bool GpuScene::HasMaterial(MaterialHandle materialHandle) const {
+  const auto value = static_cast<uint32_t>(materialHandle);
+  if (value == 0)
+    return false;
+  const uint32_t slot = HandleSlot(value);
+  if (slot == 0 || slot >= _impl->materials.size())
+    return false;
+  const Impl::MaterialEntry& entry = _impl->materials[slot];
+  return entry.live && !entry.quarantined && entry.generation == HandleGeneration(value);
 }
 
 // ---- Texture ---------------------------------------------------------------
-TextureHandle GpuScene::AcquireTexture(const TextureKey& /*textureKey*/) {
-  return TextureHandle::Invalid;
+TextureHandle GpuScene::AcquireTexture(const TextureKey& textureKey) {
+  // Same dedup + slot-allocation shape as AcquireMaterial. Decode
+  // happens lazily inside CommitResources (M5 stub: synchronous
+  // stb_image decode on the render thread; the §31 async I/O pool
+  // wires at M8 when texture-load latency starts to dominate).
+  if (_impl->textures.empty())
+    _impl->textures.emplace_back();  // sentinel slot 0
+
+  const std::uint64_t hash = HashTextureKey(textureKey);
+  if (auto found = _impl->textureKeyHashToHandle.find(hash);
+      found != _impl->textureKeyHashToHandle.end())
+  {
+    return found->second;
+  }
+
+  uint32_t slot = 0;
+  for (uint32_t candidate = 1; candidate < _impl->textures.size(); ++candidate)
+  {
+    auto& entry = _impl->textures[candidate];
+    if (!entry.live && !entry.quarantined)
+    {
+      slot = candidate;
+      break;
+    }
+  }
+  if (slot == 0)
+  {
+    if (_impl->textures.size() >= (1u << HANDLE_SLOT_BITS))
+      return TextureHandle::Invalid;
+    _impl->textures.emplace_back();
+    slot = static_cast<uint32_t>(_impl->textures.size() - 1);
+  }
+
+  Impl::TextureEntry& entry = _impl->textures[slot];
+  entry.live = true;
+  entry.needsGpuUpload = true;
+  entry.keyCopy = textureKey;
+  entry.keyHash = hash;
+  entry.resolvedPath.assign(textureKey.resolvedPath);
+  entry.keyCopy.resolvedPath = entry.resolvedPath;  // re-point at owned copy
+  entry.bindlessSlot = slot;  // bindless slot = handle slot for M5
+
+  const auto handle = static_cast<TextureHandle>(HandleEncode(slot, entry.generation));
+  _impl->textureKeyHashToHandle.emplace(hash, handle);
+  return handle;
 }
 
-void GpuScene::DestroyTexture(TextureHandle /*textureHandle*/) {}
+void GpuScene::DestroyTexture(TextureHandle textureHandle) {
+  const auto value = static_cast<uint32_t>(textureHandle);
+  if (value == 0)
+    return;
+  const uint32_t slot = HandleSlot(value);
+  if (slot == 0 || slot >= _impl->textures.size())
+  {
+    ++_impl->lastFrameStats.staleHandleDrops;
+    return;
+  }
+  Impl::TextureEntry& entry = _impl->textures[slot];
+  if (!entry.live || entry.quarantined || entry.generation != HandleGeneration(value))
+  {
+    ++_impl->lastFrameStats.staleHandleDrops;
+    return;
+  }
+  _impl->textureKeyHashToHandle.erase(entry.keyHash);
+  entry.live = false;
+  entry.texture = nullptr;
+  entry.resolvedPath.clear();
+  entry.pixelData.clear();
+  entry.pixelData.shrink_to_fit();
+  if (entry.generation == HANDLE_GENERATION_QUARANTINE)
+    entry.quarantined = true;
+  else
+    ++entry.generation;
+}
 
-bool GpuScene::HasTexture(TextureHandle /*textureHandle*/) const {
-  return false;
+bool GpuScene::HasTexture(TextureHandle textureHandle) const {
+  const auto value = static_cast<uint32_t>(textureHandle);
+  if (value == 0)
+    return false;
+  const uint32_t slot = HandleSlot(value);
+  if (slot == 0 || slot >= _impl->textures.size())
+    return false;
+  const Impl::TextureEntry& entry = _impl->textures[slot];
+  return entry.live && !entry.quarantined && entry.generation == HandleGeneration(value);
 }
 
 // ---- Instance --------------------------------------------------------------

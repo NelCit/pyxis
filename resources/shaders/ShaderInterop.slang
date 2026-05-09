@@ -72,19 +72,90 @@ struct CameraUniforms {
     float4x4 viewFromClip;      // inverse of CameraDesc::projFromView
 };
 
+// OpenPBRMaterialGPU — the bytewise layout the closesthit reads via
+// the structured-buffer material table. Plan §11. The C++ side packs
+// an OpenPBRMaterialDesc into this shape inside MaterialTable; the
+// shader side indexes by `materialId` (set on the instance custom
+// index) and reads `flags` to short-circuit lobe evaluation.
+//
+// M5 ships the BASE LAYER only. The reserved* slots leave room for
+// the §11 specular / transmission / coat / sheen / subsurface
+// extensions to land at M5+ (post the user's full BSDF impl) without
+// reshuffling existing fields. Layout is 80 bytes (5 rows of 16).
+//
+// **Scalars only** — no float3 / float4 vectors. Reason: `hlslpp::
+// float3` is SIMD-padded to 16 bytes on the C++ side while Slang's
+// `float3` in a structured buffer is 12 bytes tight; mixing the two
+// produces an off-by-4 layout drift (caught by the static_asserts
+// at the bottom). Scalar fields are byte-equivalent on both sides
+// regardless of the layout rule the compiler picked. Closesthit
+// reconstructs the float3 with `float3(m.baseColorR, m.baseColorG,
+// m.baseColorB)` — verbose but unambiguous.
+struct OpenPBRMaterialGPU {
+    // Row 0 — base color + flags.
+    float baseColorR;     // linear sRGB
+    float baseColorG;
+    float baseColorB;
+    uint  flags;          // bitmask of MaterialFlag (§11.6)
+
+    // Row 1 — bindless slot indices in Texture_SRV space=2 for the
+    // base-layer texture maps. ~0u means "no texture for this slot;
+    // closesthit uses the matching scalar above". The bindless lookup
+    // is gated by the corresponding MaterialFlag bit so the sentinel
+    // is only a fallback.
+    uint  baseColorTex;
+    uint  normalTex;
+    uint  metallicTex;
+    uint  roughnessTex;
+
+    // Row 2 — base-layer + dielectric scalars.
+    float roughness;
+    float metalness;
+    float opacity;
+    float specularIor;
+
+    // Row 3 — coat + emission.
+    float coatWeight;
+    float coatRoughness;
+    float emissionLuminance;
+    uint  emissionTex;
+
+    // Row 4 — remaining bindless slots reserved for the §11 extension
+    // surfaces the user wires alongside the full BSDF impl.
+    uint  opacityTex;
+    uint  transmissionTex;
+    uint  coatRoughnessTex;
+    uint  _reserved0;
+};
+
 #ifdef __cplusplus
     // HitInfo is shader-only (see the `#ifndef __cplusplus` guard
     // above), so its size assert lives shader-side only too. Below
     // we lock the layout of the structs that *do* cross the C++ /
-    // SPIR-V boundary as memory blobs (currently just CameraUniforms,
-    // uploaded via cbuffer).
+    // SPIR-V boundary as memory blobs (CameraUniforms via cbuffer,
+    // OpenPBRMaterialGPU via structured buffer).
     static_assert(sizeof(CameraUniforms) == 128,
                   "CameraUniforms must be 128 bytes — two 64-byte float4x4s "
                   "(see resources/shaders/ShaderInterop.slang).");
     static_assert(sizeof(CameraUniforms) % 16 == 0,
                   "CameraUniforms must be 16-byte aligned (cbuffer std140 rule).");
+    static_assert(sizeof(OpenPBRMaterialGPU) == 80,
+                  "OpenPBRMaterialGPU must be 80 bytes (5 rows of 16).");
+    static_assert(sizeof(OpenPBRMaterialGPU) % 16 == 0,
+                  "OpenPBRMaterialGPU must be 16-byte aligned (§23 cbuffer / "
+                  "structured-buffer alignment rule).");
+
+    // Sentinel bindless slot meaning "no texture bound for this lobe".
+    // The closesthit checks the matching MaterialFlag bit before
+    // sampling, so this value is only a fallback — it should never be
+    // dereferenced through the bindless table.
+    constexpr uint INVALID_BINDLESS_TEXTURE = ~0u;
 
     }  // namespace pyxis::shaderinterop
+#endif
+
+#ifndef __cplusplus
+static const uint INVALID_BINDLESS_TEXTURE = 0xFFFFFFFFu;
 #endif
 
 #endif  // PYXIS_SHADER_INTEROP_SLANG
