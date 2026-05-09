@@ -61,12 +61,20 @@ class PathTracePass final : public IRenderPass {
   nvrhi::BufferHandle _cameraUniformsBuffer;
 
   // M5: 1-element fallback material buffer (the closesthit reads
-  // `materials[InstanceID()]` so the binding must always be a
-  // non-null buffer even when the scene has no materials yet).
-  // GpuScene's own materials buffer takes precedence at binding-set
-  // creation time when present; this fallback covers cube-fixture
-  // scenes that never call AcquireMaterial.
+  // `materials[instanceMaterial[InstanceID()]]` so binding 3 must
+  // always be a non-null buffer even when the scene has no materials
+  // yet). GpuScene's own materials buffer takes precedence at
+  // binding-set creation time when present; this fallback covers
+  // cube-fixture scenes that never call AcquireMaterial.
   nvrhi::BufferHandle _fallbackMaterialBuffer;
+
+  // M6: 1-element fallback instance→material side-table. Same role
+  // as `_fallbackMaterialBuffer` but for binding 4 — the closesthit's
+  // `instanceMaterial[InstanceID()]` lookup must point at a non-null
+  // buffer even before GpuScene has built its first TLAS. Holds one
+  // zero-uint so any rogue InstanceID resolves to material slot 0
+  // (the sentinel grey material).
+  nvrhi::BufferHandle _fallbackInstanceMaterialBuffer;
 
   // Output binding-set cache, keyed on the output texture pointer.
   // Bounded — a swapchain rebuild churns through up to ~3 swapchain
@@ -81,6 +89,12 @@ class PathTracePass final : public IRenderPass {
   // frames. Without this, the cached binding set would keep the
   // stale fallback after the first AcquireMaterial.
   nvrhi::IBuffer* _lastSeenMaterialBuffer = nullptr;
+
+  // M6: same invalidation handle for the instance→material side-
+  // table at binding 4. GpuScene allocates this on the first TLAS
+  // build, so an empty scene that gains its first instance between
+  // frames needs the cached binding sets thrown out.
+  nvrhi::IBuffer* _lastSeenInstanceMaterialBuffer = nullptr;
 
   bool _shadersOk = false;  // true if ctor loaded all three shaders + built pipeline.
 };

@@ -147,14 +147,23 @@ public:
   [[nodiscard]] const CameraDesc&        GetCamera() const noexcept;
   [[nodiscard]] bool                     HasCamera() const noexcept;
 
-  // M5: structured buffer of OpenPBRMaterialGPU entries the
-  // closesthit reads via `materials[InstanceID()]` (resources/
-  // shaders/closesthit.slang binding 3). Allocated lazily on the
+  // M5/M6: structured buffer of OpenPBRMaterialGPU entries the
+  // closesthit reads via the instance→material indirection (see
+  // `GetInstanceMaterialBuffer` below). Allocated lazily on the
   // first CommitResources that observed at least one
   // AcquireMaterial — nullptr before that. The §11 packed layout
   // is documented in resources/shaders/ShaderInterop.slang's
   // `OpenPBRMaterialGPU` struct.
   [[nodiscard]] nvrhi::IBuffer*          GetMaterialBuffer() const noexcept;
+
+  // M6 (plan §15): structured buffer of `uint` indexed by instance
+  // slot. Each entry holds the material slot bound to that instance,
+  // so the closesthit reads `materials[instanceMaterial[InstanceID()]]`.
+  // The indirection is what frees the TLAS instanceCustomIndex to
+  // carry the INSTANCE slot (per §15) — required for the M6
+  // instanceId AOV + future picking. Allocated alongside the TLAS
+  // on the first CommitResources that built one; nullptr before that.
+  [[nodiscard]] nvrhi::IBuffer*          GetInstanceMaterialBuffer() const noexcept;
 
 private:
   // PIMPL: NVRHI handles, entry-table vectors, per-frame ring slots

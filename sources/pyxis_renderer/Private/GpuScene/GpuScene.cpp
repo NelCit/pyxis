@@ -305,15 +305,22 @@ struct GpuScene::Impl {
 
   // M5 GPU pools.
   // - materialGpuBuffer: structured buffer of OpenPBRMaterialGPU,
-  //   indexed by instance custom index (which we set to the
-  //   material slot at AppendInstance time). Re-uploaded on every
-  //   commit if any material has needsGpuUpload — small enough
-  //   (M5 stub: <1 MiB) that we don't bother with partial updates.
+  //   indexed by material slot. Re-uploaded on every commit if any
+  //   material has needsGpuUpload — small enough (M5 stub: <1 MiB)
+  //   that we don't bother with partial updates.
+  // - instanceMaterialBuffer (M6): structured buffer of uint, indexed
+  //   by instance slot, value = material slot. The closesthit reads
+  //   `materials[instanceMaterial[InstanceID()]]` — one indirection
+  //   so the TLAS instanceCustomIndex can carry the INSTANCE slot
+  //   (per plan §15) instead of the material slot (M5 expedience).
+  //   Freeing instanceCustomIndex unblocks the M6 instanceId AOV +
+  //   future picking (§19.4).
   // - bindlessSampler: a single shared linear-clamp sampler. Per-
   //   role samplers (sRGB filtering, anisotropic for tangent maps,
   //   etc.) are an M9 polish item.
   nvrhi::BufferHandle  materialGpuBuffer;
   bool                 materialsNeedGpuUpload = false;
+  nvrhi::BufferHandle  instanceMaterialBuffer;
   nvrhi::SamplerHandle bindlessSampler;
 
   // Magenta 4x4 fallback texture — slot 0 in the bindless table is
@@ -1361,18 +1368,14 @@ Expected<void> GpuScene::CommitResources(nvrhi::ICommandList* commandList) {
       hlslpp::store(worldRowMajor, inst.worldFromLocal);
       std::memcpy(&desc.transform, worldRowMajor, sizeof(nvrhi::rt::AffineTransform));
       desc.instanceMask = 0xFF;
-      // §11 + plan §16 — instanceID is the closesthit's
-      // `InstanceID()`. We pack the MATERIAL slot here (24-bit cap
-      // matches §19.7's HANDLE_SLOT_BITS) so the closesthit can
-      // index materials[InstanceID()] directly without a separate
-      // instance→material lookup table. Slot 0 == sentinel /
-      // missing-material → magenta fallback already packed at
-      // CommitResources upload time.
-      const auto materialValue = static_cast<std::uint32_t>(inst.material);
-      const std::uint32_t materialSlot = (materialValue == 0)
-                                             ? 0u
-                                             : HandleSlot(materialValue);
-      desc.instanceID = materialSlot;
+      // Plan §15 — instanceCustomIndex carries the INSTANCE slot
+      // (24-bit cap matches §19.7's HANDLE_SLOT_BITS). The
+      // closesthit reads `instanceMaterial[InstanceID()]` to
+      // resolve the material slot, then `materials[that]` to read
+      // the OpenPBR fields. The indirection costs one extra buffer
+      // load per closest-hit and frees the custom index for the
+      // §41 M6 instanceId AOV + future picking (§19.4).
+      desc.instanceID = slot;
       desc.instanceContributionToHitGroupIndex = 0;
       desc.flags = nvrhi::rt::InstanceFlags::None;
       desc.bottomLevelAS = mesh.blas.Get();
@@ -1386,6 +1389,50 @@ Expected<void> GpuScene::CommitResources(nvrhi::ICommandList* commandList) {
                       "CommitResources: TLAS rebuild needs %zu instances, cap is %zu",
                       instanceDescs.size(), TLAS_MAX_INSTANCES)};
     }
+
+    // Plan §15 / M6 P0 — upload the instance→material side-table.
+    // Indexed by instance slot (so dead/sparse slots are present
+    // but unread; they're never visited because the TLAS only
+    // contains live instances). Each entry holds the material slot
+    // bound to that instance; slot 0 always maps to material slot 0
+    // (the GpuScene sentinel grey material). The buffer is
+    // re-uploaded every TLAS rebuild — sized in lockstep with the
+    // instances vector so InstanceID() lookups never go OOB.
+    const std::size_t instanceTableEntries = _impl->instances.size();
+    std::vector<std::uint32_t> instanceMaterialTable(instanceTableEntries, 0u);
+    for (std::size_t entrySlot = 1; entrySlot < instanceTableEntries; ++entrySlot)
+    {
+      const Impl::InstanceEntry& inst = _impl->instances[entrySlot];
+      if (!inst.live)
+        continue;
+      const auto materialValue = static_cast<std::uint32_t>(inst.material);
+      instanceMaterialTable[entrySlot] =
+          (materialValue == 0) ? 0u : HandleSlot(materialValue);
+    }
+    const std::size_t instanceTableBytes =
+        instanceMaterialTable.size() * sizeof(std::uint32_t);
+    if (!_impl->instanceMaterialBuffer
+        || _impl->instanceMaterialBuffer->getDesc().byteSize < instanceTableBytes)
+    {
+      nvrhi::BufferDesc bufDesc;
+      bufDesc.byteSize = instanceTableBytes;
+      bufDesc.structStride = sizeof(std::uint32_t);
+      bufDesc.canHaveRawViews = false;
+      bufDesc.canHaveTypedViews = false;
+      bufDesc.format = nvrhi::Format::UNKNOWN;
+      bufDesc.debugName = "GpuScene.instanceMaterialBuffer";
+      bufDesc.initialState = nvrhi::ResourceStates::ShaderResource;
+      bufDesc.keepInitialState = true;
+      _impl->instanceMaterialBuffer = _impl->device->createBuffer(bufDesc);
+      if (!_impl->instanceMaterialBuffer)
+      {
+        return std::unexpected{
+            PYXIS_ERROR(ErrorKind::OutOfMemoryGpu,
+                        "CommitResources: createBuffer(instanceMaterialBuffer) failed")};
+      }
+    }
+    commandList->writeBuffer(_impl->instanceMaterialBuffer.Get(),
+                             instanceMaterialTable.data(), instanceTableBytes);
 
     commandList->buildTopLevelAccelStruct(_impl->tlas.Get(), instanceDescs.data(),
                                           instanceDescs.size(),
@@ -1410,6 +1457,10 @@ bool GpuScene::HasCamera() const noexcept {
 
 nvrhi::IBuffer* GpuScene::GetMaterialBuffer() const noexcept {
   return _impl->materialGpuBuffer.Get();
+}
+
+nvrhi::IBuffer* GpuScene::GetInstanceMaterialBuffer() const noexcept {
+  return _impl->instanceMaterialBuffer.Get();
 }
 
 // ---- Introspection ---------------------------------------------------------
