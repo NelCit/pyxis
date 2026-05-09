@@ -41,3 +41,23 @@ set_tests_properties(M4.AdapterParityByteEqualEXR PROPERTIES
     LABELS    "integration;m4"
     TIMEOUT   90   # Two USD-loading runs (~2-3 s each on a warm cache).
 )
+
+# §41 M5 — exercises the GPU material path with three distinct
+# UsdPreviewSurface materials. Verifies (a) determinism across re-runs
+# and (b) the rendered EXR DIFFERS from the bundled default-scene
+# render, proving the closesthit actually picks up per-instance
+# materials. See m5_material_path.cmake header for the full failure-
+# mode catalogue.
+add_test(
+    NAME    M5.MaterialPathRendersDistinctColors
+    COMMAND ${CMAKE_COMMAND}
+            -DPYXIS_EXE=$<TARGET_FILE:pyxis>
+            -DFIXTURE_CONFIG=${CMAKE_SOURCE_DIR}/tests/fixtures/headless_triangle.json
+            -DMATERIAL_SCENE=${CMAKE_SOURCE_DIR}/tests/fixtures/m5_three_materials.usd
+            -DOUTPUT_DIR=${CMAKE_BINARY_DIR}/tests/integration/m5_material_path
+            -P ${CMAKE_SOURCE_DIR}/tests/integration/m5_material_path.cmake
+)
+set_tests_properties(M5.MaterialPathRendersDistinctColors PROPERTIES
+    LABELS    "integration;m5"
+    TIMEOUT   120  # Three USD-loading runs.
+)

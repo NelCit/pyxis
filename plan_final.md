@@ -5242,6 +5242,16 @@ action`) layers on top for per-TU object caching.
   branchless on `flags`).
 - Exit: textured cube via UsdPreviewSurface renders correctly headless and viewer; unit
   test for OpenPBR conversion field-by-field green.
+- **Closesthit scope at M5**: the bundled `resources/shaders/closesthit.slang` is an
+  intentional **stub that emits `mat.baseColor` only** — no BSDF, no NEE, no shadow rays,
+  no texture sampling in the shader. The full branchless-on-`MaterialFlag` OpenPBR
+  closesthit (texture-sampled lobes, multi-bounce path integral, NEE+MIS) lands at M7
+  alongside lights when the renderer-side direct-lighting machinery exists. The M5 ground
+  scope is the **CPU-side** material/texture infrastructure (translation, dedup, decode,
+  bindless slot allocation, GPU buffer upload, TLAS instance → material wiring) and the
+  **shader binding contract** (`StructuredBuffer<OpenPBRMaterialGPU> gMaterials` at
+  binding 3, indexed by `InstanceID()`). The user replaces the stub closesthit body in
+  the M7 PR.
 
 ### Phase M6 — Native instancing
 - Add: `HdPyxisInstancer`, instance flattening (nested instancers), BLAS sharing rule,

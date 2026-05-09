@@ -118,9 +118,10 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
   layoutDesc.bindingOffsets.constantBuffer = 0;
   layoutDesc.bindingOffsets.unorderedAccess = 0;
   layoutDesc.bindings = {
-      nvrhi::BindingLayoutItem::ConstantBuffer(0),         // binding 0 CameraUniforms
-      nvrhi::BindingLayoutItem::RayTracingAccelStruct(1),  // binding 1 TLAS
-      nvrhi::BindingLayoutItem::Texture_UAV(2),            // binding 2 output
+      nvrhi::BindingLayoutItem::ConstantBuffer(0),           // binding 0 CameraUniforms
+      nvrhi::BindingLayoutItem::RayTracingAccelStruct(1),    // binding 1 TLAS
+      nvrhi::BindingLayoutItem::Texture_UAV(2),              // binding 2 output
+      nvrhi::BindingLayoutItem::StructuredBuffer_SRV(3),     // binding 3 materials (M5)
   };
   _bindingLayout = _device->createBindingLayout(layoutDesc);
   if (!_bindingLayout)
@@ -181,6 +182,30 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
     return;
   }
 
+  // M5: 1-element fallback material buffer. The closesthit binding
+  // 3 must point at a non-null structured buffer even when the
+  // scene has no materials yet (e.g. the M3 hardcoded cube). The
+  // contents are written every Execute() to a default-init
+  // OpenPBRMaterialGPU (baseColor 0.8 grey) — see the writeBuffer in
+  // Execute below. That keeps the cube-without-materials path
+  // visually consistent with the GpuScene sentinel slot 0 (also a
+  // default OpenPBRMaterialDesc → grey 0.8).
+  nvrhi::BufferDesc fallbackDesc;
+  fallbackDesc.byteSize = sizeof(shaderinterop::OpenPBRMaterialGPU);
+  fallbackDesc.structStride = sizeof(shaderinterop::OpenPBRMaterialGPU);
+  fallbackDesc.canHaveRawViews = false;
+  fallbackDesc.canHaveTypedViews = false;
+  fallbackDesc.format = nvrhi::Format::UNKNOWN;
+  fallbackDesc.debugName = "PathTrace.FallbackMaterial";
+  fallbackDesc.initialState = nvrhi::ResourceStates::ShaderResource;
+  fallbackDesc.keepInitialState = true;
+  _fallbackMaterialBuffer = _device->createBuffer(fallbackDesc);
+  if (!_fallbackMaterialBuffer)
+  {
+    Logging::Get().Error(log::RENDER, "PathTracePass: createBuffer(FallbackMaterial) failed");
+    return;
+  }
+
   _shadersOk = true;
   Logging::Get().Info(log::RENDER, "PathTracePass: initialised (RT pipeline + SBT ready)");
 }
@@ -188,6 +213,18 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
 PathTracePass::~PathTracePass() = default;
 
 nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(nvrhi::ITexture* output) {
+  // M5: invalidate cache when the scene's material-buffer pointer
+  // flips. Lazy-allocated by GpuScene on the first
+  // AcquireMaterial → CommitResources, so a scene that started
+  // empty but gained a material between frames needs the cached
+  // binding sets thrown out.
+  nvrhi::IBuffer* sceneMaterials = _scene->GetMaterialBuffer();
+  if (sceneMaterials != _lastSeenMaterialBuffer)
+  {
+    _bindingSetCache.clear();
+    _lastSeenMaterialBuffer = sceneMaterials;
+  }
+
   if (auto cached = _bindingSetCache.find(output); cached != _bindingSetCache.end())
   {
     return cached->second;
@@ -198,14 +235,23 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(nvrhi::ITexture* ou
     _bindingSetCache.clear();
   }
 
-  // Slot numbers match the BindingLayoutDesc above (0 / 1 / 2 with
-  // zero offsets) so NVRHI emits Vulkan bindings 0 / 1 / 2 to match
-  // the shader's `[[vk::binding(0/1/2, 0)]]` declarations.
+  // Slot numbers match the BindingLayoutDesc above (0 / 1 / 2 / 3
+  // with zero offsets) so NVRHI emits Vulkan bindings 0..3 to match
+  // the shaders' `[[vk::binding(N, 0)]]` declarations.
+  // M5: binding 3 is the materials structured buffer — scene's own
+  // (when AcquireMaterial has been called + CommitResources has
+  // run) or the 1-element fallback (zero baseColor, used by the M3
+  // cube fixture which has no materials).
+  nvrhi::IBuffer* materialBuffer = _scene->GetMaterialBuffer();
+  if (materialBuffer == nullptr)
+    materialBuffer = _fallbackMaterialBuffer.Get();
+
   nvrhi::BindingSetDesc setDesc;
   setDesc.bindings = {
       nvrhi::BindingSetItem::ConstantBuffer(0, _cameraUniformsBuffer),
       nvrhi::BindingSetItem::RayTracingAccelStruct(1, _scene->GetTlas()),
       nvrhi::BindingSetItem::Texture_UAV(2, output),
+      nvrhi::BindingSetItem::StructuredBuffer_SRV(3, materialBuffer),
   };
   nvrhi::BindingSetHandle set = _device->createBindingSet(setDesc, _bindingLayout);
   _bindingSetCache[output] = set;
@@ -245,6 +291,45 @@ void PathTracePass::Execute(nvrhi::ICommandList* commandList, const PassContext&
   cameraUniforms.worldFromView = hlslpp::inverse(camera.viewFromWorld);
   cameraUniforms.viewFromClip = hlslpp::inverse(camera.projFromView);
   commandList->writeBuffer(_cameraUniformsBuffer.Get(), &cameraUniforms, sizeof(cameraUniforms));
+
+  // M5: write the fallback material if the scene has no materials of
+  // its own. Only matters for the M3-cube path — scenes that
+  // AcquireMaterial bind their own buffer instead. The fallback packs
+  // the same default OpenPBRMaterialDesc that GpuScene reserves at
+  // slot 0 (baseColor 0.8 grey, roughness 0.5, opacity 1, IoR 1.5),
+  // so an instance with `material = MaterialHandle::Invalid` renders
+  // a recognisable visible grey instead of black — and the fallback
+  // path stays color-consistent with the real material buffer's
+  // sentinel slot 0. Cheap (one writeBuffer of 80 bytes per frame
+  // when active).
+  if (_scene->GetMaterialBuffer() == nullptr)
+  {
+    static const shaderinterop::OpenPBRMaterialGPU FALLBACK_MATERIAL_DEFAULT = []() {
+      shaderinterop::OpenPBRMaterialGPU material{};
+      material.baseColorR = 0.8f;
+      material.baseColorG = 0.8f;
+      material.baseColorB = 0.8f;
+      material.flags = 0u;
+      material.baseColorTex = shaderinterop::INVALID_BINDLESS_TEXTURE;
+      material.normalTex = shaderinterop::INVALID_BINDLESS_TEXTURE;
+      material.metallicTex = shaderinterop::INVALID_BINDLESS_TEXTURE;
+      material.roughnessTex = shaderinterop::INVALID_BINDLESS_TEXTURE;
+      material.roughness = 0.5f;
+      material.metalness = 0.0f;
+      material.opacity = 1.0f;
+      material.specularIor = 1.5f;
+      material.coatWeight = 0.0f;
+      material.coatRoughness = 0.0f;
+      material.emissionLuminance = 0.0f;
+      material.emissionTex = shaderinterop::INVALID_BINDLESS_TEXTURE;
+      material.opacityTex = shaderinterop::INVALID_BINDLESS_TEXTURE;
+      material.transmissionTex = shaderinterop::INVALID_BINDLESS_TEXTURE;
+      material.coatRoughnessTex = shaderinterop::INVALID_BINDLESS_TEXTURE;
+      return material;
+    }();
+    commandList->writeBuffer(_fallbackMaterialBuffer.Get(), &FALLBACK_MATERIAL_DEFAULT,
+                             sizeof(FALLBACK_MATERIAL_DEFAULT));
+  }
 
   // ---- Bind + dispatch ----------------------------------------------
   const nvrhi::BindingSetHandle bindingSet = GetOrCreateBindingSet(output);

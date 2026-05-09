@@ -181,7 +181,7 @@ KPIs (1080p hero camera, RTX 4080, post-warm): `pass.PathTrace < 12ms`, `frame.c
 | M3 | Slang path-trace box | one cube, BLAS+TLAS, raygen/closesthit/miss, accum + tonemap |
 | M3.5 | Default startup scene | `Resources/scenes/default.usd` resolves through §29.4.a chain |
 | M4 | Hydra delegate stub + USD-direct stub | usdview picks the delegate; both adapters render the same tiny `.usda` byte-identically. M4 stub: HydraEngine wraps StageWalker for byte-equal parity (full HdEngine pipeline at M5+). |
-| M5 | UsdPreviewSurface→OpenPBR | textured cube, OpenPBR shader |
+| M5 | UsdPreviewSurface→OpenPBR | textured cube, OpenPBR shader. M5 ships the **CPU material/texture infra** + the binding contract (`StructuredBuffer<OpenPBRMaterialGPU>` at binding 3, indexed by `InstanceID()`); the closesthit body is a `mat.baseColor`-only stub. Full BSDF + NEE arrives with lights at M7. |
 | M6 | Native instancing | 10k-instance scene, BLAS sharing, instance/material AOVs |
 | M7 | Lighting | dome + distant + rect; NEE + MIS |
 | M8a | Bistro render | full Bistro USD loads + renders headless and viewer; visually plausible; nightly regression seed |

@@ -1,23 +1,32 @@
 // Pyxis USD-direct ingest — StageWalker implementation.
 //
 // Walks a UsdStage in SdfPath-sorted order (the §25.O.3 P0 byte-equal
-// invariant) and translates UsdGeomMesh + UsdGeomCamera prims into
-// GpuScene mutations. Lights / materials are recognised + counted but
-// not yet wired into GpuScene at M4 — they land at M7 (lights) / M5
-// (materials) when the renderer-side closesthit consumes them.
+// invariant) and translates UsdGeomMesh + UsdGeomCamera + UsdShadeMaterial
+// prims into GpuScene mutations. Lights are recognised + counted but
+// not yet wired into GpuScene at M5 — they land at M7 when NEE + MIS
+// arrive.
 //
-// Triangulation: M4 only handles meshes whose faces are all triangles
-// (faceVertexCounts entirely 3). Quads / ngons fan-triangulate at M5+
-// when the §25.O.1 inline triangulator lands. The M4 fixture uses
-// triangle-list meshes only, which keeps both adapters in lockstep.
+// Two-pass walk: materials first (so instances can reference them by
+// MaterialHandle), then meshes / camera / lights. The first pass
+// builds a SdfPath → MaterialHandle map keyed on the material prim's
+// path; the second pass resolves each mesh's bound material via
+// UsdShadeMaterialBindingAPI and stamps the resulting MaterialHandle
+// onto its InstanceDesc.
+//
+// Triangulation: M5 still handles only triangle-list meshes
+// (faceVertexCounts entirely 3). Quads / ngons fan-triangulate at M6+
+// when the §25.O.1 inline triangulator lands. The fixtures used at
+// M5 (default.usd) are authored as triangle lists already.
 
 #include "Pyxis/UsdIngest/StageWalker.h"
 
+#include <Pyxis/MaterialTranslation/UsdShadeToOpenPBR.h>
 #include <Pyxis/Platform/Logging/Log.h>
 #include <Pyxis/Platform/Logging/LogCategories.h>
 #include <Pyxis/Renderer/Descs/CameraDesc.h>
 #include <Pyxis/Renderer/Descs/InstanceDesc.h>
 #include <Pyxis/Renderer/Descs/MeshDesc.h>
+#include <Pyxis/Renderer/Descs/OpenPBRMaterialDesc.h>
 #include <Pyxis/Renderer/GpuScene.h>
 
 #include <pxr/usd/usd/prim.h>
@@ -29,6 +38,7 @@
 #include <pxr/usd/usdLux/domeLight.h>
 #include <pxr/usd/usdLux/rectLight.h>
 #include <pxr/usd/usdShade/material.h>
+#include <pxr/usd/usdShade/materialBindingAPI.h>
 #include <pxr/usd/sdf/path.h>
 #include <pxr/base/gf/matrix4d.h>
 #include <pxr/base/gf/camera.h>
@@ -39,6 +49,7 @@
 #include <algorithm>
 #include <cstring>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace pyxis::usd_ingest {
@@ -74,12 +85,36 @@ hlslpp::float4x4 ToPyxisMatrix(const pxr::GfMatrix4d& usdMatrix) noexcept {
                      static_cast<float>(usdMatrix[3][3])});
 }
 
+using MaterialHandleByPath = std::unordered_map<std::string, MaterialHandle>;
+
+// Resolve `meshPrim`'s bound UsdShadeMaterial via the
+// MaterialBindingAPI. Returns MaterialHandle::Invalid if no binding
+// is authored, the binding points at a material we never translated
+// (e.g. a different render context than the one we walked), or the
+// caller passed an empty map. Lookup is by SdfPath string so the
+// key matches whatever the first pass populated.
+MaterialHandle ResolveBoundMaterial(const pxr::UsdPrim& meshPrim,
+                                    const MaterialHandleByPath& materialsByPath) noexcept
+{
+  if (materialsByPath.empty())
+    return MaterialHandle::Invalid;
+  const pxr::UsdShadeMaterialBindingAPI bindingApi(meshPrim);
+  const pxr::UsdShadeMaterial bound = bindingApi.ComputeBoundMaterial();
+  if (!bound.GetPrim().IsValid())
+    return MaterialHandle::Invalid;
+  const std::string boundPath = bound.GetPrim().GetPath().GetString();
+  const auto found = materialsByPath.find(boundPath);
+  if (found == materialsByPath.end())
+    return MaterialHandle::Invalid;
+  return found->second;
+}
+
 // Emit a single UsdGeomMesh into `scene`. Returns true iff the mesh
 // was emitted (false skips the matching instance increment). M4
 // constraint: all faceVertexCounts must equal 3 (triangle list); ngons
 // are dropped with a single Warn log per prim.
 bool EmitMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCache,
-              GpuScene& scene) noexcept {
+              const MaterialHandleByPath& materialsByPath, GpuScene& scene) noexcept {
   auto& log = Logging::Get();
   const pxr::UsdGeomMesh meshPrim(prim);
   if (!meshPrim.GetPrim().IsValid())
@@ -133,11 +168,16 @@ bool EmitMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCache,
     return false;
   }
 
-  // World transform → instance.
+  // World transform → instance. Material binding (if any) is
+  // resolved via UsdShadeMaterialBindingAPI and stamped into
+  // InstanceDesc::material so the closesthit can read
+  // materials[InstanceID()] (where InstanceID is the material slot
+  // — see GpuScene::CommitResources's TLAS instance pack).
   const pxr::GfMatrix4d worldFromLocal = xformCache.GetLocalToWorldTransform(prim);
   InstanceDesc instanceDesc;
   instanceDesc.mesh = *meshHandle;
   instanceDesc.worldFromLocal = ToPyxisMatrix(worldFromLocal);
+  instanceDesc.material = ResolveBoundMaterial(prim, materialsByPath);
   instanceDesc.debugName = debugName;
   const auto instanceHandle = scene.AppendInstance(instanceDesc);
   if (!instanceHandle.has_value())
@@ -225,11 +265,35 @@ IngestStats StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
   pxr::UsdGeomXformCache xformCache;
   bool cameraSet = false;
 
+  // Pass 1 — materials. Translate every UsdShadeMaterial to an
+  // OpenPBRMaterialDesc and AcquireMaterial it; record the resulting
+  // handle by SdfPath so the mesh pass can resolve bindings without
+  // re-walking the stage. Both adapters share this code path
+  // (HydraEngine routes through StageWalker at M5 — see HydraEngine.h)
+  // so any difference in material translation breaks the §25.O.3
+  // byte-equal invariant.
+  MaterialHandleByPath materialsByPath;
+  for (const pxr::UsdPrim& prim : prims)
+  {
+    if (!prim.IsA<pxr::UsdShadeMaterial>())
+      continue;
+    const pxr::UsdShadeMaterial materialPrim(prim);
+    const std::string primPath = prim.GetPath().GetString();
+    OpenPBRMaterialDesc materialDesc =
+        material_translation::FromUsdShade(materialPrim);
+    materialDesc.sourcePrim = primPath;
+    const MaterialHandle handle = scene.AcquireMaterial(materialDesc);
+    materialsByPath.emplace(primPath, handle);
+    ++stats.materialsEmitted;
+  }
+
+  // Pass 2 — meshes / camera / lights, with material handles resolved
+  // from pass 1.
   for (const pxr::UsdPrim& prim : prims)
   {
     if (prim.IsA<pxr::UsdGeomMesh>())
     {
-      if (EmitMesh(prim, xformCache, scene))
+      if (EmitMesh(prim, xformCache, materialsByPath, scene))
       {
         ++stats.meshesEmitted;
         ++stats.instancesEmitted;
@@ -247,16 +311,14 @@ IngestStats StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
     else if (prim.IsA<pxr::UsdLuxDistantLight>() || prim.IsA<pxr::UsdLuxDomeLight>()
              || prim.IsA<pxr::UsdLuxRectLight>())
     {
-      // M4 stub: lights count but aren't yet pushed into GpuScene
-      // (the path-trace closesthit ignores lights at M4 — barycentric
-      // visualisation only; M7 wires light sampling).
+      // M5 stub: lights count but aren't yet pushed into GpuScene
+      // (the path-trace closesthit ignores lights at M5 — material
+      // baseColor only; M7 wires light sampling).
       ++stats.lightsEmitted;
     }
     else if (prim.IsA<pxr::UsdShadeMaterial>())
     {
-      // M4 stub: materials count but aren't yet pushed (closesthit
-      // ignores materials too at M4; M5 wires the OpenPBR branch).
-      ++stats.materialsEmitted;
+      // Already translated + counted in pass 1.
     }
     else
     {

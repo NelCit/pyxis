@@ -81,6 +81,14 @@ target_sources(pyxis_renderer PRIVATE
 
     Private/Renderers/PyxisRenderer.cpp
 
+    # M5 — stb_image IMPLEMENTATION TU. The renderer's TextureCache
+    # decodes 8/16-bit PNG/JPG/etc via stb_image; the IMPLEMENTATION
+    # macro must land in EXACTLY one TU per binary. Same pattern
+    # pyxis_app uses for stb_image_write (its --screenshot path).
+    # Single-source-of-truth lives at Private/Materials/StbImageRead.cpp.
+    Private/Materials/StbImageRead.cpp
+    Private/Materials/MaterialFlag.h
+
     # Scene/.
     Private/Scene/World.h
     Private/Scene/World.cpp
@@ -139,6 +147,21 @@ target_include_directories(pyxis_renderer
     PRIVATE
         ${CMAKE_SOURCE_DIR}/resources/shaders
 )
+
+# stb_image is header-only; vcpkg's `Stb` config exports the include
+# dir as Stb_INCLUDE_DIR (no link target). pyxis_app already pulls
+# this for stb_image_write; pyxis_renderer pulls it independently
+# for stb_image (decode side).
+find_package(Stb REQUIRED)
+target_include_directories(pyxis_renderer PRIVATE ${Stb_INCLUDE_DIR})
+
+# stb_image's IMPLEMENTATION TU has missing-field-initializer
+# patterns inside the third-party header (same as stb_image_write
+# in pyxis_app). Disable the warning + clang-tidy on that single
+# file rather than relax it project-wide.
+set_source_files_properties(Private/Materials/StbImageRead.cpp PROPERTIES
+    COMPILE_OPTIONS    "-Wno-missing-field-initializers"
+    SKIP_LINTING       ON)
 
 target_link_libraries(pyxis_renderer
     PUBLIC
