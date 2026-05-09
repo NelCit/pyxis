@@ -25,6 +25,7 @@
 #include <Pyxis/Platform/Logging/LogCategories.h>
 #include <Pyxis/Renderer/Descs/CameraDesc.h>
 #include <Pyxis/Renderer/Descs/InstanceDesc.h>
+#include <Pyxis/Renderer/Descs/LightDesc.h>
 #include <Pyxis/Renderer/Descs/MeshDesc.h>
 #include <Pyxis/Renderer/Descs/OpenPBRMaterialDesc.h>
 #include <Pyxis/Renderer/GpuScene.h>
@@ -151,6 +152,110 @@ MaterialHandle ResolveBoundMaterial(const pxr::UsdPrim& meshPrim,
   if (found == materialsByPath.end())
     return MaterialHandle::Invalid;
   return found->second;
+}
+
+// M7: translate a UsdLuxDistantLight / UsdLuxDomeLight / UsdLuxRectLight
+// prim into a LightDesc + push via GpuScene::AddLight. The simple
+// closesthit consumes color × intensity per kind (NdotL Lambert for
+// Distant + Rect, uniform ambient for Dome). The user's M7-full pass
+// replaces the closesthit body alongside NEE + MIS + IBL importance
+// sampling per §7.
+//
+// USD light conventions:
+//   * UsdLuxDistantLight emits along the prim's local -Z axis. Its
+//     "direction the light is travelling" (away from surface) =
+//     worldFromLocal · (0, 0, -1, 0). The prim's translation is
+//     irrelevant.
+//   * UsdLuxRectLight is positioned at the prim's translation. The
+//     emitting face is +Z in local space; the M7-simple closesthit
+//     ignores axisU/axisV (treats as point-at-center) but we pack
+//     them for the M7-full pass.
+//   * UsdLuxDomeLight has color + intensity + texture:file; M7-simple
+//     ignores the env-map and treats it as uniform ambient.
+//
+// Per UsdLuxLight authoring: `inputs:intensity` × `inputs:exposure`
+// is the canonical scale. exposure is in stops; final intensity =
+// raw_intensity * 2^exposure. M7-simple skips the exposure
+// multiplier (defaults to 0 → 2^0 = 1, harmless for the common case);
+// M9 polish picks it up alongside the rest of the UsdLux input
+// surface.
+void EmitLight(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCache,
+               GpuScene& scene) noexcept {
+  auto& log = Logging::Get();
+  const pxr::GfMatrix4d worldFromLocal = xformCache.GetLocalToWorldTransform(prim);
+
+  // Helpers for USD light input attrs — they live on the prim under
+  // `inputs:<name>` namespace. UsdLuxLightAPI exposes typed accessors
+  // but pulling the attr by name is simpler + avoids the API churn
+  // between USD versions.
+  auto readFloat = [&](const char* name, float fallback) {
+    const pxr::UsdAttribute attr = prim.GetAttribute(pxr::TfToken(std::string("inputs:") + name));
+    if (!attr)
+      return fallback;
+    float value = fallback;
+    attr.Get(&value);
+    return value;
+  };
+  auto readColor = [&](const char* name, hlslpp::float3 fallback) {
+    const pxr::UsdAttribute attr = prim.GetAttribute(pxr::TfToken(std::string("inputs:") + name));
+    if (!attr)
+      return fallback;
+    pxr::GfVec3f value(fallback.x, fallback.y, fallback.z);
+    attr.Get(&value);
+    return hlslpp::float3{value[0], value[1], value[2]};
+  };
+
+  LightDesc desc;
+  desc.color = readColor("color", hlslpp::float3{1.0f, 1.0f, 1.0f});
+  desc.intensity = readFloat("intensity", 1.0f);
+
+  if (prim.IsA<pxr::UsdLuxDistantLight>())
+  {
+    desc.kind = LightDesc::Kind::Distant;
+    // Local -Z transformed by worldFromLocal's rotation. USD row-
+    // vector convention: dir_world = (0,0,-1,0) * M.
+    const pxr::GfVec4d localDir(0.0, 0.0, -1.0, 0.0);
+    const pxr::GfVec4d worldDir = localDir * worldFromLocal;
+    desc.direction =
+        hlslpp::float3{static_cast<float>(worldDir[0]), static_cast<float>(worldDir[1]),
+                       static_cast<float>(worldDir[2])};
+  }
+  else if (prim.IsA<pxr::UsdLuxRectLight>())
+  {
+    desc.kind = LightDesc::Kind::Rect;
+    const pxr::GfVec4d originLocal(0.0, 0.0, 0.0, 1.0);
+    const pxr::GfVec4d originWorld = originLocal * worldFromLocal;
+    desc.position =
+        hlslpp::float3{static_cast<float>(originWorld[0]), static_cast<float>(originWorld[1]),
+                       static_cast<float>(originWorld[2])};
+    const pxr::GfVec4d uLocal(1.0, 0.0, 0.0, 0.0);
+    const pxr::GfVec4d uWorld = uLocal * worldFromLocal;
+    desc.axisU = hlslpp::float3{static_cast<float>(uWorld[0]), static_cast<float>(uWorld[1]),
+                                static_cast<float>(uWorld[2])};
+    const pxr::GfVec4d vLocal(0.0, 1.0, 0.0, 0.0);
+    const pxr::GfVec4d vWorld = vLocal * worldFromLocal;
+    desc.axisV = hlslpp::float3{static_cast<float>(vWorld[0]), static_cast<float>(vWorld[1]),
+                                static_cast<float>(vWorld[2])};
+  }
+  else if (prim.IsA<pxr::UsdLuxDomeLight>())
+  {
+    desc.kind = LightDesc::Kind::Dome;
+    // M7-simple skips `inputs:texture:file` (env map IBL is the
+    // M7-full closesthit's job). Color * intensity becomes uniform
+    // ambient.
+  }
+  else
+  {
+    return;  // unknown light kind
+  }
+
+  const LightHandle handle = scene.AddLight(desc);
+  if (handle == LightHandle::Invalid)
+  {
+    log.Warn(log::APP, "StageWalker: AddLight failed for "
+                           + prim.GetPath().GetString()
+                           + " (light handle space exhausted?).");
+  }
 }
 
 // M6: walk a UsdGeomPointInstancer and expand it into N AppendInstance
@@ -556,9 +661,11 @@ IngestStats StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
     else if (prim.IsA<pxr::UsdLuxDistantLight>() || prim.IsA<pxr::UsdLuxDomeLight>()
              || prim.IsA<pxr::UsdLuxRectLight>())
     {
-      // M5 stub: lights count but aren't yet pushed into GpuScene
-      // (the path-trace closesthit ignores lights at M5 — material
-      // baseColor only; M7 wires light sampling).
+      // M7-simple: translate + push into GpuScene. The closesthit's
+      // simple shading model (NdotL Lambert for Distant + Rect,
+      // uniform ambient for Dome) consumes them; user's M7-full
+      // pass adds NEE + MIS + IBL importance sampling per §7.
+      EmitLight(prim, xformCache, scene);
       ++stats.lightsEmitted;
     }
     else if (prim.IsA<pxr::UsdShadeMaterial>())
