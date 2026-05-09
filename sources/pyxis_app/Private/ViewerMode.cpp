@@ -415,6 +415,21 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
       imguiHost.BuildFpsPanel(frameProfile);
       imguiHost.BuildScenePanel(sceneStats);
       imguiHost.BuildEditorPanel(gpuScene);
+
+      // Drain the editor's "Reload shaders" latch. Renderer-side
+      // shader-library invalidation isn't on the public surface yet
+      // (PyxisRenderer doesn't expose a reload entry; adding one is
+      // a v1.1 API addition under §22). For now we log the click so
+      // the button has visible feedback; the real reload arrives
+      // when the renderer's ShaderLibrary grows a public Invalidate
+      // hook.
+      if (imguiHost.TakeShaderReloadRequest())
+      {
+        log.Info(log::APP,
+                 "ViewerMode: shader-reload requested from Editor panel "
+                 "(renderer-side reload TODO)");
+      }
+
       imguiHost.Render();
     }
 

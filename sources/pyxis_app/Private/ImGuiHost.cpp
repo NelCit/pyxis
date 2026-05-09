@@ -88,23 +88,27 @@ void ApplyPyxisTheme() noexcept {
   ImGuiStyle& style = ImGui::GetStyle();
   ImVec4*     colors = style.Colors;
 
-  const ImVec4 pyxOrange       = ImVec4(0.961f, 0.627f, 0.290f, 1.000f);
-  const ImVec4 pyxOrangeDim    = ImVec4(0.961f, 0.627f, 0.290f, 0.560f);
-  const ImVec4 pyxOrangeHot    = ImVec4(1.000f, 0.690f, 0.400f, 1.000f);
-  const ImVec4 pyxOrangeMuted  = ImVec4(0.470f, 0.305f, 0.140f, 1.000f);
-  const ImVec4 windowBg        = ImVec4(0.110f, 0.110f, 0.110f, 1.000f);
-  const ImVec4 childBg         = ImVec4(0.090f, 0.090f, 0.090f, 1.000f);
-  const ImVec4 popupBg         = ImVec4(0.135f, 0.135f, 0.135f, 0.980f);
-  const ImVec4 frameBg         = ImVec4(0.145f, 0.145f, 0.145f, 1.000f);
-  const ImVec4 frameHover      = ImVec4(0.180f, 0.180f, 0.180f, 1.000f);
-  const ImVec4 frameActive     = ImVec4(0.230f, 0.230f, 0.230f, 1.000f);
-  const ImVec4 border          = ImVec4(0.230f, 0.230f, 0.230f, 1.000f);
+  // More orange across the panel — palette dialed warmer + accent
+  // colour now appears on borders, separators, title bars in every
+  // state, frame backgrounds (subtle tint), and text-tint for emphasis.
+  const ImVec4 pyxOrange       = ImVec4(1.000f, 0.620f, 0.260f, 1.000f); // brighter accent
+  const ImVec4 pyxOrangeDim    = ImVec4(1.000f, 0.620f, 0.260f, 0.620f);
+  const ImVec4 pyxOrangeHot    = ImVec4(1.000f, 0.730f, 0.420f, 1.000f);
+  const ImVec4 pyxOrangeMuted  = ImVec4(0.560f, 0.340f, 0.150f, 1.000f);
+  const ImVec4 pyxOrangeDeep   = ImVec4(0.310f, 0.190f, 0.090f, 1.000f); // deep brown-orange
+  const ImVec4 windowBg        = ImVec4(0.140f, 0.110f, 0.085f, 1.000f); // warm dark-grey-orange
+  const ImVec4 childBg         = ImVec4(0.115f, 0.090f, 0.065f, 1.000f);
+  const ImVec4 popupBg         = ImVec4(0.165f, 0.130f, 0.095f, 0.980f);
+  const ImVec4 frameBg         = ImVec4(0.190f, 0.140f, 0.090f, 1.000f); // orange-tinted frame
+  const ImVec4 frameHover      = ImVec4(0.260f, 0.180f, 0.110f, 1.000f);
+  const ImVec4 frameActive     = ImVec4(0.330f, 0.220f, 0.130f, 1.000f);
+  const ImVec4 border          = ImVec4(0.420f, 0.270f, 0.140f, 1.000f); // warm orange-brown
   const ImVec4 borderShadow    = ImVec4(0.000f, 0.000f, 0.000f, 0.000f);
-  const ImVec4 text            = ImVec4(0.880f, 0.880f, 0.880f, 1.000f);
-  const ImVec4 textDisabled    = ImVec4(0.500f, 0.500f, 0.500f, 1.000f);
-  const ImVec4 separator       = ImVec4(0.230f, 0.230f, 0.230f, 1.000f);
-  const ImVec4 headerBg        = ImVec4(0.180f, 0.180f, 0.180f, 1.000f);
-  const ImVec4 titleActive     = ImVec4(0.227f, 0.157f, 0.078f, 1.000f);
+  const ImVec4 text            = ImVec4(1.000f, 0.910f, 0.820f, 1.000f); // warm-tinted text
+  const ImVec4 textDisabled    = ImVec4(0.580f, 0.500f, 0.420f, 1.000f);
+  const ImVec4 separator       = ImVec4(0.470f, 0.300f, 0.150f, 1.000f);
+  const ImVec4 headerBg        = ImVec4(0.250f, 0.170f, 0.100f, 1.000f); // collapsing-header bg
+  const ImVec4 titleActive     = pyxOrangeDeep;
 
   colors[ImGuiCol_Text]                  = text;
   colors[ImGuiCol_TextDisabled]          = textDisabled;
@@ -447,10 +451,14 @@ void ImGuiHost::BuildFpsPanel(const FrameProfile& frameProfile) noexcept {
   // The render thread submits the load (mesh upload + BLAS build +
   // TLAS rebuild) on frame 0 — that frame's cpu/gpu cost IS the
   // load profile; subsequent frames are steady-state render only.
+  // FrameProfile.passes is a span into Profiler-owned storage that
+  // gets overwritten next BeginFrame, so we OWN-COPY it here for the
+  // Loading section's pass breakdown to survive across frames.
   if (!_loadingProfileLatched && frameProfile.cpuFrameMs > 0.0f)
   {
     _loadingCpuMs = frameProfile.cpuFrameMs;
     _loadingGpuMs = frameProfile.gpuFrameMs;
+    _loadingPasses.assign(frameProfile.passes.begin(), frameProfile.passes.end());
     _loadingProfileLatched = true;
   }
 
@@ -468,8 +476,7 @@ void ImGuiHost::BuildFpsPanel(const FrameProfile& frameProfile) noexcept {
   ImGui::SetNextWindowSizeConstraints(ImVec2(perfPanelW, 0.0f),
                                       ImVec2(perfPanelW, FLT_MAX));
   if (ImGui::Begin("Performance", nullptr,
-                   ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse
-                       | ImGuiWindowFlags_NoSavedSettings))
+                   ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings))
   {
     const ImGuiIO& imguiIO = ImGui::GetIO();
     ImGui::Text("Frame: %llu",
@@ -489,15 +496,45 @@ void ImGuiHost::BuildFpsPanel(const FrameProfile& frameProfile) noexcept {
     // rebuild + first PathTracePass dispatch — effectively the load
     // profile. Subsequent frames are steady-state render only, so
     // these values stay frozen after the first non-zero capture.
+    // The pass breakdown beneath each total mirrors the live "CPU
+    // passes" / "GPU passes" sections; same indentation rules.
     if (ImGui::CollapsingHeader("Loading"))
     {
       if (_loadingProfileLatched)
       {
-        ImGui::Text("CPU load: %.3f ms", _loadingCpuMs);
-        ImGui::Text("GPU load: %.3f ms", _loadingGpuMs);
         ImGui::TextDisabled(
             "(captured on first frame; mesh upload + BLAS / TLAS build +\n"
             "  first PathTracePass dispatch all happen here)");
+
+        ImGui::Spacing();
+        ImGui::Text("CPU load: %.3f ms", _loadingCpuMs);
+        for (const FrameProfile::PassTiming& timing : _loadingPasses)
+        {
+          if (timing.kind != FrameProfile::ScopeKind::Cpu)
+            continue;
+          const std::string_view name = timing.name.View();
+          if (name.empty())
+            continue;
+          ImGui::Text("  %*s%.*s   %.3f ms",
+                      static_cast<int>(timing.depth * 2), "",
+                      static_cast<int>(name.size()), name.data(),
+                      timing.durationMs);
+        }
+
+        ImGui::Spacing();
+        ImGui::Text("GPU load: %.3f ms", _loadingGpuMs);
+        for (const FrameProfile::PassTiming& timing : _loadingPasses)
+        {
+          if (timing.kind != FrameProfile::ScopeKind::Gpu)
+            continue;
+          const std::string_view name = timing.name.View();
+          if (name.empty())
+            continue;
+          ImGui::Text("  %*s%.*s   %.3f ms",
+                      static_cast<int>(timing.depth * 2), "",
+                      static_cast<int>(name.size()), name.data(),
+                      timing.durationMs);
+        }
       }
       else
       {
@@ -506,33 +543,42 @@ void ImGuiHost::BuildFpsPanel(const FrameProfile& frameProfile) noexcept {
     }
 
     // ----- CPU breakdown (collapsible like Lights/Materials) ----------
-    if (ImGui::CollapsingHeader("CPU passes", ImGuiTreeNodeFlags_DefaultOpen))
+    // Skip empty-name and non-finite-duration entries: GPU timestamp
+    // queries are async and can surface NaN / 0-name on the very first
+    // few frames before the timestamp pool has wrapped through enough
+    // samples, and clearing/recycling the ring can leave stale slots
+    // until the next frame writes into them.
+    auto drawPassRow = [](const FrameProfile::PassTiming& timing) {
+      const std::string_view name = timing.name.View();
+      if (name.empty())
+        return;
+      const float durationMs =
+          std::isfinite(timing.durationMs) ? timing.durationMs : 0.0f;
+      ImGui::Text("  %*s%.*s   %.3f ms",
+                  static_cast<int>(timing.depth * 2), "",
+                  static_cast<int>(name.size()), name.data(), durationMs);
+    };
+    if (ImGui::CollapsingHeader("CPU passes"))
     {
       for (const FrameProfile::PassTiming& timing : frameProfile.passes)
       {
-        if (timing.kind != FrameProfile::ScopeKind::Cpu)
-          continue;
-        const std::string_view name = timing.name.View();
-        ImGui::Text("  %*s%.*s   %.3f ms", static_cast<int>(timing.depth * 2), "",
-                    static_cast<int>(name.size()), name.data(), timing.durationMs);
+        if (timing.kind == FrameProfile::ScopeKind::Cpu)
+          drawPassRow(timing);
       }
     }
 
     // ----- GPU breakdown ----------------------------------------------
-    if (ImGui::CollapsingHeader("GPU passes", ImGuiTreeNodeFlags_DefaultOpen))
+    if (ImGui::CollapsingHeader("GPU passes"))
     {
       for (const FrameProfile::PassTiming& timing : frameProfile.passes)
       {
-        if (timing.kind != FrameProfile::ScopeKind::Gpu)
-          continue;
-        const std::string_view name = timing.name.View();
-        ImGui::Text("  %*s%.*s   %.3f ms", static_cast<int>(timing.depth * 2), "",
-                    static_cast<int>(name.size()), name.data(), timing.durationMs);
+        if (timing.kind == FrameProfile::ScopeKind::Gpu)
+          drawPassRow(timing);
       }
     }
 
     // ----- System (RAM + VRAM) ----------------------------------------
-    if (ImGui::CollapsingHeader("System", ImGuiTreeNodeFlags_DefaultOpen))
+    if (ImGui::CollapsingHeader("System"))
     {
 #if defined(_WIN32)
     PROCESS_MEMORY_COUNTERS_EX memCounters{};
@@ -659,9 +705,8 @@ void ImGuiHost::BuildScenePanel(const FrameStats& sceneStats) noexcept {
   ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + 10.0f,
                                  viewport->WorkPos.y + 10.0f),
                           ImGuiCond_Always);
-  if (ImGui::Begin("Scene", nullptr,
-                   ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse
-                       | ImGuiWindowFlags_NoSavedSettings))
+  if (ImGui::Begin("Stats", nullptr,
+                   ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings))
   {
     ImGui::Text("Counts");
     ImGui::Separator();
@@ -745,13 +790,25 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
              viewport->WorkPos.y + 10.0f + _layoutScenePanelHeight + 6.0f),
       ImGuiCond_Always);
   if (ImGui::Begin("Editor", nullptr,
-                   ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse
-                       | ImGuiWindowFlags_NoSavedSettings))
+                   ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings))
   {
+    // ---- Top-level actions -------------------------------------------
+    // Reload shaders: latches a request that ViewerMode drains via
+    // TakeShaderReloadRequest() each frame and forwards to the
+    // renderer-side shader-library invalidation. Decouples the editor
+    // (which only sees GpuScene) from PyxisRenderer's reload entry
+    // point — see the public TakeShaderReloadRequest() declaration in
+    // ImGuiHost.h for the full handshake.
+    if (ImGui::Button("Reload shaders"))
+      _editorReloadShadersRequested = true;
+    ImGui::SameLine();
+    ImGui::TextDisabled("(re-translate Slang -> SPIR-V at next CommitResources)");
+    ImGui::Spacing();
+
     // ---- Camera section ----------------------------------------------
     if (scene.HasCamera())
     {
-      if (ImGui::CollapsingHeader("Camera", ImGuiTreeNodeFlags_DefaultOpen))
+      if (ImGui::CollapsingHeader("Camera"))
       {
         CameraDesc cameraDesc = scene.GetCamera();
         bool cameraEdited = false;
@@ -785,7 +842,7 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
     // Selector by kind+index since LightDesc has no name field today.
     // Combo labels: "Light #N — Kind". The picked light's color +
     // intensity edit beneath; UpdateLight pushes the change.
-    if (ImGui::CollapsingHeader("Lights", ImGuiTreeNodeFlags_DefaultOpen))
+    if (ImGui::CollapsingHeader("Lights"))
     {
       const uint32_t lightCount = scene.GetLiveLightCount();
       if (lightCount == 0)

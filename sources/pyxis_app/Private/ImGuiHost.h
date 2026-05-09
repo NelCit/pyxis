@@ -12,6 +12,7 @@
 #include <Pyxis/Renderer/Descs/FrameStats.h>
 
 #include <cstdint>
+#include <vector>
 
 namespace nvrhi {
 class ICommandList;
@@ -109,12 +110,34 @@ class ImGuiHost {
   // call where the FrameProfile reports a non-zero CPU time — that's
   // effectively the load profile (mesh upload + BLAS build + TLAS
   // rebuild + first PathTracePass dispatch all happen on frame 0).
-  // Displayed in the Performance panel's "Loading" CollapsingHeader
-  // so the user can see what the first-frame cost was even after
-  // many frames of steady-state rendering.
-  bool        _loadingProfileLatched = false;
-  float       _loadingCpuMs          = 0.0f;
-  float       _loadingGpuMs          = 0.0f;
+  // Displayed in the Performance panel's "Loading" CollapsingHeader.
+  // The full pass breakdown is COPIED into _loadingPasses (the live
+  // FrameProfile.passes span gets recycled at every frame's
+  // BeginFrame; persisting needs an owned copy).
+  bool                                  _loadingProfileLatched = false;
+  float                                 _loadingCpuMs          = 0.0f;
+  float                                 _loadingGpuMs          = 0.0f;
+  std::vector<FrameProfile::PassTiming> _loadingPasses;
+
+  // Editor's "Reload shaders" button latches this flag; ViewerMode
+  // reads it via TakeShaderReloadRequest() each frame, calls the
+  // renderer-side reload, and clears the flag. Decouples the editor
+  // panel from the renderer (BuildEditorPanel only knows about
+  // GpuScene; the actual shader-reload lives across the API
+  // boundary on PyxisRenderer).
+  bool                                  _editorReloadShadersRequested = false;
+
+ public:
+  // Called by ViewerMode each frame; returns true and clears the
+  // latched request iff the editor's "Reload shaders" button was
+  // clicked since the last call.
+  [[nodiscard]] bool TakeShaderReloadRequest() noexcept {
+    const bool requested = _editorReloadShadersRequested;
+    _editorReloadShadersRequested = false;
+    return requested;
+  }
+
+ private:
 
   // Performance-panel rolling history. 240 frames @ 60 Hz = ~4 s of
   // visual context — enough to spot the per-pass cost shape of a
