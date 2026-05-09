@@ -203,7 +203,15 @@ void EmitPointInstancer(const pxr::UsdPrim& instancerPrim,
     const pxr::UsdPrim protoPrim = instancerPrim.GetStage()->GetPrimAtPath(protoPath);
     if (!protoPrim.IsValid())
       continue;
-    consumedPrototypes.emplace(protoPath.GetString());
+    // Mark the prototype root AND all descendants as consumed —
+    // pass 3's standalone-mesh walk will skip them so we don't
+    // double-emit a non-instanced copy. Walking descendants matters
+    // for the (M6-unsupported but defensively-handled) Xform-wrapped
+    // prototype case: without descendant marking, the inner meshes
+    // would leak through pass 3 and render as one extra standalone
+    // copy at the Xform's world position.
+    for (const pxr::UsdPrim& descendant : pxr::UsdPrimRange(protoPrim))
+      consumedPrototypes.emplace(descendant.GetPath().GetString());
 
     // M6 limitation: only direct UsdGeomMesh prototypes (no nested
     // Xform-wrapped hierarchies). Bistro foliage prototypes typically

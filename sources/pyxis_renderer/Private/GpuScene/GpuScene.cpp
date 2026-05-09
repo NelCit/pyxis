@@ -338,6 +338,16 @@ struct GpuScene::Impl {
   nvrhi::rt::AccelStructHandle tlas;
   bool                         tlasNeedsRebuild = false;
 
+  // M6 audit closeout: separate dirty track for the instance→material
+  // side-table buffer (binding 4). Kept distinct from tlasNeedsRebuild
+  // so UpdateInstanceMaterial doesn't pointlessly trigger a TLAS
+  // rebuild — the TLAS doesn't change when an instance's bound
+  // material changes; only the side-table does. AppendInstance,
+  // DestroyInstance, SetInstanceVisibility (which all DO change the
+  // TLAS) implicitly need a side-table re-upload too, so they bump
+  // both flags. UpdateInstanceMaterial only bumps this one.
+  bool                         instanceMaterialNeedsUpload = false;
+
   // Resolver helpers — centralise the §18.5 stale-handle policy for
   // void-returning Update* / Destroy* verbs. Invalid silently no-ops
   // with no counter bump; recycled / out-of-range handles bump
@@ -805,7 +815,10 @@ Expected<InstanceHandle> GpuScene::AppendInstance(const InstanceDesc& instanceDe
   entry.visible = instanceDesc.visible;
   entry.debugName.assign(instanceDesc.debugName);
 
+  // AppendInstance changes the TLAS (new instance to pack) AND the
+  // side-table (new entry to hold this instance's material slot).
   _impl->tlasNeedsRebuild = true;
+  _impl->instanceMaterialNeedsUpload = true;
   return static_cast<InstanceHandle>(HandleEncode(slot, entry.generation));
 }
 
@@ -822,10 +835,15 @@ void GpuScene::UpdateInstanceMaterial(InstanceHandle instanceHandle,
                                       MaterialHandle materialHandle) {
   if (auto* entry = _impl->ResolveInstance(instanceHandle))
   {
-    // No TLAS rebuild — material binding is a closesthit-shader
-    // table indirection (M5+); the TLAS only knows about mesh BLAS
-    // + transform + visibility.
+    // M6 audit closeout: only the side-table needs re-upload; the
+    // TLAS doesn't know about materials (it only carries mesh BLAS
+    // + transform + visibility + the per-§15 instance slot in
+    // instanceCustomIndex). Bumping just instanceMaterialNeedsUpload
+    // avoids a pointless TLAS rebuild on material edits, which the
+    // M9 "Save Scene As USD" + AOV inspector edit-material flows
+    // will exercise per-frame.
     entry->material = materialHandle;
+    _impl->instanceMaterialNeedsUpload = true;
   }
 }
 
@@ -835,7 +853,11 @@ void GpuScene::SetInstanceVisibility(InstanceHandle instanceHandle, bool visible
     if (entry->visible != visible)
     {
       entry->visible = visible;
+      // Visibility flipping a slot in/out of the TLAS pack changes
+      // which entries are live → side-table must re-upload too so
+      // any ID gap matches the new TLAS instance set.
       _impl->tlasNeedsRebuild = true;
+      _impl->instanceMaterialNeedsUpload = true;
     }
   }
 }
@@ -859,6 +881,7 @@ void GpuScene::DestroyInstance(InstanceHandle instanceHandle) {
     ++entry->generation;
   }
   _impl->tlasNeedsRebuild = true;
+  _impl->instanceMaterialNeedsUpload = true;
 }
 
 bool GpuScene::HasInstance(InstanceHandle instanceHandle) const {
@@ -1390,14 +1413,22 @@ Expected<void> GpuScene::CommitResources(nvrhi::ICommandList* commandList) {
                       instanceDescs.size(), TLAS_MAX_INSTANCES)};
     }
 
-    // Plan §15 / M6 P0 — upload the instance→material side-table.
-    // Indexed by instance slot (so dead/sparse slots are present
-    // but unread; they're never visited because the TLAS only
-    // contains live instances). Each entry holds the material slot
-    // bound to that instance; slot 0 always maps to material slot 0
-    // (the GpuScene sentinel grey material). The buffer is
-    // re-uploaded every TLAS rebuild — sized in lockstep with the
-    // instances vector so InstanceID() lookups never go OOB.
+    commandList->buildTopLevelAccelStruct(_impl->tlas.Get(), instanceDescs.data(),
+                                          instanceDescs.size(),
+                                          nvrhi::rt::AccelStructBuildFlags::PreferFastTrace);
+    _impl->tlasNeedsRebuild = false;
+  }
+
+  // Plan §15 / M6 P0 — upload the instance→material side-table.
+  // Indexed by instance slot (so dead/sparse slots are present but
+  // unread; they're never visited because the TLAS only contains
+  // live instances). Each entry holds the material slot bound to
+  // that instance; slot 0 always maps to material slot 0 (the
+  // GpuScene sentinel grey material). Re-uploaded whenever the
+  // dedicated dirty flag fires — independent of TLAS rebuild so
+  // UpdateInstanceMaterial doesn't pointlessly rebuild the TLAS.
+  if (_impl->instanceMaterialNeedsUpload && !_impl->instances.empty())
+  {
     const std::size_t instanceTableEntries = _impl->instances.size();
     std::vector<std::uint32_t> instanceMaterialTable(instanceTableEntries, 0u);
     for (std::size_t entrySlot = 1; entrySlot < instanceTableEntries; ++entrySlot)
@@ -1433,11 +1464,7 @@ Expected<void> GpuScene::CommitResources(nvrhi::ICommandList* commandList) {
     }
     commandList->writeBuffer(_impl->instanceMaterialBuffer.Get(),
                              instanceMaterialTable.data(), instanceTableBytes);
-
-    commandList->buildTopLevelAccelStruct(_impl->tlas.Get(), instanceDescs.data(),
-                                          instanceDescs.size(),
-                                          nvrhi::rt::AccelStructBuildFlags::PreferFastTrace);
-    _impl->tlasNeedsRebuild = false;
+    _impl->instanceMaterialNeedsUpload = false;
   }
 
   return {};

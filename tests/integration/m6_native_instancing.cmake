@@ -63,6 +63,24 @@ if(NOT EXISTS "${_runA_exr}")
     message(FATAL_ERROR "m6_native_instancing: run A produced no EXR at ${_runA_exr}")
 endif()
 
+# ----- Audit closeout: assert StageWalker actually expanded the 100
+# instances. The previous "differs from default scene" check would
+# also pass if EmitPointInstancer crashed after emitting a single
+# instance — a partial regression slipping through. Grep the
+# StageWalker info-log line emitted at WalkFile completion for the
+# expected counters.
+#
+# Expected log line shape (single line, see StageWalker::WalkFile):
+#   "StageWalker: <path> walked — 1 meshes, 100 instances (1 instancers), ..."
+string(REGEX MATCH "StageWalker:[^\n]*1 meshes, 100 instances \\(1 instancers\\)" _statsMatch "${_outA}")
+if(NOT _statsMatch)
+    message(FATAL_ERROR
+        "m6_native_instancing: StageWalker stats line missing or wrong shape.\n"
+        "Expected '1 meshes, 100 instances (1 instancers)' (the m6_instanced_grid.usd "
+        "fixture authors a single PointInstancer with 100 cubes of one prototype).\n"
+        "Actual stdout:\n${_outA}")
+endif()
+
 # ----- Run B: same fixture (determinism re-run) ---------------------
 execute_process(
     COMMAND "${PYXIS_EXE}" --headless --config "${FIXTURE_CONFIG}"
