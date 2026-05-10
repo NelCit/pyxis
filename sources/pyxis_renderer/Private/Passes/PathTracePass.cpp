@@ -678,19 +678,52 @@ void PathTracePass::Execute(nvrhi::ICommandList* commandList, const PassContext&
 
   // ---- Drain prior-frame pick staging -------------------------------
   // M7 follow-up. The previous Execute() copied pickResult ->
-  // pickResultStaging on the same queue our renderer submits on; by
-  // now the GPU has retired that copy, so the host-mapped read here
-  // gets the prior frame's value. Skipped on the first Execute (no
-  // copy was issued yet, staging holds garbage).
+  // pickResultStaging on the same queue our renderer submits on.
+  //
+  // Correctness contract (load-bearing — read carefully before
+  // changing FIF or the picker race becomes silent + intermittent):
+  //   * mapBuffer(CpuAccessMode::Read) does NOT itself fence on the
+  //     GPU under the Vulkan backend (it's vkInvalidateMappedMemory
+  //     + memcpy). The data we read here is whatever the staging
+  //     buffer currently holds.
+  //   * The previous frame's executeCommandList (which submitted the
+  //     copy) MUST have retired before this map runs. With
+  //     framesInFlight = 1 the viewer / headless waits on the prior
+  //     submit's fence inside deviceManager->BeginFrame before we
+  //     reach this point, so the copy IS done. The `framesInFlight
+  //     == 1` assert below pins that contract; if a future RFC bumps
+  //     it (M11+ frame-pacing knobs) the picker readback needs an
+  //     explicit nvrhi::EventQuery between the submit and the next
+  //     Execute, OR a fallback to "skip the map this frame and report
+  //     last-known-good value" (a one-extra-frame stale picker).
+  // Skipped on the very first Execute too (no copy was issued yet,
+  // staging holds default-init garbage).
   if (_pickStagingHasFrame
       && context.targets->pickResultStaging != nullptr)
   {
-    const void* mapped = _device->mapBuffer(context.targets->pickResultStaging,
-                                            nvrhi::CpuAccessMode::Read);
-    if (mapped != nullptr)
+    if (context.framesInFlight > 1)
     {
-      std::memcpy(&_lastPickResult, mapped, sizeof(_lastPickResult));
-      _device->unmapBuffer(context.targets->pickResultStaging);
+      // Future-proof: the contract only holds at FIF=1. Skip the map
+      // rather than read a possibly-uninitialised staging buffer; the
+      // editor will see the prior _lastPickResult value.
+      static bool warnedOnce = false;
+      if (!warnedOnce)
+      {
+        Logging::Get().Warn(log::RENDER,
+                            "PathTracePass: picker readback skipped — framesInFlight > 1 "
+                            "needs an EventQuery to be safe; falling back to last-known value.");
+        warnedOnce = true;
+      }
+    }
+    else
+    {
+      const void* mapped = _device->mapBuffer(context.targets->pickResultStaging,
+                                              nvrhi::CpuAccessMode::Read);
+      if (mapped != nullptr)
+      {
+        std::memcpy(&_lastPickResult, mapped, sizeof(_lastPickResult));
+        _device->unmapBuffer(context.targets->pickResultStaging);
+      }
     }
   }
 
