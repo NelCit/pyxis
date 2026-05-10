@@ -1100,6 +1100,45 @@ std::size_t EmitMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCach
     }
   }
 
+  // ---- Normals source data (M9 smooth-shading) ----------------------
+  // UsdGeomMesh authors normals as either the schema-level
+  // `normals` attribute (the most common case — what the lobby uses)
+  // or as a `primvars:normals` primvar (modern style). Try the
+  // schema attr first; if absent, try the primvar. Closesthit reads
+  // these via per-vertex barycentric interpolation; in the face-
+  // varying case we collapse to per-vertex (taking the first normal
+  // per shared vertex), losing hard-edge fidelity. Vertex
+  // duplication for accurate hard edges is M11+ polish — for now
+  // smooth shading on shared edges is a major visual upgrade vs the
+  // M7-simple per-face fallback.
+  pxr::VtArray<pxr::GfVec3f> normalsArr;
+  pxr::TfToken               normalsInterpolation;
+  bool                       normalsHasValue = false;
+  {
+    const pxr::UsdAttribute schemaNormalsAttr = meshPrim.GetNormalsAttr();
+    if (schemaNormalsAttr && schemaNormalsAttr.HasAuthoredValue()
+        && schemaNormalsAttr.Get(&normalsArr) && !normalsArr.empty())
+    {
+      normalsInterpolation = meshPrim.GetNormalsInterpolation();
+      normalsHasValue = true;
+    }
+    else
+    {
+      const pxr::UsdGeomPrimvarsAPI primvarsApi(prim);
+      const pxr::UsdGeomPrimvar     normalsPrimvar =
+          primvarsApi.GetPrimvar(pxr::TfToken("normals"));
+      if (normalsPrimvar.HasValue())
+      {
+        normalsPrimvar.ComputeFlattened(&normalsArr);
+        if (!normalsArr.empty())
+        {
+          normalsInterpolation = normalsPrimvar.GetInterpolation();
+          normalsHasValue = true;
+        }
+      }
+    }
+  }
+
   // ---- Per-subset emit loop ----------------------------------------
   std::size_t emittedCount = 0;
   const hlslpp::float4x4 worldFromLocal =
@@ -1209,11 +1248,77 @@ std::size_t EmitMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCach
       // zero-init the declaration above gave us.
     }
 
+    // Per-vertex normal buffer — same shape + same fallback policy as
+    // vertexUvs above. Empty when the mesh authored no normals; the
+    // closesthit's M9 smooth-shading path detects a near-zero
+    // interpolated normal magnitude and falls back to the M7-NdotL
+    // face-normal path. Production scenes (lobby) author faceVarying
+    // normals; the first-per-vertex collapse here loses hard-edge
+    // fidelity but avoids vertex duplication.
+    std::vector<hlslpp::float3> vertexNormals;
+    if (normalsHasValue)
+    {
+      vertexNormals.assign(usdPoints.size(), hlslpp::float3{0.0f, 0.0f, 0.0f});
+      if (normalsInterpolation == pxr::UsdGeomTokens->vertex
+          && normalsArr.size() == usdPoints.size())
+      {
+        for (std::size_t i = 0; i < normalsArr.size(); ++i)
+          vertexNormals[i] =
+              hlslpp::float3{normalsArr[i][0], normalsArr[i][1], normalsArr[i][2]};
+      }
+      else if (normalsInterpolation == pxr::UsdGeomTokens->faceVarying
+               && normalsArr.size() == usdIndices.size())
+      {
+        std::vector<bool> normalAssigned(usdPoints.size(), false);
+        auto walkFaceN = [&](std::size_t faceIdx) {
+          const int faceCount = usdCounts[faceIdx];
+          const std::size_t fvBase = faceStartOffsets[faceIdx];
+          for (int faceVertex = 0; faceVertex < faceCount; ++faceVertex)
+          {
+            const std::size_t fvIdx = fvBase + static_cast<std::size_t>(faceVertex);
+            const auto vertexIdx = static_cast<std::size_t>(usdIndices[fvIdx]);
+            if (vertexIdx < normalAssigned.size() && !normalAssigned[vertexIdx])
+            {
+              vertexNormals[vertexIdx] = hlslpp::float3{
+                  normalsArr[fvIdx][0], normalsArr[fvIdx][1], normalsArr[fvIdx][2]};
+              normalAssigned[vertexIdx] = true;
+            }
+          }
+        };
+        if (subset.faceIndices.empty())
+        {
+          for (std::size_t faceIdx = 0; faceIdx < usdCounts.size(); ++faceIdx)
+            walkFaceN(faceIdx);
+        }
+        else
+        {
+          for (const int faceIdx : subset.faceIndices)
+            walkFaceN(static_cast<std::size_t>(faceIdx));
+        }
+      }
+      else if ((normalsInterpolation == pxr::UsdGeomTokens->constant
+                || normalsInterpolation == pxr::UsdGeomTokens->uniform)
+               && !normalsArr.empty())
+      {
+        const hlslpp::float3 single{
+            normalsArr[0][0], normalsArr[0][1], normalsArr[0][2]};
+        std::fill(vertexNormals.begin(), vertexNormals.end(), single);
+      }
+      else
+      {
+        // Length mismatch — drop the normals buffer so the closesthit
+        // falls back to face normals. Better than feeding the shader
+        // a partial array indexed past its end.
+        vertexNormals.clear();
+      }
+    }
+
     const std::string subDebugName = primPath + subset.debugSuffix;
     MeshDesc meshDesc;
     meshDesc.positions = positions;
     meshDesc.indices = indices;
     meshDesc.uv0 = vertexUvs;
+    meshDesc.normals = vertexNormals;
     meshDesc.debugName = subDebugName;
     const auto meshHandle = scene.CreateMesh(meshDesc);
     if (!meshHandle.has_value())

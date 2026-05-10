@@ -201,6 +201,14 @@ inline shaderinterop::OpenPBRMaterialGPU PackMaterialGpu(
   gpu.transmissionTex = transmissionSlot;
   gpu.coatRoughnessTex = coatRoughnessSlot;
   gpu._reserved0 = 0;
+  // M9 emission RGB. UsdPreviewSurface authors emissive as a color3f
+  // (`emissiveColor`); the closesthit emits emissionColor ×
+  // emissionLuminance × (sampled emissionTex) when the
+  // MATERIAL_FLAG_EMISSIVE bit is set.
+  gpu.emissionR = static_cast<float>(desc.emissionColor.x);
+  gpu.emissionG = static_cast<float>(desc.emissionColor.y);
+  gpu.emissionB = static_cast<float>(desc.emissionColor.z);
+  gpu._reserved1 = 0;
   return gpu;
 }
 
@@ -523,6 +531,18 @@ struct GpuScene::Impl
   bool                 meshUvsNeedUpload     = false;
   bool                 meshIndicesNeedUpload = false;
 
+  // M9 smooth shading: per-vertex normals concatenated into one flat
+  // float4 buffer + per-mesh-slot start offsets. Mirror of the
+  // per-triangle face-normal buffer above but per-VERTEX so the
+  // closesthit can barycentric-interpolate three vertex normals at
+  // each hit. Stored as float4 for std430 alignment + a future
+  // tangent.w sign-bit slot. Empty for meshes with no authored
+  // normals — closesthit detects a near-zero magnitude and falls
+  // back to the M7 face-normal path.
+  nvrhi::BufferHandle  meshVertexNormalsBuffer;
+  nvrhi::BufferHandle  meshVertexNormalOffsetsBuffer;
+  bool                 meshVertexNormalsNeedUpload = false;
+
   // Magenta 4x4 fallback texture — slot 0 in the bindless table is
   // permanently the "missing texture" colour so any material whose
   // resolved path failed to decode renders visibly-broken instead
@@ -685,6 +705,7 @@ struct GpuScene::Impl
   [[nodiscard]] Expected<void> UploadMeshFaceNormals(nvrhi::ICommandList* commandList);
   [[nodiscard]] Expected<void> UploadMeshUvs(nvrhi::ICommandList* commandList);
   [[nodiscard]] Expected<void> UploadMeshIndices(nvrhi::ICommandList* commandList);
+  [[nodiscard]] Expected<void> UploadMeshVertexNormals(nvrhi::ICommandList* commandList);
 };
 
 }  // namespace pyxis

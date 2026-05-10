@@ -254,6 +254,16 @@ public:
   [[nodiscard]] nvrhi::IBuffer*          GetMeshIndicesBuffer() const noexcept;
   [[nodiscard]] nvrhi::IBuffer*          GetMeshIndexOffsetsBuffer() const noexcept;
 
+  // M9 smooth shading: per-vertex normals concatenated into one flat
+  // float4 buffer + per-mesh-slot start offsets. Closesthit reads:
+  //   nv0..2 = gMeshVertexNormals[gMeshVertexNormalOffsets[meshSlot] + v_i]
+  //   nLocal = barycentric_interp(nv0, nv1, nv2, attribs.bary)
+  // and falls back to the per-triangle face normal when |nLocal|≈0
+  // (mesh authored no normals). Float4 stride for std430 alignment +
+  // a future tangent.w sign-bit slot.
+  [[nodiscard]] nvrhi::IBuffer*          GetMeshVertexNormalsBuffer() const noexcept;
+  [[nodiscard]] nvrhi::IBuffer*          GetMeshVertexNormalOffsetsBuffer() const noexcept;
+
   // M7-IBL: env-map texture of the FIRST live UsdLuxDomeLight, or
   // nullptr if no dome with a resolved envMap exists. Miss shader
   // samples this at the ray direction's lat-long uv to draw the

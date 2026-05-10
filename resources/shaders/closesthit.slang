@@ -76,6 +76,8 @@
 [[vk::binding(26, 0)]] StructuredBuffer<uint>               gMeshIndices;
 [[vk::binding(27, 0)]] StructuredBuffer<uint>               gMeshIndexOffsets;
 [[vk::binding(28, 0)]] Texture2D                            gBindlessTextures[BINDLESS_TEXTURES_CAP];
+[[vk::binding(29, 0)]] StructuredBuffer<float4>             gMeshVertexNormals;
+[[vk::binding(30, 0)]] StructuredBuffer<uint>               gMeshVertexNormalOffsets;
 
 // Slang emits the SPIR-V `OpEntryPoint` name as `"main"` regardless
 // of the source-side function name; the C++ side passes `"main"` to
@@ -129,22 +131,40 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
         baseColor = sampled.rgb;
     }
 
-    // M7 NdotL: resolve the hit-triangle's object-space face normal
-    // via the M7 NdotL side-tables, then transform to world space
-    // using Vulkan's per-instance ObjectToWorld3x4 builtin.
+    // M9 smooth shading: try the per-vertex normal path first. The
+    // vertex-normal flat buffer is per-mesh-vertex (3 normals per
+    // triangle vertex, addressed via the same gMeshIndices triple
+    // we used for UVs above). Barycentric-interpolate, normalize.
+    // Meshes that authored no normals contribute zero entries
+    // (M9 StageWalker fills with float4(0,0,0,0)) — detected via the
+    // squared magnitude of the interpolated vector. The M7 face-
+    // normal path is the fallback so unauthored meshes still light.
     //
     // ObjectToWorld3x4() returns a column-major 3x4 affine; its
-    // upper-3x3 transforms direction vectors. For a uniform-scale +
-    // rotation transform (the M7 fixture cases) this is correct as-
-    // is. Non-uniform scale would need the inverse-transpose of the
-    // upper 3x3 (M9 polish).
-    const uint faceOffset = gMeshFaceOffsets[meshSlot];
-    const float3 nLocal = gMeshFaceNormals[faceOffset + PrimitiveIndex()].xyz;
+    // upper-3x3 transforms direction vectors. For a uniform-scale
+    // + rotation transform this is correct as-is; non-uniform scale
+    // needs the inverse-transpose of the upper 3x3 (M11 polish).
     const float3x4 objectToWorld = ObjectToWorld3x4();
     const float3x3 worldFromObject3x3 = float3x3(
         objectToWorld[0].xyz,
         objectToWorld[1].xyz,
         objectToWorld[2].xyz);
+
+    const uint vertexNormalBase = gMeshVertexNormalOffsets[meshSlot];
+    const float3 nv0 = gMeshVertexNormals[vertexNormalBase + v0].xyz;
+    const float3 nv1 = gMeshVertexNormals[vertexNormalBase + v1].xyz;
+    const float3 nv2 = gMeshVertexNormals[vertexNormalBase + v2].xyz;
+    const float3 smoothLocal = nv0 * w0 + nv1 * bary.x + nv2 * bary.y;
+    const float  smoothLenSq = dot(smoothLocal, smoothLocal);
+
+    float3 nLocal;
+    if (smoothLenSq > 1e-6) {
+        nLocal = smoothLocal * rsqrt(smoothLenSq);
+    } else {
+        // Mesh authored no normals — fall back to face normal.
+        const uint faceOffset = gMeshFaceOffsets[meshSlot];
+        nLocal = gMeshFaceNormals[faceOffset + PrimitiveIndex()].xyz;
+    }
     const float3 nWorld = normalize(mul(worldFromObject3x3, nLocal));
 
     // M7-simple lighting + NdotL Lambert for direct lights. Loop
@@ -233,7 +253,29 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
         totalContribution += L.intensity;
     }
 
-    payload.color = (totalContribution > 0.0) ? (baseColor * (directSum + ambientSum)) : baseColor;
+    // M9 emission. Emissive materials (UsdPreviewSurface authored
+    // `emissiveColor` non-zero, MaterialFlag::EMISSIVE bit set by
+    // PackMaterialGpu) add their authored radiance directly to the
+    // output — independent of NdotL, distance falloff, or any
+    // incoming light. Per-material emissionTex (when authored)
+    // multiplies the constant emissionColor pointwise; no UV-set
+    // indirection beyond what the baseColor sample already did.
+    float3 emission = float3(0.0, 0.0, 0.0);
+    if ((mat.flags & MATERIAL_FLAG_EMISSIVE) != 0u) {
+        emission = float3(mat.emissionR, mat.emissionG, mat.emissionB)
+                   * mat.emissionLuminance;
+        if ((mat.flags & MATERIAL_FLAG_HAS_EMISSION_MAP) != 0u
+            && mat.emissionTex < BINDLESS_TEXTURES_CAP) {
+            const float3 sampledEmission = gBindlessTextures[mat.emissionTex].SampleLevel(
+                gBindlessSampler, uv, 0).rgb;
+            emission *= sampledEmission;
+        }
+    }
+
+    const float3 lit = (totalContribution > 0.0)
+        ? (baseColor * (directSum + ambientSum))
+        : baseColor;
+    payload.color = lit + emission;
     payload.hitT  = RayTCurrent();
     // M7 follow-up — fields the raygen-side AOV inspector reads.
     // Normal is the world-space face normal we already computed for

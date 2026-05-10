@@ -91,6 +91,9 @@ void GpuScene::Impl::Clear() noexcept
   meshIndexOffsetsBuffer = nullptr;
   meshUvsNeedUpload = false;
   meshIndicesNeedUpload = false;
+  meshVertexNormalsBuffer = nullptr;
+  meshVertexNormalOffsetsBuffer = nullptr;
+  meshVertexNormalsNeedUpload = false;
   instanceMeshBuffer = nullptr;
 
   // Sampler + missingTexture are scene-lifetime singletons that the
@@ -164,6 +167,7 @@ Expected<void> GpuScene::Impl::CommitResources(nvrhi::ICommandList* commandList)
   PYXIS_TRY(UploadMeshFaceNormals(commandList));
   PYXIS_TRY(UploadMeshUvs(commandList));
   PYXIS_TRY(UploadMeshIndices(commandList));
+  PYXIS_TRY(UploadMeshVertexNormals(commandList));
   return {};
 }
 
@@ -894,6 +898,65 @@ Expected<void> GpuScene::Impl::UploadMeshIndices(nvrhi::ICommandList* commandLis
   commandList->writeBuffer(meshIndicesBuffer.Get(),       packedIndices.data(),  indicesBytes);
   commandList->writeBuffer(meshIndexOffsetsBuffer.Get(),  perMeshOffsets.data(), offsetsBytes);
   meshIndicesNeedUpload = false;
+  return {};
+}
+
+// M9 smooth shading: per-vertex normals concatenated into one flat
+// float4 buffer + per-mesh-slot start-offset table. Mirror of the
+// per-triangle face-normal upload above but per-VERTEX so the
+// closesthit can barycentric-interpolate three vertex normals at
+// each hit.
+//
+// Like the UV path, every mesh contributes EXACTLY vertexCount
+// entries — short / empty `mesh.normals` arrays pad with (0,0,0,0).
+// Closesthit detects the zero-magnitude case and falls back to the
+// face-normal path so meshes that authored no normals still render.
+Expected<void> GpuScene::Impl::UploadMeshVertexNormals(nvrhi::ICommandList* commandList)
+{
+  if (!meshVertexNormalsNeedUpload || meshes.empty())
+    return {};
+
+  std::vector<hlslpp::float4> packedNormals;
+  std::vector<std::uint32_t>  perMeshOffsets(meshes.size(), 0u);
+  for (std::size_t meshSlot = 0; meshSlot < meshes.size(); ++meshSlot)
+  {
+    perMeshOffsets[meshSlot] = static_cast<std::uint32_t>(packedNormals.size());
+    const MeshEntry& mesh = meshes[meshSlot];
+    if (!mesh.live)
+      continue;
+    const std::size_t copyCount =
+        std::min<std::size_t>(mesh.normals.size(), mesh.vertexCount);
+    for (std::size_t i = 0; i < copyCount; ++i)
+    {
+      packedNormals.emplace_back(mesh.normals[i].x, mesh.normals[i].y,
+                                 mesh.normals[i].z, 0.0f);
+    }
+    if (copyCount < mesh.vertexCount)
+    {
+      const std::size_t padCount = mesh.vertexCount - copyCount;
+      packedNormals.insert(packedNormals.end(), padCount,
+                           hlslpp::float4{0.0f, 0.0f, 0.0f, 0.0f});
+    }
+  }
+  if (packedNormals.empty())
+    packedNormals.emplace_back(0.0f, 0.0f, 0.0f, 0.0f);  // 1-element fallback
+
+  const std::size_t normalsBytes = packedNormals.size() * sizeof(hlslpp::float4);
+  const std::size_t offsetsBytes = perMeshOffsets.size() * sizeof(std::uint32_t);
+
+  PYXIS_TRY(EnsureStructuredBuffer(device, meshVertexNormalsBuffer, normalsBytes,
+                                   sizeof(hlslpp::float4),
+                                   "GpuScene.meshVertexNormalsBuffer",
+                                   "meshVertexNormalsBuffer"));
+  PYXIS_TRY(EnsureStructuredBuffer(device, meshVertexNormalOffsetsBuffer, offsetsBytes,
+                                   sizeof(std::uint32_t),
+                                   "GpuScene.meshVertexNormalOffsetsBuffer",
+                                   "meshVertexNormalOffsetsBuffer"));
+  commandList->writeBuffer(meshVertexNormalsBuffer.Get(),
+                           packedNormals.data(), normalsBytes);
+  commandList->writeBuffer(meshVertexNormalOffsetsBuffer.Get(),
+                           perMeshOffsets.data(), offsetsBytes);
+  meshVertexNormalsNeedUpload = false;
   return {};
 }
 

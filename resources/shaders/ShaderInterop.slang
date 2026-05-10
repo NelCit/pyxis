@@ -272,6 +272,17 @@ struct OpenPBRMaterialGPU {
     uint  transmissionTex;
     uint  coatRoughnessTex;
     uint  _reserved0;
+
+    // Row 5 — M9 emission RGB. UsdPreviewSurface authors the emissive
+    // tint as a color3f (`emissiveColor`); the closesthit emits
+    // `emissionColor × emissionLuminance × (sampled emissionTex)`
+    // when MATERIAL_FLAG_EMISSIVE is set. emissionLuminance lives on
+    // row 3 above as a scalar multiplier (set to 1.0 by default for
+    // UsdPreviewSurface materials with non-zero emissiveColor).
+    float emissionR;
+    float emissionG;
+    float emissionB;
+    uint  _reserved1;
 };
 
 // LightGpu — packed light entry the closesthit reads via the
@@ -376,8 +387,10 @@ static const uint BINDLESS_TEXTURES_CAP = 4096u;
                   "See resources/shaders/ShaderInterop.slang.");
     static_assert(sizeof(PickResult) % 16 == 0,
                   "PickResult must be 16-byte aligned (structured-buffer rule).");
-    static_assert(sizeof(OpenPBRMaterialGPU) == 80,
-                  "OpenPBRMaterialGPU must be 80 bytes (5 rows of 16).");
+    static_assert(sizeof(OpenPBRMaterialGPU) == 96,
+                  "OpenPBRMaterialGPU must be 96 bytes (6 rows of 16) — M9 added "
+                  "emissionR/G/B on row 5 alongside the existing emissionLuminance "
+                  "scalar on row 3.");
     static_assert(sizeof(OpenPBRMaterialGPU) % 16 == 0,
                   "OpenPBRMaterialGPU must be 16-byte aligned (§23 cbuffer / "
                   "structured-buffer alignment rule).");

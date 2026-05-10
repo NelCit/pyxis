@@ -164,6 +164,9 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
       // v1 production scene.
       nvrhi::BindingLayoutItem::Texture_SRV(28).setSize(
           shaderinterop::BINDLESS_TEXTURES_CAP),             // binding 28 bindless textures
+      // M9 smooth shading — per-vertex normals + per-mesh start offsets.
+      nvrhi::BindingLayoutItem::StructuredBuffer_SRV(29),    // binding 29 mesh vertex normals
+      nvrhi::BindingLayoutItem::StructuredBuffer_SRV(30),    // binding 30 mesh vertex-normal offsets
   };
   _bindingLayout = _device->createBindingLayout(layoutDesc);
   if (!_bindingLayout)
@@ -364,6 +367,36 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
   if (!_fallbackMeshUvsBuffer)
   {
     Logging::Get().Error(log::RENDER, "PathTracePass: createBuffer(FallbackMeshUvs) failed");
+    return;
+  }
+
+  // M9 smooth-shading fallbacks. Vertex-normal buffer is one zero
+  // float4; the offset table fallback shares the uint-stride helper
+  // with the index/UV-offset fallbacks above.
+  _fallbackMeshVertexNormalOffsetsBuffer =
+      makeUintFallback("PathTrace.FallbackMeshVertexNormalOffsets");
+  if (!_fallbackMeshVertexNormalOffsetsBuffer)
+  {
+    Logging::Get().Error(log::RENDER,
+                         "PathTracePass: createBuffer(FallbackMeshVertexNormalOffsets) failed");
+    return;
+  }
+  {
+    nvrhi::BufferDesc nFallbackDesc;
+    nFallbackDesc.byteSize = sizeof(hlslpp::float4);
+    nFallbackDesc.structStride = sizeof(hlslpp::float4);
+    nFallbackDesc.canHaveRawViews = false;
+    nFallbackDesc.canHaveTypedViews = false;
+    nFallbackDesc.format = nvrhi::Format::UNKNOWN;
+    nFallbackDesc.debugName = "PathTrace.FallbackMeshVertexNormals";
+    nFallbackDesc.initialState = nvrhi::ResourceStates::ShaderResource;
+    nFallbackDesc.keepInitialState = true;
+    _fallbackMeshVertexNormalsBuffer = _device->createBuffer(nFallbackDesc);
+  }
+  if (!_fallbackMeshVertexNormalsBuffer)
+  {
+    Logging::Get().Error(log::RENDER,
+                         "PathTracePass: createBuffer(FallbackMeshVertexNormals) failed");
     return;
   }
 
@@ -599,10 +632,12 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(RenderTargets const
   current[slot(BindingSlot::MeshFaceOffsets)]  = _scene->GetMeshFaceOffsetsBuffer();
   current[slot(BindingSlot::DomeTexture)]      = _scene->GetDomeEnvMapTexture();
   current[slot(BindingSlot::BindlessSampler)]  = _scene->GetBindlessSampler();
-  current[slot(BindingSlot::MeshUvs)]          = _scene->GetMeshUvsBuffer();
-  current[slot(BindingSlot::MeshUvOffsets)]    = _scene->GetMeshUvOffsetsBuffer();
-  current[slot(BindingSlot::MeshIndices)]      = _scene->GetMeshIndicesBuffer();
-  current[slot(BindingSlot::MeshIndexOffsets)] = _scene->GetMeshIndexOffsetsBuffer();
+  current[slot(BindingSlot::MeshUvs)]                = _scene->GetMeshUvsBuffer();
+  current[slot(BindingSlot::MeshUvOffsets)]          = _scene->GetMeshUvOffsetsBuffer();
+  current[slot(BindingSlot::MeshIndices)]            = _scene->GetMeshIndicesBuffer();
+  current[slot(BindingSlot::MeshIndexOffsets)]       = _scene->GetMeshIndexOffsetsBuffer();
+  current[slot(BindingSlot::MeshVertexNormals)]      = _scene->GetMeshVertexNormalsBuffer();
+  current[slot(BindingSlot::MeshVertexNormalOffsets)]= _scene->GetMeshVertexNormalOffsetsBuffer();
   current[slot(BindingSlot::ColorHdrAov)]      = targets.colorHdr;
   current[slot(BindingSlot::NormalAov)]        = targets.normalAov;
   current[slot(BindingSlot::DepthAov)]         = targets.depthAov;
@@ -694,6 +729,13 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(RenderTargets const
   nvrhi::IBuffer* meshIndexOffsetsBuffer = _scene->GetMeshIndexOffsetsBuffer();
   if (meshIndexOffsetsBuffer == nullptr)
     meshIndexOffsetsBuffer = _fallbackMeshIndexOffsetsBuffer.Get();
+  // M9 smooth shading — per-vertex normals + their offset table.
+  nvrhi::IBuffer* meshVertexNormalsBuffer = _scene->GetMeshVertexNormalsBuffer();
+  if (meshVertexNormalsBuffer == nullptr)
+    meshVertexNormalsBuffer = _fallbackMeshVertexNormalsBuffer.Get();
+  nvrhi::IBuffer* meshVertexNormalOffsetsBuffer = _scene->GetMeshVertexNormalOffsetsBuffer();
+  if (meshVertexNormalOffsetsBuffer == nullptr)
+    meshVertexNormalOffsetsBuffer = _fallbackMeshVertexNormalOffsetsBuffer.Get();
   // M7-IBL: dome HDRI texture + sampler. Scene's first live dome
   // wins; falls back to the 1×1 black texture + the local linear-
   // clamp sampler when no dome with a resolved env-map exists. The
@@ -766,6 +808,9 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(RenderTargets const
       nvrhi::BindingSetItem::StructuredBuffer_SRV(25, meshUvOffsetsBuffer),
       nvrhi::BindingSetItem::StructuredBuffer_SRV(26, meshIndicesBuffer),
       nvrhi::BindingSetItem::StructuredBuffer_SRV(27, meshIndexOffsetsBuffer),
+      // M9 smooth shading.
+      nvrhi::BindingSetItem::StructuredBuffer_SRV(29, meshVertexNormalsBuffer),
+      nvrhi::BindingSetItem::StructuredBuffer_SRV(30, meshVertexNormalOffsetsBuffer),
   };
 
   // ---- Bindless texture array (binding 28) -----------------------------
@@ -976,7 +1021,7 @@ void PathTracePass::Execute(nvrhi::ICommandList* commandList, const PassContext&
     const void*  defaultBytes;
     std::size_t  defaultByteSize;
   };
-  const std::array<BufferFallbackSpec, 10> bufferFallbacks{{
+  const std::array<BufferFallbackSpec, 12> bufferFallbacks{{
       {&GpuScene::GetMaterialBuffer,         &PathTracePass::_fallbackMaterialBuffer,
        &FALLBACK_MATERIAL_GREY,    sizeof(FALLBACK_MATERIAL_GREY)   },
       {&GpuScene::GetInstanceMaterialBuffer, &PathTracePass::_fallbackInstanceMaterialBuffer,
@@ -997,6 +1042,11 @@ void PathTracePass::Execute(nvrhi::ICommandList* commandList, const PassContext&
       {&GpuScene::GetMeshIndicesBuffer,      &PathTracePass::_fallbackMeshIndicesBuffer,
        &FALLBACK_UINT_ZERO,        sizeof(FALLBACK_UINT_ZERO)       },
       {&GpuScene::GetMeshIndexOffsetsBuffer, &PathTracePass::_fallbackMeshIndexOffsetsBuffer,
+       &FALLBACK_UINT_ZERO,        sizeof(FALLBACK_UINT_ZERO)       },
+      // M9 smooth shading.
+      {&GpuScene::GetMeshVertexNormalsBuffer,        &PathTracePass::_fallbackMeshVertexNormalsBuffer,
+       FALLBACK_FLOAT4_ZERO,       sizeof(FALLBACK_FLOAT4_ZERO)     },
+      {&GpuScene::GetMeshVertexNormalOffsetsBuffer,  &PathTracePass::_fallbackMeshVertexNormalOffsetsBuffer,
        &FALLBACK_UINT_ZERO,        sizeof(FALLBACK_UINT_ZERO)       },
   }};
   for (const BufferFallbackSpec& spec : bufferFallbacks)

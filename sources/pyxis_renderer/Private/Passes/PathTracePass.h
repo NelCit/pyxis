@@ -131,6 +131,14 @@ class PathTracePass final : public IRenderPass {
   nvrhi::BufferHandle _fallbackMeshIndicesBuffer;
   nvrhi::BufferHandle _fallbackMeshIndexOffsetsBuffer;
 
+  // M9 smooth shading: 1-element fallbacks for the per-vertex normal
+  // buffer + offset table. Closesthit's bary-interp path detects an
+  // empty mesh by reading a zero-magnitude normal; falls back to the
+  // M7 face-normal path. Same lifetime + create rationale as the UV
+  // fallbacks above.
+  nvrhi::BufferHandle _fallbackMeshVertexNormalsBuffer;
+  nvrhi::BufferHandle _fallbackMeshVertexNormalOffsetsBuffer;
+
   // M7-IBL: 1×1 black RGBA32F fallback texture + a default linear-
   // clamp sampler. Bound at bindings 9/10 when the scene has no dome
   // light with a resolved env-map — sampling returns black so the
@@ -164,6 +172,8 @@ class PathTracePass final : public IRenderPass {
     MeshUvOffsets,
     MeshIndices,
     MeshIndexOffsets,
+    MeshVertexNormals,
+    MeshVertexNormalOffsets,
     ColorHdrAov,
     NormalAov,
     DepthAov,
