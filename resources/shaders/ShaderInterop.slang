@@ -71,7 +71,8 @@ struct HitInfo {
     float3 baseColor;
     uint   materialId;   // material slot from gInstanceMaterial[instanceId]
     float3 worldHit;
-    uint   _hitInfoPad0;
+    uint   elementId;    // PrimitiveIndex() — per-face id within the BLAS;
+                         // ~0u on miss. Hydra's `HdAovTokens->elementId`.
 };
 #endif
 
@@ -80,20 +81,28 @@ struct HitInfo {
 // no jitter); the §43.3 reservation for `apertureFStop` lives on
 // CameraDesc and gets wired into the shader at M9+.
 //
-// Layout: 128 bytes (two 64-byte float4x4s). Both matrices are
+// Layout: 192 bytes (three 64-byte float4x4s). All matrices are
 // row-major + column-vector convention (§10):
 //   pos_view  = mul(viewFromWorld, pos_world)
 //   pos_clip  = mul(projFromView,  pos_view)
-// The raygen shader uses the *inverses* — `worldFromView`
-// (= inverse(viewFromWorld)) to translate ray origin into world,
-// and `viewFromClip` (= inverse(projFromView)) to translate NDC
-// pixel coordinates into a view-space direction. We pass the
-// inverses pre-computed by the C++ side rather than computing them
-// in shader; M3 ships static cameras so this is one matrix-inverse
-// per frame at most.
+// The raygen shader needs both directions:
+//   `worldFromView` (= inverse of CameraDesc::viewFromWorld) — used to
+//      translate the ray origin / direction from view → world
+//      (primary-ray construction).
+//   `viewFromClip` (= inverse of CameraDesc::projFromView) — used to
+//      translate NDC pixel coordinates into a view-space direction
+//      (primary-ray construction).
+//   `viewFromWorld` (= CameraDesc::viewFromWorld, FORWARD) — used to
+//      transform world-space hit position + normal into eye space for
+//      the Neye / Peye AOVs (Hydra-canonical, comp tools assume
+//      eye-space normals + positions).
+// We pass the inverses pre-computed by the C++ side rather than
+// computing them in shader; static cameras → one matrix-inverse per
+// frame at most.
 struct CameraUniforms {
     float4x4 worldFromView;     // inverse of CameraDesc::viewFromWorld
     float4x4 viewFromClip;      // inverse of CameraDesc::projFromView
+    float4x4 viewFromWorld;     // forward — for Neye / Peye AOVs
 };
 
 // FrameUiUniforms — per-frame viewer-only state the raygen reads
@@ -128,13 +137,18 @@ struct FrameUiUniforms {
 // Editor panel writes one of these into camera.debugViewMode; raygen
 // branches on it to compute the BGRA8 display output (gOutput) from
 // the raw per-AOV textures.
-static const uint DEBUG_VIEW_COLOR        = 0;  // post-tonemap radiance
-static const uint DEBUG_VIEW_NORMAL       = 1;  // world normal as (n*0.5+0.5)
-static const uint DEBUG_VIEW_DEPTH        = 2;  // 1/depth grayscale
-static const uint DEBUG_VIEW_INSTANCE_ID  = 3;  // hashed instance-id colour
-static const uint DEBUG_VIEW_MATERIAL_ID  = 4;  // hashed material-id colour
-static const uint DEBUG_VIEW_BASE_COLOR   = 5;  // raw OpenPBR baseColor (no shading)
-static const uint DEBUG_VIEW_WORLD_POS    = 6;  // worldHit / 10 then frac for visualisation
+static const uint DEBUG_VIEW_COLOR        = 0;   // post-tonemap radiance
+static const uint DEBUG_VIEW_NORMAL       = 1;   // world normal as (n*0.5+0.5)
+static const uint DEBUG_VIEW_DEPTH        = 2;   // 1/depth grayscale
+static const uint DEBUG_VIEW_INSTANCE_ID  = 3;   // hashed instance-id colour
+static const uint DEBUG_VIEW_MATERIAL_ID  = 4;   // hashed material-id colour
+static const uint DEBUG_VIEW_BASE_COLOR   = 5;   // raw OpenPBR baseColor (no shading)
+static const uint DEBUG_VIEW_WORLD_POS    = 6;   // worldHit / 10 then frac for visualisation
+// Tier 1 Hydra-canonical (DCC compositing tools query these by name).
+static const uint DEBUG_VIEW_ALPHA        = 7;   // 1.0 on hit, 0.0 on miss
+static const uint DEBUG_VIEW_ELEMENT_ID   = 8;   // hashed face-id colour
+static const uint DEBUG_VIEW_NORMAL_EYE   = 9;   // eye-space normal as (n*0.5+0.5)
+static const uint DEBUG_VIEW_WORLD_POS_EYE = 10; // sin-encoded eye-space position
 
 // Sentinel for camera.mousePixel{X,Y} meaning "mouse outside viewport".
 // Raygen short-circuits the pick-write when either component matches.
@@ -294,9 +308,10 @@ static const uint LIGHT_KIND_RECT    = 2;
     // we lock the layout of the structs that *do* cross the C++ /
     // SPIR-V boundary as memory blobs (CameraUniforms via cbuffer,
     // OpenPBRMaterialGPU via structured buffer).
-    static_assert(sizeof(CameraUniforms) == 128,
-                  "CameraUniforms must be 128 bytes — two 64-byte float4x4s "
-                  "(see resources/shaders/ShaderInterop.slang).");
+    static_assert(sizeof(CameraUniforms) == 192,
+                  "CameraUniforms must be 192 bytes — three 64-byte float4x4s "
+                  "(worldFromView + viewFromClip inverses + viewFromWorld forward, "
+                  "see resources/shaders/ShaderInterop.slang).");
     static_assert(sizeof(CameraUniforms) % 16 == 0,
                   "CameraUniforms must be 16-byte aligned (cbuffer std140 rule).");
     static_assert(sizeof(FrameUiUniforms) == 32,

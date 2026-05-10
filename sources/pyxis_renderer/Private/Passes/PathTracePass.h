@@ -158,6 +158,11 @@ class PathTracePass final : public IRenderPass {
     BaseColorAov,
     WorldPosAov,
     PickResult,
+    // Tier 1 Hydra-canonical AOVs.
+    AlphaAov,
+    ElementIdAov,
+    NormalEyeAov,
+    WorldPosEyeAov,
     Count,
   };
   static constexpr std::size_t BINDING_SLOT_COUNT =
@@ -177,6 +182,11 @@ class PathTracePass final : public IRenderPass {
   nvrhi::TextureHandle _fallbackBaseColorAov;
   nvrhi::TextureHandle _fallbackWorldPosAov;
   nvrhi::BufferHandle  _fallbackPickResult;
+  // Tier 1 Hydra-canonical fallbacks.
+  nvrhi::TextureHandle _fallbackAlphaAov;
+  nvrhi::TextureHandle _fallbackElementIdAov;
+  nvrhi::TextureHandle _fallbackNormalEyeAov;
+  nvrhi::TextureHandle _fallbackWorldPosEyeAov;
 
   // Cached one-frame-stale picker readback. Updated at the top of
   // each Execute() by mapping the staging buffer (if a copy was

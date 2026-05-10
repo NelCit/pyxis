@@ -148,13 +148,17 @@ void LogDeterminismPin(const Configuration& config, uint32_t framesInFlight) noe
   // without these the writes go to the 1×1 fallbacks PathTracePass
   // owns, which is fine but wastes the already-allocated AovTextures
   // memory. Same RenderTargets shape ViewerMode wires.
-  targets.colorHdr      = aovs.colorHdr.Get();
-  targets.normalAov     = aovs.normal.Get();
-  targets.depthAov      = aovs.depth.Get();
-  targets.instanceIdAov = aovs.instanceId.Get();
-  targets.materialIdAov = aovs.materialId.Get();
-  targets.baseColorAov  = aovs.baseColor.Get();
-  targets.worldPosAov   = aovs.worldPos.Get();
+  targets.colorHdr       = aovs.colorHdr.Get();
+  targets.normalAov      = aovs.normal.Get();
+  targets.depthAov       = aovs.depth.Get();
+  targets.instanceIdAov  = aovs.instanceId.Get();
+  targets.materialIdAov  = aovs.materialId.Get();
+  targets.baseColorAov   = aovs.baseColor.Get();
+  targets.worldPosAov    = aovs.worldPos.Get();
+  targets.alphaAov       = aovs.alpha.Get();
+  targets.elementIdAov   = aovs.elementId.Get();
+  targets.normalEyeAov   = aovs.normalEye.Get();
+  targets.worldPosEyeAov = aovs.worldPosEye.Get();
   RenderSettings settings{};
   settings.width = renderTarget->getDesc().width;
   settings.height = renderTarget->getDesc().height;
@@ -283,7 +287,8 @@ void SaveAovsFromList(std::string_view saveAovList,
       log.Warn(log::APP, "headless: --save-aov: unknown AOV name '"
                              + std::string{aovName}
                              + "' (recognised: color,normal,depth,instanceId,"
-                               "materialId,baseColor,worldPos,all)");
+                               "materialId,baseColor,worldPos,alpha,elementId,"
+                               "normalEye,worldPosEye,all)");
       return;
     }
     saveOne(entry->name, (aovs.*entry->texturePtr).Get());

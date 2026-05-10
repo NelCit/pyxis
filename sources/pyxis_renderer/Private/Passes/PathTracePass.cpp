@@ -36,9 +36,10 @@ namespace {
 // size on the C++ allocator below, the build fails here rather than
 // at runtime via a confusing validation error.
 using shaderinterop::CameraUniforms;
-static_assert(sizeof(CameraUniforms) == 128,
-              "CameraUniforms is two float4x4s = 128 bytes "
-              "(see resources/shaders/ShaderInterop.slang).");
+static_assert(sizeof(CameraUniforms) == 192,
+              "CameraUniforms is three float4x4s = 192 bytes "
+              "(worldFromView / viewFromClip inverses + viewFromWorld forward, "
+              "see resources/shaders/ShaderInterop.slang).");
 static_assert(sizeof(shaderinterop::FrameUiUniforms) == 32,
               "FrameUiUniforms is 32 bytes (2 cbuffer rows): picker + display "
               "selector on row 0, per-AOV knobs (worldPosPeriod + reserved) on row 1.");
@@ -143,6 +144,11 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
       nvrhi::BindingLayoutItem::Texture_UAV(17),             // binding 17 baseColor AOV
       nvrhi::BindingLayoutItem::Texture_UAV(18),             // binding 18 worldPos AOV
       nvrhi::BindingLayoutItem::ConstantBuffer(19),          // binding 19 FrameUiUniforms
+      // Tier 1 Hydra-canonical AOVs (alpha, elementId, Neye, Peye).
+      nvrhi::BindingLayoutItem::Texture_UAV(20),             // binding 20 alpha AOV
+      nvrhi::BindingLayoutItem::Texture_UAV(21),             // binding 21 elementId AOV
+      nvrhi::BindingLayoutItem::Texture_UAV(22),             // binding 22 normalEye AOV
+      nvrhi::BindingLayoutItem::Texture_UAV(23),             // binding 23 worldPosEye AOV
   };
   _bindingLayout = _device->createBindingLayout(layoutDesc);
   if (!_bindingLayout)
@@ -401,14 +407,19 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
     nvrhi::Format format;
     const char* debugName;
   };
-  const std::array<FallbackSpec, 7> aovFallbacks{{
-      {&PathTracePass::_fallbackColorHdrAov,  nvrhi::Format::RGBA16_FLOAT, "PathTrace.FbColorHdrAov" },
-      {&PathTracePass::_fallbackNormalAov,    nvrhi::Format::RGBA16_FLOAT, "PathTrace.FbNormalAov"   },
-      {&PathTracePass::_fallbackDepthAov,     nvrhi::Format::R32_FLOAT,    "PathTrace.FbDepthAov"    },
-      {&PathTracePass::_fallbackInstanceAov,  nvrhi::Format::R32_UINT,     "PathTrace.FbInstanceAov" },
-      {&PathTracePass::_fallbackMaterialAov,  nvrhi::Format::R32_UINT,     "PathTrace.FbMaterialAov" },
-      {&PathTracePass::_fallbackBaseColorAov, nvrhi::Format::RGBA16_FLOAT, "PathTrace.FbBaseColorAov"},
-      {&PathTracePass::_fallbackWorldPosAov,  nvrhi::Format::RGBA32_FLOAT, "PathTrace.FbWorldPosAov" },
+  const std::array<FallbackSpec, 11> aovFallbacks{{
+      {&PathTracePass::_fallbackColorHdrAov,    nvrhi::Format::RGBA16_FLOAT, "PathTrace.FbColorHdrAov"   },
+      {&PathTracePass::_fallbackNormalAov,      nvrhi::Format::RGBA16_FLOAT, "PathTrace.FbNormalAov"     },
+      {&PathTracePass::_fallbackDepthAov,       nvrhi::Format::R32_FLOAT,    "PathTrace.FbDepthAov"      },
+      {&PathTracePass::_fallbackInstanceAov,    nvrhi::Format::R32_UINT,     "PathTrace.FbInstanceAov"   },
+      {&PathTracePass::_fallbackMaterialAov,    nvrhi::Format::R32_UINT,     "PathTrace.FbMaterialAov"   },
+      {&PathTracePass::_fallbackBaseColorAov,   nvrhi::Format::RGBA16_FLOAT, "PathTrace.FbBaseColorAov"  },
+      {&PathTracePass::_fallbackWorldPosAov,    nvrhi::Format::RGBA32_FLOAT, "PathTrace.FbWorldPosAov"   },
+      // Tier 1 Hydra-canonical fallbacks.
+      {&PathTracePass::_fallbackAlphaAov,       nvrhi::Format::R8_UNORM,     "PathTrace.FbAlphaAov"      },
+      {&PathTracePass::_fallbackElementIdAov,   nvrhi::Format::R32_UINT,     "PathTrace.FbElementIdAov"  },
+      {&PathTracePass::_fallbackNormalEyeAov,   nvrhi::Format::RGBA16_FLOAT, "PathTrace.FbNormalEyeAov"  },
+      {&PathTracePass::_fallbackWorldPosEyeAov, nvrhi::Format::RGBA32_FLOAT, "PathTrace.FbWorldPosEyeAov"},
   }};
   for (const FallbackSpec& spec : aovFallbacks)
   {
@@ -550,6 +561,10 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(RenderTargets const
   current[slot(BindingSlot::BaseColorAov)]     = targets.baseColorAov;
   current[slot(BindingSlot::WorldPosAov)]      = targets.worldPosAov;
   current[slot(BindingSlot::PickResult)]       = targets.pickResult;
+  current[slot(BindingSlot::AlphaAov)]         = targets.alphaAov;
+  current[slot(BindingSlot::ElementIdAov)]     = targets.elementIdAov;
+  current[slot(BindingSlot::NormalEyeAov)]     = targets.normalEyeAov;
+  current[slot(BindingSlot::WorldPosEyeAov)]   = targets.worldPosEyeAov;
   if (current != _lastBindings)
   {
     _bindingSetCache.clear();
@@ -630,6 +645,15 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(RenderTargets const
   if (baseColorAov == nullptr) baseColorAov = _fallbackBaseColorAov.Get();
   nvrhi::ITexture* worldPosAov = targets.worldPosAov;
   if (worldPosAov == nullptr) worldPosAov = _fallbackWorldPosAov.Get();
+  // Tier 1 Hydra-canonical AOVs.
+  nvrhi::ITexture* alphaAov = targets.alphaAov;
+  if (alphaAov == nullptr) alphaAov = _fallbackAlphaAov.Get();
+  nvrhi::ITexture* elementIdAov = targets.elementIdAov;
+  if (elementIdAov == nullptr) elementIdAov = _fallbackElementIdAov.Get();
+  nvrhi::ITexture* normalEyeAov = targets.normalEyeAov;
+  if (normalEyeAov == nullptr) normalEyeAov = _fallbackNormalEyeAov.Get();
+  nvrhi::ITexture* worldPosEyeAov = targets.worldPosEyeAov;
+  if (worldPosEyeAov == nullptr) worldPosEyeAov = _fallbackWorldPosEyeAov.Get();
 
   nvrhi::BindingSetDesc setDesc;
   setDesc.bindings = {
@@ -653,6 +677,10 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(RenderTargets const
       nvrhi::BindingSetItem::Texture_UAV(17, baseColorAov),
       nvrhi::BindingSetItem::Texture_UAV(18, worldPosAov),
       nvrhi::BindingSetItem::ConstantBuffer(19, _frameUiBuffer),
+      nvrhi::BindingSetItem::Texture_UAV(20, alphaAov),
+      nvrhi::BindingSetItem::Texture_UAV(21, elementIdAov),
+      nvrhi::BindingSetItem::Texture_UAV(22, normalEyeAov),
+      nvrhi::BindingSetItem::Texture_UAV(23, worldPosEyeAov),
   };
   nvrhi::BindingSetHandle set = _device->createBindingSet(setDesc, _bindingLayout);
   _bindingSetCache[output] = set;
@@ -737,6 +765,10 @@ void PathTracePass::Execute(nvrhi::ICommandList* commandList, const PassContext&
   CameraUniforms cameraUniforms{};
   cameraUniforms.worldFromView = hlslpp::inverse(camera.viewFromWorld);
   cameraUniforms.viewFromClip = hlslpp::inverse(camera.projFromView);
+  // Forward viewFromWorld is straight off the CameraDesc — no inverse
+  // needed; raygen uses it to transform world-space hit position +
+  // normal into eye space for the Hydra-canonical Neye / Peye AOVs.
+  cameraUniforms.viewFromWorld = camera.viewFromWorld;
   commandList->writeBuffer(_cameraUniformsBuffer.Get(), &cameraUniforms, sizeof(cameraUniforms));
 
   // ---- Upload viewer-only per-frame UI state -------------------------
@@ -901,6 +933,22 @@ void PathTracePass::Execute(nvrhi::ICommandList* commandList, const PassContext&
                                  nvrhi::ResourceStates::UnorderedAccess);
   if (context.targets->worldPosAov != nullptr)
     commandList->setTextureState(context.targets->worldPosAov,
+                                 nvrhi::AllSubresources,
+                                 nvrhi::ResourceStates::UnorderedAccess);
+  if (context.targets->alphaAov != nullptr)
+    commandList->setTextureState(context.targets->alphaAov,
+                                 nvrhi::AllSubresources,
+                                 nvrhi::ResourceStates::UnorderedAccess);
+  if (context.targets->elementIdAov != nullptr)
+    commandList->setTextureState(context.targets->elementIdAov,
+                                 nvrhi::AllSubresources,
+                                 nvrhi::ResourceStates::UnorderedAccess);
+  if (context.targets->normalEyeAov != nullptr)
+    commandList->setTextureState(context.targets->normalEyeAov,
+                                 nvrhi::AllSubresources,
+                                 nvrhi::ResourceStates::UnorderedAccess);
+  if (context.targets->worldPosEyeAov != nullptr)
+    commandList->setTextureState(context.targets->worldPosEyeAov,
                                  nvrhi::AllSubresources,
                                  nvrhi::ResourceStates::UnorderedAccess);
   commandList->commitBarriers();

@@ -37,13 +37,19 @@ struct RenderSettings {
   // Headless mode leaves these at defaults (Color, no mouse hover)
   // so byte-equal regression artefacts stay stable.
   enum class DebugView : uint32_t {
-    Color      = 0,   // post-tonemap radiance
-    Normal     = 1,   // (n*0.5+0.5)
-    Depth      = 2,   // 1/depth grayscale
-    InstanceId = 3,   // hashed colour per slot
-    MaterialId = 4,   // hashed colour per material
-    BaseColor  = 5,   // raw OpenPBR baseColor (pre-shading albedo)
-    WorldPos   = 6,   // 10-unit-period fract of world hit position
+    Color       = 0,   // post-tonemap radiance
+    Normal      = 1,   // (n*0.5+0.5)
+    Depth       = 2,   // 1/depth grayscale
+    InstanceId  = 3,   // hashed colour per slot
+    MaterialId  = 4,   // hashed colour per material
+    BaseColor   = 5,   // raw OpenPBR baseColor (pre-shading albedo)
+    WorldPos    = 6,   // 10-unit-period fract of world hit position
+    // Tier 1 Hydra-canonical AOVs — exposed as inspector views too so
+    // the editor can sanity-check what Hydra delegates pull.
+    Alpha       = 7,   // 1.0 on hit, 0.0 on miss (binary today)
+    ElementId   = 8,   // hashed colour per face within a BLAS
+    NormalEye   = 9,   // eye-space normal as (n*0.5+0.5)
+    WorldPosEye = 10,  // sin-encoded eye-space position
   };
   DebugView debugView = DebugView::Color;
 

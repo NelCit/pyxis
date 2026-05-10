@@ -48,14 +48,19 @@ struct AovEntry {
 // double as an index into this table without a search. Adding a new
 // AOV is one line here + matching DebugView entry + matching AovTextures
 // member + matching raygen UAV binding.
-inline constexpr std::array<AovEntry, 7> AOV_REGISTRY = {{
-    {"color",      "Color",      RenderSettings::DebugView::Color,      &AovTextures::colorHdr  },
-    {"normal",     "Normal",     RenderSettings::DebugView::Normal,     &AovTextures::normal    },
-    {"depth",      "Depth",      RenderSettings::DebugView::Depth,      &AovTextures::depth     },
-    {"instanceId", "InstanceID", RenderSettings::DebugView::InstanceId, &AovTextures::instanceId},
-    {"materialId", "MaterialID", RenderSettings::DebugView::MaterialId, &AovTextures::materialId},
-    {"baseColor",  "BaseColor",  RenderSettings::DebugView::BaseColor,  &AovTextures::baseColor },
-    {"worldPos",   "WorldPos",   RenderSettings::DebugView::WorldPos,   &AovTextures::worldPos  },
+inline constexpr std::array<AovEntry, 11> AOV_REGISTRY = {{
+    {"color",       "Color",       RenderSettings::DebugView::Color,       &AovTextures::colorHdr   },
+    {"normal",      "Normal",      RenderSettings::DebugView::Normal,      &AovTextures::normal     },
+    {"depth",       "Depth",       RenderSettings::DebugView::Depth,       &AovTextures::depth      },
+    {"instanceId",  "InstanceID",  RenderSettings::DebugView::InstanceId,  &AovTextures::instanceId },
+    {"materialId",  "MaterialID",  RenderSettings::DebugView::MaterialId,  &AovTextures::materialId },
+    {"baseColor",   "BaseColor",   RenderSettings::DebugView::BaseColor,   &AovTextures::baseColor  },
+    {"worldPos",    "WorldPos",    RenderSettings::DebugView::WorldPos,    &AovTextures::worldPos   },
+    // Tier 1 Hydra-canonical (alpha, elementId, Neye, Peye).
+    {"alpha",       "Alpha",       RenderSettings::DebugView::Alpha,       &AovTextures::alpha      },
+    {"elementId",   "ElementID",   RenderSettings::DebugView::ElementId,   &AovTextures::elementId  },
+    {"normalEye",   "NormalEye",   RenderSettings::DebugView::NormalEye,   &AovTextures::normalEye  },
+    {"worldPosEye", "WorldPosEye", RenderSettings::DebugView::WorldPosEye, &AovTextures::worldPosEye},
 }};
 
 // Resolve a DebugView enum to its registry entry, or nullptr if the

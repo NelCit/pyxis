@@ -62,6 +62,15 @@ struct RenderTargets {
   nvrhi::ITexture* materialIdAov = nullptr;
   nvrhi::ITexture* baseColorAov  = nullptr;
   nvrhi::ITexture* worldPosAov   = nullptr;
+  // Tier 1 Hydra-canonical AOVs (every DCC delegate queries them).
+  //   alphaAov       : R8_UNORM   1.0 on hit, 0.0 on miss
+  //   elementIdAov   : R32_UINT   PrimitiveIndex() (per-face id, ~0u on miss)
+  //   normalEyeAov   : RGBA16F    eye-space normal (Hydra's Neye)
+  //   worldPosEyeAov : RGBA32F    eye-space hit position (Hydra's Peye)
+  nvrhi::ITexture* alphaAov       = nullptr;
+  nvrhi::ITexture* elementIdAov   = nullptr;
+  nvrhi::ITexture* normalEyeAov   = nullptr;
+  nvrhi::ITexture* worldPosEyeAov = nullptr;
 
   // 1-element RWStructuredBuffer<PickResult> the raygen writes when
   // the dispatched pixel matches RenderSettings::mousePixel{X,Y}.

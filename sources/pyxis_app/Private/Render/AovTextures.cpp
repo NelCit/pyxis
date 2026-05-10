@@ -55,15 +55,21 @@ std::expected<AovTextures, std::string> AovTextures::Create(nvrhi::IDevice* devi
     aovDesc.debugName = dbgName;
     return device->createTexture(aovDesc);
   };
-  result.colorHdr   = makeAov(nvrhi::Format::RGBA16_FLOAT, "aov.colorHdr");
-  result.normal     = makeAov(nvrhi::Format::RGBA16_FLOAT, "aov.normal");
-  result.depth      = makeAov(nvrhi::Format::R32_FLOAT,    "aov.depth");
-  result.instanceId = makeAov(nvrhi::Format::R32_UINT,     "aov.instanceId");
-  result.materialId = makeAov(nvrhi::Format::R32_UINT,     "aov.materialId");
-  result.baseColor  = makeAov(nvrhi::Format::RGBA16_FLOAT, "aov.baseColor");
-  result.worldPos   = makeAov(nvrhi::Format::RGBA32_FLOAT, "aov.worldPos");
+  result.colorHdr    = makeAov(nvrhi::Format::RGBA16_FLOAT, "aov.colorHdr");
+  result.normal      = makeAov(nvrhi::Format::RGBA16_FLOAT, "aov.normal");
+  result.depth       = makeAov(nvrhi::Format::R32_FLOAT,    "aov.depth");
+  result.instanceId  = makeAov(nvrhi::Format::R32_UINT,     "aov.instanceId");
+  result.materialId  = makeAov(nvrhi::Format::R32_UINT,     "aov.materialId");
+  result.baseColor   = makeAov(nvrhi::Format::RGBA16_FLOAT, "aov.baseColor");
+  result.worldPos    = makeAov(nvrhi::Format::RGBA32_FLOAT, "aov.worldPos");
+  // Tier 1 Hydra-canonical AOVs.
+  result.alpha       = makeAov(nvrhi::Format::R8_UNORM,     "aov.alpha");
+  result.elementId   = makeAov(nvrhi::Format::R32_UINT,     "aov.elementId");
+  result.normalEye   = makeAov(nvrhi::Format::RGBA16_FLOAT, "aov.normalEye");
+  result.worldPosEye = makeAov(nvrhi::Format::RGBA32_FLOAT, "aov.worldPosEye");
   if (!result.colorHdr || !result.normal || !result.depth || !result.instanceId
-      || !result.materialId || !result.baseColor || !result.worldPos)
+      || !result.materialId || !result.baseColor || !result.worldPos
+      || !result.alpha || !result.elementId || !result.normalEye || !result.worldPosEye)
   {
     return std::unexpected{std::string{"AovTextures::Create: createTexture(raw AOV) failed"}};
   }

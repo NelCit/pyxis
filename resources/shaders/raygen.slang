@@ -51,6 +51,14 @@
 // own cbuffer (rather than tail-on-CameraUniforms) so future per-frame
 // camera uniforms can grow without touching UI bindings.
 [[vk::binding(19, 0)]] ConstantBuffer<FrameUiUniforms> gFrameUi;
+// Tier 1 Hydra-canonical AOVs — every DCC delegate (usdview, Solaris,
+// Omniverse) queries these by name. Same shape as the existing AOVs:
+// one UAV per channel, written every frame from the same TraceRay
+// payload (no second trace).
+[[vk::binding(20, 0)]] RWTexture2D<float>             gOutAlpha;           // R8_UNORM 1.0 hit / 0.0 miss
+[[vk::binding(21, 0)]] RWTexture2D<uint>              gOutElementId;       // R32U  per-face id (~0u miss)
+[[vk::binding(22, 0)]] RWTexture2D<float4>            gOutNormalEye;       // RGBA16F eye-space normal
+[[vk::binding(23, 0)]] RWTexture2D<float4>            gOutWorldPosEye;     // RGBA32F eye-space hit pos
 
 // Narkowicz ACES Filmic — pulled out of main() so the display branch
 // for DEBUG_VIEW_COLOR can call it cleanly. Same constants as before;
@@ -132,7 +140,7 @@ void main() {
     payload.baseColor    = float3(0, 0, 0);
     payload.materialId   = 0xFFFFFFFFu;
     payload.worldHit     = float3(0, 0, 0);
-    payload._hitInfoPad0 = 0u;
+    payload.elementId    = 0xFFFFFFFFu;
 
     // RAY_FLAG_NONE — keep the door open for future shadow/opaque-only
     // refinements. instanceMask = 0xFF matches what GpuScene's TLAS
@@ -159,6 +167,19 @@ void main() {
     gOutMaterialId[launchIndex] = payload.materialId;
     gOutBaseColor[launchIndex]  = float4(payload.baseColor, 1.0f);
     gOutWorldPos[launchIndex]   = float4(payload.worldHit, 1.0f);
+
+    // Tier 1 Hydra-canonical AOVs. Eye-space normal + position need
+    // the FORWARD viewFromWorld matrix — direction-only for the
+    // normal (w=0 so translation column drops), full affine for the
+    // position. Camera matrices are orthonormal rotation + translation
+    // (no scale / skew) so a unit world normal stays unit in eye space.
+    const bool didHit  = (payload.hitT > 0.0f);
+    const float3 nEye  = mul((float3x3)gCamera.viewFromWorld, payload.normalWorld);
+    const float3 pEye  = mul(gCamera.viewFromWorld, float4(payload.worldHit, 1.0f)).xyz;
+    gOutAlpha[launchIndex]       = didHit ? 1.0f : 0.0f;
+    gOutElementId[launchIndex]   = payload.elementId;
+    gOutNormalEye[launchIndex]   = float4(nEye, 1.0f);
+    gOutWorldPosEye[launchIndex] = float4(pEye, 1.0f);
 
     // ----- Pixel picker -------------------------------------------
     // Write the raw values into the 1-element pick buffer when this
@@ -264,6 +285,42 @@ void main() {
         const float omega = WORLD_POS_TAU / period;
         displayColor = (payload.hitT > 0.0f)
             ? (sin(payload.worldHit * omega) * 0.5f + 0.5f)
+            : float3(0.0, 0.0, 0.0);
+    }
+    // Tier 1 Hydra-canonical display branches.
+    else if (gFrameUi.debugViewMode == DEBUG_VIEW_ALPHA)
+    {
+        // Binary today; future-proofed for transmission / coverage.
+        // White = hit, black = miss. Signed-distance-friendly visual.
+        const float a = didHit ? 1.0f : 0.0f;
+        displayColor = float3(a, a, a);
+    }
+    else if (gFrameUi.debugViewMode == DEBUG_VIEW_ELEMENT_ID)
+    {
+        // Same hash palette as InstanceID — different identifier
+        // domain (per-face vs per-instance) so adjacent faces land
+        // on visually-distinct hues. Miss → black.
+        displayColor = hashInstanceColor(payload.elementId);
+    }
+    else if (gFrameUi.debugViewMode == DEBUG_VIEW_NORMAL_EYE)
+    {
+        // Standard half-encode like the world-normal branch; miss
+        // renders middle grey so the background isn't visually
+        // identical to a Z-aligned eye-space surface.
+        displayColor = didHit
+            ? (nEye * 0.5f + 0.5f)
+            : float3(0.5f, 0.5f, 0.5f);
+    }
+    else if (gFrameUi.debugViewMode == DEBUG_VIEW_WORLD_POS_EYE)
+    {
+        // Same sin-encoded periodic visualisation as WORLD_POS, but
+        // sampled in eye space. Useful for verifying that a Hydra
+        // delegate's Peye matches the renderer's view transform.
+        const float period = max(gFrameUi.worldPosPeriod, 1e-3);
+        const float WORLD_POS_TAU_EYE = 6.28318530717958647692;
+        const float omegaEye = WORLD_POS_TAU_EYE / period;
+        displayColor = didHit
+            ? (sin(pEye * omegaEye) * 0.5f + 0.5f)
             : float3(0.0, 0.0, 0.0);
     }
     gOutput[launchIndex] = float4(displayColor, 1.0f);

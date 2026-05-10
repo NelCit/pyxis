@@ -68,6 +68,16 @@ struct AovTextures {
   nvrhi::TextureHandle materialId;
   nvrhi::TextureHandle baseColor;
   nvrhi::TextureHandle worldPos;
+  // Tier 1 Hydra-canonical AOVs (every DCC delegate queries them).
+  //   alpha       R8_UNORM    1.0 on hit, 0.0 on miss (binary today;
+  //                           future-proofed for transmission / coverage)
+  //   elementId   R32_UINT    per-face id within a BLAS (~0u on miss)
+  //   normalEye   RGBA16_FLOAT eye-space normal (Hydra's Neye)
+  //   worldPosEye RGBA32_FLOAT eye-space hit position (Hydra's Peye)
+  nvrhi::TextureHandle alpha;
+  nvrhi::TextureHandle elementId;
+  nvrhi::TextureHandle normalEye;
+  nvrhi::TextureHandle worldPosEye;
 
   // 1-element RWStructuredBuffer<PickResult> + a host-readable
   // staging buffer for one-frame-stale CPU readback. PathTracePass

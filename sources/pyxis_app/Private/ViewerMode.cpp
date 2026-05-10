@@ -834,14 +834,18 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
       // the AOV inspector / picker / Save EXR all have data to read.
       // The pass tolerates nullptr (binds 1×1 fallbacks); we feed the
       // real AovTextures handles unconditionally for the viewer path.
-      targets.colorHdr = aovs.colorHdr.Get();
-      targets.normalAov = aovs.normal.Get();
-      targets.depthAov = aovs.depth.Get();
-      targets.instanceIdAov = aovs.instanceId.Get();
-      targets.materialIdAov = aovs.materialId.Get();
-      targets.baseColorAov  = aovs.baseColor.Get();
-      targets.worldPosAov   = aovs.worldPos.Get();
-      targets.pickResult = aovs.pickResult.Get();
+      targets.colorHdr          = aovs.colorHdr.Get();
+      targets.normalAov         = aovs.normal.Get();
+      targets.depthAov          = aovs.depth.Get();
+      targets.instanceIdAov     = aovs.instanceId.Get();
+      targets.materialIdAov     = aovs.materialId.Get();
+      targets.baseColorAov      = aovs.baseColor.Get();
+      targets.worldPosAov       = aovs.worldPos.Get();
+      targets.alphaAov          = aovs.alpha.Get();
+      targets.elementIdAov      = aovs.elementId.Get();
+      targets.normalEyeAov      = aovs.normalEye.Get();
+      targets.worldPosEyeAov    = aovs.worldPosEye.Get();
+      targets.pickResult        = aovs.pickResult.Get();
       targets.pickResultStaging = aovs.pickResultStaging.Get();
 
       RenderSettings settings{};

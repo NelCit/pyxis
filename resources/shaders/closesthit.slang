@@ -162,5 +162,8 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
     payload.baseColor   = baseColor;
     payload.materialId  = materialId;
     payload.worldHit    = hitWorld;
-    payload._hitInfoPad0 = 0u;
+    // PrimitiveIndex() is the per-face id within the BLAS — Hydra's
+    // HdAovTokens->elementId. ~0u is the miss sentinel raygen sets
+    // before TraceRay; we overwrite with the real face here.
+    payload.elementId   = PrimitiveIndex();
 }
