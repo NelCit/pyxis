@@ -123,20 +123,24 @@ class ImGuiHost {
   float                                 _loadingGpuMs          = 0.0f;
   std::vector<FrameProfile::PassTiming> _loadingPasses;
 
-  // Editor's "Reload shaders" button latches this flag; ViewerMode
-  // reads it via TakeShaderReloadRequest() each frame, calls the
-  // renderer-side reload, and clears the flag. Decouples the editor
-  // panel from the renderer (BuildEditorPanel only knows about
-  // GpuScene; the actual shader-reload lives across the API
-  // boundary on PyxisRenderer).
-  bool                                  _editorReloadShadersRequested = false;
-
-  // Editor's "Open scene..." button latches the picked-file path here;
-  // ViewerMode drains it via TakeSceneReloadRequest() each frame.
-  // Empty string = no pending request. Owned std::string because the
-  // path comes out of an OS file dialog whose buffer disappears with
-  // the dialog.
-  std::string                           _editorPendingScenePath;
+  // EditorLatches — every "set on event in BuildEditorPanel, drained
+  // by ViewerMode (or BuildEditorPanel itself) on the next frame"
+  // signal grouped in one POD. Pre-refactor each was a separate
+  // field + setter + Take* method; consolidating made the latch
+  // pattern explicit and keeps related state on one cache line.
+  //
+  // - reloadShaders     : "Reload shaders" button -> ViewerMode
+  // - sceneReloadPath   : "Open scene..." picked path -> ViewerMode
+  // - saveAovPath       : "Save current AOV..." path -> ViewerMode
+  // - clickInstanceSlot : LMB-click instance id -> BuildEditorPanel
+  //                       drains internally (snaps Material combo)
+  struct EditorLatches {
+    bool        reloadShaders     = false;
+    std::string sceneReloadPath;
+    std::string saveAovPath;
+    uint32_t    clickInstanceSlot = INSTANCE_ID_NONE;
+  };
+  EditorLatches                         _latches;
 
   // Last-completed ingest source label + per-stage timing — set by
   // ViewerMode via SetIngestProfile() right after engine.Load()
@@ -168,11 +172,7 @@ class ImGuiHost {
   // LastPickResult(); displayed in the Editor panel as a hover
   // readout (color, normal, depth, instance id).
   PickResult                            _editorLastPick{};
-  // "Save current AOV..." latch — set by the editor button to the
-  // requested file path; ViewerMode drains it via TakeSaveAovRequest()
-  // and dispatches a TextureReadback + ExrWriter write. Empty = no
-  // pending request.
-  std::string                           _editorPendingSaveAovPath;
+  // (Save-AOV path latch moved into _latches.saveAovPath above.)
 
   // Render dims of the AOV the renderer dispatches into. ViewerMode
   // pushes these each frame so:
@@ -186,12 +186,7 @@ class ImGuiHost {
   uint32_t                              _renderWidth  = 1u;
   uint32_t                              _renderHeight = 1u;
 
-  // Click-to-select latch (M7 follow-up). ViewerMode pushes the
-  // §15 instance slot from a left-button click (NOT a drag — drag is
-  // reserved for the camera). BuildEditorPanel drains it once per
-  // frame, looks up the material via GpuScene, and snaps the
-  // Material combo to that entry. Sentinel ~0u = no pending click.
-  uint32_t                              _editorPendingClickInstance = INSTANCE_ID_NONE;
+  // (Click-instance slot latch moved into _latches.clickInstanceSlot above.)
 
   // Picker pin/follow toggle (M7 follow-up). When `_pickerPinned`
   // is true, ViewerMode pushes `_pickerPinnedU/V` (denormalised to
@@ -214,8 +209,8 @@ class ImGuiHost {
   // latched request iff the editor's "Reload shaders" button was
   // clicked since the last call.
   [[nodiscard]] bool TakeShaderReloadRequest() noexcept {
-    const bool requested = _editorReloadShadersRequested;
-    _editorReloadShadersRequested = false;
+    const bool requested = _latches.reloadShaders;
+    _latches.reloadShaders = false;
     return requested;
   }
 
@@ -224,10 +219,10 @@ class ImGuiHost {
   // internal slot resets to empty in either branch so a subsequent
   // call returns false until the user picks another file.
   [[nodiscard]] bool TakeSceneReloadRequest(std::string& outPath) noexcept {
-    if (_editorPendingScenePath.empty())
+    if (_latches.sceneReloadPath.empty())
       return false;
-    outPath = std::move(_editorPendingScenePath);
-    _editorPendingScenePath.clear();
+    outPath = std::move(_latches.sceneReloadPath);
+    _latches.sceneReloadPath.clear();
     return true;
   }
 
@@ -273,7 +268,7 @@ class ImGuiHost {
   // frame and snaps the Material combo to that instance's material.
   // INSTANCE_ID_NONE = "no instance under cursor" — silently dropped.
   void SetClickedInstance(uint32_t instanceSlot) noexcept {
-    _editorPendingClickInstance = instanceSlot;
+    _latches.clickInstanceSlot = instanceSlot;
   }
 
   // Picker pin accessors. ViewerMode reads these each frame to decide
@@ -293,10 +288,10 @@ class ImGuiHost {
   // the last call. The current debug view selects which AOV gets
   // saved (Color/Normal/Depth/InstanceID).
   [[nodiscard]] bool TakeSaveAovRequest(std::string& outPath) noexcept {
-    if (_editorPendingSaveAovPath.empty())
+    if (_latches.saveAovPath.empty())
       return false;
-    outPath = std::move(_editorPendingSaveAovPath);
-    _editorPendingSaveAovPath.clear();
+    outPath = std::move(_latches.saveAovPath);
+    _latches.saveAovPath.clear();
     return true;
   }
 

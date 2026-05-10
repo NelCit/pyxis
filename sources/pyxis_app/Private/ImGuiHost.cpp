@@ -959,21 +959,21 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
     //   Slang -> SPIR-V is a CMake build-step (ShaderMake), so the
     //   workflow is "rebuild shaders externally first, then click".
     // - Open scene: pops a Win COM IFileOpenDialog filtered to USD;
-    //   the picked path latches into _editorPendingScenePath and
+    //   the picked path latches into _latches.sceneReloadPath and
     //   ViewerMode handles waitForIdle + GpuScene::Clear + re-ingest.
     if (ImGui::Button("Reload shaders"))
-      _editorReloadShadersRequested = true;
+      _latches.reloadShaders = true;
     ImGui::SameLine();
     if (ImGui::Button("Open scene..."))
     {
       std::string picked = OpenScenePickerDialog();
       if (!picked.empty())
-        _editorPendingScenePath = std::move(picked);
+        _latches.sceneReloadPath = std::move(picked);
     }
-    if (!_editorPendingScenePath.empty())
+    if (!_latches.sceneReloadPath.empty())
     {
       ImGui::TextColored(ImVec4(0.95f, 0.85f, 0.20f, 1.0f),
-                         "Pending scene reload: %s", _editorPendingScenePath.c_str());
+                         "Pending scene reload: %s", _latches.sceneReloadPath.c_str());
     }
     ImGui::Spacing();
 
@@ -1095,7 +1095,7 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
       }
 
       // Save current AOV — pops a Win COM IFileSaveDialog filtered to
-      // *.exr; the picked path is latched into _editorPendingSaveAovPath
+      // *.exr; the picked path is latched into _latches.saveAovPath
       // and ViewerMode drains it via TakeSaveAovRequest() to perform
       // the readback + EXR write of the currently-selected raw AOV.
       ImGui::Separator();
@@ -1116,12 +1116,12 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
           suggested = L"pyxis_aov_worldpos.exr";
         std::string picked = SaveFilePickerDialog(suggested);
         if (!picked.empty())
-          _editorPendingSaveAovPath = std::move(picked);
+          _latches.saveAovPath = std::move(picked);
       }
-      if (!_editorPendingSaveAovPath.empty())
+      if (!_latches.saveAovPath.empty())
       {
         ImGui::TextColored(ImVec4(0.95f, 0.85f, 0.20f, 1.0f),
-                           "Pending save: %s", _editorPendingSaveAovPath.c_str());
+                           "Pending save: %s", _latches.saveAovPath.c_str());
       }
     }
 
@@ -1298,10 +1298,10 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
     // collapsed it. Without (b), clicking a sphere would update the
     // combo behind a closed header — silent change, bad UX.
     bool clickForceOpen = false;
-    if (_editorPendingClickInstance != INSTANCE_ID_NONE)
+    if (_latches.clickInstanceSlot != INSTANCE_ID_NONE)
     {
       const MaterialHandle clickedMat =
-          scene.LookupInstanceMaterialBySlot(_editorPendingClickInstance);
+          scene.LookupInstanceMaterialBySlot(_latches.clickInstanceSlot);
       if (clickedMat != MaterialHandle::Invalid)
       {
         const uint32_t lookupCount = scene.GetLiveMaterialCount();
@@ -1315,7 +1315,7 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
           }
         }
       }
-      _editorPendingClickInstance = INSTANCE_ID_NONE;
+      _latches.clickInstanceSlot = INSTANCE_ID_NONE;
     }
     if (clickForceOpen)
       ImGui::SetNextItemOpen(true, ImGuiCond_Always);
