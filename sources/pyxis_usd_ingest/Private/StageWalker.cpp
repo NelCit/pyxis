@@ -25,8 +25,10 @@
 #include <Pyxis/Platform/Logging/LogCategories.h>
 #include <Pyxis/Renderer/Descs/CameraDesc.h>
 #include <Pyxis/Renderer/Descs/InstanceDesc.h>
+#include <Pyxis/Renderer/Descs/LightDesc.h>
 #include <Pyxis/Renderer/Descs/MeshDesc.h>
 #include <Pyxis/Renderer/Descs/OpenPBRMaterialDesc.h>
+#include <Pyxis/Renderer/Descs/TextureKey.h>
 #include <Pyxis/Renderer/GpuScene.h>
 
 #include <pxr/usd/usd/prim.h>
@@ -53,6 +55,7 @@
 #include <hlsl++.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <string>
 #include <unordered_map>
@@ -151,6 +154,137 @@ MaterialHandle ResolveBoundMaterial(const pxr::UsdPrim& meshPrim,
   if (found == materialsByPath.end())
     return MaterialHandle::Invalid;
   return found->second;
+}
+
+// M7: translate a UsdLuxDistantLight / UsdLuxDomeLight / UsdLuxRectLight
+// prim into a LightDesc + push via GpuScene::AddLight. The simple
+// closesthit consumes color × intensity per kind (NdotL Lambert for
+// Distant + Rect, uniform ambient for Dome). The user's M7-full pass
+// replaces the closesthit body alongside NEE + MIS + IBL importance
+// sampling per §7.
+//
+// USD light conventions:
+//   * UsdLuxDistantLight emits along the prim's local -Z axis. Its
+//     "direction the light is travelling" (away from surface) =
+//     worldFromLocal · (0, 0, -1, 0). The prim's translation is
+//     irrelevant.
+//   * UsdLuxRectLight is positioned at the prim's translation. The
+//     emitting face is +Z in local space; the M7-simple closesthit
+//     ignores axisU/axisV (treats as point-at-center) but we pack
+//     them for the M7-full pass.
+//   * UsdLuxDomeLight has color + intensity + texture:file; M7-simple
+//     ignores the env-map and treats it as uniform ambient.
+//
+// Per UsdLuxLight authoring: `inputs:intensity` × `inputs:exposure`
+// is the canonical scale. exposure is in stops; final intensity =
+// raw_intensity * 2^exposure. M7-simple skips the exposure
+// multiplier (defaults to 0 → 2^0 = 1, harmless for the common case);
+// M9 polish picks it up alongside the rest of the UsdLux input
+// surface.
+void EmitLight(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCache,
+               GpuScene& scene) noexcept {
+  auto& log = Logging::Get();
+  const pxr::GfMatrix4d worldFromLocal = xformCache.GetLocalToWorldTransform(prim);
+
+  // Helpers for USD light input attrs — they live on the prim under
+  // `inputs:<name>` namespace. UsdLuxLightAPI exposes typed accessors
+  // but pulling the attr by name is simpler + avoids the API churn
+  // between USD versions.
+  auto readFloat = [&](const char* name, float fallback) {
+    const pxr::UsdAttribute attr = prim.GetAttribute(pxr::TfToken(std::string("inputs:") + name));
+    if (!attr)
+      return fallback;
+    float value = fallback;
+    attr.Get(&value);
+    return value;
+  };
+  auto readColor = [&](const char* name, hlslpp::float3 fallback) {
+    const pxr::UsdAttribute attr = prim.GetAttribute(pxr::TfToken(std::string("inputs:") + name));
+    if (!attr)
+      return fallback;
+    pxr::GfVec3f value(fallback.x, fallback.y, fallback.z);
+    attr.Get(&value);
+    return hlslpp::float3{value[0], value[1], value[2]};
+  };
+
+  LightDesc desc;
+  desc.color = readColor("color", hlslpp::float3{1.0f, 1.0f, 1.0f});
+  desc.intensity = readFloat("intensity", 1.0f);
+
+  if (prim.IsA<pxr::UsdLuxDistantLight>())
+  {
+    desc.kind = LightDesc::Kind::Distant;
+    // Local -Z transformed by worldFromLocal's rotation. USD row-
+    // vector convention: dir_world = (0,0,-1,0) * M.
+    const pxr::GfVec4d localDir(0.0, 0.0, -1.0, 0.0);
+    const pxr::GfVec4d worldDir = localDir * worldFromLocal;
+    desc.direction =
+        hlslpp::float3{static_cast<float>(worldDir[0]), static_cast<float>(worldDir[1]),
+                       static_cast<float>(worldDir[2])};
+  }
+  else if (prim.IsA<pxr::UsdLuxRectLight>())
+  {
+    desc.kind = LightDesc::Kind::Rect;
+    const pxr::GfVec4d originLocal(0.0, 0.0, 0.0, 1.0);
+    const pxr::GfVec4d originWorld = originLocal * worldFromLocal;
+    desc.position =
+        hlslpp::float3{static_cast<float>(originWorld[0]), static_cast<float>(originWorld[1]),
+                       static_cast<float>(originWorld[2])};
+    const pxr::GfVec4d uLocal(1.0, 0.0, 0.0, 0.0);
+    const pxr::GfVec4d uWorld = uLocal * worldFromLocal;
+    desc.axisU = hlslpp::float3{static_cast<float>(uWorld[0]), static_cast<float>(uWorld[1]),
+                                static_cast<float>(uWorld[2])};
+    const pxr::GfVec4d vLocal(0.0, 1.0, 0.0, 0.0);
+    const pxr::GfVec4d vWorld = vLocal * worldFromLocal;
+    desc.axisV = hlslpp::float3{static_cast<float>(vWorld[0]), static_cast<float>(vWorld[1]),
+                                static_cast<float>(vWorld[2])};
+  }
+  else if (prim.IsA<pxr::UsdLuxDomeLight>())
+  {
+    desc.kind = LightDesc::Kind::Dome;
+    // Resolve the dome's `inputs:texture:file` SdfAssetPath through
+    // USD's ArResolver (handles relative `@./default_sky.exr@`-style
+    // refs against the .usd's parent directory) and AcquireTexture
+    // it. The resulting TextureHandle is stored on LightDesc.envMap;
+    // GpuScene::CommitResources resolves it to a bindless slot at
+    // pack time, and PathTracePass reads the first live dome's
+    // texture for the miss shader's lat-long sample.
+    const pxr::UsdAttribute textureAttr =
+        prim.GetAttribute(pxr::TfToken("inputs:texture:file"));
+    if (textureAttr)
+    {
+      pxr::SdfAssetPath assetPath;
+      if (textureAttr.Get(&assetPath))
+      {
+        // ResolvedPath() runs USD's ArResolver; falls back to the
+        // raw asset string if the resolver couldn't find the file
+        // (rare for relative siblings; the M7 path-trace then
+        // logs an EXR-decode failure at CommitResources time).
+        std::string resolvedPath = assetPath.GetResolvedPath();
+        if (resolvedPath.empty())
+          resolvedPath = assetPath.GetAssetPath();
+        if (!resolvedPath.empty())
+        {
+          TextureKey key;
+          key.resolvedPath = resolvedPath;
+          key.role = TextureKey::Role::Emission;  // HDR env-map: linear, no sRGB EOTF
+          desc.envMap = scene.AcquireTexture(key);
+        }
+      }
+    }
+  }
+  else
+  {
+    return;  // unknown light kind
+  }
+
+  const LightHandle handle = scene.AddLight(desc);
+  if (handle == LightHandle::Invalid)
+  {
+    log.Warn(log::APP, "StageWalker: AddLight failed for "
+                           + prim.GetPath().GetString()
+                           + " (light handle space exhausted?).");
+  }
 }
 
 // M6: walk a UsdGeomPointInstancer and expand it into N AppendInstance
@@ -454,13 +588,27 @@ void EmitCamera(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCache,
 IngestStats StageWalker::WalkFile(std::string_view usdPath, GpuScene& scene) {
   auto& log = Logging::Get();
   const std::string pathString{usdPath};
+
+  using Clock = std::chrono::steady_clock;
+  const auto walkStart = Clock::now();
   const pxr::UsdStageRefPtr stage = pxr::UsdStage::Open(pathString);
+  const auto stageOpenEnd = Clock::now();
   if (!stage)
   {
     log.Error(log::APP, std::string{"StageWalker: failed to open "} + pathString);
-    return {};
+    IngestStats failed{};
+    failed.stageOpenMs =
+        std::chrono::duration<float, std::milli>(stageOpenEnd - walkStart).count();
+    failed.totalMs = failed.stageOpenMs;
+    return failed;
   }
-  const IngestStats stats = WalkStage(stage, scene);
+  IngestStats stats = WalkStage(stage, scene);
+  const auto walkEnd = Clock::now();
+  // stageOpenMs is local to WalkFile (WalkStage didn't open the
+  // stage); fold it in + recompute totalMs to include it.
+  stats.stageOpenMs =
+      std::chrono::duration<float, std::milli>(stageOpenEnd - walkStart).count();
+  stats.totalMs = std::chrono::duration<float, std::milli>(walkEnd - walkStart).count();
   log.Info(log::APP,
            "StageWalker: " + pathString + " walked — "
                + std::to_string(stats.meshesEmitted) + " meshes, "
@@ -478,6 +626,9 @@ IngestStats StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
   if (!stage)
     return stats;
 
+  using Clock = std::chrono::steady_clock;
+  const auto walkStart = Clock::now();
+
   // Collect every prim, sort by SdfPath. §25.O.3: SdfPath-sorted is
   // the P0 byte-equal invariant — both adapters must emit instances
   // in this exact order.
@@ -488,6 +639,9 @@ IngestStats StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
                    [](const pxr::UsdPrim& lhs, const pxr::UsdPrim& rhs) {
                      return lhs.GetPath() < rhs.GetPath();
                    });
+  const auto traverseEnd = Clock::now();
+  stats.traverseSortMs =
+      std::chrono::duration<float, std::milli>(traverseEnd - walkStart).count();
 
   pxr::UsdGeomXformCache xformCache;
   bool cameraSet = false;
@@ -500,6 +654,7 @@ IngestStats StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
   // so any difference in material translation breaks the §25.O.3
   // byte-equal invariant.
   MaterialHandleByPath materialsByPath;
+  const auto materialPassStart = Clock::now();
   for (const pxr::UsdPrim& prim : prims)
   {
     if (!prim.IsA<pxr::UsdShadeMaterial>())
@@ -513,6 +668,9 @@ IngestStats StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
     materialsByPath.emplace(primPath, handle);
     ++stats.materialsEmitted;
   }
+  const auto materialPassEnd = Clock::now();
+  stats.materialPassMs =
+      std::chrono::duration<float, std::milli>(materialPassEnd - materialPassStart).count();
 
   // Pass 2 — UsdGeomPointInstancer (M6). Walked BEFORE the standalone
   // mesh pass so any prototype meshes referenced by an instancer get
@@ -521,6 +679,7 @@ IngestStats StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
   // prototype. SdfPath-sorted iteration order is preserved per
   // §25.O.3 so both adapters expand instancers identically.
   ConsumedPrototypePaths consumedPrototypes;
+  const auto instancerPassStart = Clock::now();
   for (const pxr::UsdPrim& prim : prims)
   {
     if (!prim.IsA<pxr::UsdGeomPointInstancer>())
@@ -528,10 +687,14 @@ IngestStats StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
     EmitPointInstancer(prim, xformCache, materialsByPath, scene, stats,
                        consumedPrototypes);
   }
+  const auto instancerPassEnd = Clock::now();
+  stats.instancerPassMs =
+      std::chrono::duration<float, std::milli>(instancerPassEnd - instancerPassStart).count();
 
   // Pass 3 — meshes / camera / lights, with material handles resolved
   // from pass 1 and instancer prototypes skipped (pass 2 already
   // expanded them).
+  const auto meshPassStart = Clock::now();
   for (const pxr::UsdPrim& prim : prims)
   {
     if (prim.IsA<pxr::UsdGeomMesh>())
@@ -556,9 +719,11 @@ IngestStats StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
     else if (prim.IsA<pxr::UsdLuxDistantLight>() || prim.IsA<pxr::UsdLuxDomeLight>()
              || prim.IsA<pxr::UsdLuxRectLight>())
     {
-      // M5 stub: lights count but aren't yet pushed into GpuScene
-      // (the path-trace closesthit ignores lights at M5 — material
-      // baseColor only; M7 wires light sampling).
+      // M7-simple: translate + push into GpuScene. The closesthit's
+      // simple shading model (NdotL Lambert for Distant + Rect,
+      // uniform ambient for Dome) consumes them; user's M7-full
+      // pass adds NEE + MIS + IBL importance sampling per §7.
+      EmitLight(prim, xformCache, scene);
       ++stats.lightsEmitted;
     }
     else if (prim.IsA<pxr::UsdShadeMaterial>())
@@ -574,6 +739,14 @@ IngestStats StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
       }
     }
   }
+  const auto meshPassEnd = Clock::now();
+  stats.meshLightCameraMs =
+      std::chrono::duration<float, std::milli>(meshPassEnd - meshPassStart).count();
+  // totalMs covers WalkStage end-to-end (sum of stages + harness
+  // overhead). WalkFile recomputes totalMs to also include the
+  // pxr::UsdStage::Open above WalkStage.
+  stats.totalMs =
+      std::chrono::duration<float, std::milli>(meshPassEnd - walkStart).count();
 
   return stats;
 }

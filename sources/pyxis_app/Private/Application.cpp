@@ -136,9 +136,9 @@ int Run(int argc, char** argv) noexcept {
   }
   const Configuration& config = *resolved;
 
-  // §29.4.a default-scene resolution. M4 hands the resolved path to
-  // the ingest engine (HydraEngine / UsdDirectEngine selected via
-  // `config.app.ingest`); engine load failure falls back to the M3
+  // §29.4.a default-scene resolution. The resolved path flows into
+  // IngestUsd() (dispatched on `config.app.ingest` to the hydra or
+  // usd_direct adapter); ingest failure falls back to the M3
   // hardcoded cube path inside HeadlessMode / ViewerMode so
   // pyxis.exe always produces an image.
   const ResolvedScene scene = ResolveScene(cli, config);
@@ -149,9 +149,9 @@ int Run(int argc, char** argv) noexcept {
 
   if (cli.headless)
   {
-    return RunHeadless(config, scene);
+    return RunHeadless(config, scene, cli.saveAov);
   }
-  return RunViewer(config, scene, cli.screenshotPath);
+  return RunViewer(config, scene, cli.screenshotPath, cli.shaderRebuildDir);
 }
 
 }  // namespace pyxis::app

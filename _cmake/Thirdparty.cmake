@@ -42,6 +42,16 @@ set(PYXIS_NVRHI_GIT_TAG "54100464714de88a5a5059d25808f5ccb914ad7d")
 # backends directly against our system Vulkan SDK + the vcpkg glfw3.
 set(PYXIS_IMGUI_GIT_TAG "c51f1a6e47b8b5b11ca13490c461842c96bc4ca2")
 
+# ImPlot was attempted at v0.16 (the last tagged release) but its
+# source uses three ImGui API surfaces ImGui 1.92 removed
+# (AddPolyline arg order, ImGuiColorEditFlags_AlphaPreview,
+# ImGuiWindow::CalcFontSize). Bumping ImPlot to a main-HEAD SHA
+# that's been updated for ImGui 1.92 needs an internet-verifiable
+# pinning we don't yet have. Tracked as a follow-up; until then
+# the perf-panel chart uses an ImDrawList-based custom drawer
+# (see ImGuiHost::BuildFpsPanel) which gives us multi-series
+# overlay + auto-scaling without the dep.
+
 # Slang — prebuilt Windows x86_64 binary release. Pulled via URL mode so
 # we don't pay Slang's full source build (~10–15 min on a fresh clone).
 # slangc.exe lives at <slang_root>/bin/slangc.exe after unpack.

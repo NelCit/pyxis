@@ -56,6 +56,8 @@ namespace nvrhi {
 class IDevice;
 class ICommandList;
 class IBuffer;
+class ITexture;
+class ISampler;
 namespace rt {
 class IAccelStruct;
 }  // namespace rt
@@ -126,8 +128,50 @@ public:
   // dirty BLAS, rebuilds / refits TLAS. Render thread only.
   [[nodiscard]] Expected<void> CommitResources(nvrhi::ICommandList* commandList);
 
+  // ---- Scene-wide reset ----------------------------------------------
+  // Drops every mesh / material / texture / instance / light + the
+  // TLAS + the camera + the dedup maps + per-frame counters, leaving
+  // the scene in the exact post-construction state. Used by the
+  // viewer's "Open scene..." path: caller waits the device idle,
+  // calls Clear, then re-runs the ingest engine against the new path.
+  // Render thread only — same single-writer rule as every other
+  // mutation verb (§31). The caller must NOT have any in-flight
+  // command list referencing the scene's TLAS / buffers when this
+  // runs; the public ABI rule (§18.5) lets us assume callers honour
+  // the documented synchronisation contract.
+  void Clear() noexcept;
+
   // ---- Introspection -------------------------------------------------
   [[nodiscard]] FrameStats LastFrameStats() const;
+
+  // Editor-side enumeration (M7 follow-up). The viewer's editor panel
+  // walks live lights / materials to populate dropdowns + sliders;
+  // the engine never iterates these tables itself, so the surface is
+  // intentionally simple — `Count()` returns the live entry count
+  // and `At(i)` returns the i-th live entry's handle / desc-copy
+  // (skipping dead + quarantined slots). The pair (handle + desc)
+  // is enough for the panel to (a) display current values, (b) push
+  // edits back via the matching Update verb. Index validity is
+  // bounded by Count() at the moment of call; callers that mutate
+  // the scene mid-iteration must re-query.
+  [[nodiscard]] uint32_t                 GetLiveLightCount() const noexcept;
+  [[nodiscard]] LightHandle              GetLightHandleAt(uint32_t liveIndex) const noexcept;
+  [[nodiscard]] LightDesc                GetLightDescAt(uint32_t liveIndex) const noexcept;
+
+  [[nodiscard]] uint32_t                 GetLiveMaterialCount() const noexcept;
+  [[nodiscard]] MaterialHandle           GetMaterialHandleAt(uint32_t liveIndex) const noexcept;
+  [[nodiscard]] OpenPBRMaterialDesc      GetMaterialDescAt(uint32_t liveIndex) const noexcept;
+
+  // Click-to-select helper (M7 follow-up). The picker AOV writes the
+  // raw §15 instance-slot integer (24-bit `instanceCustomIndex`); the
+  // viewer takes that on click and asks the scene for the bound
+  // material so the Editor's Material combo can jump to it. Returns
+  // MaterialHandle::Invalid when the slot is 0 (sentinel), out of
+  // range, or points at a dead / quarantined entry — caller should
+  // treat that as "no selection". Generation-checked InstanceHandle
+  // lookup isn't possible here because the picker only carries the
+  // 24-bit slot, not the 8-bit generation.
+  [[nodiscard]] MaterialHandle LookupInstanceMaterialBySlot(uint32_t instanceSlot) const noexcept;
 
   // ---- Render-side accessors -----------------------------------------
   // Borrowed pointer / ref valid for the lifetime of the scene (the
@@ -164,6 +208,47 @@ public:
   // instanceId AOV + future picking. Allocated alongside the TLAS
   // on the first CommitResources that built one; nullptr before that.
   [[nodiscard]] nvrhi::IBuffer*          GetInstanceMaterialBuffer() const noexcept;
+
+  // M7: structured buffer of `LightGpu` entries (resources/shaders/
+  // ShaderInterop.slang) packed from the LightDesc copies of every
+  // LIVE LightHandle. Sized to the live-light count (sparse / dead
+  // slots are omitted, NOT included as holes — the closesthit
+  // iterates the buffer's full length). Allocated lazily on the
+  // first CommitResources that observed at least one AddLight;
+  // nullptr before that — PathTracePass binds a 1-element zero
+  // sentinel fallback in that case so the closesthit never reads
+  // an unbound buffer.
+  [[nodiscard]] nvrhi::IBuffer*          GetLightBuffer() const noexcept;
+
+  // M7 NdotL: per-instance mesh slot side-table (parallel to the
+  // §15 instance→material side-table). Indexed by instance slot,
+  // value = mesh slot. The closesthit needs this to know which
+  // mesh's face-normal range to look up for the Lambert pass.
+  [[nodiscard]] nvrhi::IBuffer*          GetInstanceMeshBuffer() const noexcept;
+
+  // M7 NdotL: flat float4 buffer of object-space face normals,
+  // every live mesh's normals concatenated. Closesthit reads:
+  //   nLocal = gMeshFaceNormals[gMeshFaceOffsets[meshSlot]
+  //                            + PrimitiveIndex()].xyz
+  [[nodiscard]] nvrhi::IBuffer*          GetMeshFaceNormalsBuffer() const noexcept;
+
+  // M7 NdotL: per-mesh-slot start offsets into GetMeshFaceNormalsBuffer.
+  // Sized to the mesh table length so the closesthit's lookup is
+  // bounds-safe by construction.
+  [[nodiscard]] nvrhi::IBuffer*          GetMeshFaceOffsetsBuffer() const noexcept;
+
+  // M7-IBL: env-map texture of the FIRST live UsdLuxDomeLight, or
+  // nullptr if no dome with a resolved envMap exists. Miss shader
+  // samples this at the ray direction's lat-long uv to draw the
+  // actual HDRI background. Multi-dome scenes pick the first one
+  // (production-renderer convention; multi-dome is post-v1 §43).
+  [[nodiscard]] nvrhi::ITexture*         GetDomeEnvMapTexture() const noexcept;
+
+  // M5/M7: shared linear-clamp sampler used for every bindless
+  // texture lookup (materials' baseColor/normal/etc. + the dome
+  // env-map). Per-role samplers (anisotropic for tangent maps, etc.)
+  // are an M9 polish item.
+  [[nodiscard]] nvrhi::ISampler*         GetBindlessSampler() const noexcept;
 
 private:
   // PIMPL: NVRHI handles, entry-table vectors, per-frame ring slots

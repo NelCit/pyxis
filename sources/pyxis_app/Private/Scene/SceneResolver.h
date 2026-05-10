@@ -12,7 +12,8 @@
 // At M3.5 the resolved path is just *emitted* via a one-line spdlog
 // (`scene.resolved.source = ...`) and stored alongside the
 // Configuration; nothing parses USD yet. M4+ feeds the resolved path
-// into HydraEngine / UsdDirectEngine and renders it for real.
+// into IngestUsd() (which dispatches by `config.app.ingest` to the
+// hydra / usd_direct adapter) and renders it for real.
 
 #pragma once
 

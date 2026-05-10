@@ -41,14 +41,21 @@ namespace {
 
 // Reused single-triangle mesh — every test that needs a live mesh
 // builds one from this fixture so AppendInstance has a valid
-// `instanceDesc.mesh` to point at.
+// `instanceDesc.mesh` to point at. The `seed` constructor argument
+// nudges vertex 0's X coord so two fixtures with different seeds
+// hash to different §15 dedup buckets — needed any time a test
+// wants two DISTINCT mesh slots in the same scene.
 struct TriangleFixture {
-  std::array<hlslpp::float3, 3> positions{
-      hlslpp::float3{0.0f, 0.0f, 0.0f},
-      hlslpp::float3{1.0f, 0.0f, 0.0f},
-      hlslpp::float3{0.0f, 1.0f, 0.0f},
-  };
+  std::array<hlslpp::float3, 3> positions;
   std::array<uint32_t, 3> indices{0, 1, 2};
+
+  explicit TriangleFixture(float seed = 0.0f) noexcept {
+    positions = {
+        hlslpp::float3{seed, 0.0f, 0.0f},
+        hlslpp::float3{1.0f, 0.0f, 0.0f},
+        hlslpp::float3{0.0f, 1.0f, 0.0f},
+    };
+  }
 
   [[nodiscard]] MeshDesc Desc() const noexcept {
     MeshDesc desc;
@@ -65,8 +72,11 @@ struct CpuOnlyScene {
 
   // Convenience: every instance test needs at least one live mesh.
   // Returns a valid MeshHandle the caller can drop into InstanceDesc.
-  [[nodiscard]] MeshHandle MakeMesh() {
-    const TriangleFixture triangle;
+  // Default seed=0 — repeated calls with no seed dedup to the same
+  // MeshHandle (§15). Pass a distinct seed when you need a DIFFERENT
+  // mesh slot from a prior MakeMesh call in the same scene.
+  [[nodiscard]] MeshHandle MakeMesh(float seed = 0.0f) {
+    const TriangleFixture triangle{seed};
     auto created = scene.CreateMesh(triangle.Desc());
     EXPECT_TRUE(created.has_value());
     return *created;
@@ -317,9 +327,13 @@ TEST(GpuSceneInstance, ManyInstancesSharePrototypeMeshSlot) {
 // -----------------------------------------------------------------------------
 TEST(GpuSceneInstance, MultiplePrototypeMeshesEachOwnAtMostOneBlasSlot) {
   CpuOnlyScene fixture;
-  const MeshHandle prototypeA = fixture.MakeMesh();
-  const MeshHandle prototypeB = fixture.MakeMesh();
-  const MeshHandle prototypeC = fixture.MakeMesh();
+  // Distinct seeds so the §15 content-dedup misses and each
+  // MakeMesh allocates a separate MeshHandle (the test wants three
+  // *distinct* prototype meshes; same-content MakeMesh calls would
+  // collapse to one slot).
+  const MeshHandle prototypeA = fixture.MakeMesh(0.0f);
+  const MeshHandle prototypeB = fixture.MakeMesh(2.0f);
+  const MeshHandle prototypeC = fixture.MakeMesh(4.0f);
 
   constexpr int INSTANCES_PER_PROTOTYPE = 30;
   for (int i = 0; i < INSTANCES_PER_PROTOTYPE; ++i)

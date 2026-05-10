@@ -199,6 +199,24 @@ CliArgs Parse(int argc, char** argv) noexcept {
         return out;
       }
     }
+    else if (Equals(arg, "--save-aov"))
+    {
+      if (!TakeValue(argc, argv, i, out.saveAov))
+      {
+        out.invalid = true;
+        out.invalidArg = arg;
+        return out;
+      }
+    }
+    else if (Equals(arg, "--shader-rebuild-dir"))
+    {
+      if (!TakeValue(argc, argv, i, out.shaderRebuildDir))
+      {
+        out.invalid = true;
+        out.invalidArg = arg;
+        return out;
+      }
+    }
     else
     {
       out.invalid = true;
@@ -230,6 +248,16 @@ void PrintUsage() noexcept {
       "  --seed <int>            Override render.seed (must be non-zero in headless).\n"
       "  --output <path>         Override output.image (EXR).\n"
       "  --profile <path>        Override profiling output (M11+).\n"
+      "  --save-aov <list>       Headless: write extra EXRs alongside --output for the\n"
+      "                          comma-separated raw AOV names. Recognised:\n"
+      "                          color,normal,depth,instanceId,materialId,baseColor,\n"
+      "                          worldPos,all. Each AOV writes <prefix>_<aov>.exr where\n"
+      "                          <prefix> is --output stripped of its .exr extension.\n"
+      "  --shader-rebuild-dir <path>\n"
+      "                          Viewer: CMake build dir the Reload Shaders button\n"
+      "                          spawns ShaderMake against (overrides the cwd walk-up\n"
+      "                          heuristic). Use when the binary lives outside the\n"
+      "                          build tree.\n"
       "\n"
       "Viewer extras:\n"
       "  --screenshot <path>     Run viewer briefly; write a PNG of the backbuffer.\n"

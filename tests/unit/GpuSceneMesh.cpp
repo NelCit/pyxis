@@ -36,14 +36,23 @@ using pyxis::Profiler;
 namespace {
 
 // Single-triangle fixture used by most tests. Three vertices, one
-// triangle, no normals/tangents/uv0 (optional spans empty).
+// triangle, no normals/tangents/uv0 (optional spans empty). The
+// `seed` constructor argument nudges vertex 0's X coord so two
+// fixtures with different seeds hash to different §15 dedup buckets
+// — needed any time a test wants to allocate two DISTINCT mesh
+// slots in the same scene (since CreateMesh content-dedups
+// byte-identical descs).
 struct TriangleFixture {
-  std::array<hlslpp::float3, 3> positions{
-      hlslpp::float3{0.0f, 0.0f, 0.0f},
-      hlslpp::float3{1.0f, 0.0f, 0.0f},
-      hlslpp::float3{0.0f, 1.0f, 0.0f},
-  };
+  std::array<hlslpp::float3, 3> positions;
   std::array<uint32_t, 3> indices{0, 1, 2};
+
+  explicit TriangleFixture(float seed = 0.0f) noexcept {
+    positions = {
+        hlslpp::float3{seed, 0.0f, 0.0f},
+        hlslpp::float3{1.0f, 0.0f, 0.0f},
+        hlslpp::float3{0.0f, 1.0f, 0.0f},
+    };
+  }
 
   [[nodiscard]] MeshDesc Desc() const noexcept {
     MeshDesc desc;
@@ -85,7 +94,32 @@ TEST(GpuSceneMesh, CreateMeshReturnsLiveHandle) {
   EXPECT_TRUE(fixture.scene.HasMesh(*result));
 }
 
-TEST(GpuSceneMesh, CreateMeshAllocatesDistinctSlotsForSequentialCreates) {
+TEST(GpuSceneMesh, CreateMeshAllocatesDistinctSlotsForDistinctContent) {
+  CpuOnlyScene fixture;
+  // Two fixtures with different seeds → byte-distinct MeshDescs →
+  // §15 content-dedup misses → fresh slot allocation each time.
+  const TriangleFixture triangleA{0.0f};
+  const TriangleFixture triangleB{2.0f};
+
+  const Expected<MeshHandle> first = fixture.scene.CreateMesh(triangleA.Desc());
+  const Expected<MeshHandle> second = fixture.scene.CreateMesh(triangleB.Desc());
+  ASSERT_TRUE(first.has_value());
+  ASSERT_TRUE(second.has_value());
+  EXPECT_NE(*first, *second);
+  EXPECT_NE(SlotOf(*first), SlotOf(*second));
+  EXPECT_TRUE(fixture.scene.HasMesh(*first));
+  EXPECT_TRUE(fixture.scene.HasMesh(*second));
+}
+
+// -----------------------------------------------------------------------------
+// §15 content-dedup: two CreateMesh calls with byte-identical
+// MeshDescs return the SAME MeshHandle (and therefore share one
+// BLAS once CommitResources runs the build). Pins the audit-fix
+// behaviour where three identical sphere prims in default.usd
+// previously allocated three handles + three BLAS even though they
+// were geometrically indistinguishable.
+// -----------------------------------------------------------------------------
+TEST(GpuSceneMesh, CreateMeshDeduplicatesByContent) {
   CpuOnlyScene fixture;
   const TriangleFixture triangle;
 
@@ -93,9 +127,33 @@ TEST(GpuSceneMesh, CreateMeshAllocatesDistinctSlotsForSequentialCreates) {
   const Expected<MeshHandle> second = fixture.scene.CreateMesh(triangle.Desc());
   ASSERT_TRUE(first.has_value());
   ASSERT_TRUE(second.has_value());
-  EXPECT_NE(*first, *second);
-  EXPECT_NE(SlotOf(*first), SlotOf(*second));
-  EXPECT_TRUE(fixture.scene.HasMesh(*first));
+  EXPECT_EQ(*first, *second)
+      << "Identical MeshDescs must dedup to one MeshHandle (§15 BLAS sharing).";
+  EXPECT_EQ(fixture.scene.LastFrameStats().meshCount, 1u)
+      << "meshCount should reflect the dedup'd live count, not the call count.";
+}
+
+// After DestroyMesh, the dedup map must drop its stale entry so a
+// future CreateMesh of the same content allocates fresh — verified
+// by checking the recycled-slot generation bumped (which would not
+// happen if dedup mistakenly handed back the destroyed handle).
+TEST(GpuSceneMesh, DestroyMeshClearsContentDedupEntry) {
+  CpuOnlyScene fixture;
+  const TriangleFixture triangle;
+
+  const Expected<MeshHandle> first = fixture.scene.CreateMesh(triangle.Desc());
+  ASSERT_TRUE(first.has_value());
+  const uint8_t firstGen = GenerationOf(*first);
+
+  fixture.scene.DestroyMesh(*first);
+
+  const Expected<MeshHandle> second = fixture.scene.CreateMesh(triangle.Desc());
+  ASSERT_TRUE(second.has_value());
+  EXPECT_EQ(SlotOf(*second), SlotOf(*first))
+      << "Slot must be recycled (dedup map should not return the dead entry).";
+  EXPECT_EQ(GenerationOf(*second), static_cast<uint8_t>(firstGen + 1u))
+      << "Generation must bump exactly once (proves a fresh allocation, not a dedup hit).";
+  EXPECT_FALSE(fixture.scene.HasMesh(*first));
   EXPECT_TRUE(fixture.scene.HasMesh(*second));
 }
 
@@ -253,12 +311,15 @@ TEST(GpuSceneMesh, RecycledSlotBumpsGeneration) {
 // -----------------------------------------------------------------------------
 TEST(GpuSceneMesh, LastFrameStatsTracksLiveMeshCount) {
   CpuOnlyScene fixture;
-  const TriangleFixture triangle;
+  // Distinct seeds → distinct content → §15 content-dedup misses →
+  // each CreateMesh allocates a fresh slot, meshCount counts both.
+  const TriangleFixture triangleA{0.0f};
+  const TriangleFixture triangleB{2.0f};
 
   EXPECT_EQ(fixture.scene.LastFrameStats().meshCount, 0u);
 
-  const Expected<MeshHandle> first = fixture.scene.CreateMesh(triangle.Desc());
-  const Expected<MeshHandle> second = fixture.scene.CreateMesh(triangle.Desc());
+  const Expected<MeshHandle> first = fixture.scene.CreateMesh(triangleA.Desc());
+  const Expected<MeshHandle> second = fixture.scene.CreateMesh(triangleB.Desc());
   ASSERT_TRUE(first.has_value());
   ASSERT_TRUE(second.has_value());
   EXPECT_EQ(fixture.scene.LastFrameStats().meshCount, 2u);

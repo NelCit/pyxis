@@ -34,6 +34,19 @@ struct PYXIS_USD_INGEST_API IngestStats {
   uint32_t materialsEmitted = 0;
   uint32_t camerasEmitted = 0;
   uint32_t skipped = 0;       // unsupported prim types (volume, points, etc.)
+
+  // Per-stage timings (milliseconds, std::chrono::steady_clock based).
+  // Surfaced in the viewer's Performance / Loading panel so users can
+  // see where USD-load latency goes. Zero on a stage that didn't run
+  // (e.g. stageOpenMs is 0 when WalkStage is called with an already-
+  // opened stage). totalMs is the sum of all stages plus the harness
+  // overhead inside WalkFile / WalkStage.
+  float    stageOpenMs       = 0.0f;  // pxr::UsdStage::Open
+  float    traverseSortMs    = 0.0f;  // stage->Traverse + stable_sort
+  float    materialPassMs    = 0.0f;  // pass 1: UsdShadeMaterial -> AcquireMaterial
+  float    instancerPassMs   = 0.0f;  // pass 2: UsdGeomPointInstancer expansion
+  float    meshLightCameraMs = 0.0f;  // pass 3: meshes / camera / lights
+  float    totalMs           = 0.0f;
 };
 
 class PYXIS_USD_INGEST_API StageWalker final {

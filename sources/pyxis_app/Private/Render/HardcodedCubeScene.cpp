@@ -96,13 +96,32 @@ hlslpp::float4x4 BuildViewMatrix() noexcept {
       hlslpp::float4(0.0f, 0.0f, 1.0f, -3.0f), hlslpp::float4(0.0f, 0.0f, 0.0f, 1.0f));
 }
 
-// Build a row-major + column-vector Vulkan perspective projection.
-// Y is flipped (negated `f` in the second row) so the M3 image is
-// upright; Vulkan's NDC has Y-down by default.
+// Build a row-major + column-vector GL-convention perspective
+// projection. raygen does its own Y-flip in the NDC mapping (top row
+// of dispatch -> ndc.y = +1, see raygen.slang's ndc construction),
+// so the projection itself stays GL-style with +focal in row 1.
+//
+// Pre-fix this matrix had -focal (a Vulkan-style Y-flip), which
+// double-inverted Y when combined with raygen's flip. The cube
+// hides the bug because it's Y-symmetric, but the FOV-edit path
+// in the editor exposed the inconsistency: USD ingest produces
+// +focal projections (via ToPyxisMatrix(GfFrustum::ComputeProjectionMatrix))
+// and an editor rebuild that used -focal flipped USD-loaded scenes.
+// One convention everywhere now.
+//
+// IMAGE NOTE for anyone re-baselining: the M2 byte-equal regression
+// test (m2_byte_equal.cmake) compares two re-runs against each other,
+// not against a stored baseline image — so this fix produces stable
+// output without breaking the test. If you're maintaining an external
+// PNG / EXR snapshot of the M3 cube outside the repo (RenderDoc grab,
+// docs hero shot, etc.), the new image WILL differ from any pre-0204b44
+// capture by a Y-flip, even though the cube's geometry is symmetric:
+// the lighting (Sun direction Y < 0 + Dome ambient) is direction-aware,
+// so the shading hits opposite faces.
 //
 // Right-handed view space, depth [0, 1] (Vulkan), `v_clip = P · v_view`:
 //   [ f/aspect  0      0                  0                   ]
-//   [ 0        -f      0                  0                   ]   (-f flips Y)
+//   [ 0         f      0                  0                   ]
 //   [ 0         0      far/(near-far)     near*far/(near-far) ]
 //   [ 0         0     -1                  0                   ]
 //
@@ -122,7 +141,7 @@ hlslpp::float4x4 BuildProjMatrix(std::uint32_t renderWidth, std::uint32_t render
   const float nearMinusFar = nearZ - farZ;  // negative.
 
   return hlslpp::float4x4(
-      hlslpp::float4(focal / aspect, 0.0f, 0.0f, 0.0f), hlslpp::float4(0.0f, -focal, 0.0f, 0.0f),
+      hlslpp::float4(focal / aspect, 0.0f, 0.0f, 0.0f), hlslpp::float4(0.0f, focal, 0.0f, 0.0f),
       hlslpp::float4(0.0f, 0.0f, farZ / nearMinusFar, nearZ * farZ / nearMinusFar),
       hlslpp::float4(0.0f, 0.0f, -1.0f, 0.0f));
 }

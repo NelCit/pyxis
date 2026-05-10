@@ -27,6 +27,15 @@ class IRenderPass {
   virtual ~IRenderPass() = default;
   [[nodiscard]] virtual std::string_view Name() const = 0;
   virtual void Execute(nvrhi::ICommandList* commandList, const PassContext& context) = 0;
+
+  // Editor-driven shader reload (M7 follow-up). Default no-op; passes
+  // that load shaders from disk override to re-read .spv + rebuild
+  // their pipeline. Caller must have waited the device idle before
+  // calling so no in-flight command buffer references the old
+  // pipeline / shader table. Returns true on success; false on any
+  // step (file read, createShader, createRayTracingPipeline) so the
+  // editor can surface a one-shot log line.
+  [[nodiscard]] virtual bool ReloadShaders() noexcept { return true; }
 };
 
 }  // namespace pyxis

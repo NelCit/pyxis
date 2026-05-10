@@ -96,12 +96,11 @@ ResolvedScene ResolveScene(const CliArgs& cli, const Configuration& config) noex
                            + " not found; falling through to chain step 4");
   }
 
-  // Step 3 — %LOCALAPPDATA%/Pyxis/recent_scenes.json. Deferred to
-  // M4+: that step needs a scene-load telemetry pipeline (write the
-  // newly-loaded path on success, evict on missing) that only makes
-  // sense once HydraEngine / UsdDirectEngine actually load scenes.
-  // M3.5 plumbing skips it; the chain falls straight from step 2 to
-  // step 4.
+  // Step 3 — %LOCALAPPDATA%/Pyxis/recent_scenes.json. Deferred:
+  // that step needs a scene-load telemetry pipeline (write the
+  // newly-loaded path on success, evict on missing) that lands
+  // alongside the M9 "Save Scene As USD" + recent-list polish.
+  // The chain falls straight from step 2 to step 4 today.
 
   // Step 4 — bundled default at <exe-dir>/Resources/scenes/default.usd.
   // Always exists in a correctly-built / correctly-installed Pyxis;

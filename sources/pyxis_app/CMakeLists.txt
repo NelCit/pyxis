@@ -21,6 +21,10 @@ target_sources(pyxis PRIVATE
     Private/CliArgs.cpp
     Private/Config/Configuration.h
     Private/Config/Configuration.cpp
+    Private/Output/AovExrSaver.h
+    Private/Output/AovExrSaver.cpp
+    Private/Output/BackbufferScreenshot.h
+    Private/Output/BackbufferScreenshot.cpp
     Private/Output/ExrWriter.h
     Private/Output/ExrWriter.cpp
     Private/Output/TextureReadback.h
@@ -33,10 +37,9 @@ target_sources(pyxis PRIVATE
     Private/Render/HardcodedCubeScene.cpp
     Private/Scene/SceneResolver.h
     Private/Scene/SceneResolver.cpp
-    Private/UsdDirectEngine/UsdDirectEngine.h
-    Private/UsdDirectEngine/UsdDirectEngine.cpp
-    Private/HydraEngine/HydraEngine.h
-    Private/HydraEngine/HydraEngine.cpp
+    Private/EditorPanel.cpp
+    Private/IngestUsd.h
+    Private/IngestUsd.cpp
     Private/HeadlessMode.h
     Private/HeadlessMode.cpp
     Private/ViewerMode.h
@@ -148,13 +151,20 @@ pyxis_thirdparty_require_imgui()
 target_link_libraries(pyxis PRIVATE
     Pyxis::Platform
     Pyxis::Renderer
-    Pyxis::UsdIngest                 # M4 — UsdDirectEngine + HydraEngine (M4 stub) wrap StageWalker.
+    Pyxis::UsdIngest                 # M4 — IngestUsd() unified entry point shares StageWalker across both adapters.
     Pyxis::Hydra                     # M4 — pyxis_hydra plugInfo.json + Sync impls register at process load.
     pyxis_imgui
     Vulkan::Vulkan        # vkCmdBeginRendering / vkCmdEndRendering / descriptor-pool calls
     nlohmann_json::nlohmann_json     # parameters.json + effective-config writer (§26 / §27)
     unofficial::tinyexr::tinyexr     # headless EXR writer (§41 M2)
 )
+
+# Windows-only system libs. psapi (Process Status API) — used by
+# ImGuiHost's perf-panel RAM row (GetProcessMemoryInfo). Available on
+# every Windows SDK; no third-party dep needed.
+if(WIN32)
+    target_link_libraries(pyxis PRIVATE psapi)
+endif()
 
 # stb_image_write is header-only; vcpkg's `Stb` config exports the
 # include dir as Stb_INCLUDE_DIR but no link target. ViewerMode.cpp's

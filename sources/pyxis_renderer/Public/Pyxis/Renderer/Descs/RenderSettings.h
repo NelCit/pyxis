@@ -30,6 +30,42 @@ struct RenderSettings {
   struct Features {
     bool imguiOverlay = true;  // PYXIS_DEBUG_TOOLS-gated
   } features;
+
+  // M7 follow-up — viewer-driven AOV inspector + pixel picker. The
+  // raygen reads these out of CameraUniforms each frame. Mirrors the
+  // DEBUG_VIEW_* constants in resources/shaders/ShaderInterop.slang.
+  // Headless mode leaves these at defaults (Color, no mouse hover)
+  // so byte-equal regression artefacts stay stable.
+  enum class DebugView : uint32_t {
+    Color       = 0,   // post-tonemap radiance
+    Normal      = 1,   // (n*0.5+0.5)
+    Depth       = 2,   // 1/depth grayscale
+    PrimId      = 3,   // hashed colour per slot — Hydra's HdAovTokens->primId
+    MaterialId  = 4,   // hashed colour per material
+    BaseColor   = 5,   // raw OpenPBR baseColor (pre-shading albedo)
+    WorldPos    = 6,   // 10-unit-period fract of world hit position
+    // Tier 1 Hydra-canonical AOVs — exposed as inspector views too so
+    // the editor can sanity-check what Hydra delegates pull.
+    Alpha       = 7,   // 1.0 on hit, 0.0 on miss (binary today)
+    ElementId   = 8,   // hashed colour per face within a BLAS
+    NormalEye   = 9,   // eye-space normal as (n*0.5+0.5)
+    WorldPosEye = 10,  // sin-encoded eye-space position
+  };
+  DebugView debugView = DebugView::Color;
+
+  // Mouse pixel for the picker. 0xFFFFFFFF on either axis = "no
+  // hover"; raygen short-circuits the pick write.
+  static constexpr uint32_t MOUSE_PIXEL_NONE = 0xFFFFFFFFu;
+  uint32_t mousePixelX = MOUSE_PIXEL_NONE;
+  uint32_t mousePixelY = MOUSE_PIXEL_NONE;
+
+  // WorldPos AOV display period (scene units, typically meters).
+  // The display branch in raygen.slang encodes worldPos via
+  // sin(p * 2pi / worldPosPeriod) so a smaller value gives finer
+  // bands. 10 m is a sensible default for human-scale scenes;
+  // crank to ~50 m for Bistro-scale (or down to ~0.1 m for a unit
+  // cube). 0 falls through to PathTracePass's default of 10.
+  float worldPosPeriod = 10.0f;
 };
 
 }  // namespace pyxis

@@ -5278,6 +5278,21 @@ action`) layers on top for per-TU object caching.
   in raygen; NEE; multiple-importance sampling with BRDF.
 - Exit: a Cornell-box-equivalent scene with all three light types converges to a known
   reference within RMSE tolerance.
+- **Scope split landed at M7-simple**: this milestone ships the **CPU + GPU lighting
+  plumbing** + a deliberately-simple shading model — `LightGpu` packed buffer at binding
+  5 (uploaded by `GpuScene::CommitResources` from every live `LightDesc`), `StageWalker`
+  translation of `UsdLuxDistantLight` / `UsdLuxDomeLight` / `UsdLuxRectLight` into
+  `AddLight` calls, and a closesthit that does **NdotL Lambert against pre-computed
+  per-mesh face normals** (delivered via three new GPU buffers: `gMeshFaceNormals` flat
+  +  `gMeshFaceOffsets` per-mesh + `gInstanceMesh` side-table). Per-light shading model:
+  Distant uses `lightDir = -L.direction`, Rect treats the rect as a point at its center
+  (`lightDir = normalize(L.position - hitWorld)`), Dome uses Lambert against the world
+  up axis (`max(0, dot(N, +Y))`). **No shadow rays, no NEE, no MIS, no IBL importance
+  sampling** — those are the M7-full closesthit replacement the user fills in alongside
+  proper hemispheric integration over the dome (per §7) + Rect area sampling. M7-simple
+  also defers `inputs:exposure` (intensity stops multiplier), env-map IBL from
+  `inputs:texture:file`, non-uniform-scale normal correction (inverse-transpose), and
+  the M9 polish items (cone spots, IES profiles).
 
 ### Phase M8a — Bistro render
 - Add: full Amazon Lumberyard Bistro USD (interior + exterior) shipped via

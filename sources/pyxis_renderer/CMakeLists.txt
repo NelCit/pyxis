@@ -63,8 +63,17 @@ target_sources(pyxis_renderer PRIVATE
 
     # M3 — GpuScene canonical scene-mutation API. PIMPL'd per §18.9;
     # mesh upload + BLAS build + TLAS rebuild are wired here at M3,
-    # materials + textures fill in at M5+.
+    # materials + textures fill in at M5+. Per-verb bodies are split
+    # into sibling files; Internal.h holds the shared `struct Impl` +
+    # hashing/packing helpers every verb file needs.
+    Private/GpuScene/Internal.h
     Private/GpuScene/GpuScene.cpp
+    Private/GpuScene/Mesh.cpp
+    Private/GpuScene/Material.cpp
+    Private/GpuScene/Texture.cpp
+    Private/GpuScene/Instance.cpp
+    Private/GpuScene/Light.cpp
+    Private/GpuScene/Commit.cpp
 
     # M1 — RenderGraph + Passes + Profiler + Renderer.
     Private/Diagnostics/CommandListMarker.h
@@ -155,6 +164,11 @@ target_include_directories(pyxis_renderer
 find_package(Stb REQUIRED)
 target_include_directories(pyxis_renderer PRIVATE ${Stb_INCLUDE_DIR})
 
+# tinyexr — HDR / EXR decode for M7 dome environment maps. pyxis_app
+# already links it for EXR output; the renderer pulls it independently
+# for the input / decode side.
+find_package(tinyexr CONFIG REQUIRED)
+
 # stb_image's IMPLEMENTATION TU has missing-field-initializer
 # patterns inside the third-party header (same as stb_image_write
 # in pyxis_app). Disable the warning + clang-tidy on that single
@@ -170,6 +184,7 @@ target_link_libraries(pyxis_renderer
     PRIVATE
         $<TARGET_NAME_IF_EXISTS:flecs::flecs_static>
         $<TARGET_NAME_IF_EXISTS:flecs::flecs>
+        unofficial::tinyexr::tinyexr
 )
 
 # Debug-only: PYXIS_DEBUG_TOOLS toggles Flecs Explorer (§30.11).

@@ -34,6 +34,7 @@ struct Configuration;
 struct ResolvedScene;
 
 int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScene,
-                  std::string_view screenshotPath) noexcept;
+                  std::string_view screenshotPath,
+                  std::string_view shaderRebuildDirOverride = {}) noexcept;
 
 }  // namespace pyxis::app

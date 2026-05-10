@@ -38,6 +38,13 @@ class RenderGraph final {
   // Per-frame execute (called from PyxisRenderer::RenderFrame).
   void Execute(nvrhi::ICommandList* commandList, const PassContext& context);
 
+  // Reload shaders for every pass that overrides IRenderPass::ReloadShaders.
+  // Returns true iff every pass reported success; on partial failure
+  // returns false but still attempts every pass (so a broken closesthit
+  // doesn't prevent a fixed raygen pass from picking up its update).
+  // Caller must ensure GPU idle before calling. Render thread only.
+  [[nodiscard]] bool ReloadShaders() noexcept;
+
  private:
   // _device is used by M3+'s RenderGraph::Compile to allocate barriers /
   // imported resources; M1's minimal Execute doesn't read it.
