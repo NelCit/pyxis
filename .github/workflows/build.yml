@@ -57,7 +57,7 @@ jobs:
       # plugs it into CMAKE_C/CXX_COMPILER_LAUNCHER — no preset
       # changes needed once sccache is on PATH.
       - name: Install sccache
-        uses: mozilla-actions/sccache-action@v0.0.5
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       # Vulkan SDK — required by find_package(Vulkan) (looks for
       # vulkan-1.lib loader) and the NVRHI Vulkan backend at runtime.
