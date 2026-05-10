@@ -240,13 +240,17 @@ void main() {
     }
     else if (gFrameUi.debugViewMode == DEBUG_VIEW_WORLD_POS)
     {
-        // Visualise world-space hit position via a 10-unit-period
-        // fract pattern. Lets users verify camera<->scene alignment
-        // without a magnitude-dependent colour scale; (0..10) maps
-        // identically to (0..1) so a unit-cube object reads as a
-        // tenth-tone gradient. Miss (worldHit == 0) reads as black.
+        // Visualise world-space hit position via a SMOOTH periodic
+        // encoding — sin remap to [0,1] with a 10-unit period.
+        // Pre-fix this used `frac(worldHit * 0.1)` which has a sharp
+        // 0->1 discontinuity at every integer multiple of the period,
+        // producing visible bright/dark bands at floors / walls /
+        // any plane where worldPos.{x,y,z} = 0 (where the -0.0 / +0.0
+        // boundary lands). The sin encoding is C-infinity smooth so
+        // no discontinuities exist anywhere in world space.
+        const float WORLD_POS_OMEGA = 0.62831853f;  // 2*pi / 10 (10-unit period)
         displayColor = (payload.hitT > 0.0f)
-            ? frac(payload.worldHit * 0.1f)
+            ? (sin(payload.worldHit * WORLD_POS_OMEGA) * 0.5f + 0.5f)
             : float3(0.0, 0.0, 0.0);
     }
     gOutput[launchIndex] = float4(displayColor, 1.0f);
