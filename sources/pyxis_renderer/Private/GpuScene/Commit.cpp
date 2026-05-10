@@ -94,6 +94,9 @@ void GpuScene::Impl::Clear() noexcept
   meshVertexNormalsBuffer = nullptr;
   meshVertexNormalOffsetsBuffer = nullptr;
   meshVertexNormalsNeedUpload = false;
+  meshTangentsBuffer = nullptr;
+  meshTangentOffsetsBuffer = nullptr;
+  meshTangentsNeedUpload = false;
   instanceMeshBuffer = nullptr;
 
   // Sampler + missingTexture are scene-lifetime singletons that the
@@ -168,6 +171,7 @@ Expected<void> GpuScene::Impl::CommitResources(nvrhi::ICommandList* commandList)
   PYXIS_TRY(UploadMeshUvs(commandList));
   PYXIS_TRY(UploadMeshIndices(commandList));
   PYXIS_TRY(UploadMeshVertexNormals(commandList));
+  PYXIS_TRY(UploadMeshTangents(commandList));
   return {};
 }
 
@@ -573,8 +577,16 @@ Expected<void> GpuScene::Impl::BuildPendingBlas(nvrhi::ICommandList* commandList
         .setIndexFormat(nvrhi::Format::R32_UINT)
         .setIndexCount(entry.indexCount);
 
+    // M9: drop the Opaque flag globally so the anyhit shader fires
+    // on every hit. Anyhit reads the bound material and calls
+    // IgnoreHit() for semi-translucent / transmissive / alpha-tested
+    // materials (M9 invisibility-as-translucency stub) — without the
+    // flag drop the GPU would short-circuit straight to closesthit
+    // and translucent geometry would block light incorrectly.
+    // Opaque-material cost is one extra anyhit invocation that
+    // returns immediately; well within the §34 KPI budget.
     nvrhi::rt::GeometryDesc geometry;
-    geometry.setTriangles(triangles).setFlags(nvrhi::rt::GeometryFlags::Opaque);
+    geometry.setTriangles(triangles).setFlags(nvrhi::rt::GeometryFlags::None);
 
     auto buildFlags = nvrhi::rt::AccelStructBuildFlags::PreferFastTrace;
     if (triangleCount >= BLAS_COMPACTION_TRIANGLE_THRESHOLD)
@@ -957,6 +969,62 @@ Expected<void> GpuScene::Impl::UploadMeshVertexNormals(nvrhi::ICommandList* comm
   commandList->writeBuffer(meshVertexNormalOffsetsBuffer.Get(),
                            perMeshOffsets.data(), offsetsBytes);
   meshVertexNormalsNeedUpload = false;
+  return {};
+}
+
+// M9 normal mapping: per-vertex tangents (from MikkTSpace) packed
+// into a flat float4 buffer + per-mesh start-offset table. xyz is
+// the unit tangent; w is the bitangent sign (+/- 1) used by the
+// closesthit's `bitangent = sign × cross(N, T)` construction. Same
+// shape + padding policy as the vertex-normal upload above —
+// meshes that didn't generate tangents (no UVs / no normals) pad
+// with zeros, and the closesthit's normal-mapping branch detects
+// the zero-magnitude case and skips its TBN construction.
+Expected<void> GpuScene::Impl::UploadMeshTangents(nvrhi::ICommandList* commandList)
+{
+  if (!meshTangentsNeedUpload || meshes.empty())
+    return {};
+
+  std::vector<hlslpp::float4> packedTangents;
+  std::vector<std::uint32_t>  perMeshOffsets(meshes.size(), 0u);
+  for (std::size_t meshSlot = 0; meshSlot < meshes.size(); ++meshSlot)
+  {
+    perMeshOffsets[meshSlot] = static_cast<std::uint32_t>(packedTangents.size());
+    const MeshEntry& mesh = meshes[meshSlot];
+    if (!mesh.live)
+      continue;
+    const std::size_t copyCount =
+        std::min<std::size_t>(mesh.tangents.size(), mesh.vertexCount);
+    for (std::size_t i = 0; i < copyCount; ++i)
+    {
+      packedTangents.push_back(mesh.tangents[i]);
+    }
+    if (copyCount < mesh.vertexCount)
+    {
+      const std::size_t padCount = mesh.vertexCount - copyCount;
+      packedTangents.insert(packedTangents.end(), padCount,
+                            hlslpp::float4{0.0f, 0.0f, 0.0f, 0.0f});
+    }
+  }
+  if (packedTangents.empty())
+    packedTangents.emplace_back(0.0f, 0.0f, 0.0f, 0.0f);  // 1-element fallback
+
+  const std::size_t tangentsBytes = packedTangents.size() * sizeof(hlslpp::float4);
+  const std::size_t offsetsBytes  = perMeshOffsets.size() * sizeof(std::uint32_t);
+
+  PYXIS_TRY(EnsureStructuredBuffer(device, meshTangentsBuffer, tangentsBytes,
+                                   sizeof(hlslpp::float4),
+                                   "GpuScene.meshTangentsBuffer",
+                                   "meshTangentsBuffer"));
+  PYXIS_TRY(EnsureStructuredBuffer(device, meshTangentOffsetsBuffer, offsetsBytes,
+                                   sizeof(std::uint32_t),
+                                   "GpuScene.meshTangentOffsetsBuffer",
+                                   "meshTangentOffsetsBuffer"));
+  commandList->writeBuffer(meshTangentsBuffer.Get(),
+                           packedTangents.data(), tangentsBytes);
+  commandList->writeBuffer(meshTangentOffsetsBuffer.Get(),
+                           perMeshOffsets.data(), offsetsBytes);
+  meshTangentsNeedUpload = false;
   return {};
 }
 

@@ -224,3 +224,10 @@ pyxis_compile_slang_shader(
     STAGE       closesthit
     OUTPUT      closesthit.spv
 )
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/anyhit.slang
+    ENTRY_POINT main
+    STAGE       anyhit
+    OUTPUT      anyhit.spv
+)

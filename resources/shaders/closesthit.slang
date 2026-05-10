@@ -78,6 +78,8 @@
 [[vk::binding(28, 0)]] Texture2D                            gBindlessTextures[BINDLESS_TEXTURES_CAP];
 [[vk::binding(29, 0)]] StructuredBuffer<float4>             gMeshVertexNormals;
 [[vk::binding(30, 0)]] StructuredBuffer<uint>               gMeshVertexNormalOffsets;
+[[vk::binding(31, 0)]] StructuredBuffer<float4>             gMeshTangents;
+[[vk::binding(32, 0)]] StructuredBuffer<uint>               gMeshTangentOffsets;
 
 // Slang emits the SPIR-V `OpEntryPoint` name as `"main"` regardless
 // of the source-side function name; the C++ side passes `"main"` to
@@ -165,7 +167,57 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
         const uint faceOffset = gMeshFaceOffsets[meshSlot];
         nLocal = gMeshFaceNormals[faceOffset + PrimitiveIndex()].xyz;
     }
-    const float3 nWorld = normalize(mul(worldFromObject3x3, nLocal));
+    float3 nWorld = normalize(mul(worldFromObject3x3, nLocal));
+
+    // M9 normal mapping. When the material binds a normal texture,
+    // sample it in tangent space and transform to world via the TBN
+    // matrix built from the per-vertex tangent (MikkTSpace) + the
+    // per-vertex normal we just computed + sign-bit-derived bitangent
+    // (`bitangent = sign × cross(N, T)`). Tangents stored as float4:
+    // xyz = unit tangent in object space, w = handedness sign.
+    //
+    // Three guards skip the TBN sample (closesthit keeps the
+    // smooth-interp normal as the shading normal):
+    //   1. Material doesn't flag HAS_NORMAL_MAP (no normal texture).
+    //   2. mat.normalTex is the INVALID_BINDLESS_TEXTURE sentinel.
+    //   3. Per-vertex tangent magnitude is zero (mesh authored no
+    //      tangents — typical for cube fixtures + meshes without
+    //      UVs / normals where MikkTSpace can't generate them).
+    if ((mat.flags & MATERIAL_FLAG_HAS_NORMAL_MAP) != 0u
+        && mat.normalTex < BINDLESS_TEXTURES_CAP) {
+        const uint   tangentBase = gMeshTangentOffsets[meshSlot];
+        const float4 tv0 = gMeshTangents[tangentBase + v0];
+        const float4 tv1 = gMeshTangents[tangentBase + v1];
+        const float4 tv2 = gMeshTangents[tangentBase + v2];
+        const float3 tangentLocal = tv0.xyz * w0 + tv1.xyz * bary.x + tv2.xyz * bary.y;
+        const float  tangentLenSq = dot(tangentLocal, tangentLocal);
+        if (tangentLenSq > 1e-6) {
+            // Per-MikkTSpace doc: averaging tangent.w across vertices
+            // is invalid (handedness shouldn't lerp), so take the
+            // first vertex's sign — same lossy-but-consistent
+            // collapse used for the per-vertex tangent slot itself.
+            const float  handedness = tv0.w;
+            const float3 tangentWorld_raw =
+                normalize(mul(worldFromObject3x3, tangentLocal * rsqrt(tangentLenSq)));
+            // Gram-Schmidt re-orthonormalise T against N (cheap
+            // safety net — interp may have de-orthogonalised).
+            const float3 tangentWorld =
+                normalize(tangentWorld_raw - dot(tangentWorld_raw, nWorld) * nWorld);
+            const float3 bitangentWorld = cross(nWorld, tangentWorld) * handedness;
+
+            // Sample the tangent-space normal map. Convention: the
+            // texture stores [0,1]-encoded tangent-space normals;
+            // unpack to [-1,1] before transforming.
+            const float3 nTangent =
+                gBindlessTextures[mat.normalTex].SampleLevel(gBindlessSampler, uv, 0).rgb
+                * 2.0 - 1.0;
+
+            // Transform tangent-space normal to world space.
+            nWorld = normalize(nTangent.x * tangentWorld
+                             + nTangent.y * bitangentWorld
+                             + nTangent.z * nWorld);
+        }
+    }
 
     // M7-simple lighting + NdotL Lambert for direct lights. Loop
     // over every authored light, accumulate the per-light Lambert

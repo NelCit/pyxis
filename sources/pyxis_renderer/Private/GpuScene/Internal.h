@@ -543,6 +543,16 @@ struct GpuScene::Impl
   nvrhi::BufferHandle  meshVertexNormalOffsetsBuffer;
   bool                 meshVertexNormalsNeedUpload = false;
 
+  // M9 normal mapping: per-vertex tangents from MikkTSpace. float4
+  // stride — xyz is the unit tangent, w is the bitangent sign
+  // (+/- 1) for the closesthit's `bitangent = sign × cross(N, T)`
+  // construction. Empty when the mesh has no UVs or normals (those
+  // are MikkTSpace prereqs); closesthit's normal-mapping branch then
+  // falls back to using the vertex-interpolated normal without TBN.
+  nvrhi::BufferHandle  meshTangentsBuffer;
+  nvrhi::BufferHandle  meshTangentOffsetsBuffer;
+  bool                 meshTangentsNeedUpload = false;
+
   // Magenta 4x4 fallback texture — slot 0 in the bindless table is
   // permanently the "missing texture" colour so any material whose
   // resolved path failed to decode renders visibly-broken instead
@@ -706,6 +716,7 @@ struct GpuScene::Impl
   [[nodiscard]] Expected<void> UploadMeshUvs(nvrhi::ICommandList* commandList);
   [[nodiscard]] Expected<void> UploadMeshIndices(nvrhi::ICommandList* commandList);
   [[nodiscard]] Expected<void> UploadMeshVertexNormals(nvrhi::ICommandList* commandList);
+  [[nodiscard]] Expected<void> UploadMeshTangents(nvrhi::ICommandList* commandList);
 };
 
 }  // namespace pyxis

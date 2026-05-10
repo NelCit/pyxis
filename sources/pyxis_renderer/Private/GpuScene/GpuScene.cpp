@@ -279,6 +279,14 @@ nvrhi::IBuffer* GpuScene::GetMeshVertexNormalOffsetsBuffer() const noexcept {
   return _impl->meshVertexNormalOffsetsBuffer.Get();
 }
 
+nvrhi::IBuffer* GpuScene::GetMeshTangentsBuffer() const noexcept {
+  return _impl->meshTangentsBuffer.Get();
+}
+
+nvrhi::IBuffer* GpuScene::GetMeshTangentOffsetsBuffer() const noexcept {
+  return _impl->meshTangentOffsetsBuffer.Get();
+}
+
 nvrhi::ITexture* GpuScene::GetMissingTexture() const noexcept {
   return _impl->missingTexture.Get();
 }

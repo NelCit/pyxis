@@ -1,7 +1,7 @@
 # M9 — World Lobby visual correctness
 
-**Status: in flight** (smooth shading + emission landed; normal mapping
-deferred to a follow-up PR pending MikkTSpace integration)
+**Status: complete** (smooth shading + emission + normal mapping +
+translucent-as-invisible all landed; dome alignment audited)
 
 §41 M9 normatively targets Bistro; substituting the lobby (same pattern
 as M8b — see `_documentation/m8b-lobby-perf.md`).
@@ -70,48 +70,104 @@ baseColor.
 lobby author non-zero `emissiveColor`) now contribute their
 authored radiance.
 
+### 3. Translucent materials → invisible (anyhit IgnoreHit stub)
+
+**Problem.** First-bounce shading treated every triangle hit the same:
+the closesthit shaded the surface and the ray stopped. Materials
+authored with `opacity < 1` or `transmissionWeight > 0` (glass,
+water, semi-transparent overlays) were rendering as solid surfaces
+that blocked light from reaching what's behind them.
+
+**Fix (M9 stub — proper transmission BSDF is M11+).**
+- New `resources/shaders/anyhit.slang` reads
+  `gMaterials[gInstanceMaterial[InstanceID()]]` and calls `IgnoreHit()`
+  when the material has `opacity < 0.999` OR
+  `MATERIAL_FLAG_TRANSMISSION_ENABLED` OR `MATERIAL_FLAG_ALPHA_TESTED`.
+  The ray then passes through and traversal continues to the next
+  intersection — the closesthit fires on the closest opaque hit
+  behind the translucent geometry.
+- `pyxis_compile_slang_shader` wires it into the build; PathTracePass
+  loads `anyhit.spv`, adds it to `HitGroupDefault.setAnyHitShader`,
+  and ReloadShaders is symmetric.
+- BLAS build drops the `Opaque` flag globally so the anyhit fires on
+  every hit. Opaque-material cost is one extra anyhit invocation
+  that returns immediately — measured ~0.45 ms p50 added to
+  `pass.PathTrace` on the lobby (1.12 → 1.55 ms), still 6× headroom
+  on the 12 ms KPI.
+
+### 4. Normal mapping (MikkTSpace tangents)
+
+**Problem.** Lobby materials author normal maps (`mat.normalTex`
+acquired by the translator + survives all the way to
+`OpenPBRMaterialGPU.normalTex`), but the closesthit never sampled
+them — flat tangent-space detail (terrazzo, oak grain, ceramic tile,
+brushed steel) was missing entirely.
+
+**Fix.**
+- `mikktspace` (already in `vcpkg.json`) wired into `pyxis_usd_ingest`
+  via `find_package(mikktspace CONFIG REQUIRED)` + the
+  `mikktspace::mikktspace` link target.
+- `StageWalker::EmitMesh` runs `genTangSpaceDefault` after
+  triangulation + normal extraction: callbacks expose positions,
+  faceVertex indices, normals, UVs; `setTSpaceBasic` writes
+  `(tangent.xyz, sign)` per face-vertex into a per-vertex `float4`
+  buffer (first-tangent-wins per shared vertex — same lossy
+  collapse used for normals; vertex duplication for accurate
+  hard-edge tangents is M11+ polish).
+- New per-mesh `meshTangentsBuffer` + `meshTangentOffsetsBuffer` on
+  `GpuScene::Impl`; `UploadMeshTangents` commit phase + dirty bump
+  on `CreateMesh`; new public getters
+  `GetMeshTangentsBuffer()` / `GetMeshTangentOffsetsBuffer()`.
+- PathTracePass: 2 new structured-buffer bindings (31, 32) +
+  fallbacks + slot-enum entries.
+- Closesthit: when `MATERIAL_FLAG_HAS_NORMAL_MAP` is set + the
+  material's bindless `normalTex` slot is valid + the per-vertex
+  tangent has non-zero magnitude (mesh has authored UVs + normals),
+  builds a TBN matrix from the per-vertex tangent + barycentric-
+  interpolated normal + sign-derived bitangent, samples the normal
+  map at the interpolated UV, transforms tangent-space normal to
+  world. Falls back to the smooth-interp normal when any guard
+  fails (mesh has no UVs, MikkTSpace gave up on degenerate
+  authoring, etc.).
+
+### 5. Dome alignment audit
+
+**Conclusion: lobby alignment is correct. No code change needed.**
+
+The lobby's DomeLight authors:
+- `inputs:texture:format = "latlong"` ✓ matches our miss shader
+- `xformOp:rotateXYZ = (0, 0, 0)` ✓ no per-prim rotation to apply
+- `inputs:texture:file = @@` (empty) → bundled `default_sky.exr`
+  fallback fires, which is Y-up authored (Poly Haven convention)
+
+The miss shader's lat-long math (`v = acos(dir.y)/π`,
+`u = atan2(dir.x, dir.z)/2π + 0.5`) is Y-up canonical. The stage
+Z→Y correction we apply at ingest puts world rays into Y-up space
+before they reach the miss shader. End-to-end alignment is
+self-consistent.
+
+**Out-of-lobby gap (not triggered here):** we silently drop
+per-prim dome rotation (`xformOp:rotateXYZ` on the DomeLight prim).
+A scene that authors `rotateY = 45°` on its dome to rotate the
+HDRI horizon would render the HDRI at the unrotated orientation.
+Fix is a small `LightGpu` extension (3 floats for rotation) +
+miss-shader transform of the sample direction; deferred to the
+first scene that actually needs it.
+
 ## §34 KPI compliance unchanged
 
 Re-measured at 1080p, RTX 4070 Laptop, Release, 60 + 60 frames:
 
-| Scope                       | Before M9 (p50/p99) | After M9 (p50/p99) | Δ |
+| Scope                    | M8b baseline | After M9 full stack | Headroom |
 |---|---|---|---|
-| `pass.PathTrace`            | 1.14 / 1.61 ms      | 1.12 / 1.15 ms     | ~0 |
-| `render.commitResources`    | 0.003 / 0.008 ms    | 0.002 / 0.029 ms   | ~0 |
+| `pass.PathTrace`         | 1.14 ms p50  | 1.55 ms p50 / 1.94 ms p99 | 6× |
+| `render.commitResources` | 0.003 ms p50 | 0.005 ms p50 / 0.042 ms p99 | 400× |
 
-The smooth-shading + emission additions cost a few extra GPU reads +
-multiplies; well within the 12 ms `pass.PathTrace` budget.
+Anyhit is the dominant cost (+0.45 ms — fires per hit even on opaque
+materials, evaluates two material flags, returns). Smooth shading,
+emission, and normal mapping each add < 0.05 ms per pixel.
 
 ## Deferred to follow-up PRs
-
-### Normal mapping
-
-`mat.normalTex` is acquired by the material translator and survives
-through to `OpenPBRMaterialGPU.normalTex`, but the closesthit doesn't
-sample it. Sampling requires:
-
-1. **Tangent loading.** The lobby authors no `primvars:tangents`. We'd
-   need to either compute tangents at load time via MikkTSpace
-   (vcpkg has it as a single-file header) or skip tangents and use
-   geometric tangent derivation in-shader (less accurate at UV seams).
-2. **Per-mesh tangent buffer** — mirror of the vertex-normal pipeline
-   above (per-mesh flat float4 + offset table; `tangent.w` carries
-   the bitangent sign).
-3. **Closesthit TBN matrix** + tangent-space normal sample +
-   transform to world space.
-
-This is a substantial follow-up; landing it as a single dedicated PR
-keeps M9's review surface focused on the smooth-shading + emission
-core.
-
-### Dome+sun alignment audit
-
-The miss shader's lat-long mapping assumes Y-up (v=0 at +Y, v=1 at -Y).
-The Z→Y stage correction we apply at ingest already routes the dome
-through the same world-space rotation as everything else. Spot-check
-suggested no observable misalignment, but a rigorous audit needs visual
-A/B against usdview / Storm output — out of scope for headless-only
-testing.
 
 ### MaterialX coverage
 

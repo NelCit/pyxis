@@ -74,6 +74,7 @@ class PathTracePass final : public IRenderPass {
   nvrhi::ShaderHandle _raygenShader;
   nvrhi::ShaderHandle _missShader;
   nvrhi::ShaderHandle _closestHitShader;
+  nvrhi::ShaderHandle _anyHitShader;
   nvrhi::BindingLayoutHandle _bindingLayout;
   nvrhi::rt::PipelineHandle _pipeline;
   nvrhi::rt::ShaderTableHandle _shaderTable;
@@ -139,6 +140,12 @@ class PathTracePass final : public IRenderPass {
   nvrhi::BufferHandle _fallbackMeshVertexNormalsBuffer;
   nvrhi::BufferHandle _fallbackMeshVertexNormalOffsetsBuffer;
 
+  // M9 normal mapping: same shape, for the per-vertex tangent buffer.
+  // Closesthit's normal-mapping branch checks for zero-magnitude
+  // tangent and skips its TBN sample.
+  nvrhi::BufferHandle _fallbackMeshTangentsBuffer;
+  nvrhi::BufferHandle _fallbackMeshTangentOffsetsBuffer;
+
   // M7-IBL: 1×1 black RGBA32F fallback texture + a default linear-
   // clamp sampler. Bound at bindings 9/10 when the scene has no dome
   // light with a resolved env-map — sampling returns black so the
@@ -174,6 +181,8 @@ class PathTracePass final : public IRenderPass {
     MeshIndexOffsets,
     MeshVertexNormals,
     MeshVertexNormalOffsets,
+    MeshTangents,
+    MeshTangentOffsets,
     ColorHdrAov,
     NormalAov,
     DepthAov,

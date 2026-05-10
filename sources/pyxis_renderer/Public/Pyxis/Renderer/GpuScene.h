@@ -264,6 +264,14 @@ public:
   [[nodiscard]] nvrhi::IBuffer*          GetMeshVertexNormalsBuffer() const noexcept;
   [[nodiscard]] nvrhi::IBuffer*          GetMeshVertexNormalOffsetsBuffer() const noexcept;
 
+  // M9 normal mapping: per-vertex tangents from MikkTSpace. float4
+  // stride — xyz is the unit tangent, w is the bitangent sign for
+  // the closesthit's `bitangent = sign × cross(N, T)` build. Empty
+  // for meshes without UVs or normals (MikkTSpace prereqs); the
+  // closesthit's normal-mapping branch then skips the TBN sample.
+  [[nodiscard]] nvrhi::IBuffer*          GetMeshTangentsBuffer() const noexcept;
+  [[nodiscard]] nvrhi::IBuffer*          GetMeshTangentOffsetsBuffer() const noexcept;
+
   // M7-IBL: env-map texture of the FIRST live UsdLuxDomeLight, or
   // nullptr if no dome with a resolved envMap exists. Miss shader
   // samples this at the ray direction's lat-long uv to draw the

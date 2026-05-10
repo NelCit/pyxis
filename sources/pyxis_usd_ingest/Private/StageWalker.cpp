@@ -31,6 +31,8 @@
 #include <Pyxis/Renderer/Descs/TextureKey.h>
 #include <Pyxis/Renderer/GpuScene.h>
 
+#include <mikktspace.h>
+
 #include <pxr/usd/usd/prim.h>
 #include <pxr/usd/usd/primRange.h>
 #include <pxr/usd/usd/relationship.h>
@@ -129,6 +131,84 @@ bool IngestResult::GetCameraAt(uint32_t index, NamedCameraView* out) const noexc
 IngestResult::Impl& IngestResult::GetImpl() noexcept { return *_impl; }
 
 namespace {
+
+// MikkTSpace user-data + callbacks for per-mesh tangent generation.
+// MikkTSpace consumes (positions, normals, UVs) per-face-vertex and
+// produces per-(face, vertex) tangents — strictly the documented
+// "do NOT collapse via the existing index list" pattern. We collapse
+// to per-vertex anyway (first-tangent-wins) to match the per-vertex
+// shape of meshNormals / meshUvs in GpuScene; lossy at hard tangent
+// boundaries (UV seams) but consistent with the rest of the M9
+// shading data. Vertex duplication for accurate hard edges is M11+
+// polish.
+struct MikkContext {
+  const std::vector<hlslpp::float3>* positions       = nullptr;
+  const std::vector<std::uint32_t>*  triangleIndices = nullptr;  // post-triangulation
+  const std::vector<hlslpp::float3>* vertexNormals   = nullptr;
+  const std::vector<hlslpp::float2>* vertexUvs       = nullptr;
+  std::vector<hlslpp::float4>*       outVertexTangents = nullptr;  // x,y,z,sign
+  std::vector<bool>*                 outTangentAssigned = nullptr;
+};
+
+int MikkGetNumFaces(const SMikkTSpaceContext* ctx) {
+  const auto* user = static_cast<const MikkContext*>(ctx->m_pUserData);
+  return static_cast<int>(user->triangleIndices->size() / 3u);
+}
+
+int MikkGetNumVerticesOfFace(const SMikkTSpaceContext* /*ctx*/, int /*face*/) {
+  return 3;  // Always triangulated upstream.
+}
+
+void MikkGetPosition(const SMikkTSpaceContext* ctx, float* outPos,
+                     int face, int vert) {
+  const auto* user = static_cast<const MikkContext*>(ctx->m_pUserData);
+  const std::uint32_t vertexIdx =
+      (*user->triangleIndices)[static_cast<std::size_t>(face) * 3u
+                               + static_cast<std::size_t>(vert)];
+  const hlslpp::float3& pos = (*user->positions)[vertexIdx];
+  outPos[0] = static_cast<float>(pos.x);
+  outPos[1] = static_cast<float>(pos.y);
+  outPos[2] = static_cast<float>(pos.z);
+}
+
+void MikkGetNormal(const SMikkTSpaceContext* ctx, float* outNormal,
+                   int face, int vert) {
+  const auto* user = static_cast<const MikkContext*>(ctx->m_pUserData);
+  const std::uint32_t vertexIdx =
+      (*user->triangleIndices)[static_cast<std::size_t>(face) * 3u
+                               + static_cast<std::size_t>(vert)];
+  const hlslpp::float3& nrm = (*user->vertexNormals)[vertexIdx];
+  outNormal[0] = static_cast<float>(nrm.x);
+  outNormal[1] = static_cast<float>(nrm.y);
+  outNormal[2] = static_cast<float>(nrm.z);
+}
+
+void MikkGetTexCoord(const SMikkTSpaceContext* ctx, float* outUv,
+                     int face, int vert) {
+  const auto* user = static_cast<const MikkContext*>(ctx->m_pUserData);
+  const std::uint32_t vertexIdx =
+      (*user->triangleIndices)[static_cast<std::size_t>(face) * 3u
+                               + static_cast<std::size_t>(vert)];
+  const hlslpp::float2& uvCoord = (*user->vertexUvs)[vertexIdx];
+  outUv[0] = static_cast<float>(uvCoord.x);
+  outUv[1] = static_cast<float>(uvCoord.y);
+}
+
+void MikkSetTSpaceBasic(const SMikkTSpaceContext* ctx, const float* tangent,
+                        float sign, int face, int vert) {
+  auto* user = static_cast<MikkContext*>(ctx->m_pUserData);
+  const std::uint32_t vertexIdx =
+      (*user->triangleIndices)[static_cast<std::size_t>(face) * 3u
+                               + static_cast<std::size_t>(vert)];
+  if (vertexIdx >= user->outVertexTangents->size())
+    return;
+  if (!(*user->outTangentAssigned)[vertexIdx])
+  {
+    (*user->outVertexTangents)[vertexIdx] =
+        hlslpp::float4{tangent[0], tangent[1], tangent[2], sign};
+    (*user->outTangentAssigned)[vertexIdx] = true;
+  }
+}
 
 // Convert USD's row-major double-precision matrix to Pyxis's
 // column-vector + row-major float4x4 (plan §10). USD's GfMatrix4d
@@ -1313,12 +1393,51 @@ std::size_t EmitMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCach
       }
     }
 
+    // Per-vertex tangents via MikkTSpace (industry-standard tangent
+    // basis). Requires non-empty UVs + vertex normals + at least one
+    // triangle; falls through to empty when any of those are missing
+    // (closesthit's normal-mapping branch then skips its TBN sample).
+    // First-tangent-per-vertex collapse loses hard-edge fidelity at
+    // UV seams; vertex duplication for accurate hard edges is M11+.
+    std::vector<hlslpp::float4> vertexTangents;
+    if (!indices.empty() && !vertexUvs.empty() && !vertexNormals.empty())
+    {
+      vertexTangents.assign(positions.size(),
+                            hlslpp::float4{0.0f, 0.0f, 0.0f, 0.0f});
+      std::vector<bool> tangentAssigned(positions.size(), false);
+      MikkContext userData{};
+      userData.positions          = &positions;
+      userData.triangleIndices    = &indices;
+      userData.vertexNormals      = &vertexNormals;
+      userData.vertexUvs          = &vertexUvs;
+      userData.outVertexTangents  = &vertexTangents;
+      userData.outTangentAssigned = &tangentAssigned;
+      SMikkTSpaceInterface mikkInterface{};
+      mikkInterface.m_getNumFaces           = MikkGetNumFaces;
+      mikkInterface.m_getNumVerticesOfFace  = MikkGetNumVerticesOfFace;
+      mikkInterface.m_getPosition           = MikkGetPosition;
+      mikkInterface.m_getNormal             = MikkGetNormal;
+      mikkInterface.m_getTexCoord           = MikkGetTexCoord;
+      mikkInterface.m_setTSpaceBasic        = MikkSetTSpaceBasic;
+      SMikkTSpaceContext mikkCtx{};
+      mikkCtx.m_pInterface = &mikkInterface;
+      mikkCtx.m_pUserData  = &userData;
+      if (!genTangSpaceDefault(&mikkCtx))
+      {
+        // MikkTSpace failed (degenerate UVs across the whole mesh,
+        // most likely) — drop the tangent buffer so the closesthit's
+        // normal-mapping branch falls back to vertex-normal-only.
+        vertexTangents.clear();
+      }
+    }
+
     const std::string subDebugName = primPath + subset.debugSuffix;
     MeshDesc meshDesc;
     meshDesc.positions = positions;
     meshDesc.indices = indices;
     meshDesc.uv0 = vertexUvs;
     meshDesc.normals = vertexNormals;
+    meshDesc.tangents = vertexTangents;
     meshDesc.debugName = subDebugName;
     const auto meshHandle = scene.CreateMesh(meshDesc);
     if (!meshHandle.has_value())

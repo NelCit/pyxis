@@ -28,6 +28,7 @@ target_sources(pyxis_usd_ingest PRIVATE
 )
 
 find_package(pxr CONFIG REQUIRED)
+find_package(mikktspace CONFIG REQUIRED)
 
 # Same C++20 std::is_pod deprecation silence as pyxis_hydra — see
 # the comment block there. USD's tf headers use the deprecated
@@ -49,4 +50,5 @@ target_link_libraries(pyxis_usd_ingest
         tf
         gf
         vt
+        mikktspace::mikktspace
 )
