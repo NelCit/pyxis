@@ -1411,12 +1411,30 @@ PreparedMesh PrepareMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xform
     // `pi`, or -1 if none yet. Walked linearly per face-vertex
     // lookup; chain length is 1 for interior shared positions, 2–4
     // for UV-seam / crease corners.
-    std::vector<std::int32_t> headByPosition(usdPoints.size(), -1);
-    std::vector<VertexEntry>  entries;
-    std::vector<hlslpp::float3> outPositions;
-    std::vector<hlslpp::float3> outNormals;   // sized iff emitNormals
-    std::vector<hlslpp::float2> outUvs;       // always size-matched (zero when no UVs)
-    std::vector<std::uint32_t>  indices;
+    //
+    // Reused across submeshes via thread_local storage. Each OpenMP
+    // worker thread keeps its own scratch with capacity preserved
+    // between meshes — first iteration pays for the alloc, subsequent
+    // iterations only pay for fill (assign / clear). This eliminates
+    // the per-submesh allocator-mutex contention that was the
+    // dominant Debug pass3b cost.
+    //
+    // (PrepareMesh lives in an anonymous namespace so it's not
+    // dllexport — `thread_local` is legal here. The lambda restriction
+    // we hit earlier only applies to `thread_local` declared INSIDE
+    // a lambda body that captures into an exported DLL.)
+    thread_local std::vector<std::int32_t>      headByPosition;
+    thread_local std::vector<VertexEntry>       entries;
+    thread_local std::vector<hlslpp::float3>    outPositions;
+    thread_local std::vector<hlslpp::float3>    outNormals;
+    thread_local std::vector<hlslpp::float2>    outUvs;
+    thread_local std::vector<std::uint32_t>     indices;
+    headByPosition.assign(usdPoints.size(), -1);  // resize + fill, capacity preserved
+    entries.clear();
+    outPositions.clear();
+    outNormals.clear();
+    outUvs.clear();
+    indices.clear();
     {
       const std::size_t fvUpperBound =
           subset.faceIndices.empty() ? usdIndices.size()
@@ -1524,7 +1542,10 @@ PreparedMesh PrepareMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xform
     const bool subsetNeedsTangents =
         subset.material != MaterialHandle::Invalid
         && materialsNeedingTangents.contains(subset.material);
-    std::vector<hlslpp::float4> vertexTangents;
+    thread_local std::vector<hlslpp::float4> vertexTangents;
+    thread_local std::vector<std::uint8_t>   tangentAssigned;
+    vertexTangents.clear();
+    tangentAssigned.clear();
     if (subsetNeedsTangents && !indices.empty() && emitNormals
         && (uvsFv || uvsVertex || uvsConstant))
     {
@@ -1533,7 +1554,7 @@ PreparedMesh PrepareMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xform
       // std::vector<bool> is bit-packed; MikkTSpace's per-FV write
       // path needs a plain bool* for the cached-pointer path. Use
       // a uint8_t-typed vector so &v[i] is a sane T* pointer.
-      std::vector<std::uint8_t> tangentAssigned(outPositions.size(), 0u);
+      tangentAssigned.assign(outPositions.size(), 0u);
       MikkContext userData{};
       userData.triangleIndices    = indices.data();
       userData.triangleVertCount  = indices.size();
@@ -1563,12 +1584,19 @@ PreparedMesh PrepareMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xform
       }
     }
 
+    // Copy (not move) into the per-thread output: move would steal
+    // the thread_local scratch buffer, dropping its capacity to 0
+    // and forcing the next submesh's first push_back to reallocate
+    // — defeating the whole point of the thread_local pool. assign()
+    // copies into a fresh PreparedSubMesh allocation (single alloc
+    // per channel per submesh, paid by the worker thread on the
+    // contended Debug heap) but leaves the scratch capacity intact.
     PreparedSubMesh subMesh;
-    subMesh.positions = std::move(outPositions);
-    subMesh.indices   = std::move(indices);
-    subMesh.normals   = std::move(outNormals);
-    subMesh.tangents  = std::move(vertexTangents);
-    subMesh.uv0       = std::move(outUvs);
+    subMesh.positions.assign(outPositions.begin(), outPositions.end());
+    subMesh.indices  .assign(indices.begin(),      indices.end());
+    subMesh.normals  .assign(outNormals.begin(),   outNormals.end());
+    subMesh.tangents .assign(vertexTangents.begin(), vertexTangents.end());
+    subMesh.uv0      .assign(outUvs.begin(),       outUvs.end());
     subMesh.material  = subset.material;
     subMesh.debugName = primPath + subset.debugSuffix;
     prepared.subMeshes.push_back(std::move(subMesh));
