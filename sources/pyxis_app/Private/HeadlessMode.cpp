@@ -408,11 +408,13 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
 }
 
 int RunViewer(const Configuration& config, const ResolvedScene& resolvedScene,
-              std::string_view screenshotPath) noexcept {
+              std::string_view screenshotPath, std::string_view shaderRebuildDir) noexcept {
   // Viewer keeps the M1 entrypoint shape; M4 P5d/P5e wires
   // resolvedScene through to the engine dispatch inside
-  // RunViewerLoop.
-  return RunViewerLoop(config, resolvedScene, screenshotPath);
+  // RunViewerLoop. shaderRebuildDir overrides the cwd walk-up
+  // heuristic for the editor's Reload Shaders button (see
+  // ViewerMode.cpp's FindCMakeBuildDir).
+  return RunViewerLoop(config, resolvedScene, screenshotPath, shaderRebuildDir);
 }
 
 }  // namespace pyxis::app

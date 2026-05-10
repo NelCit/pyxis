@@ -201,8 +201,18 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
     // - Open scene: pops a Win COM IFileOpenDialog filtered to USD;
     //   the picked path latches into _latches.sceneReloadPath and
     //   ViewerMode handles waitForIdle + GpuScene::Clear + re-ingest.
-    if (ImGui::Button("Reload shaders"))
+    if (_shaderRebuildInFlight)
+    {
+      // Worker thread is spawning cmake / waiting for exit. Disable
+      // the button so a second click can't queue parallel rebuilds.
+      ImGui::BeginDisabled();
+      ImGui::Button("Rebuilding shaders...");
+      ImGui::EndDisabled();
+    }
+    else if (ImGui::Button("Reload shaders"))
+    {
       _latches.reloadShaders = true;
+    }
     ImGui::SameLine();
     if (ImGui::Button("Open scene..."))
     {

@@ -35,12 +35,14 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 // _spawnvp for the shader-rebuild path (Windows). Avoids std::system
@@ -85,10 +87,20 @@ constexpr int GLFW_ESCAPE_KEY_CODE = 256;
   return {};
 }
 
+// Result of a ShaderMake-rebuild attempt. `errnoCode` lets the
+// caller distinguish "cmake not on PATH" (ENOENT) from "build
+// failed" (non-zero exit code) so the editor can show a useful
+// hint instead of a generic "rebuild FAILED".
+struct ShaderRebuildResult {
+  bool ok = false;
+  int  errnoCode = 0;   // 0 on success; ENOENT if cmake isn't found
+  int  exitCode = 0;    // _spawnvp exit status when ok = false but cmake ran
+};
+
 // Spawn `cmake --build <buildDir> --target pyxis_renderer_shaders` and
-// block until it completes. Returns true on exit code 0. The editor's
-// reload-shaders path calls this BEFORE asking the renderer to re-read
-// .spv from disk so the click also picks up .slang source edits.
+// block until it completes. The editor's reload-shaders path calls
+// this BEFORE asking the renderer to re-read .spv from disk so the
+// click also picks up .slang source edits.
 //
 // Uses _spawnvp (Windows) to avoid the shell — std::system trips
 // clang-tidy's cert-env33-c rule and would shell-parse paths.
@@ -98,9 +110,11 @@ constexpr int GLFW_ESCAPE_KEY_CODE = 256;
 // path string, so a build dir named with shell metacharacters could
 // still misbehave inside cmake's own scripts — out of our perimeter
 // but worth knowing if a developer parks the repo at a hostile path.
-[[nodiscard]] bool RebuildShaderTarget(const std::filesystem::path& buildDir) noexcept {
+[[nodiscard]] ShaderRebuildResult RebuildShaderTarget(
+    const std::filesystem::path& buildDir) noexcept {
+  ShaderRebuildResult result;
   if (buildDir.empty())
-    return false;
+    return result;
 #if defined(_WIN32)
   const std::string buildDirStr = buildDir.generic_string();
   const char* const argv[] = {
@@ -109,12 +123,23 @@ constexpr int GLFW_ESCAPE_KEY_CODE = 256;
       nullptr,
   };
   // _spawnvp searches PATH for cmake.exe; _P_WAIT blocks until exit.
+  errno = 0;
   const intptr_t spawnResult = _spawnvp(_P_WAIT, "cmake",
                                         const_cast<char* const*>(argv));
-  return spawnResult == 0;
+  if (spawnResult == -1)
+  {
+    // Spawn itself failed — cmake not on PATH is the common case
+    // (errno == ENOENT). Other errnos are rarer (EACCES, EAGAIN, ...)
+    // but we surface whatever the OS reported so the caller can log it.
+    result.errnoCode = errno;
+    return result;
+  }
+  result.exitCode = static_cast<int>(spawnResult);
+  result.ok = (spawnResult == 0);
+  return result;
 #else
   (void)buildDir;
-  return false;
+  return result;
 #endif
 }
 
@@ -122,8 +147,26 @@ constexpr int GLFW_ESCAPE_KEY_CODE = 256;
 
 
 int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScene,
-                  std::string_view screenshotPath) noexcept {
+                  std::string_view screenshotPath,
+                  std::string_view shaderRebuildDirOverride) noexcept {
   auto& log = Logging::Get();
+
+  // ShaderMake rebuild state machine. Pre-async this whole flow ran
+  // synchronously inside the click-handler and froze the UI for ~2 s
+  // while cmake built the .spv. Now the spawn happens on a worker
+  // thread; ImGuiHost shows "Rebuilding..." while in-flight; the
+  // main thread polls per-frame and runs waitForIdle + ReloadShaders
+  // when the worker reports back. The state moves Idle -> InFlight
+  // -> ResultPending -> Idle. Atomics are unnecessary since the only
+  // cross-thread write is the state flag and the worker writes it
+  // exactly once at the end of its body (with sequenced-before
+  // memory_order — we use atomic<int> for the formal happens-before).
+  enum class ShaderRebuildState : int { Idle = 0, InFlight = 1, ResultPending = 2 };
+  std::atomic<int>           shaderRebuildState{
+      static_cast<int>(ShaderRebuildState::Idle)};
+  ShaderRebuildResult        shaderRebuildResult{};
+  std::filesystem::path      shaderRebuildLastDir;
+  std::thread                shaderRebuildWorker;
 
   // ---- Window ----------------------------------------------------------
   // §27 render.{width,height} drive the swapchain dims; the window
@@ -506,37 +549,100 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
       // that overrides IRenderPass::ReloadShaders — at M7 that's
       // PathTracePass only. Failure stays silent in the panel; the
       // log line is the user-visible feedback.
-      if (imguiHost.TakeShaderReloadRequest())
+      // Async ShaderMake rebuild + .spv reload. State machine:
+      //   Idle          : button enabled; click moves to InFlight
+      //   InFlight      : worker thread spawning cmake; button shows
+      //                   "Rebuilding..." disabled
+      //   ResultPending : worker done, main thread joins + drains
+      //                   the result, runs waitForIdle + ReloadShaders,
+      //                   moves back to Idle
+      // Click latch is drained ONLY when state == Idle so a second
+      // click during a rebuild can't queue parallel work.
+      const auto state = static_cast<ShaderRebuildState>(shaderRebuildState.load());
+      if (state == ShaderRebuildState::Idle && imguiHost.TakeShaderReloadRequest())
       {
-        // Two-step reload: (a) spawn `cmake --build <buildDir>
-        // --target pyxis_renderer_shaders` to recompile .slang ->
-        // .spv, then (b) wait the GPU idle and ask the renderer to
-        // re-read the freshly-built .spv. Without (a) the click only
-        // picks up .slang edits if the user separately re-ran cmake;
-        // the audit asked for the click to close that loop.
-        const std::filesystem::path buildDir =
-            FindCMakeBuildDir(std::filesystem::current_path());
-        if (buildDir.empty())
+        // Resolve build dir: explicit --shader-rebuild-dir override
+        // wins; otherwise walk up from cwd looking for CMakeCache.txt.
+        std::filesystem::path buildDir;
+        if (!shaderRebuildDirOverride.empty())
         {
-          log.Warn(log::APP,
-                   "ViewerMode: shader reload — no CMakeCache.txt found near cwd; "
-                   "skipping ShaderMake rebuild and re-loading the existing .spv.");
-        }
-        else if (RebuildShaderTarget(buildDir))
-        {
-          log.Info(log::APP, "ViewerMode: shader rebuild OK ("
-                                 + buildDir.generic_string() + ")");
+          buildDir = std::filesystem::path{std::string{shaderRebuildDirOverride}};
         }
         else
         {
-          log.Warn(log::APP, "ViewerMode: shader rebuild FAILED — re-loading the "
-                             "existing .spv anyway (any edits won't be picked up).");
+          buildDir = FindCMakeBuildDir(std::filesystem::current_path());
+        }
+        if (buildDir.empty())
+        {
+          log.Warn(log::APP,
+                   "ViewerMode: shader reload — no CMakeCache.txt found near cwd "
+                   "(use --shader-rebuild-dir <path> to override); skipping "
+                   "ShaderMake rebuild and re-loading the existing .spv.");
+          // Skip rebuild but still re-read .spv on the main thread —
+          // immediate, no worker needed.
+          device->waitForIdle();
+          const bool reloadOk = renderer.ReloadShaders();
+          log.Info(log::APP, std::string{"ViewerMode: shader reload "}
+                                  + (reloadOk ? "OK (no rebuild)"
+                                              : "FAILED (kept old pipeline)"));
+        }
+        else
+        {
+          // Spawn the worker. References capture the locals — the
+          // worker writes shaderRebuildResult and flips the state to
+          // ResultPending exactly once before exiting.
+          shaderRebuildLastDir = buildDir;
+          shaderRebuildState.store(static_cast<int>(ShaderRebuildState::InFlight));
+          shaderRebuildWorker = std::thread([buildDir, &shaderRebuildResult,
+                                             &shaderRebuildState]() noexcept {
+            shaderRebuildResult = RebuildShaderTarget(buildDir);
+            shaderRebuildState.store(
+                static_cast<int>(ShaderRebuildState::ResultPending));
+          });
+        }
+      }
+      else if (state == ShaderRebuildState::ResultPending)
+      {
+        // Worker is done — join it (cheap; thread already exited),
+        // log the outcome with a useful hint when cmake itself wasn't
+        // found, then drain the GPU and re-read .spv from disk.
+        if (shaderRebuildWorker.joinable())
+          shaderRebuildWorker.join();
+        if (shaderRebuildResult.ok)
+        {
+          log.Info(log::APP, "ViewerMode: shader rebuild OK ("
+                                 + shaderRebuildLastDir.generic_string() + ")");
+        }
+        else if (shaderRebuildResult.errnoCode == ENOENT)
+        {
+          log.Error(log::APP,
+                    "ViewerMode: shader rebuild FAILED — `cmake` not found on PATH. "
+                    "Install CMake or add it to PATH; re-loading the existing .spv "
+                    "anyway (any .slang edits won't be picked up).");
+        }
+        else if (shaderRebuildResult.errnoCode != 0)
+        {
+          log.Error(log::APP, "ViewerMode: shader rebuild FAILED — _spawnvp errno="
+                                  + std::to_string(shaderRebuildResult.errnoCode)
+                                  + "; re-loading the existing .spv anyway.");
+        }
+        else
+        {
+          log.Warn(log::APP, "ViewerMode: shader rebuild FAILED — cmake exit="
+                                 + std::to_string(shaderRebuildResult.exitCode)
+                                 + " (your .slang has a compile error?); re-loading "
+                                   "the existing .spv anyway.");
         }
         device->waitForIdle();
         const bool reloadOk = renderer.ReloadShaders();
         log.Info(log::APP, std::string{"ViewerMode: shader reload "}
                                 + (reloadOk ? "OK" : "FAILED (kept old pipeline)"));
+        shaderRebuildState.store(static_cast<int>(ShaderRebuildState::Idle));
       }
+      // Push the in-flight flag to the editor so the button can show
+      // "Rebuilding..." disabled. Done unconditionally each frame.
+      imguiHost.SetShaderRebuildInFlight(
+          shaderRebuildState.load() != static_cast<int>(ShaderRebuildState::Idle));
 
       // Drain the editor's "Open scene..." latch. Same waitForIdle
       // discipline plus a GpuScene::Clear before re-running the
@@ -835,6 +941,12 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
   }
 
   log.Info(log::APP, "ViewerMode: frame loop exited; tearing down");
+  // Block on any in-flight shader rebuild before destroying the
+  // worker thread — std::thread's destructor calls std::terminate on
+  // a joinable thread. The worker is just spawning cmake so the join
+  // is bounded by ShaderMake's runtime (~2 s); fine for shutdown.
+  if (shaderRebuildWorker.joinable())
+    shaderRebuildWorker.join();
   deviceManager->WaitIdle();
   imguiHost.Shutdown();
   return EXIT_OK;

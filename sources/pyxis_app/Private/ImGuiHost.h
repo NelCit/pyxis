@@ -173,6 +173,13 @@ class ImGuiHost {
   // pushes this into RenderSettings::worldPosPeriod each frame.
   // Default 10 m matches the pre-slider hardcoded behaviour.
   float                                 _editorWorldPosPeriod = 10.0f;
+  // ShaderMake rebuild status — pushed by ViewerMode each frame.
+  // True while the worker thread is spawning cmake / waiting for
+  // exit; the editor's Reload Shaders button shows "Rebuilding..."
+  // and disables itself so a second click can't queue parallel
+  // rebuilds. Pre-async this was always false — the click-handler
+  // blocked the main thread for ~2 s.
+  bool                                  _shaderRebuildInFlight = false;
   // Latest pick readback the viewer pushed from PyxisRenderer's
   // LastPickResult(); displayed in the Editor panel as a hover
   // readout (color, normal, depth, instance id).
@@ -254,6 +261,13 @@ class ImGuiHost {
   // Editor's WorldPos period slider value (scene units). ViewerMode
   // pushes this into RenderSettings::worldPosPeriod each frame.
   [[nodiscard]] float GetWorldPosPeriod() const noexcept { return _editorWorldPosPeriod; }
+
+  // ViewerMode pushes the live rebuild state each frame so the
+  // editor's Reload Shaders button can show "Rebuilding..." +
+  // disable itself while the worker thread is in flight.
+  void SetShaderRebuildInFlight(bool inFlight) noexcept {
+    _shaderRebuildInFlight = inFlight;
+  }
 
   // ViewerMode pushes the renderer's LastPickResult() into the panel
   // each frame; the Editor displays the hover-pixel values.

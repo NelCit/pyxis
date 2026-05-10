@@ -33,7 +33,13 @@ int RunHeadless(const Configuration& config, const ResolvedScene& scene,
 // Viewer mode. screenshotPath is the M1 --screenshot debug capture
 // (non-empty -> render a few warmup frames, write a PNG, exit 0).
 // Empty = normal interactive viewer.
+//
+// `shaderRebuildDir` (M7 follow-up): explicit CMake build directory
+// the Reload Shaders button spawns ShaderMake against. Empty falls
+// back to the cwd walk-up heuristic; supply when the binary lives
+// outside the build tree (packaged install, demo launcher, etc.).
 int RunViewer(const Configuration& config, const ResolvedScene& scene,
-              std::string_view screenshotPath) noexcept;
+              std::string_view screenshotPath,
+              std::string_view shaderRebuildDir = {}) noexcept;
 
 }  // namespace pyxis::app

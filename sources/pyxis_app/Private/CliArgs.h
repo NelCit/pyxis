@@ -61,6 +61,15 @@ struct CliArgs {
   // Empty = no AOV save (current behaviour).
   std::string_view saveAov;
 
+  // --shader-rebuild-dir <path>: explicit CMake build directory the
+  // editor's "Reload shaders" button passes to ShaderMake. Empty =
+  // walk-up heuristic from cwd looking for CMakeCache.txt (covers
+  // the typical bin/Release/pyxis.exe -> build/dev layout). Useful
+  // when the binary lives outside the build tree (packaged install
+  // demo, dev launching from a separate working dir, etc.) so the
+  // heuristic can't find a CMakeCache.txt anywhere upstream.
+  std::string_view shaderRebuildDir;
+
   // ---- M1 viewer extras ----------------------------------------------
   // --screenshot <path>: run the viewer for a few warmup frames, copy
   // the backbuffer to PNG at the given path, then exit. Plan §35

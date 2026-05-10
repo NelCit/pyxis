@@ -151,7 +151,7 @@ int Run(int argc, char** argv) noexcept {
   {
     return RunHeadless(config, scene, cli.saveAov);
   }
-  return RunViewer(config, scene, cli.screenshotPath);
+  return RunViewer(config, scene, cli.screenshotPath, cli.shaderRebuildDir);
 }
 
 }  // namespace pyxis::app
