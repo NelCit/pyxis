@@ -1180,10 +1180,12 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
         ImGui::PopItemWidth();
 
         // Rebuild projFromView whenever any projection-affecting
-        // slider moved. Mirrors the row-major + column-vector Vulkan
-        // perspective matrix BuildProjMatrix() in HardcodedCubeScene.cpp
-        // — same convention (Y-flipped, depth [0,1], v_clip = P · v_view)
-        // so the editor doesn't drift from the cube / USD ingest path.
+        // slider moved. Mirrors the row-major + column-vector
+        // GL-convention perspective matrix BuildProjMatrix() in
+        // HardcodedCubeScene.cpp — same convention USD ingest uses
+        // (raygen does its own Y-flip in the NDC mapping, so the
+        // projection stays +focal). Pre-fix this used -focal, which
+        // inverted Y on every editor edit of a USD-loaded scene.
         if (projectionEdited)
         {
           const float fovYRad = 2.0f * std::atan(
@@ -1195,7 +1197,7 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
           const float nearMinusFar = nearZ - farZ;  // negative
           cameraDesc.projFromView = hlslpp::float4x4(
               hlslpp::float4(focal / aspect, 0.0f, 0.0f, 0.0f),
-              hlslpp::float4(0.0f,          -focal, 0.0f, 0.0f),
+              hlslpp::float4(0.0f,           focal, 0.0f, 0.0f),
               hlslpp::float4(0.0f, 0.0f, farZ / nearMinusFar,
                              nearZ * farZ / nearMinusFar),
               hlslpp::float4(0.0f, 0.0f, -1.0f, 0.0f));
