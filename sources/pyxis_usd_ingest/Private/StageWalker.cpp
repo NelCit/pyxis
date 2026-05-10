@@ -132,15 +132,65 @@ IngestResult::Impl& IngestResult::GetImpl() noexcept { return *_impl; }
 
 namespace {
 
+// M9-fidelity hard-edge dedup. UsdGeomMesh authors normals + UVs
+// with one of three interpolation modes:
+//   - vertex:      one value per usdPoints entry (already shared)
+//   - faceVarying: one value per face-vertex (independent per face)
+//   - constant/uniform: one value for the whole mesh / face
+// Only faceVarying introduces hard edges — when two faces sharing a
+// vertex want different normals (hard mesh edge) or different UVs
+// (UV seam at an island boundary). The pre-M9-fidelity pipeline
+// collapsed faceVarying to per-vertex by taking the first value
+// per shared vertex slot, dropping the second. With dedup we emit
+// a NEW vertex slot whenever (positionIdx, normal, uv) differs —
+// duplicating shared positions only as needed. UV seams + hard
+// crease edges then render correctly.
+//
+// VertexKey captures the discriminator: the original positionIdx
+// (so we never merge across distinct positions) plus the bit-cast
+// of normal + uv. Bit-cast (vs value-cast) is intentional — two
+// mathematically-equal floats with different representations
+// (e.g. -0 vs +0) compare equal under operator==, and the
+// std::unordered_map uses operator== for collision resolution.
+// FNV-1a 64-bit hash keeps the hash distribution uniform across
+// 6 uint32 slots without pulling a heavyweight hashing library.
+struct VertexKey {
+  std::uint32_t positionIdx;
+  std::uint32_t normalBits[3];
+  std::uint32_t uvBits[2];
+
+  bool operator==(const VertexKey& other) const noexcept {
+    return positionIdx     == other.positionIdx
+        && normalBits[0]   == other.normalBits[0]
+        && normalBits[1]   == other.normalBits[1]
+        && normalBits[2]   == other.normalBits[2]
+        && uvBits[0]       == other.uvBits[0]
+        && uvBits[1]       == other.uvBits[1];
+  }
+};
+
+struct VertexKeyHash {
+  std::size_t operator()(const VertexKey& key) const noexcept {
+    std::uint64_t hash = 0xcbf29ce484222325ULL;
+    auto mix = [&](std::uint32_t word) {
+      hash ^= static_cast<std::uint64_t>(word);
+      hash *= 0x100000001b3ULL;
+    };
+    mix(key.positionIdx);
+    mix(key.normalBits[0]); mix(key.normalBits[1]); mix(key.normalBits[2]);
+    mix(key.uvBits[0]);     mix(key.uvBits[1]);
+    return static_cast<std::size_t>(hash);
+  }
+};
+
 // MikkTSpace user-data + callbacks for per-mesh tangent generation.
 // MikkTSpace consumes (positions, normals, UVs) per-face-vertex and
 // produces per-(face, vertex) tangents — strictly the documented
-// "do NOT collapse via the existing index list" pattern. We collapse
-// to per-vertex anyway (first-tangent-wins) to match the per-vertex
-// shape of meshNormals / meshUvs in GpuScene; lossy at hard tangent
-// boundaries (UV seams) but consistent with the rest of the M9
-// shading data. Vertex duplication for accurate hard edges is M11+
-// polish.
+// "do NOT collapse via the existing index list" pattern. We feed it
+// the M9-fidelity hard-edge-deduplicated arrays (one tangent per
+// emitted vertex slot, where face-varying boundaries already split
+// into distinct slots), so each tangent write naturally lands on a
+// unique slot and the first-tangent-wins guard becomes a no-op.
 struct MikkContext {
   const std::vector<hlslpp::float3>* positions       = nullptr;
   const std::vector<std::uint32_t>*  triangleIndices = nullptr;  // post-triangulation
@@ -1248,18 +1298,124 @@ std::size_t EmitMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCach
       ComposeWorldFromLocal(prim, xformCache, stageCtx);
   const std::string primPath = prim.GetPath().GetString();
 
+  // Cached interpolation-mode flags — read once, branched per face-
+  // vertex below. The `faceVarying` length check (.size() == fvCount)
+  // is the tripwire that catches mis-authored primvars; when it
+  // fails we treat the channel as absent rather than indexing past
+  // the array's end.
+  const bool hasNormals       = normalsHasValue && !normalsArr.empty();
+  const bool normalsFv        = hasNormals
+                                && normalsInterpolation == pxr::UsdGeomTokens->faceVarying
+                                && normalsArr.size() == usdIndices.size();
+  const bool normalsVertex    = hasNormals
+                                && normalsInterpolation == pxr::UsdGeomTokens->vertex
+                                && normalsArr.size() == usdPoints.size();
+  const bool normalsConstant  = hasNormals
+                                && (normalsInterpolation == pxr::UsdGeomTokens->constant
+                                    || normalsInterpolation == pxr::UsdGeomTokens->uniform);
+  const bool emitNormals      = normalsFv || normalsVertex || normalsConstant;
+
+  const bool hasUvs           = stHasValue && !stUvs.empty();
+  const bool uvsFv            = hasUvs
+                                && stInterpolation == pxr::UsdGeomTokens->faceVarying
+                                && stUvs.size() == usdIndices.size();
+  const bool uvsVertex        = hasUvs
+                                && stInterpolation == pxr::UsdGeomTokens->vertex
+                                && stUvs.size() == usdPoints.size();
+  const bool uvsConstant      = hasUvs
+                                && (stInterpolation == pxr::UsdGeomTokens->constant
+                                    || stInterpolation == pxr::UsdGeomTokens->uniform);
+
   for (const SubsetEmitInfo& subset : subsetInfos)
   {
-    // Triangulate. For the no-subset path (faceIndices empty) we walk
-    // every face; for subsets we walk only the listed face ids,
-    // pulling each face's fv-range via faceStartOffsets.
-    std::vector<uint32_t> indices;
+    // M9-fidelity hard-edge dedup. Walks the face-vertex stream once
+    // per subset. Each face-vertex contributes a (position, normal,
+    // uv) triple; identical triples sharing a position collapse into
+    // the same output vertex slot, distinct triples (faceVarying
+    // boundaries — UV seams + crease edges) split into separate
+    // slots. Per-subset arrays are minimal — only positions actually
+    // touched by the subset's faces appear in the output.
+    auto getNormal = [&](std::size_t fvIdx, std::uint32_t positionIdx) -> hlslpp::float3 {
+      if (normalsFv)
+      {
+        const auto& src = normalsArr[fvIdx];
+        return hlslpp::float3{src[0], src[1], src[2]};
+      }
+      if (normalsVertex)
+      {
+        const auto& src = normalsArr[positionIdx];
+        return hlslpp::float3{src[0], src[1], src[2]};
+      }
+      if (normalsConstant)
+      {
+        const auto& src = normalsArr[0];
+        return hlslpp::float3{src[0], src[1], src[2]};
+      }
+      return hlslpp::float3{0.0f, 0.0f, 0.0f};
+    };
+    auto getUv = [&](std::size_t fvIdx, std::uint32_t positionIdx) -> hlslpp::float2 {
+      if (uvsFv)
+      {
+        const auto& uvSrc = stUvs[fvIdx];
+        return hlslpp::float2{uvSrc[0], uvSrc[1]};
+      }
+      if (uvsVertex)
+      {
+        const auto& uvSrc = stUvs[positionIdx];
+        return hlslpp::float2{uvSrc[0], uvSrc[1]};
+      }
+      if (uvsConstant)
+      {
+        const auto& uvSrc = stUvs[0];
+        return hlslpp::float2{uvSrc[0], uvSrc[1]};
+      }
+      return hlslpp::float2{0.0f, 0.0f};
+    };
+
+    std::unordered_map<VertexKey, std::uint32_t, VertexKeyHash> uniqueMap;
+    std::vector<hlslpp::float3> outPositions;
+    std::vector<hlslpp::float3> outNormals;   // sized iff emitNormals
+    std::vector<hlslpp::float2> outUvs;       // always size-matched (zero when no UVs)
+    std::vector<std::uint32_t>  indices;
     {
-      const std::size_t inputFvCount =
+      const std::size_t fvUpperBound =
           subset.faceIndices.empty() ? usdIndices.size()
-                                     : subset.faceIndices.size() * 4u;  // upper-bound guess
-      indices.reserve(inputFvCount * 3u / 2u);
+                                     : subset.faceIndices.size() * 4u;
+      uniqueMap.reserve(fvUpperBound);
+      outPositions.reserve(fvUpperBound);
+      if (emitNormals)
+        outNormals.reserve(fvUpperBound);
+      outUvs.reserve(fvUpperBound);
+      indices.reserve(fvUpperBound * 3u / 2u);
     }
+
+    auto pushVertex = [&](std::size_t fvIdx) -> std::uint32_t {
+      const auto positionIdx = static_cast<std::uint32_t>(usdIndices[fvIdx]);
+      if (positionIdx >= usdPoints.size())
+        return 0u;  // bounds-check defence; broken meshes drop bad fv refs
+      const hlslpp::float3 normal = getNormal(fvIdx, positionIdx);
+      const hlslpp::float2 uvOut  = getUv(fvIdx, positionIdx);
+      VertexKey key{};
+      key.positionIdx = positionIdx;
+      const float normalArr[3] = {static_cast<float>(normal.x),
+                                  static_cast<float>(normal.y),
+                                  static_cast<float>(normal.z)};
+      const float uvArr[2]     = {static_cast<float>(uvOut.x),
+                                  static_cast<float>(uvOut.y)};
+      std::memcpy(&key.normalBits[0], normalArr, sizeof(normalArr));
+      std::memcpy(&key.uvBits[0],     uvArr,     sizeof(uvArr));
+      const auto [iter, inserted] =
+          uniqueMap.try_emplace(key, static_cast<std::uint32_t>(outPositions.size()));
+      if (inserted)
+      {
+        outPositions.push_back(positions[positionIdx]);
+        if (emitNormals)
+          outNormals.push_back(normal);
+        outUvs.push_back(uvOut);
+      }
+      return iter->second;
+    };
+
     auto emitTrianglesForFace = [&](std::size_t faceIdx) {
       const int faceCount = usdCounts[faceIdx];
       if (faceCount < 3)
@@ -1267,9 +1423,9 @@ std::size_t EmitMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCach
       const std::size_t fvBase = faceStartOffsets[faceIdx];
       for (int triIdx = 0; triIdx < faceCount - 2; ++triIdx)
       {
-        indices.push_back(static_cast<uint32_t>(usdIndices[fvBase + 0]));
-        indices.push_back(static_cast<uint32_t>(usdIndices[fvBase + triIdx + 1]));
-        indices.push_back(static_cast<uint32_t>(usdIndices[fvBase + triIdx + 2]));
+        indices.push_back(pushVertex(fvBase + 0u));
+        indices.push_back(pushVertex(fvBase + static_cast<std::size_t>(triIdx + 1)));
+        indices.push_back(pushVertex(fvBase + static_cast<std::size_t>(triIdx + 2)));
       }
     };
     if (subset.faceIndices.empty())
@@ -1289,150 +1445,24 @@ std::size_t EmitMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCach
       continue;
     }
 
-    // Per-vertex UV buffer sized to positions.size() and zero-init
-    // unconditionally — even for meshes that author no `primvars:st`
-    // or whose UVs we fail to extract. GpuScene's flat-UV upload
-    // path indexes via `gMeshUvs[gMeshUvOffsets[meshSlot] + v_i]`;
-    // a short / missing UV array would let the closesthit's index
-    // spill into a neighbouring mesh's UV range and pull unrelated
-    // texels. Size-matched zero buffer keeps the worst case "sample
-    // (0,0) of the bound texture", which is at least mesh-local.
-    std::vector<hlslpp::float2> vertexUvs(usdPoints.size(), hlslpp::float2{0.0f, 0.0f});
-    if (stHasValue)
-    {
-      if (stInterpolation == pxr::UsdGeomTokens->vertex
-          && stUvs.size() == usdPoints.size())
-      {
-        for (std::size_t i = 0; i < stUvs.size(); ++i)
-          vertexUvs[i] = hlslpp::float2{stUvs[i][0], stUvs[i][1]};
-      }
-      else if (stInterpolation == pxr::UsdGeomTokens->faceVarying
-               && stUvs.size() == usdIndices.size())
-      {
-        // Walk face-vertex stream — full or subset — taking the
-        // FIRST UV per vertex. Subsets reuse the parent mesh's
-        // positions array, so each subset re-collapses faceVarying
-        // into the same vertex slots; identical content across
-        // subsets shares the §15 mesh-content dedup.
-        std::vector<bool> uvAssigned(usdPoints.size(), false);
-        auto walkFace = [&](std::size_t faceIdx) {
-          const int faceCount = usdCounts[faceIdx];
-          const std::size_t fvBase = faceStartOffsets[faceIdx];
-          for (int faceVertex = 0; faceVertex < faceCount; ++faceVertex)
-          {
-            const std::size_t fvIdx = fvBase + static_cast<std::size_t>(faceVertex);
-            const auto vertexIdx = static_cast<std::size_t>(usdIndices[fvIdx]);
-            if (vertexIdx < uvAssigned.size() && !uvAssigned[vertexIdx])
-            {
-              vertexUvs[vertexIdx] = hlslpp::float2{stUvs[fvIdx][0], stUvs[fvIdx][1]};
-              uvAssigned[vertexIdx] = true;
-            }
-          }
-        };
-        if (subset.faceIndices.empty())
-        {
-          for (std::size_t faceIdx = 0; faceIdx < usdCounts.size(); ++faceIdx)
-            walkFace(faceIdx);
-        }
-        else
-        {
-          for (const int faceIdx : subset.faceIndices)
-            walkFace(static_cast<std::size_t>(faceIdx));
-        }
-      }
-      else if ((stInterpolation == pxr::UsdGeomTokens->constant
-                || stInterpolation == pxr::UsdGeomTokens->uniform)
-               && !stUvs.empty())
-      {
-        const hlslpp::float2 single{stUvs[0][0], stUvs[0][1]};
-        std::fill(vertexUvs.begin(), vertexUvs.end(), single);
-      }
-      // Unknown / mismatched interpolation: leave vertexUvs at the
-      // zero-init the declaration above gave us.
-    }
-
-    // Per-vertex normal buffer — same shape + same fallback policy as
-    // vertexUvs above. Empty when the mesh authored no normals; the
-    // closesthit's M9 smooth-shading path detects a near-zero
-    // interpolated normal magnitude and falls back to the M7-NdotL
-    // face-normal path. Production scenes (lobby) author faceVarying
-    // normals; the first-per-vertex collapse here loses hard-edge
-    // fidelity but avoids vertex duplication.
-    std::vector<hlslpp::float3> vertexNormals;
-    if (normalsHasValue)
-    {
-      vertexNormals.assign(usdPoints.size(), hlslpp::float3{0.0f, 0.0f, 0.0f});
-      if (normalsInterpolation == pxr::UsdGeomTokens->vertex
-          && normalsArr.size() == usdPoints.size())
-      {
-        for (std::size_t i = 0; i < normalsArr.size(); ++i)
-          vertexNormals[i] =
-              hlslpp::float3{normalsArr[i][0], normalsArr[i][1], normalsArr[i][2]};
-      }
-      else if (normalsInterpolation == pxr::UsdGeomTokens->faceVarying
-               && normalsArr.size() == usdIndices.size())
-      {
-        std::vector<bool> normalAssigned(usdPoints.size(), false);
-        auto walkFaceN = [&](std::size_t faceIdx) {
-          const int faceCount = usdCounts[faceIdx];
-          const std::size_t fvBase = faceStartOffsets[faceIdx];
-          for (int faceVertex = 0; faceVertex < faceCount; ++faceVertex)
-          {
-            const std::size_t fvIdx = fvBase + static_cast<std::size_t>(faceVertex);
-            const auto vertexIdx = static_cast<std::size_t>(usdIndices[fvIdx]);
-            if (vertexIdx < normalAssigned.size() && !normalAssigned[vertexIdx])
-            {
-              vertexNormals[vertexIdx] = hlslpp::float3{
-                  normalsArr[fvIdx][0], normalsArr[fvIdx][1], normalsArr[fvIdx][2]};
-              normalAssigned[vertexIdx] = true;
-            }
-          }
-        };
-        if (subset.faceIndices.empty())
-        {
-          for (std::size_t faceIdx = 0; faceIdx < usdCounts.size(); ++faceIdx)
-            walkFaceN(faceIdx);
-        }
-        else
-        {
-          for (const int faceIdx : subset.faceIndices)
-            walkFaceN(static_cast<std::size_t>(faceIdx));
-        }
-      }
-      else if ((normalsInterpolation == pxr::UsdGeomTokens->constant
-                || normalsInterpolation == pxr::UsdGeomTokens->uniform)
-               && !normalsArr.empty())
-      {
-        const hlslpp::float3 single{
-            normalsArr[0][0], normalsArr[0][1], normalsArr[0][2]};
-        std::fill(vertexNormals.begin(), vertexNormals.end(), single);
-      }
-      else
-      {
-        // Length mismatch — drop the normals buffer so the closesthit
-        // falls back to face normals. Better than feeding the shader
-        // a partial array indexed past its end.
-        vertexNormals.clear();
-      }
-    }
-
-    // Per-vertex tangents via MikkTSpace (industry-standard tangent
-    // basis). Requires non-empty UVs + vertex normals + at least one
-    // triangle; falls through to empty when any of those are missing
-    // (closesthit's normal-mapping branch then skips its TBN sample).
-    // First-tangent-per-vertex collapse loses hard-edge fidelity at
-    // UV seams; vertex duplication for accurate hard edges is M11+.
+    // Per-vertex tangents via MikkTSpace on the deduplicated arrays.
+    // Hard-edge dup means each (face, vert) maps to a vertex slot
+    // unique to its UV/normal combination, so MikkTSpace's per-(face,
+    // vert) tangent writes naturally land on the right slot — the
+    // first-tangent-wins guard becomes a no-op. Requires non-empty
+    // UVs + vertex normals + at least one triangle; falls through to
+    // empty when any are missing.
     std::vector<hlslpp::float4> vertexTangents;
-    if (!indices.empty() && !vertexUvs.empty() && !vertexNormals.empty())
+    if (!indices.empty() && emitNormals && (uvsFv || uvsVertex || uvsConstant))
     {
-      vertexTangents.assign(positions.size(),
+      vertexTangents.assign(outPositions.size(),
                             hlslpp::float4{0.0f, 0.0f, 0.0f, 0.0f});
-      std::vector<bool> tangentAssigned(positions.size(), false);
+      std::vector<bool> tangentAssigned(outPositions.size(), false);
       MikkContext userData{};
-      userData.positions          = &positions;
+      userData.positions          = &outPositions;
       userData.triangleIndices    = &indices;
-      userData.vertexNormals      = &vertexNormals;
-      userData.vertexUvs          = &vertexUvs;
+      userData.vertexNormals      = &outNormals;
+      userData.vertexUvs          = &outUvs;
       userData.outVertexTangents  = &vertexTangents;
       userData.outTangentAssigned = &tangentAssigned;
       SMikkTSpaceInterface mikkInterface{};
@@ -1456,10 +1486,10 @@ std::size_t EmitMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCach
 
     const std::string subDebugName = primPath + subset.debugSuffix;
     MeshDesc meshDesc;
-    meshDesc.positions = positions;
+    meshDesc.positions = outPositions;
     meshDesc.indices = indices;
-    meshDesc.uv0 = vertexUvs;
-    meshDesc.normals = vertexNormals;
+    meshDesc.uv0 = outUvs;
+    meshDesc.normals = outNormals;
     meshDesc.tangents = vertexTangents;
     meshDesc.debugName = subDebugName;
     const auto meshHandle = scene.CreateMesh(meshDesc);
