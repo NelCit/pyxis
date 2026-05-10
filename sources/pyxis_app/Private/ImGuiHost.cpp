@@ -1123,6 +1123,49 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
         ImGui::TextColored(ImVec4(0.95f, 0.85f, 0.20f, 1.0f),
                            "Pending save: %s", _latches.saveAovPath.c_str());
       }
+
+      // Viewport overlay: when the picker is pinned, draw a small
+      // crosshair on top of the rendered image at the pinned UV's
+      // screen position. ImGui::GetForegroundDrawList draws on top
+      // of every panel + the swapchain blit, so the crosshair is
+      // always visible regardless of which panel has focus.
+      // Pinned UV is normalised — denormalise against the main
+      // viewport's WorkSize (the area outside platform chrome) so
+      // the screen position matches what the renderer sampled.
+      if (_pickerPinned)
+      {
+        ImGuiViewport* viewport = ImGui::GetMainViewport();
+        const ImVec2 origin = viewport->WorkPos;
+        const ImVec2 size   = viewport->WorkSize;
+        const ImVec2 center{
+            origin.x + _pickerPinnedU * size.x,
+            origin.y + _pickerPinnedV * size.y,
+        };
+        ImDrawList* drawList = ImGui::GetForegroundDrawList(viewport);
+        const ImU32  crossColor = IM_COL32(255, 158, 66, 255);  // Pyxis orange
+        const ImU32  haloColor  = IM_COL32(0, 0, 0, 200);       // dark halo for contrast
+        const float  arm        = 8.0f;   // pixels each direction from center
+        const float  gap        = 2.0f;   // gap around the center pixel
+        // Halo first (one pixel thicker, drawn underneath) so the
+        // crosshair stays readable on bright backgrounds too.
+        drawList->AddLine(ImVec2(center.x - arm, center.y),
+                          ImVec2(center.x - gap, center.y), haloColor, 3.0f);
+        drawList->AddLine(ImVec2(center.x + gap, center.y),
+                          ImVec2(center.x + arm, center.y), haloColor, 3.0f);
+        drawList->AddLine(ImVec2(center.x, center.y - arm),
+                          ImVec2(center.x, center.y - gap), haloColor, 3.0f);
+        drawList->AddLine(ImVec2(center.x, center.y + gap),
+                          ImVec2(center.x, center.y + arm), haloColor, 3.0f);
+        // Foreground orange line on top.
+        drawList->AddLine(ImVec2(center.x - arm, center.y),
+                          ImVec2(center.x - gap, center.y), crossColor, 1.5f);
+        drawList->AddLine(ImVec2(center.x + gap, center.y),
+                          ImVec2(center.x + arm, center.y), crossColor, 1.5f);
+        drawList->AddLine(ImVec2(center.x, center.y - arm),
+                          ImVec2(center.x, center.y - gap), crossColor, 1.5f);
+        drawList->AddLine(ImVec2(center.x, center.y + gap),
+                          ImVec2(center.x, center.y + arm), crossColor, 1.5f);
+      }
     }
 
     // ---- Camera section ----------------------------------------------
