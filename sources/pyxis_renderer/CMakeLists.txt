@@ -68,6 +68,12 @@ target_sources(pyxis_renderer PRIVATE
     # hashing/packing helpers every verb file needs.
     Private/GpuScene/Internal.h
     Private/GpuScene/GpuScene.cpp
+    Private/GpuScene/Mesh.cpp
+    Private/GpuScene/Material.cpp
+    Private/GpuScene/Texture.cpp
+    Private/GpuScene/Instance.cpp
+    Private/GpuScene/Light.cpp
+    Private/GpuScene/Commit.cpp
 
     # M1 — RenderGraph + Passes + Profiler + Renderer.
     Private/Diagnostics/CommandListMarker.h
