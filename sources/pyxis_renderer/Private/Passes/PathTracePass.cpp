@@ -773,85 +773,70 @@ void PathTracePass::Execute(nvrhi::ICommandList* commandList, const PassContext&
   // path stays color-consistent with the real material buffer's
   // sentinel slot 0. Cheap (one writeBuffer of 80 bytes per frame
   // when active).
-  if (_scene->GetMaterialBuffer() == nullptr)
-  {
-    static const shaderinterop::OpenPBRMaterialGPU FALLBACK_MATERIAL_DEFAULT = []() {
-      shaderinterop::OpenPBRMaterialGPU material{};
-      material.baseColorR = 0.8f;
-      material.baseColorG = 0.8f;
-      material.baseColorB = 0.8f;
-      material.flags = 0u;
-      material.baseColorTex = shaderinterop::INVALID_BINDLESS_TEXTURE;
-      material.normalTex = shaderinterop::INVALID_BINDLESS_TEXTURE;
-      material.metallicTex = shaderinterop::INVALID_BINDLESS_TEXTURE;
-      material.roughnessTex = shaderinterop::INVALID_BINDLESS_TEXTURE;
-      material.roughness = 0.5f;
-      material.metalness = 0.0f;
-      material.opacity = 1.0f;
-      material.specularIor = 1.5f;
-      material.coatWeight = 0.0f;
-      material.coatRoughness = 0.0f;
-      material.emissionLuminance = 0.0f;
-      material.emissionTex = shaderinterop::INVALID_BINDLESS_TEXTURE;
-      material.opacityTex = shaderinterop::INVALID_BINDLESS_TEXTURE;
-      material.transmissionTex = shaderinterop::INVALID_BINDLESS_TEXTURE;
-      material.coatRoughnessTex = shaderinterop::INVALID_BINDLESS_TEXTURE;
-      return material;
-    }();
-    commandList->writeBuffer(_fallbackMaterialBuffer.Get(), &FALLBACK_MATERIAL_DEFAULT,
-                             sizeof(FALLBACK_MATERIAL_DEFAULT));
-  }
+  // ---- Scene-buffer fallback uploads --------------------------------
+  // 5 lazy-allocated scene-side buffers (materials / instance-material
+  // / lights / instance-mesh / mesh-face-offsets / mesh-face-normals)
+  // share the same shape: "if the scene hasn't allocated yet, write
+  // a tiny default into the 1-element fallback buffer so the binding
+  // point sees something safe." Pre-refactor the five blocks were
+  // spelled out verbatim ~80 lines; one table + loop replaces them.
+  // The default-grey OpenPBR material (baseColor 0.8 grey, roughness
+  // 0.5, IoR 1.5, all texture slots = INVALID_BINDLESS_TEXTURE) is
+  // built on first call and cached in a function-local static.
+  static const shaderinterop::OpenPBRMaterialGPU FALLBACK_MATERIAL_GREY = []() {
+    shaderinterop::OpenPBRMaterialGPU material{};
+    material.baseColorR = 0.8f;
+    material.baseColorG = 0.8f;
+    material.baseColorB = 0.8f;
+    material.flags = 0u;
+    material.baseColorTex = shaderinterop::INVALID_BINDLESS_TEXTURE;
+    material.normalTex = shaderinterop::INVALID_BINDLESS_TEXTURE;
+    material.metallicTex = shaderinterop::INVALID_BINDLESS_TEXTURE;
+    material.roughnessTex = shaderinterop::INVALID_BINDLESS_TEXTURE;
+    material.roughness = 0.5f;
+    material.metalness = 0.0f;
+    material.opacity = 1.0f;
+    material.specularIor = 1.5f;
+    material.coatWeight = 0.0f;
+    material.coatRoughness = 0.0f;
+    material.emissionLuminance = 0.0f;
+    material.emissionTex = shaderinterop::INVALID_BINDLESS_TEXTURE;
+    material.opacityTex = shaderinterop::INVALID_BINDLESS_TEXTURE;
+    material.transmissionTex = shaderinterop::INVALID_BINDLESS_TEXTURE;
+    material.coatRoughnessTex = shaderinterop::INVALID_BINDLESS_TEXTURE;
+    return material;
+  }();
+  static const shaderinterop::LightGpu FALLBACK_LIGHT_DISABLED{};
+  static const std::uint32_t           FALLBACK_UINT_ZERO = 0u;
+  static const float                   FALLBACK_FLOAT4_ZERO[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 
-  // M6: same shape for the instance→material side-table fallback.
-  // Holds a single zero-uint so any rogue InstanceID resolves to
-  // material slot 0 (which the material fallback above maps to grey).
-  if (_scene->GetInstanceMaterialBuffer() == nullptr)
+  struct BufferFallbackSpec {
+    nvrhi::IBuffer* (GpuScene::*sceneGetter)() const noexcept;
+    nvrhi::BufferHandle PathTracePass::* fallbackMember;
+    const void*  defaultBytes;
+    std::size_t  defaultByteSize;
+  };
+  const std::array<BufferFallbackSpec, 6> bufferFallbacks{{
+      {&GpuScene::GetMaterialBuffer,         &PathTracePass::_fallbackMaterialBuffer,
+       &FALLBACK_MATERIAL_GREY,    sizeof(FALLBACK_MATERIAL_GREY)   },
+      {&GpuScene::GetInstanceMaterialBuffer, &PathTracePass::_fallbackInstanceMaterialBuffer,
+       &FALLBACK_UINT_ZERO,        sizeof(FALLBACK_UINT_ZERO)       },
+      {&GpuScene::GetLightBuffer,            &PathTracePass::_fallbackLightBuffer,
+       &FALLBACK_LIGHT_DISABLED,   sizeof(FALLBACK_LIGHT_DISABLED)  },
+      {&GpuScene::GetInstanceMeshBuffer,     &PathTracePass::_fallbackInstanceMeshBuffer,
+       &FALLBACK_UINT_ZERO,        sizeof(FALLBACK_UINT_ZERO)       },
+      {&GpuScene::GetMeshFaceOffsetsBuffer,  &PathTracePass::_fallbackMeshFaceOffsetsBuffer,
+       &FALLBACK_UINT_ZERO,        sizeof(FALLBACK_UINT_ZERO)       },
+      {&GpuScene::GetMeshFaceNormalsBuffer,  &PathTracePass::_fallbackMeshFaceNormalsBuffer,
+       FALLBACK_FLOAT4_ZERO,       sizeof(FALLBACK_FLOAT4_ZERO)     },
+  }};
+  for (const BufferFallbackSpec& spec : bufferFallbacks)
   {
-    static const std::uint32_t FALLBACK_INSTANCE_MATERIAL_ZERO = 0u;
-    commandList->writeBuffer(_fallbackInstanceMaterialBuffer.Get(),
-                             &FALLBACK_INSTANCE_MATERIAL_ZERO,
-                             sizeof(FALLBACK_INSTANCE_MATERIAL_ZERO));
-  }
-
-  // M7: same shape for the lights fallback. One zero-init LightGpu
-  // (intensity=0) so the closesthit per-light loop sees one disabled
-  // entry and falls through to the M5/M6 baseColor-only path —
-  // preserving byte-equal across M5 + M6 fixtures that don't author
-  // lights.
-  if (_scene->GetLightBuffer() == nullptr)
-  {
-    static const shaderinterop::LightGpu FALLBACK_LIGHT_DISABLED{};
-    commandList->writeBuffer(_fallbackLightBuffer.Get(),
-                             &FALLBACK_LIGHT_DISABLED,
-                             sizeof(FALLBACK_LIGHT_DISABLED));
-  }
-
-  // M7 NdotL: zero-init the three normal-lookup fallbacks if the
-  // scene hasn't built them. instanceMesh + meshFaceOffsets resolve
-  // to slot 0 (offset 0), and meshFaceNormals[0] = (0,0,0,0) — so
-  // the closesthit reads nLocal=(0,0,0) → NdotL=0, which combined
-  // with the lights fallback (intensity=0 above) routes to the
-  // baseColor-only path anyway.
-  if (_scene->GetInstanceMeshBuffer() == nullptr)
-  {
-    static const std::uint32_t FALLBACK_INSTANCE_MESH_ZERO = 0u;
-    commandList->writeBuffer(_fallbackInstanceMeshBuffer.Get(),
-                             &FALLBACK_INSTANCE_MESH_ZERO,
-                             sizeof(FALLBACK_INSTANCE_MESH_ZERO));
-  }
-  if (_scene->GetMeshFaceOffsetsBuffer() == nullptr)
-  {
-    static const std::uint32_t FALLBACK_MESH_FACE_OFFSETS_ZERO = 0u;
-    commandList->writeBuffer(_fallbackMeshFaceOffsetsBuffer.Get(),
-                             &FALLBACK_MESH_FACE_OFFSETS_ZERO,
-                             sizeof(FALLBACK_MESH_FACE_OFFSETS_ZERO));
-  }
-  if (_scene->GetMeshFaceNormalsBuffer() == nullptr)
-  {
-    static const float FALLBACK_MESH_FACE_NORMALS_ZERO[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    commandList->writeBuffer(_fallbackMeshFaceNormalsBuffer.Get(),
-                             FALLBACK_MESH_FACE_NORMALS_ZERO,
-                             sizeof(FALLBACK_MESH_FACE_NORMALS_ZERO));
+    if ((_scene->*spec.sceneGetter)() == nullptr)
+    {
+      commandList->writeBuffer((this->*spec.fallbackMember).Get(),
+                               spec.defaultBytes, spec.defaultByteSize);
+    }
   }
 
   // M7-IBL: WHITE-init the 1×1 dome fallback texture if the scene
