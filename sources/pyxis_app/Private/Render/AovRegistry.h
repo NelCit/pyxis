@@ -52,7 +52,7 @@ inline constexpr std::array<AovEntry, 11> AOV_REGISTRY = {{
     {"color",       "Color",       RenderSettings::DebugView::Color,       &AovTextures::colorHdr   },
     {"normal",      "Normal",      RenderSettings::DebugView::Normal,      &AovTextures::normal     },
     {"depth",       "Depth",       RenderSettings::DebugView::Depth,       &AovTextures::depth      },
-    {"instanceId",  "InstanceID",  RenderSettings::DebugView::InstanceId,  &AovTextures::instanceId },
+    {"primId",      "PrimID",      RenderSettings::DebugView::PrimId,      &AovTextures::primId     },
     {"materialId",  "MaterialID",  RenderSettings::DebugView::MaterialId,  &AovTextures::materialId },
     {"baseColor",   "BaseColor",   RenderSettings::DebugView::BaseColor,   &AovTextures::baseColor  },
     {"worldPos",    "WorldPos",    RenderSettings::DebugView::WorldPos,    &AovTextures::worldPos   },

@@ -41,7 +41,7 @@
 [[vk::binding(11, 0)]] RWTexture2D<float4>            gOutColorHdr;        // RGBA16F radiance
 [[vk::binding(12, 0)]] RWTexture2D<float4>            gOutNormal;          // RGBA16F world normal
 [[vk::binding(13, 0)]] RWTexture2D<float>             gOutDepth;           // R32F  ray-distance
-[[vk::binding(14, 0)]] RWTexture2D<uint>              gOutInstanceId;      // R32U  instance slot
+[[vk::binding(14, 0)]] RWTexture2D<uint>              gOutPrimId;          // R32U  Hydra primId (per-instance slot)
 [[vk::binding(15, 0)]] RWStructuredBuffer<PickResult> gPickResult;         // 1-elem pick latch
 // M7 follow-up batch 2 — 3 more raw AOVs the inspector exposes.
 [[vk::binding(16, 0)]] RWTexture2D<uint>              gOutMaterialId;      // R32U  material slot
@@ -163,7 +163,7 @@ void main() {
     gOutColorHdr[launchIndex]   = float4(payload.color, 1.0f);
     gOutNormal[launchIndex]     = float4(payload.normalWorld, 1.0f);
     gOutDepth[launchIndex]      = (payload.hitT > 0.0f) ? payload.hitT : 0.0f;
-    gOutInstanceId[launchIndex] = payload.instanceId;
+    gOutPrimId[launchIndex]     = payload.instanceId;
     gOutMaterialId[launchIndex] = payload.materialId;
     gOutBaseColor[launchIndex]  = float4(payload.baseColor, 1.0f);
     gOutWorldPos[launchIndex]   = float4(payload.worldHit, 1.0f);
@@ -241,7 +241,7 @@ void main() {
         const float intensity = (d > 0.0f) ? (1.0f / (1.0f + d * 0.1f)) : 0.0f;
         displayColor = float3(intensity, intensity, intensity);
     }
-    else if (gFrameUi.debugViewMode == DEBUG_VIEW_INSTANCE_ID)
+    else if (gFrameUi.debugViewMode == DEBUG_VIEW_PRIM_ID)
     {
         displayColor = hashInstanceColor(payload.instanceId);
     }

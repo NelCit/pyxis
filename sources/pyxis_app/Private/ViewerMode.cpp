@@ -837,7 +837,7 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
       targets.colorHdr          = aovs.colorHdr.Get();
       targets.normalAov         = aovs.normal.Get();
       targets.depthAov          = aovs.depth.Get();
-      targets.instanceIdAov     = aovs.instanceId.Get();
+      targets.primIdAov         = aovs.primId.Get();
       targets.materialIdAov     = aovs.materialId.Get();
       targets.baseColorAov      = aovs.baseColor.Get();
       targets.worldPosAov       = aovs.worldPos.Get();

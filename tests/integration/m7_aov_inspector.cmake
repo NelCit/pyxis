@@ -5,12 +5,12 @@
 # --save-aov all so every raw AOV the inspector exposes lands on disk
 # alongside the regular BGRA8 EXR. The instanced-grid scene gives the
 # pairwise byte-distinctness check below enough per-pixel variation to
-# distinguish instanceId from materialId — a single-instance scene
+# distinguish primId from materialId — a single-instance scene
 # (the M7 lit fixture) collapses those two to byte-identical content.
 # Asserts:
 #
 #   1. The headless run exits 0 and produces all 8 files (BGRA8 +
-#      7 raw AOVs: color, normal, depth, instanceId, materialId,
+#      7 raw AOVs: color, normal, depth, primId, materialId,
 #      baseColor, worldPos).
 #   2. Every output file is larger than the implausibly-empty floor
 #      (rules out "WriteExr emitted a zero-byte file" regressions).
@@ -52,7 +52,7 @@ file(REMOVE_RECURSE "${OUTPUT_DIR}")
 file(MAKE_DIRECTORY "${OUTPUT_DIR}")
 
 set(_bgra_exr "${OUTPUT_DIR}/aovs.exr")
-set(_aov_names color normal depth instanceId materialId baseColor worldPos)
+set(_aov_names color normal depth primId materialId baseColor worldPos)
 set(_min_plausible_bytes 1024)
 
 # ----- Run A: --save-aov all ----------------------------------------

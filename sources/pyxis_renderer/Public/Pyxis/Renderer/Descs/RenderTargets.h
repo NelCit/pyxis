@@ -1,6 +1,6 @@
 // Pyxis renderer — RenderTargets POD.
 // Plan §18.4 / §19.8. M1 ships only `color`; the AOV slots
-// (depth/normal/albedo/motionVector/materialId/instanceId) come online
+// (depth/normal/albedo/motionVector/materialId/primId) come online
 // at M5+.
 
 #pragma once
@@ -22,7 +22,7 @@ enum class AovFlag : uint32_t {
   Albedo = 1u << 3,
   MotionVector = 1u << 4,
   MaterialId = 1u << 5,
-  InstanceId = 1u << 6,
+  PrimId = 1u << 6,
 };
 
 struct RenderTargets {
@@ -36,7 +36,7 @@ struct RenderTargets {
   nvrhi::ITexture* albedo = nullptr;
   nvrhi::ITexture* motionVector = nullptr;
   nvrhi::ITexture* materialId = nullptr;
-  nvrhi::ITexture* instanceId = nullptr;
+  nvrhi::ITexture* primId = nullptr;
 
   // M7 follow-up — extra targets the AOV-inspector path writes.
   // These complement `color`: the BGRA8 `color` carries the post-
@@ -47,12 +47,13 @@ struct RenderTargets {
   //   colorHdr   : RGBA16F pre-tonemap radiance
   //   normalAov  : RGBA16F world-space normal (xyz, w unused)
   //   depthAov   : R32F    primary-ray hit distance (0 on miss)
-  //   instanceIdAov : R32_UINT InstanceID() at hit (~0u on miss)
+  //   primIdAov  : R32_UINT InstanceID() at hit (~0u on miss) —
+  //               Hydra's HdAovTokens->primId
   // Required for v1 viewer; passes can no-op if any are null.
   nvrhi::ITexture* colorHdr = nullptr;
   nvrhi::ITexture* normalAov = nullptr;
   nvrhi::ITexture* depthAov = nullptr;
-  nvrhi::ITexture* instanceIdAov = nullptr;
+  nvrhi::ITexture* primIdAov = nullptr;
   // Second AOV batch (M7 follow-up) — material id, baseColor,
   // world-position. Same caller-allocation contract; PathTracePass
   // binds 1×1 fallbacks when null.

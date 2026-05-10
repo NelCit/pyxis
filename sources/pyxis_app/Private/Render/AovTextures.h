@@ -16,7 +16,7 @@
 // and land alongside their respective passes:
 //   depth/normal/albedo at M5 (UsdPreviewSurface→OpenPBR)
 //   motionVector       at M11 polish
-//   materialId / instanceId at M6 alongside instance AOVs
+//   materialId / primId at M6 alongside instance AOVs
 //
 // Format choice: SBGRA8_UNORM matches both the viewer swapchain and
 // the §33.7 byte-identical EXR contract that M2 ships today. The
@@ -56,11 +56,13 @@ struct AovTextures {
   //   colorHdr      RGBA16_FLOAT (pre-tonemap radiance)
   //   normal        RGBA16_FLOAT (world normal in xyz, w unused)
   //   depth         R32_FLOAT    (primary-ray distance, 0 on miss)
-  //   instanceId    R32_UINT     (~0u on miss)
+  //   primId        R32_UINT     per-instance slot — Hydra's HdAovTokens->primId
+  //                              (~0u on miss; the per-FACE id is `elementId`
+  //                              below in the Tier 1 batch)
   nvrhi::TextureHandle colorHdr;
   nvrhi::TextureHandle normal;
   nvrhi::TextureHandle depth;
-  nvrhi::TextureHandle instanceId;
+  nvrhi::TextureHandle primId;
   // Second AOV batch (M7 follow-up).
   //   materialId   R32_UINT     material slot (~0u on miss)
   //   baseColor    RGBA16_FLOAT raw OpenPBR baseColor pre-shading

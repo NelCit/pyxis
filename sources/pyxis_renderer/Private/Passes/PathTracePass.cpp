@@ -411,7 +411,7 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
       {&PathTracePass::_fallbackColorHdrAov,    nvrhi::Format::RGBA16_FLOAT, "PathTrace.FbColorHdrAov"   },
       {&PathTracePass::_fallbackNormalAov,      nvrhi::Format::RGBA16_FLOAT, "PathTrace.FbNormalAov"     },
       {&PathTracePass::_fallbackDepthAov,       nvrhi::Format::R32_FLOAT,    "PathTrace.FbDepthAov"      },
-      {&PathTracePass::_fallbackInstanceAov,    nvrhi::Format::R32_UINT,     "PathTrace.FbInstanceAov"   },
+      {&PathTracePass::_fallbackPrimIdAov,      nvrhi::Format::R32_UINT,     "PathTrace.FbPrimIdAov"     },
       {&PathTracePass::_fallbackMaterialAov,    nvrhi::Format::R32_UINT,     "PathTrace.FbMaterialAov"   },
       {&PathTracePass::_fallbackBaseColorAov,   nvrhi::Format::RGBA16_FLOAT, "PathTrace.FbBaseColorAov"  },
       {&PathTracePass::_fallbackWorldPosAov,    nvrhi::Format::RGBA32_FLOAT, "PathTrace.FbWorldPosAov"   },
@@ -556,7 +556,7 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(RenderTargets const
   current[slot(BindingSlot::ColorHdrAov)]      = targets.colorHdr;
   current[slot(BindingSlot::NormalAov)]        = targets.normalAov;
   current[slot(BindingSlot::DepthAov)]         = targets.depthAov;
-  current[slot(BindingSlot::InstanceAov)]      = targets.instanceIdAov;
+  current[slot(BindingSlot::PrimIdAov)]        = targets.primIdAov;
   current[slot(BindingSlot::MaterialAov)]      = targets.materialIdAov;
   current[slot(BindingSlot::BaseColorAov)]     = targets.baseColorAov;
   current[slot(BindingSlot::WorldPosAov)]      = targets.worldPosAov;
@@ -635,8 +635,8 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(RenderTargets const
   if (normalAov == nullptr)   normalAov   = _fallbackNormalAov.Get();
   nvrhi::ITexture* depthAov    = targets.depthAov;
   if (depthAov == nullptr)    depthAov    = _fallbackDepthAov.Get();
-  nvrhi::ITexture* instanceAov = targets.instanceIdAov;
-  if (instanceAov == nullptr) instanceAov = _fallbackInstanceAov.Get();
+  nvrhi::ITexture* primIdAov = targets.primIdAov;
+  if (primIdAov == nullptr) primIdAov = _fallbackPrimIdAov.Get();
   nvrhi::IBuffer*  pickBuffer  = targets.pickResult;
   if (pickBuffer == nullptr)  pickBuffer  = _fallbackPickResult.Get();
   nvrhi::ITexture* materialAov = targets.materialIdAov;
@@ -671,7 +671,7 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(RenderTargets const
       nvrhi::BindingSetItem::Texture_UAV(11, colorHdrAov),
       nvrhi::BindingSetItem::Texture_UAV(12, normalAov),
       nvrhi::BindingSetItem::Texture_UAV(13, depthAov),
-      nvrhi::BindingSetItem::Texture_UAV(14, instanceAov),
+      nvrhi::BindingSetItem::Texture_UAV(14, primIdAov),
       nvrhi::BindingSetItem::StructuredBuffer_UAV(15, pickBuffer),
       nvrhi::BindingSetItem::Texture_UAV(16, materialAov),
       nvrhi::BindingSetItem::Texture_UAV(17, baseColorAov),
@@ -919,8 +919,8 @@ void PathTracePass::Execute(nvrhi::ICommandList* commandList, const PassContext&
     commandList->setTextureState(context.targets->depthAov,
                                  nvrhi::AllSubresources,
                                  nvrhi::ResourceStates::UnorderedAccess);
-  if (context.targets->instanceIdAov != nullptr)
-    commandList->setTextureState(context.targets->instanceIdAov,
+  if (context.targets->primIdAov != nullptr)
+    commandList->setTextureState(context.targets->primIdAov,
                                  nvrhi::AllSubresources,
                                  nvrhi::ResourceStates::UnorderedAccess);
   if (context.targets->materialIdAov != nullptr)

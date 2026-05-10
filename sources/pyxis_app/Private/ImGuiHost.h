@@ -308,7 +308,7 @@ class ImGuiHost {
   // ViewerMode drains a pending save-AOV path each frame. Returns
   // true and clears the latch iff the user clicked "Save AOV..." since
   // the last call. The current debug view selects which AOV gets
-  // saved (Color/Normal/Depth/InstanceID).
+  // saved (Color/Normal/Depth/PrimID/...).
   [[nodiscard]] bool TakeSaveAovRequest(std::string& outPath) noexcept {
     if (_latches.saveAovPath.empty())
       return false;

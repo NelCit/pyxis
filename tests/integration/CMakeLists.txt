@@ -106,7 +106,7 @@ set_tests_properties(M7.LightingMovesPixels PROPERTIES
 
 # §41 M7 follow-up — exercises the AOV inspector path end-to-end. One
 # headless run with --save-aov all dumps every raw AOV (color HDR,
-# normal, depth, instanceId, materialId, baseColor, worldPos) into
+# normal, depth, primId, materialId, baseColor, worldPos) into
 # `<prefix>_<aov>.exr` files; the test asserts (a) every expected
 # file exists and is non-empty, (b) AOVs are byte-distinct from each
 # other (proves the writes are independent — a regression that wired
@@ -120,7 +120,7 @@ add_test(
             -DPYXIS_EXE=$<TARGET_FILE:pyxis>
             -DFIXTURE_CONFIG=${CMAKE_SOURCE_DIR}/tests/fixtures/headless_triangle.json
             # m6 fixture (100 instances of 1 prototype mesh, 1 material) gives
-            # the AOV inspector enough per-pixel variation that instanceId
+            # the AOV inspector enough per-pixel variation that primId
             # genuinely differs from materialId — m7_lit_scene.usd has 1:1
             # entity counts and the two integer AOVs collapse to identical
             # content there, defeating the pairwise byte-distinctness check.

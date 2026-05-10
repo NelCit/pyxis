@@ -58,7 +58,7 @@ std::expected<AovTextures, std::string> AovTextures::Create(nvrhi::IDevice* devi
   result.colorHdr    = makeAov(nvrhi::Format::RGBA16_FLOAT, "aov.colorHdr");
   result.normal      = makeAov(nvrhi::Format::RGBA16_FLOAT, "aov.normal");
   result.depth       = makeAov(nvrhi::Format::R32_FLOAT,    "aov.depth");
-  result.instanceId  = makeAov(nvrhi::Format::R32_UINT,     "aov.instanceId");
+  result.primId      = makeAov(nvrhi::Format::R32_UINT,     "aov.primId");
   result.materialId  = makeAov(nvrhi::Format::R32_UINT,     "aov.materialId");
   result.baseColor   = makeAov(nvrhi::Format::RGBA16_FLOAT, "aov.baseColor");
   result.worldPos    = makeAov(nvrhi::Format::RGBA32_FLOAT, "aov.worldPos");
@@ -67,7 +67,7 @@ std::expected<AovTextures, std::string> AovTextures::Create(nvrhi::IDevice* devi
   result.elementId   = makeAov(nvrhi::Format::R32_UINT,     "aov.elementId");
   result.normalEye   = makeAov(nvrhi::Format::RGBA16_FLOAT, "aov.normalEye");
   result.worldPosEye = makeAov(nvrhi::Format::RGBA32_FLOAT, "aov.worldPosEye");
-  if (!result.colorHdr || !result.normal || !result.depth || !result.instanceId
+  if (!result.colorHdr || !result.normal || !result.depth || !result.primId
       || !result.materialId || !result.baseColor || !result.worldPos
       || !result.alpha || !result.elementId || !result.normalEye || !result.worldPosEye)
   {
@@ -78,7 +78,7 @@ std::expected<AovTextures, std::string> AovTextures::Create(nvrhi::IDevice* devi
   // RWStructuredBuffer the raygen writes; the staging buffer is
   // host-mapped after a per-frame copy for one-frame-stale CPU
   // readback. 80 bytes per element matches shaderinterop::PickResult
-  // (5 rows of 16: color/depth, normal/instanceId, baseColor/materialId,
+  // (5 rows of 16: color/depth, normal/primId, baseColor/materialId,
   // worldHit/pad, pixelXY/pad).
   constexpr uint32_t PICK_RESULT_BYTES = 80;
   nvrhi::BufferDesc pickDesc;

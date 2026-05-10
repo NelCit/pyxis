@@ -151,7 +151,7 @@ void LogDeterminismPin(const Configuration& config, uint32_t framesInFlight) noe
   targets.colorHdr       = aovs.colorHdr.Get();
   targets.normalAov      = aovs.normal.Get();
   targets.depthAov       = aovs.depth.Get();
-  targets.instanceIdAov  = aovs.instanceId.Get();
+  targets.primIdAov      = aovs.primId.Get();
   targets.materialIdAov  = aovs.materialId.Get();
   targets.baseColorAov   = aovs.baseColor.Get();
   targets.worldPosAov    = aovs.worldPos.Get();
@@ -286,7 +286,7 @@ void SaveAovsFromList(std::string_view saveAovList,
     {
       log.Warn(log::APP, "headless: --save-aov: unknown AOV name '"
                              + std::string{aovName}
-                             + "' (recognised: color,normal,depth,instanceId,"
+                             + "' (recognised: color,normal,depth,primId,"
                                "materialId,baseColor,worldPos,alpha,elementId,"
                                "normalEye,worldPosEye,all)");
       return;

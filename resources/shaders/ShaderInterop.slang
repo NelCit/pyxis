@@ -120,7 +120,7 @@ struct FrameUiUniforms {
     // Row 0 — picker + display selector.
     uint  mousePixelX;          // top-left origin pixel coord, or PICK_PIXEL_NONE if no hover
     uint  mousePixelY;
-    uint  debugViewMode;        // DEBUG_VIEW_COLOR / NORMAL / DEPTH / INSTANCE_ID / ...
+    uint  debugViewMode;        // DEBUG_VIEW_COLOR / NORMAL / DEPTH / PRIM_ID / ...
     uint  _reservedUi0;
     // Row 1 — AOV-specific knobs the editor surfaces as sliders.
     // worldPosPeriod: scene-units period of the WorldPos AOV's sin
@@ -140,7 +140,7 @@ struct FrameUiUniforms {
 static const uint DEBUG_VIEW_COLOR        = 0;   // post-tonemap radiance
 static const uint DEBUG_VIEW_NORMAL       = 1;   // world normal as (n*0.5+0.5)
 static const uint DEBUG_VIEW_DEPTH        = 2;   // 1/depth grayscale
-static const uint DEBUG_VIEW_INSTANCE_ID  = 3;   // hashed instance-id colour
+static const uint DEBUG_VIEW_PRIM_ID      = 3;   // hashed prim-id colour (Hydra primId)
 static const uint DEBUG_VIEW_MATERIAL_ID  = 4;   // hashed material-id colour
 static const uint DEBUG_VIEW_BASE_COLOR   = 5;   // raw OpenPBR baseColor (no shading)
 static const uint DEBUG_VIEW_WORLD_POS    = 6;   // worldHit / 10 then frac for visualisation

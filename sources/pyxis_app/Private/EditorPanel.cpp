@@ -230,7 +230,7 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
     // ---- AOV inspector ------------------------------------------------
     // Combo selects which raw AOV the raygen remaps into the BGRA8
     // display target (Color = post-tonemap, Normal = (n*0.5+0.5),
-    // Depth = 1/depth grayscale, InstanceID = hashed palette). The
+    // Depth = 1/depth grayscale, PrimID = hashed palette). The
     // pixel-picker readout below shows the RAW values at the cursor
     // pulled from PyxisRenderer::LastPickResult() — one frame stale
     // (acceptable for hover-feedback). Save button kicks an EXR save

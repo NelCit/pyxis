@@ -153,7 +153,7 @@ class PathTracePass final : public IRenderPass {
     ColorHdrAov,
     NormalAov,
     DepthAov,
-    InstanceAov,
+    PrimIdAov,
     MaterialAov,
     BaseColorAov,
     WorldPosAov,
@@ -177,7 +177,7 @@ class PathTracePass final : public IRenderPass {
   nvrhi::TextureHandle _fallbackColorHdrAov;
   nvrhi::TextureHandle _fallbackNormalAov;
   nvrhi::TextureHandle _fallbackDepthAov;
-  nvrhi::TextureHandle _fallbackInstanceAov;
+  nvrhi::TextureHandle _fallbackPrimIdAov;
   nvrhi::TextureHandle _fallbackMaterialAov;
   nvrhi::TextureHandle _fallbackBaseColorAov;
   nvrhi::TextureHandle _fallbackWorldPosAov;
