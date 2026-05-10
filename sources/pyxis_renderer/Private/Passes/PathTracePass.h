@@ -136,34 +136,33 @@ class PathTracePass final : public IRenderPass {
   std::unordered_map<nvrhi::ITexture*, nvrhi::BindingSetHandle> _bindingSetCache;
 
   // BindingsSnapshot — every borrowed-pointer that participates in a
-  // binding-set, captured per Execute. A C++23 defaulted operator==
-  // gives memberwise compare for free, so the cache invalidation
-  // logic collapses from 16 separate pointer comparisons + 16
-  // assignments to one struct compare + one struct assign on a miss.
-  // Pre-refactor each of these tracker fields was its own member
-  // with a multi-line comment about which binding it watches.
-  struct BindingsSnapshot {
-    // Scene-side (lazy-allocated by GpuScene; flips from fallback
-    // to real on the first AcquireMaterial / AppendInstance / AddLight).
-    nvrhi::IBuffer*  materials              = nullptr;
-    nvrhi::IBuffer*  instanceMaterial       = nullptr;
-    nvrhi::IBuffer*  lights                 = nullptr;
-    nvrhi::IBuffer*  instanceMesh           = nullptr;
-    nvrhi::IBuffer*  meshFaceNormals        = nullptr;
-    nvrhi::IBuffer*  meshFaceOffsets        = nullptr;
-    nvrhi::ITexture* domeTexture            = nullptr;
-    nvrhi::ISampler* bindlessSampler        = nullptr;
-    // Caller-side raw AOV outputs + pick buffer (M7 follow-up).
-    nvrhi::ITexture* colorHdrAov            = nullptr;
-    nvrhi::ITexture* normalAov              = nullptr;
-    nvrhi::ITexture* depthAov               = nullptr;
-    nvrhi::ITexture* instanceAov            = nullptr;
-    nvrhi::ITexture* materialAov            = nullptr;
-    nvrhi::ITexture* baseColorAov           = nullptr;
-    nvrhi::ITexture* worldPosAov            = nullptr;
-    nvrhi::IBuffer*  pickResult             = nullptr;
-    bool operator==(const BindingsSnapshot&) const = default;
+  // binding-set, captured per Execute as a flat std::array<void*>.
+  // std::array's element-wise operator== / operator= keep the per-frame
+  // compare + assign idiomatic. Slot order pinned by the scoped-enum
+  // indices below; the construction site documents which scene/target
+  // getter feeds each slot.
+  enum class BindingSlot : std::size_t {
+    Materials = 0,
+    InstanceMaterial,
+    Lights,
+    InstanceMesh,
+    MeshFaceNormals,
+    MeshFaceOffsets,
+    DomeTexture,
+    BindlessSampler,
+    ColorHdrAov,
+    NormalAov,
+    DepthAov,
+    InstanceAov,
+    MaterialAov,
+    BaseColorAov,
+    WorldPosAov,
+    PickResult,
+    Count,
   };
+  static constexpr std::size_t BINDING_SLOT_COUNT =
+      static_cast<std::size_t>(BindingSlot::Count);
+  using BindingsSnapshot = std::array<const void*, BINDING_SLOT_COUNT>;
   BindingsSnapshot _lastBindings{};
 
   bool _shadersOk = false;  // true if ctor loaded all three shaders + built pipeline.

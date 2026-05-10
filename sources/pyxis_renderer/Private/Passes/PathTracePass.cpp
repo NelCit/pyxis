@@ -528,26 +528,29 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(RenderTargets const
   // / AppendInstance / AddLight that creates a real buffer where a
   // 1×1 fallback used to live), the caller-side AOV swaps on resize,
   // and the dome-texture flip when a USD dome's env-map resolves.
-  // C++23 defaulted operator== gives the structural compare for free.
-  const BindingsSnapshot current{
-      .materials              = _scene->GetMaterialBuffer(),
-      .instanceMaterial       = _scene->GetInstanceMaterialBuffer(),
-      .lights                 = _scene->GetLightBuffer(),
-      .instanceMesh           = _scene->GetInstanceMeshBuffer(),
-      .meshFaceNormals        = _scene->GetMeshFaceNormalsBuffer(),
-      .meshFaceOffsets        = _scene->GetMeshFaceOffsetsBuffer(),
-      .domeTexture            = _scene->GetDomeEnvMapTexture(),
-      .bindlessSampler        = _scene->GetBindlessSampler(),
-      .colorHdrAov            = targets.colorHdr,
-      .normalAov              = targets.normalAov,
-      .depthAov               = targets.depthAov,
-      .instanceAov            = targets.instanceIdAov,
-      .materialAov            = targets.materialIdAov,
-      .baseColorAov           = targets.baseColorAov,
-      .worldPosAov            = targets.worldPosAov,
-      .pickResult             = targets.pickResult,
-  };
-  if (!(current == _lastBindings))
+  // Indexed init keeps slot order in lockstep with the BindingSlot
+  // enum; std::array's element-wise operator== and operator= keep the
+  // compare + assign idiomatic without the multi-level pointer cast
+  // memcmp/memcpy would need.
+  auto slot = [](BindingSlot index) constexpr noexcept { return static_cast<std::size_t>(index); };
+  BindingsSnapshot current{};
+  current[slot(BindingSlot::Materials)]        = _scene->GetMaterialBuffer();
+  current[slot(BindingSlot::InstanceMaterial)] = _scene->GetInstanceMaterialBuffer();
+  current[slot(BindingSlot::Lights)]           = _scene->GetLightBuffer();
+  current[slot(BindingSlot::InstanceMesh)]     = _scene->GetInstanceMeshBuffer();
+  current[slot(BindingSlot::MeshFaceNormals)]  = _scene->GetMeshFaceNormalsBuffer();
+  current[slot(BindingSlot::MeshFaceOffsets)]  = _scene->GetMeshFaceOffsetsBuffer();
+  current[slot(BindingSlot::DomeTexture)]      = _scene->GetDomeEnvMapTexture();
+  current[slot(BindingSlot::BindlessSampler)]  = _scene->GetBindlessSampler();
+  current[slot(BindingSlot::ColorHdrAov)]      = targets.colorHdr;
+  current[slot(BindingSlot::NormalAov)]        = targets.normalAov;
+  current[slot(BindingSlot::DepthAov)]         = targets.depthAov;
+  current[slot(BindingSlot::InstanceAov)]      = targets.instanceIdAov;
+  current[slot(BindingSlot::MaterialAov)]      = targets.materialIdAov;
+  current[slot(BindingSlot::BaseColorAov)]     = targets.baseColorAov;
+  current[slot(BindingSlot::WorldPosAov)]      = targets.worldPosAov;
+  current[slot(BindingSlot::PickResult)]       = targets.pickResult;
+  if (current != _lastBindings)
   {
     _bindingSetCache.clear();
     _lastBindings = current;
