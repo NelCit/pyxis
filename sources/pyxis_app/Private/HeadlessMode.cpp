@@ -98,8 +98,9 @@ void LogDeterminismPin(const Configuration& config, uint32_t framesInFlight) noe
   bool sceneLoaded = false;
   if (!resolvedScene.path.empty())
   {
-    const pyxis::usd_ingest::IngestStats stats =
+    const pyxis::usd_ingest::IngestResult result =
         IngestUsd(config.app.ingest, resolvedScene.path, gpuScene);
+    const pyxis::usd_ingest::IngestStats& stats = result.Stats();
     sceneLoaded = stats.meshesEmitted > 0 || stats.camerasEmitted > 0;
   }
   if (!sceneLoaded)
@@ -321,7 +322,7 @@ void SaveAovsFromList(std::string_view saveAovList,
 }  // namespace
 
 int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
-                std::string_view saveAovList) noexcept {
+                std::string_view saveAovList, uint32_t benchFrames) noexcept {
   auto& log = Logging::Get();
 
   // §27 ValidateForHeadless: non-zero seed (§33.7), non-empty
@@ -475,6 +476,109 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
   {
     const std::string aovPrefix = DeriveAovPrefix(config.output.image);
     SaveAovsFromList(saveAovList, aovPrefix, aovs, device, commandList);
+  }
+
+  // ---- M8b benchmark loop --------------------------------------------
+  // After the regular EXR write, optionally render N warm-up + N
+  // measurement frames and print a §34 KPI table. The warm-up frames
+  // amortise the first-frame BLAS-build / pipeline-cache / TLAS-bake
+  // costs that the single-frame above already paid; the measurement
+  // window captures steady-state numbers comparable to the §34.3 KPIs
+  // (pass.PathTrace < 12 ms, frame.cpu.commitResources < 2 ms).
+  if (benchFrames > 0)
+  {
+    // Per-pass min / sorted percentile aggregator. Vectors keep sorted
+    // values for direct percentile lookup; pass count is small (<= 8
+    // top-level scopes today) so the O(N log N) sort per print is
+    // fine.
+    struct PassAcc {
+      std::string name;
+      FrameProfile::ScopeKind kind = FrameProfile::ScopeKind::Cpu;
+      std::vector<double> samples;
+    };
+    std::vector<PassAcc> accumulators;
+    accumulators.reserve(16);
+
+    auto recordFrame = [&](const FrameProfile& profile) {
+      for (const FrameProfile::PassTiming& pass : profile.passes)
+      {
+        const std::string_view nameView = pass.name.View();
+        auto found = std::find_if(accumulators.begin(), accumulators.end(),
+                                  [nameView](const PassAcc& acc) { return acc.name == nameView; });
+        if (found == accumulators.end())
+        {
+          PassAcc fresh;
+          fresh.name.assign(nameView);
+          fresh.kind = pass.kind;
+          fresh.samples.reserve(benchFrames);
+          accumulators.push_back(std::move(fresh));
+          found = accumulators.end() - 1;
+        }
+        found->samples.push_back(pass.durationMs);
+      }
+    };
+
+    auto runOneFrame = [&]() -> bool {
+      scene.Tick();
+      profiler.BeginFrame();
+      deviceManager->BeginFrame();
+      bool frameOk = true;
+      {
+        const Profiler::CpuScope frameScope(profiler, "headless.frame");
+        frameOk = RecordAndExecuteRenderFrame(device, commandList, gpuScene, renderer,
+                                              aovs, renderTarget);
+      }
+      deviceManager->EndFrame();
+      profiler.EndFrame();
+      device->runGarbageCollection();
+      return frameOk;
+    };
+
+    log.Info(log::APP, "headless: benchmark — " + std::to_string(benchFrames)
+                           + " warm-up + " + std::to_string(benchFrames) + " measurement frames");
+    for (uint32_t i = 0; i < benchFrames; ++i)
+    {
+      if (!runOneFrame())
+      {
+        scene.Shutdown();
+        return EXIT_RUNTIME_FAIL;
+      }
+    }
+    for (uint32_t i = 0; i < benchFrames; ++i)
+    {
+      if (!runOneFrame())
+      {
+        scene.Shutdown();
+        return EXIT_RUNTIME_FAIL;
+      }
+      recordFrame(profiler.LastFrameProfile());
+    }
+
+    // ---- KPI table ---------------------------------------------------
+    auto percentile = [](std::vector<double>& samples, double pct) {
+      std::sort(samples.begin(), samples.end());
+      const auto idx = static_cast<std::size_t>(
+          (samples.size() - 1) * std::clamp(pct, 0.0, 1.0));
+      return samples[idx];
+    };
+    log.Info(log::APP, "===== §34 KPI table (steady state) =====");
+    log.Info(log::APP, "scope                              kind   p50      p99      max");
+    for (PassAcc& acc : accumulators)
+    {
+      if (acc.samples.empty())
+        continue;
+      const double p50  = percentile(acc.samples, 0.50);
+      const double p99  = percentile(acc.samples, 0.99);
+      const double pmax = percentile(acc.samples, 1.00);
+      char line[160];
+      std::snprintf(line, sizeof(line),
+                    "%-34s %-6s %7.3fms %7.3fms %7.3fms",
+                    acc.name.c_str(),
+                    acc.kind == FrameProfile::ScopeKind::Gpu ? "GPU" : "CPU",
+                    p50, p99, pmax);
+      log.Info(log::APP, std::string{line});
+    }
+    log.Info(log::APP, "========================================");
   }
 
   // ---- Effective-config dump + teardown ------------------------------

@@ -546,24 +546,30 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
   auto loadScene = [&](std::string_view             path,
                        std::string_view             adapterLabel,
                        ImGuiHost::IngestProfile&    outProfile) -> bool {
-    const pyxis::usd_ingest::IngestStats stats =
+    const pyxis::usd_ingest::IngestResult result =
         IngestUsd(adapterLabel, path, gpuScene);
-    outProfile.totalMs           = stats.totalMs;
-    outProfile.stageOpenMs       = stats.stageOpenMs;
-    outProfile.traverseSortMs    = stats.traverseSortMs;
-    outProfile.materialPassMs    = stats.materialPassMs;
-    outProfile.instancerPassMs   = stats.instancerPassMs;
-    outProfile.meshLightCameraMs = stats.meshLightCameraMs;
+    const pyxis::usd_ingest::IngestStats& stats = result.Stats();
+    outProfile.totalMs           = stats.timings.totalMs;
+    outProfile.stageOpenMs       = stats.timings.stageOpenMs;
+    outProfile.traverseSortMs    = stats.timings.traverseSortMs;
+    outProfile.materialPassMs    = stats.timings.materialPassMs;
+    outProfile.instancerPassMs   = stats.timings.instancerPassMs;
+    outProfile.meshLightCameraMs = stats.timings.meshLightCameraMs;
     // Snapshot the camera list for the editor's Scene-Camera combo.
-    // Convert from pyxis_usd_ingest's NamedCamera to ImGuiHost's
-    // mirror so the panel-side header stays free of USD includes.
+    // Pull each camera through the §18.9-compliant fixed-buffer view
+    // accessor — std::strings live behind PIMPL on the result and
+    // truncate into a 256-char inline buffer here.
     pendingSceneCameras.clear();
-    pendingSceneCameras.reserve(stats.cameras.size());
-    for (const auto& cam : stats.cameras)
+    const uint32_t cameraCount = result.GetCameraCount();
+    pendingSceneCameras.reserve(cameraCount);
+    for (uint32_t i = 0; i < cameraCount; ++i)
     {
+      pyxis::usd_ingest::NamedCameraView cameraView{};
+      if (!result.GetCameraAt(i, &cameraView))
+        continue;
       ImGuiHost::SceneCameraEntry entry;
-      entry.name = cam.name;
-      entry.desc = cam.desc;
+      entry.name = cameraView.name;
+      entry.desc = cameraView.desc;
       pendingSceneCameras.push_back(std::move(entry));
     }
     pendingActiveCameraIdx = stats.activeCameraIndex;

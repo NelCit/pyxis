@@ -25,17 +25,16 @@ Expected<InstanceHandle> GpuScene::Impl::AppendInstance(const InstanceDesc& inst
                     static_cast<uint32_t>(instanceDesc.mesh))};
   }
 
+  // O(1) free-list pop. DestroyInstance pushes the slot back on
+  // the free list symmetrically; an append-heavy load never enters
+  // the pop branch.
   uint32_t slot = 0;
-  for (uint32_t candidateSlot = 1; candidateSlot < instances.size(); ++candidateSlot)
+  if (!freeInstanceSlots.empty())
   {
-    const InstanceEntry& candidate = instances[candidateSlot];
-    if (!candidate.live && !candidate.quarantined)
-    {
-      slot = candidateSlot;
-      break;
-    }
+    slot = freeInstanceSlots.back();
+    freeInstanceSlots.pop_back();
   }
-  if (slot == 0)
+  else
   {
     if (instances.size() >= (1u << HANDLE_SLOT_BITS))
     {
@@ -120,10 +119,13 @@ void GpuScene::Impl::DestroyInstance(InstanceHandle instanceHandle)
   if (entry->generation == HANDLE_GENERATION_QUARANTINE)
   {
     entry->quarantined = true;
+    // Quarantined slot — never reuse, don't push to free list.
   }
   else
   {
     ++entry->generation;
+    const auto slot = static_cast<std::uint32_t>(entry - instances.data());
+    freeInstanceSlots.push_back(slot);
   }
   tlasNeedsRebuild = true;
   instanceMaterialNeedsUpload = true;

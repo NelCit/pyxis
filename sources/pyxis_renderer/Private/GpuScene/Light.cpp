@@ -18,17 +18,14 @@ void GpuScene::Impl::SetCamera(const CameraDesc& cameraDescIn)
 
 LightHandle GpuScene::Impl::AddLight(const LightDesc& lightDesc)
 {
+  // O(1) free-list pop; RemoveLight pushes back symmetrically.
   uint32_t slot = 0;
-  for (uint32_t candidateSlot = 1; candidateSlot < lights.size(); ++candidateSlot)
+  if (!freeLightSlots.empty())
   {
-    const LightEntry& candidate = lights[candidateSlot];
-    if (!candidate.live && !candidate.quarantined)
-    {
-      slot = candidateSlot;
-      break;
-    }
+    slot = freeLightSlots.back();
+    freeLightSlots.pop_back();
   }
-  if (slot == 0)
+  else
   {
     if (lights.size() >= (1u << HANDLE_SLOT_BITS))
     {
@@ -72,6 +69,8 @@ void GpuScene::Impl::RemoveLight(LightHandle lightHandle)
   else
   {
     ++entry->generation;
+    const auto slot = static_cast<std::uint32_t>(entry - lights.data());
+    freeLightSlots.push_back(slot);
   }
   lightsNeedGpuUpload = true;
 }

@@ -27,8 +27,15 @@ struct ResolvedScene;
 // baseColor,worldPos" + the "all" alias). Each dump lands at
 // `<output-prefix>_<aov>.exr` where the prefix is the BGRA8 path
 // stripped of its `.exr` extension. Empty = no extra writes.
+//
+// `benchFrames` (M8b): when non-zero, after the regular single-frame
+// render + EXR write the harness records `benchFrames` warm-up frames
+// + `benchFrames` measurement frames, then prints a §34 KPI table to
+// stdout (per-pass GPU + CPU min/p50/p99/max ms). Used to gate KPI
+// compliance for the §41 perf milestones (M8b Bistro, lobby, ...).
 int RunHeadless(const Configuration& config, const ResolvedScene& scene,
-                std::string_view saveAovList = {}) noexcept;
+                std::string_view saveAovList = {},
+                uint32_t benchFrames = 0) noexcept;
 
 // Viewer mode. screenshotPath is the M1 --screenshot debug capture
 // (non-empty -> render a few warmup frames, write a PNG, exit 0).

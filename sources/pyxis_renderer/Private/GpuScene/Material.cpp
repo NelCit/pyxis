@@ -30,17 +30,14 @@ MaterialHandle GpuScene::Impl::AcquireMaterial(const OpenPBRMaterialDesc& materi
     return found->second;
   }
 
+  // O(1) free-list pop; DestroyMaterial pushes back symmetrically.
   uint32_t slot = 0;
-  for (uint32_t candidate = 1; candidate < materials.size(); ++candidate)
+  if (!freeMaterialSlots.empty())
   {
-    auto& entry = materials[candidate];
-    if (!entry.live && !entry.quarantined)
-    {
-      slot = candidate;
-      break;
-    }
+    slot = freeMaterialSlots.back();
+    freeMaterialSlots.pop_back();
   }
-  if (slot == 0)
+  else
   {
     if (materials.size() >= (1u << HANDLE_SLOT_BITS))
       return MaterialHandle::Invalid;  // slot space exhausted
@@ -92,9 +89,15 @@ void GpuScene::Impl::DestroyMaterial(MaterialHandle materialHandle)
   entry->descCopy = OpenPBRMaterialDesc{};
   entry->sourcePrim.clear();
   if (entry->generation == HANDLE_GENERATION_QUARANTINE)
+  {
     entry->quarantined = true;
+  }
   else
+  {
     ++entry->generation;
+    const auto slot = static_cast<std::uint32_t>(entry - materials.data());
+    freeMaterialSlots.push_back(slot);
+  }
 }
 
 bool GpuScene::Impl::HasMaterial(MaterialHandle materialHandle) const
