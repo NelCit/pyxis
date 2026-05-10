@@ -174,12 +174,17 @@ class ImGuiHost {
   // pending request.
   std::string                           _editorPendingSaveAovPath;
 
-  // Aspect ratio (renderWidth / renderHeight) of the AOV the renderer
-  // dispatches into. ViewerMode pushes this each frame via
-  // SetRenderAspect so the Camera section can rebuild projFromView
-  // from FOV + near/far when the user drags a slider. Defaults to 1.0
-  // (square) so the first frame's editor sliders don't divide by zero.
+  // Render dims of the AOV the renderer dispatches into. ViewerMode
+  // pushes these each frame so:
+  //   - the Camera section can rebuild projFromView from FOV +
+  //     near/far when the user drags a slider (uses _renderAspect),
+  //   - the picker-pin toggle can normalise the pinned pixel into
+  //     [0, 1] UV (uses _renderWidth/_renderHeight) so the pin
+  //     survives a window resize.
+  // Defaults sized so the first frame's sliders don't divide by zero.
   float                                 _renderAspect = 1.0f;
+  uint32_t                              _renderWidth  = 1u;
+  uint32_t                              _renderHeight = 1u;
 
   // Click-to-select latch (M7 follow-up). ViewerMode pushes the
   // §15 instance slot from a left-button click (NOT a drag — drag is
@@ -189,15 +194,20 @@ class ImGuiHost {
   uint32_t                              _editorPendingClickInstance = INSTANCE_ID_NONE;
 
   // Picker pin/follow toggle (M7 follow-up). When `_pickerPinned`
-  // is true, ViewerMode pushes `_pickerPinnedX/Y` to RenderSettings
-  // instead of the live cursor pixel — the readout in the Editor
-  // stays frozen at the pixel the user pinned, so they can move
-  // the camera and see how the values at that exact world point
-  // change. F-key toggles via ImGui::IsKeyPressed inside the AOV
-  // inspector.
+  // is true, ViewerMode pushes `_pickerPinnedU/V` (denormalised to
+  // the current AOV dims) to RenderSettings instead of the live
+  // cursor pixel — the readout in the Editor stays frozen at the
+  // pixel the user pinned, so they can move the camera and see how
+  // the values at that exact world point change. F-key toggles via
+  // ImGui::IsKeyPressed inside the AOV inspector.
+  //
+  // Stored as NORMALISED [0, 1] UV (not raw pixel coords) so a window
+  // resize after pinning keeps the pin at roughly the same screen
+  // location — pre-fix the raw pinned pixel could go out-of-bounds
+  // after a resize and the pin silently died.
   bool                                  _pickerPinned = false;
-  uint32_t                              _pickerPinnedX = 0;
-  uint32_t                              _pickerPinnedY = 0;
+  float                                 _pickerPinnedU = 0.0f;
+  float                                 _pickerPinnedV = 0.0f;
 
  public:
   // Called by ViewerMode each frame; returns true and clears the
@@ -246,14 +256,15 @@ class ImGuiHost {
   // each frame; the Editor displays the hover-pixel values.
   void SetLastPickResult(const PickResult& pick) noexcept { _editorLastPick = pick; }
 
-  // ViewerMode pushes the renderer's current AOV aspect ratio
-  // (width / height) each frame. The Camera section's FOV / focal-
-  // length sliders use this to rebuild projFromView on edit so the
-  // result matches the dispatched render dims at the time of the
-  // edit. Sub-1.0 floors at a tiny epsilon to avoid divide-by-zero
-  // before the first AOV is allocated.
-  void SetRenderAspect(float aspect) noexcept {
-    _renderAspect = (aspect > 1e-3f) ? aspect : 1.0f;
+  // ViewerMode pushes the renderer's current AOV dims each frame.
+  // The Camera section's FOV / focal-length sliders use the aspect
+  // to rebuild projFromView on edit; the picker-pin toggle uses
+  // {width, height} to normalise the pinned pixel to UV so it
+  // survives a resize. Sub-1 dims floor to 1 to avoid divide-by-zero.
+  void SetRenderDims(uint32_t width, uint32_t height) noexcept {
+    _renderWidth  = (width  > 0) ? width  : 1u;
+    _renderHeight = (height > 0) ? height : 1u;
+    _renderAspect = static_cast<float>(_renderWidth) / static_cast<float>(_renderHeight);
   }
 
   // ViewerMode calls this on a left-button click that wasn't a drag
@@ -270,9 +281,12 @@ class ImGuiHost {
   // RenderSettings::mousePixel{X,Y}. When pinned, the raygen keeps
   // sampling the same pixel even as the user moves the cursor / camera,
   // so the picker readout reflects the world point the user locked in.
+  // The UV is in normalised [0, 1] coords; ViewerMode denormalises
+  // against the current AOV dims so a window resize after pinning
+  // keeps the pin at roughly the same screen location.
   [[nodiscard]] bool IsPickerPinned() const noexcept { return _pickerPinned; }
-  [[nodiscard]] uint32_t PickerPinnedX() const noexcept { return _pickerPinnedX; }
-  [[nodiscard]] uint32_t PickerPinnedY() const noexcept { return _pickerPinnedY; }
+  [[nodiscard]] float PickerPinnedU() const noexcept { return _pickerPinnedU; }
+  [[nodiscard]] float PickerPinnedV() const noexcept { return _pickerPinnedV; }
 
   // ViewerMode drains a pending save-AOV path each frame. Returns
   // true and clears the latch iff the user clicked "Save AOV..." since

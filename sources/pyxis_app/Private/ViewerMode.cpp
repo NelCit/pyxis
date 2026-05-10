@@ -646,15 +646,20 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
       // raygen keeps sampling the locked pixel regardless of cursor
       // movement. Otherwise we feed the live cursor (clamped to the
       // AOV bounds; out-of-bounds = sentinel "no pick").
+      // The pinned UV is normalised [0, 1] so a window resize after
+      // pinning denormalises against the NEW dims and the pin stays
+      // at the same screen location (pre-fix the pinned pixel went
+      // out-of-bounds and silently died).
       if (imguiHost.IsReady() && imguiHost.IsPickerPinned())
       {
-        const uint32_t pinnedX = imguiHost.PickerPinnedX();
-        const uint32_t pinnedY = imguiHost.PickerPinnedY();
-        if (pinnedX < aovs.width && pinnedY < aovs.height)
-        {
-          settings.mousePixelX = pinnedX;
-          settings.mousePixelY = pinnedY;
-        }
+        const uint32_t pinnedX = static_cast<uint32_t>(
+            imguiHost.PickerPinnedU() * static_cast<float>(aovs.width));
+        const uint32_t pinnedY = static_cast<uint32_t>(
+            imguiHost.PickerPinnedV() * static_cast<float>(aovs.height));
+        // Clamp to last-row / last-column in case the float
+        // multiplication landed on an exclusive upper bound.
+        settings.mousePixelX = (pinnedX < aovs.width)  ? pinnedX  : (aovs.width  - 1);
+        settings.mousePixelY = (pinnedY < aovs.height) ? pinnedY  : (aovs.height - 1);
       }
       else
       {
@@ -683,8 +688,7 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
       {
         const PickResult pickThisFrame = renderer.LastPickResult();
         imguiHost.SetLastPickResult(pickThisFrame);
-        imguiHost.SetRenderAspect(static_cast<float>(aovs.width)
-                                  / static_cast<float>(aovs.height));
+        imguiHost.SetRenderDims(aovs.width, aovs.height);
         // Drain the click latch the event sink set on a non-drag
         // LMB release. The picker is one frame stale by design (raygen
         // wrote pickResult last frame -> staging copy retired now ->

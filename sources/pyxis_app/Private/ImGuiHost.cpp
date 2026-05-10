@@ -1024,8 +1024,14 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
       {
         if (!_pickerPinned && pick.pixelX != PICK_PIXEL_NONE)
         {
-          _pickerPinnedX = pick.pixelX;
-          _pickerPinnedY = pick.pixelY;
+          // Capture as normalised UV so a window resize after pinning
+          // keeps the pin at roughly the same screen location. +0.5
+          // lands the UV on the pixel CENTER so denormalisation against
+          // the same dims round-trips back to the same integer pixel.
+          _pickerPinnedU =
+              (static_cast<float>(pick.pixelX) + 0.5f) / static_cast<float>(_renderWidth);
+          _pickerPinnedV =
+              (static_cast<float>(pick.pixelY) + 0.5f) / static_cast<float>(_renderHeight);
           _pickerPinned = true;
         }
         else
@@ -1036,10 +1042,17 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
       const bool pickerActive = (pick.pixelX != PICK_PIXEL_NONE);
       if (_pickerPinned)
       {
+        // Denormalise just for the readout — ViewerMode will do the
+        // same against the (possibly-resized) AOV dims when feeding
+        // the renderer.
+        const uint32_t pinnedDispX =
+            static_cast<uint32_t>(_pickerPinnedU * static_cast<float>(_renderWidth));
+        const uint32_t pinnedDispY =
+            static_cast<uint32_t>(_pickerPinnedV * static_cast<float>(_renderHeight));
         ImGui::TextColored(ImVec4(1.0f, 0.62f, 0.26f, 1.0f),
                            "Picker  PINNED @ (%u, %u)  [press F to follow mouse]",
-                           static_cast<unsigned int>(_pickerPinnedX),
-                           static_cast<unsigned int>(_pickerPinnedY));
+                           static_cast<unsigned int>(pinnedDispX),
+                           static_cast<unsigned int>(pinnedDispY));
       }
       else if (pickerActive)
       {
