@@ -1886,6 +1886,7 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
   // PrepareMesh writes only to its assigned slot in preparedMeshes
   // and to the worker's local xformCache; no cross-worker state.
   std::vector<PreparedMesh> preparedMeshes(meshPrimIndices.size());
+  const auto pass3bStart = Clock::now();
   // OpenMP parallel-for. Lower per-task overhead than MSVC's PPL/
   // ConcRT (used by std::execution::par) — measured benefit on the
   // lobby in Debug (where PPL's task-tracking machinery + Debug
@@ -1904,9 +1905,15 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
         PrepareMesh(prims[primIdx], localXformCache, materialsByPath,
                     materialsNeedingTangents, stageCtx);
   }
+  const auto pass3bEnd = Clock::now();
+  const auto pass3bMs =
+      std::chrono::duration<float, std::milli>(pass3bEnd - pass3bStart).count();
+  Logging::Get().Info(log::APP,
+      "StageWalker pass3b (parallel mesh prep): " + std::to_string(static_cast<int>(pass3bMs)) + "ms");
 
   // Pass 3c — single-writer drain: walk prims in SdfPath order and
   // emit prepared meshes / cameras / lights in lockstep.
+  const auto pass3cStart = Clock::now();
   std::size_t nextPreparedIdx = 0;
   for (const pxr::UsdPrim& prim : prims)
   {
@@ -1957,6 +1964,13 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
       }
     }
   }
+  const auto pass3cEnd = Clock::now();
+  const auto pass3cMs =
+      std::chrono::duration<float, std::milli>(pass3cEnd - pass3cStart).count();
+  Logging::Get().Info(log::APP,
+      "StageWalker pass3c (serial drain + cameras + lights): "
+          + std::to_string(static_cast<int>(pass3cMs)) + "ms");
+
   // Active-camera selection. Honour the root-layer's `boundCamera`
   // hint if present (Omniverse + DCC convention: the camera the
   // scene's authoring tool was last looking through). Fall back to

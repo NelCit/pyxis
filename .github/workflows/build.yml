@@ -28,11 +28,6 @@ jobs:
       # populate the cache (first time a port is built) and consume it
       # (subsequent runs hit cache and skip the compile entirely).
       VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
-      # sccache uses GHA cache too — same backend as the vcpkg cache,
-      # different key namespace (per-translation-unit object cache vs
-      # per-port binary cache). Together they give us "no compile"
-      # behaviour across runs as long as nothing material changed.
-      SCCACHE_GHA_ENABLED: "true"
       # CMake preset name — picks up VCPKG_BINARY_SOURCES via env above.
       PYXIS_PRESET: ci
 
@@ -40,24 +35,15 @@ jobs:
       - uses: actions/checkout@v4
 
       # Export GitHub Actions cache tokens so vcpkg's x-gha backend
-      # AND sccache's GHA backend both find them. They're only
-      # available to specific actions contexts by default; this script
-      # exports them as plain env vars to all subsequent steps.
+      # finds them. They're only available to specific actions
+      # contexts by default; this script exports them as plain env
+      # vars to all subsequent steps.
       - name: Export GHA cache tokens
         uses: actions/github-script@v7
         with:
           script: |
             core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
             core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
-
-      # sccache (Mozilla) wraps every C/C++ compile so cache hits on
-      # unchanged TUs return in ms instead of recompiling. Reads/writes
-      # the GHA cache via SCCACHE_GHA_ENABLED. The Pyxis CMake auto-
-      # detects sccache via find_program (see CMakeLists.txt) and
-      # plugs it into CMAKE_C/CXX_COMPILER_LAUNCHER — no preset
-      # changes needed once sccache is on PATH.
-      - name: Install sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
 
       # Vulkan SDK — required by find_package(Vulkan) (looks for
       # vulkan-1.lib loader) and the NVRHI Vulkan backend at runtime.
@@ -103,9 +89,3 @@ jobs:
       # `m2`) which needs a GPU; everything else is CPU-only.
       - name: Test (CPU-only suite)
         run: ctest --preset $env:PYXIS_PRESET -LE m2
-
-      # Print sccache hit/miss stats so cache-effectiveness regressions
-      # are visible in the workflow log.
-      - name: sccache stats
-        if: always()
-        run: sccache --show-stats

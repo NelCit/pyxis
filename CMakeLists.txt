@@ -15,28 +15,15 @@ cmake_minimum_required(VERSION 3.27)
 list(PREPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/_cmake")
 include(Version)
 
-# -----------------------------------------------------------------------------
-# Compiler launcher (sccache) — auto-detect, opt-out via -DPYXIS_DISABLE_SCCACHE=ON.
-# Wraps every C/C++ compile with sccache when present so incremental builds,
-# branch switches, and CI runs reuse compiled object files instead of
-# recompiling from scratch. Independent of vcpkg's binary cache (vcpkg's
-# cache is per-port; sccache is per-translation-unit).
-#
-# CI workflow installs sccache via mozilla-actions/sccache-action and sets
-# SCCACHE_GHA_ENABLED=true so sccache uses GitHub Actions cache as backend.
-# Local dev: install sccache from https://github.com/mozilla/sccache (or
-# `winget install Mozilla.sccache`) and it is picked up automatically; no
-# environment fiddling required.
-# -----------------------------------------------------------------------------
-option(PYXIS_DISABLE_SCCACHE "Skip the auto-detected sccache compiler launcher." OFF)
-if(NOT PYXIS_DISABLE_SCCACHE)
-    find_program(PYXIS_SCCACHE_PROGRAM sccache)
-    if(PYXIS_SCCACHE_PROGRAM)
-        set(CMAKE_C_COMPILER_LAUNCHER   "${PYXIS_SCCACHE_PROGRAM}")
-        set(CMAKE_CXX_COMPILER_LAUNCHER "${PYXIS_SCCACHE_PROGRAM}")
-        message(STATUS "Pyxis: sccache compiler launcher enabled (${PYXIS_SCCACHE_PROGRAM})")
-    endif()
-endif()
+# Compiler launcher: removed. The auto-detected sccache wrapper turned
+# out to silently feed the linker stale cached objects (real-world
+# repro: edit a .cpp, build "succeeds" — `[N/M] Building CXX object …`
+# printed — but the .obj on disk is the prior version, so the new
+# code never lands in the DLL even after a fresh link). Diagnosed via
+# string-grepping the .obj for a freshly-added log literal: missing.
+# Fastest reliable path is to just compile every TU. CI will need
+# its own per-TU caching strategy if rebuild times become a problem
+# (vcpkg binary cache already handles third-party).
 
 # Read version.txt so project() gets the right number.
 pyxis_read_version()
