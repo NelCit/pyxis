@@ -1022,7 +1022,7 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
       const PickResult& pick = _editorLastPick;
       if (ImGui::IsKeyPressed(ImGuiKey_F))
       {
-        if (!_pickerPinned && pick.pixelX != 0xFFFFFFFFu)
+        if (!_pickerPinned && pick.pixelX != PICK_PIXEL_NONE)
         {
           _pickerPinnedX = pick.pixelX;
           _pickerPinnedY = pick.pixelY;
@@ -1033,7 +1033,7 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
           _pickerPinned = false;
         }
       }
-      const bool pickerActive = (pick.pixelX != 0xFFFFFFFFu);
+      const bool pickerActive = (pick.pixelX != PICK_PIXEL_NONE);
       if (_pickerPinned)
       {
         ImGui::TextColored(ImVec4(1.0f, 0.62f, 0.26f, 1.0f),
@@ -1283,7 +1283,7 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
     // collapsed it. Without (b), clicking a sphere would update the
     // combo behind a closed header — silent change, bad UX.
     bool clickForceOpen = false;
-    if (_editorPendingClickInstance != 0xFFFFFFFFu)
+    if (_editorPendingClickInstance != INSTANCE_ID_NONE)
     {
       const MaterialHandle clickedMat =
           scene.LookupInstanceMaterialBySlot(_editorPendingClickInstance);
@@ -1300,7 +1300,7 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
           }
         }
       }
-      _editorPendingClickInstance = 0xFFFFFFFFu;
+      _editorPendingClickInstance = INSTANCE_ID_NONE;
     }
     if (clickForceOpen)
       ImGui::SetNextItemOpen(true, ImGuiCond_Always);

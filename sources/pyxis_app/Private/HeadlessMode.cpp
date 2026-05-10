@@ -71,9 +71,6 @@ std::string DeriveAovPrefix(std::string_view outputPath) noexcept {
 int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
                 std::string_view saveAovList) noexcept {
   auto& log = Logging::Get();
-  (void)resolvedScene;  // M4 P5d/P5e wire ingest engines; for now
-                        // the hardcoded cube fallback covers both
-                        // adapters.
 
   // §27 ValidateForHeadless: non-zero seed (§33.7), non-empty
   // output.image, non-zero render dims. Surfaces a config-fail exit

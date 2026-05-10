@@ -21,6 +21,17 @@ vcpkg-init.log
 # Generated NOTICE
 NOTICE.generated
 
+# Headless / viewer effective-config sidecars dropped wherever the
+# user happened to invoke the binary. The intentional artifacts go
+# under `build/` (covered above); the named .effective.json file lands
+# in the cwd when --effective-config is set without an absolute path.
+/*.effective.json
+
+# Headless EXR output dropped in the repo root when --output is a bare
+# filename. Bundled HDRIs (resources/) and test fixtures (tests/) keep
+# their .exr files; only root-level dumps are ignored.
+/*.exr
+
 # IDE / editor
 .vs/
 .idea/

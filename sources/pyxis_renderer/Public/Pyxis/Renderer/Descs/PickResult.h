@@ -16,6 +16,15 @@
 
 namespace pyxis {
 
+// Sentinel constants used across the picker / AOV inspector. Hoisted
+// here (next to the struct that holds them) so every site reads from
+// one source of truth instead of inlining 0xFFFFFFFFu literals. Same
+// 32-bit value but different semantic meaning per field — keeping
+// them named makes intent explicit at every read site.
+inline constexpr uint32_t INSTANCE_ID_NONE = 0xFFFFFFFFu;  // ray missed / picker disabled
+inline constexpr uint32_t MATERIAL_ID_NONE = 0xFFFFFFFFu;  // ray missed / material unbound
+inline constexpr uint32_t PICK_PIXEL_NONE  = 0xFFFFFFFFu;  // cursor outside viewport / no hover
+
 struct PickResult {
   // Row 0 — final radiance (HDR, pre-tonemap) + ray distance.
   float    colorR = 0.0f;
@@ -27,17 +36,18 @@ struct PickResult {
   float    normalX = 0.0f;
   float    normalY = 0.0f;
   float    normalZ = 0.0f;
-  uint32_t instanceId = 0xFFFFFFFFu;  // ~0u = no hit / picker disabled
+  uint32_t instanceId = INSTANCE_ID_NONE;
 
   // Row 2 — raw OpenPBR baseColor (pre-shading) + material slot.
   float    baseColorR = 0.0f;
   float    baseColorG = 0.0f;
   float    baseColorB = 0.0f;
-  uint32_t materialId = 0xFFFFFFFFu;  // ~0u = no hit
+  uint32_t materialId = MATERIAL_ID_NONE;
 
-  // Row 3 — world-space hit position + pad. Pad name follows §22.3 /
-  // §30.2 convention; NOLINT for the same reason CameraDesc::_reserved
-  // does (POD-only field, layout-locked, no `Pyxis` prefix).
+  // Row 3 — world-space hit position + 1 pad word. Bottom row's 3
+  // trailing pads land in `_pickPad`. POD-layout-locked; the §22.3 /
+  // §30.2 underscore-named pads need a NOLINT since the public-field
+  // naming rule (camelCase) doesn't accept leading underscores.
   float    worldHitX = 0.0f;
   float    worldHitY = 0.0f;
   float    worldHitZ = 0.0f;
@@ -48,12 +58,10 @@ struct PickResult {
   // space). Mirrors the mousePixel{X,Y} the renderer was given via
   // RenderSettings, so the editor's hover readout can show
   // "Picker @ (1234, 567)" without tracking its own copy.
-  uint32_t pixelX    = 0xFFFFFFFFu;
-  uint32_t pixelY    = 0xFFFFFFFFu;
+  uint32_t pixelX    = PICK_PIXEL_NONE;
+  uint32_t pixelY    = PICK_PIXEL_NONE;
   // NOLINTNEXTLINE(readability-identifier-naming)
-  uint32_t _pickPad1 = 0u;
-  // NOLINTNEXTLINE(readability-identifier-naming)
-  uint32_t _pickPad2 = 0u;
+  uint32_t _pickPad1[2] = {0u, 0u};
 };
 
 static_assert(sizeof(PickResult) == 80,

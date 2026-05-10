@@ -636,7 +636,8 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
       // Editor combo flips _editorDebugView; the cursor pump above
       // captures latestMousePixelXY from MouseMove events and we
       // clamp here to the viewport bounds (raygen treats the sentinel
-      // 0xFFFFFFFF as "no hover -> skip pick write").
+      // PICK_PIXEL_NONE / RenderSettings::MOUSE_PIXEL_NONE as "no
+      // hover -> skip pick write").
       if (imguiHost.IsReady())
       {
         settings.debugView = imguiHost.GetDebugView();
@@ -690,13 +691,19 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
         // map at top of this Execute), so the instance id we read
         // here corresponds to the click pixel within ~16 ms — easily
         // good enough for human "I clicked the orange sphere".
-        // Discards the latch when the picker reports "no hit"
-        // (instanceId == 0xFFFFFFFF) so clicking the background
-        // doesn't reset the Material combo to a stale selection.
+        // First-frame guard: pickThisFrame.pixelX == PICK_PIXEL_NONE
+        // means the renderer hasn't produced ANY pick yet (no map
+        // happened, the staging buffer holds default-constructed
+        // garbage from PickResult{}). Drop the click in that case
+        // so we don't snap to a fabricated instance id.
+        // Background-click guard: instanceId == INSTANCE_ID_NONE
+        // means the cursor was over the background; silently drop
+        // so the Material combo doesn't reset on a stray miss.
         const int32_t clickX = pendingClickPixelX.exchange(-1);
         const int32_t clickY = pendingClickPixelY.exchange(-1);
         if (clickX >= 0 && clickY >= 0
-            && pickThisFrame.instanceId != 0xFFFFFFFFu)
+            && pickThisFrame.pixelX != PICK_PIXEL_NONE
+            && pickThisFrame.instanceId != INSTANCE_ID_NONE)
         {
           imguiHost.SetClickedInstance(pickThisFrame.instanceId);
         }

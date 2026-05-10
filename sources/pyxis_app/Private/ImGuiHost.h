@@ -186,7 +186,7 @@ class ImGuiHost {
   // reserved for the camera). BuildEditorPanel drains it once per
   // frame, looks up the material via GpuScene, and snaps the
   // Material combo to that entry. Sentinel ~0u = no pending click.
-  uint32_t                              _editorPendingClickInstance = 0xFFFFFFFFu;
+  uint32_t                              _editorPendingClickInstance = INSTANCE_ID_NONE;
 
   // Picker pin/follow toggle (M7 follow-up). When `_pickerPinned`
   // is true, ViewerMode pushes `_pickerPinnedX/Y` to RenderSettings
@@ -260,7 +260,7 @@ class ImGuiHost {
   // (LMB-up displacement < small threshold). The slot comes from the
   // most recent picker readback; BuildEditorPanel drains it next
   // frame and snaps the Material combo to that instance's material.
-  // 0xFFFFFFFF = "no instance under cursor" — silently dropped.
+  // INSTANCE_ID_NONE = "no instance under cursor" — silently dropped.
   void SetClickedInstance(uint32_t instanceSlot) noexcept {
     _editorPendingClickInstance = instanceSlot;
   }
