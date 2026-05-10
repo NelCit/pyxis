@@ -30,11 +30,12 @@ namespace pyxis::app {
 // public §18 API. `adapter` is the value of `config.app.ingest`
 // ("usd_direct" or "hydra") — at M4 both branches share the same
 // StageWalker for byte-equal parity, so the dispatch is a banner-log
-// only. Returns the IngestStats from StageWalker (counts + per-stage
-// timings); on a missing / unloadable path every counter is zero and
-// the caller should fall back to the hardcoded cube.
-pyxis::usd_ingest::IngestStats IngestUsd(std::string_view adapter,
-                                         std::string_view usdPath,
-                                         GpuScene& scene);
+// only. Returns the IngestResult from StageWalker (counts + per-stage
+// timings + opaque camera list); on a missing / unloadable path
+// every counter is zero and the caller should fall back to the
+// hardcoded cube.
+pyxis::usd_ingest::IngestResult IngestUsd(std::string_view adapter,
+                                          std::string_view usdPath,
+                                          GpuScene& scene);
 
 }  // namespace pyxis::app

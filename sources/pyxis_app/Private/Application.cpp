@@ -149,7 +149,7 @@ int Run(int argc, char** argv) noexcept {
 
   if (cli.headless)
   {
-    return RunHeadless(config, scene, cli.saveAov);
+    return RunHeadless(config, scene, cli.saveAov, cli.benchFrames);
   }
   return RunViewer(config, scene, cli.screenshotPath, cli.shaderRebuildDir);
 }

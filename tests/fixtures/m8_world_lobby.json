@@ -1,0 +1,28 @@
+{
+  "$comment": "Pyxis M8a fixture — World Lobby (Omniverse Collected scene). Standalone: provides §34 KPI dims (1920x1080), pinned seed for repeatability, FIF=3 for §33.7 byte-equal contract. Scene path is supplied separately via --scene CLI so this fixture is reusable across other M8 scenes (ALAB / Moana etc.) without per-scene fixture proliferation.",
+
+  "render": {
+    "width":           1920,
+    "height":          1080,
+    "samplesPerFrame": 1,
+    "seed":            42
+  },
+
+  "output": {
+    "image":           "m8_world_lobby.exr",
+    "effectiveConfig": "m8_world_lobby.effective.json"
+  },
+
+  "diagnostics": {
+    "validationLayer": false,
+    "aftermath":       false
+  },
+
+  "limits": {
+    "framesInFlight":  3
+  },
+
+  "app": {
+    "ingest":          "usd_direct"
+  }
+}

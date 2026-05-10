@@ -7,6 +7,9 @@ README is an index of merged RFCs (one line per RFC).
 | Number | Title | Status |
 |---|---|---|
 | 0000 | Template (do not number) | Template |
+| 0001 | TLAS instance-cap of 65 536 for v1 | Accepted |
+| 0002 | Bindless texture array cap of 4 096 for v1 | Accepted |
+| 0003 | Move render-side `GpuScene` accessors to a `SceneResources` view | Accepted |
 
 ## Lifecycle (§44.4)
 

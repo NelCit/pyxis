@@ -54,6 +54,33 @@ class FlyCameraController final {
   // view transform updates.
   void Update(float dtSeconds, GpuScene& scene) noexcept;
 
+  // Snap to a specific authored camera. Re-seeds yaw / pitch /
+  // position from the supplied desc so the controller's next Update
+  // continues from there. Used by the editor's Scene-Camera combo
+  // (and ViewerMode after a scene reload) to jump the FlyCam onto
+  // an authored hero camera.
+  void SnapToCamera(const CameraDesc& camera) noexcept;
+
+  // Linear-translation speed (the WASD/ZQSD pace). Angular look
+  // sensitivity is intentionally NOT exposed — mouse drag is in
+  // pixels and stays at the §29.2 default.
+  [[nodiscard]] float MoveSpeed() const noexcept { return _moveSpeed; }
+  void SetMoveSpeed(float metresPerSecond) noexcept;
+
+  // Drop the seeded-from-scene flag so the next Update re-seeds from
+  // whatever camera the (possibly newly-loaded) scene authors. Used
+  // by ViewerMode after a scene reload — without it the FlyCam
+  // silently keeps the old scene's pose. Preserves move speed
+  // (the user's slider value carries across reloads).
+  void Reset() noexcept;
+
+  // Read-only pose accessors for the editor's pose readout. Position
+  // is world-space (after the StageWalker's stage→world correction
+  // bakes metersPerUnit + Z->Y); orientation is returned as a unit
+  // quaternion (xyz = imaginary, w = real) derived from yaw + pitch.
+  [[nodiscard]] hlslpp::float3 Position() const noexcept { return _position; }
+  [[nodiscard]] hlslpp::float4 OrientationQuat() const noexcept;
+
  private:
   // Public so the .cpp's anonymous-namespace Bit() helper can name
   // it — it's still an implementation detail (only the .cpp uses it).

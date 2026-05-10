@@ -30,6 +30,27 @@ GpuScene::GpuScene(nvrhi::IDevice* device, Profiler& profiler, const GpuSceneCre
   _impl->device = device;
   _impl->profiler = &profiler;
   _impl->desc = desc;
+  // M8a perf: pre-reserve entry vectors + dedup maps to skip the
+  // first dozen geometric reallocations during scene load. Sized for
+  // a "modest production scene" (lobby = ~1K meshes / 1K instances /
+  // ~150 materials / ~200 textures); larger scenes (Bistro ~50K) pay
+  // a few extra reallocations past these caps but never the cliff
+  // from 0 → 1024. Memory cost is bounded — each entry vector is at
+  // most a few hundred bytes per slot, so 4096 reservations cost
+  // ~MB-class up front.
+  constexpr std::size_t INITIAL_MESH_RESERVE     = 4096;
+  constexpr std::size_t INITIAL_INSTANCE_RESERVE = 4096;
+  constexpr std::size_t INITIAL_MATERIAL_RESERVE = 512;
+  constexpr std::size_t INITIAL_TEXTURE_RESERVE  = 1024;
+  constexpr std::size_t INITIAL_LIGHT_RESERVE    = 256;
+  _impl->meshes.reserve(INITIAL_MESH_RESERVE);
+  _impl->instances.reserve(INITIAL_INSTANCE_RESERVE);
+  _impl->materials.reserve(INITIAL_MATERIAL_RESERVE);
+  _impl->textures.reserve(INITIAL_TEXTURE_RESERVE);
+  _impl->lights.reserve(INITIAL_LIGHT_RESERVE);
+  _impl->meshDescHashToHandle.reserve(INITIAL_MESH_RESERVE);
+  _impl->materialDescHashToHandle.reserve(INITIAL_MATERIAL_RESERVE);
+  _impl->textureKeyHashToHandle.reserve(INITIAL_TEXTURE_RESERVE);
   // Slot 0 is the Invalid sentinel for every handle table — keep
   // each one permanently quarantined so a fabricated handle whose
   // slot decodes to 0 never resolves.
@@ -232,6 +253,39 @@ nvrhi::IBuffer* GpuScene::GetMeshFaceNormalsBuffer() const noexcept {
 
 nvrhi::IBuffer* GpuScene::GetMeshFaceOffsetsBuffer() const noexcept {
   return _impl->meshFaceOffsetsBuffer.Get();
+}
+
+nvrhi::IBuffer* GpuScene::GetMeshUvsBuffer() const noexcept {
+  return _impl->meshUvsBuffer.Get();
+}
+
+nvrhi::IBuffer* GpuScene::GetMeshUvOffsetsBuffer() const noexcept {
+  return _impl->meshUvOffsetsBuffer.Get();
+}
+
+nvrhi::IBuffer* GpuScene::GetMeshIndicesBuffer() const noexcept {
+  return _impl->meshIndicesBuffer.Get();
+}
+
+nvrhi::IBuffer* GpuScene::GetMeshIndexOffsetsBuffer() const noexcept {
+  return _impl->meshIndexOffsetsBuffer.Get();
+}
+
+nvrhi::ITexture* GpuScene::GetMissingTexture() const noexcept {
+  return _impl->missingTexture.Get();
+}
+
+uint32_t GpuScene::GetBindlessTextureCount() const noexcept {
+  return static_cast<uint32_t>(_impl->textures.size());
+}
+
+nvrhi::ITexture* GpuScene::GetBindlessTextureAt(uint32_t bindlessSlot) const noexcept {
+  if (bindlessSlot >= _impl->textures.size())
+    return nullptr;
+  const Impl::TextureEntry& entry = _impl->textures[bindlessSlot];
+  if (!entry.live || !entry.texture)
+    return nullptr;
+  return entry.texture.Get();
 }
 
 // ---- Editor introspection (M7 follow-up) -----------------------------------

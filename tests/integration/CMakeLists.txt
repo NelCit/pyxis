@@ -133,3 +133,51 @@ set_tests_properties(M7.AovInspectorWritesAllAovs PROPERTIES
     TIMEOUT   120  # Two USD-loading runs (one --save-aov all + one
                    # determinism re-run).
 )
+
+# §41 M8a — World Lobby smoke. The framework test for "renderer
+# survives an Omniverse-Collected production-style scene + emits a
+# plausible EXR." Differs from M2..M7 fixtures: the scene is NOT
+# bundled in the repo (3.4 GB compressed → .gitignore'd at
+# resources/scenes/world_lobby/). Conditionally registered: if the
+# entry-point .usd doesn't exist at config time, we emit a STATUS
+# line and skip — no test is added — so a clean clone still
+# `ctest`s green without the user setup.
+#
+# Setup steps the user must run ONCE (before reconfigure):
+#   1. Download Collected_World_Lobby.zip (Omniverse Marketplace).
+#   2. Extract to <repo>/resources/scenes/world_lobby/ (excluding
+#      the .usdz duplicate and .thumbs/ saves ~1.7 GB).
+#   3. Re-run `cmake -S . -B build/dev` to pick up the test.
+#
+# Override path: pass -DM8_SCENE_PATH=<absolute path to .usd> to
+# point at a different location (e.g. a sibling directory outside
+# the repo). The path is resolved at configure time, not at test
+# time, so a missing scene at configure time silently de-registers.
+set(_m8_default_scene
+    "${CMAKE_SOURCE_DIR}/resources/scenes/world_lobby/World_Lobby.usd")
+set(M8_SCENE_PATH "${_m8_default_scene}" CACHE FILEPATH
+    "Path to the M8a stress-test scene .usd (default: World Lobby under \
+resources/scenes/world_lobby/). Test is skipped if the file doesn't exist.")
+if(EXISTS "${M8_SCENE_PATH}")
+    add_test(
+        NAME    M8a.WorldLobbySmoke
+        COMMAND ${CMAKE_COMMAND}
+                -DPYXIS_EXE=$<TARGET_FILE:pyxis>
+                -DFIXTURE_CONFIG=${CMAKE_SOURCE_DIR}/tests/fixtures/m8_world_lobby.json
+                -DSCENE_PATH=${M8_SCENE_PATH}
+                -DOUTPUT_DIR=${CMAKE_BINARY_DIR}/tests/integration/m8_world_lobby
+                -P ${CMAKE_SOURCE_DIR}/tests/integration/m8_world_lobby_smoke.cmake
+    )
+    set_tests_properties(M8a.WorldLobbySmoke PROPERTIES
+        LABELS    "integration;m8;m8a;requires_external_scene"
+        TIMEOUT   600  # First run can take 60-90s on a cold cache (1256
+                       # textures via synchronous stb_image decode); 10
+                       # min ceiling tolerates a slow first build pass.
+    )
+    message(STATUS "M8a.WorldLobbySmoke registered (scene: ${M8_SCENE_PATH})")
+else()
+    message(STATUS
+        "M8a.WorldLobbySmoke skipped — no scene at ${M8_SCENE_PATH}. "
+        "Extract Collected_World_Lobby.zip into resources/scenes/world_lobby/ "
+        "and reconfigure to enable.")
+endif()

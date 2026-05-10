@@ -85,17 +85,15 @@ Expected<MeshHandle> GpuScene::Impl::CreateMesh(const MeshDesc& meshDesc)
   }
 
   // ---- Allocate slot -----------------------------------------------------
+  // O(1) free-list pop. DestroyMesh pushes the slot back here
+  // symmetrically; an append-only load never enters the pop branch.
   uint32_t slot = 0;
-  for (uint32_t candidateSlot = 1; candidateSlot < meshes.size(); ++candidateSlot)
+  if (!freeMeshSlots.empty())
   {
-    const MeshEntry& candidate = meshes[candidateSlot];
-    if (!candidate.live && !candidate.quarantined)
-    {
-      slot = candidateSlot;
-      break;
-    }
+    slot = freeMeshSlots.back();
+    freeMeshSlots.pop_back();
   }
-  if (slot == 0)
+  else
   {
     if (meshes.size() >= (1u << HANDLE_SLOT_BITS))
     {
@@ -153,6 +151,14 @@ Expected<MeshHandle> GpuScene::Impl::CreateMesh(const MeshDesc& meshDesc)
   }
   meshFaceNormalsNeedUpload = true;
 
+  // M8a: any mesh registration also dirties the per-mesh UV +
+  // index flat buffers (re-uploaded next CommitResources). UV array
+  // can be empty when the source authored no `primvars:st`; the
+  // closesthit's HasBaseColorMap flag falls through to the scalar
+  // baseColor in that case.
+  meshUvsNeedUpload     = true;
+  meshIndicesNeedUpload = true;
+
   // Record the descHash on the entry + register the handle in the
   // dedup map. DestroyMesh erases the map entry symmetrically.
   entry.descHash = descHash;
@@ -194,9 +200,18 @@ void GpuScene::Impl::DestroyMesh(MeshHandle meshHandle)
   entry->vertexCount = 0;
   entry->indexCount = 0;
   if (entry->generation == HANDLE_GENERATION_QUARANTINE)
+  {
     entry->quarantined = true;
+    // Quarantined slots are never reused — don't push to free list.
+  }
   else
+  {
     ++entry->generation;
+    // Recycle the slot for the next CreateMesh. Generation bump
+    // protects stale handles from accidentally resolving here.
+    const auto slot = static_cast<std::uint32_t>(entry - meshes.data());
+    freeMeshSlots.push_back(slot);
+  }
 }
 
 bool GpuScene::Impl::HasMesh(MeshHandle meshHandle) const

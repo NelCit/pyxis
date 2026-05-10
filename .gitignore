@@ -92,6 +92,16 @@ Crashes/
 # Local user config
 parameters.local.json
 
+# M8 stress-test scenes — large external assets the user downloads + drops
+# under resources/scenes/. Bundled smoke-test fixtures (default.usd /
+# default_sky.exr) stay tracked; everything else under resources/scenes/
+# is local-only.
+#
+# CONVENTION: resources/scenes/<scene-name>/ for any external scene the
+# user wants the M8 framework to load. Add the directory name here OR
+# rely on the size-bounded default rule below.
+/resources/scenes/world_lobby/
+
 # OS detritus
 Thumbs.db
 .DS_Store

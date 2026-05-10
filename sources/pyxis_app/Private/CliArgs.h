@@ -49,6 +49,14 @@ struct CliArgs {
   std::string_view outputPath;   // --output <path>  (overrides output.image)
   std::string_view profilePath;  // --profile <path>  (M11+ wires)
 
+  // M8b — headless benchmark mode. When non-zero, after the normal
+  // single-frame render + EXR write, the headless harness records N
+  // additional warm-up frames and N measurement frames, then prints a
+  // KPI table to stdout (pass.PathTrace ms, frame.cpu.commitResources
+  // ms, p50 / p99 / max). Used to gate §34 KPI compliance for the
+  // §41 perf milestones.
+  uint32_t benchFrames = 0;      // --bench-frames <int>  (0 = disabled)
+
   // ---- M7 follow-up: AOV save -----------------------------------------
   // --save-aov <list>  Comma-separated list of raw AOVs to dump
   // alongside the regular `--output` BGRA8 EXR. The path stem of

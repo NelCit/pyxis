@@ -464,6 +464,71 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
     {
       if (ImGui::CollapsingHeader("Camera"))
       {
+        // Scene-camera combo. List of every camera the StageWalker
+        // emitted (fed in via SetSceneCameras). Selecting an entry
+        // latches the index → ViewerMode drains it and snaps the
+        // FlyCam to that camera's transform on the next frame. The
+        // same combo doubles as a record of what the scene authored
+        // so the user knows what's available.
+        if (!_sceneCameras.empty())
+        {
+          const int currentIdx = (_sceneCameraSelectedIndex >= 0
+                                  && _sceneCameraSelectedIndex
+                                       < static_cast<int>(_sceneCameras.size()))
+                                     ? _sceneCameraSelectedIndex
+                                     : 0;
+          const std::string& currentName = _sceneCameras[static_cast<std::size_t>(currentIdx)].name;
+          char preview[256];
+          std::snprintf(preview, sizeof(preview), "%s", currentName.c_str());
+          ImGui::PushItemWidth(260.0f);
+          if (ImGui::BeginCombo("Scene Camera", preview))
+          {
+            for (std::size_t i = 0; i < _sceneCameras.size(); ++i)
+            {
+              const bool isSelected = (static_cast<int>(i) == currentIdx);
+              char itemLabel[256];
+              std::snprintf(itemLabel, sizeof(itemLabel), "%s",
+                            _sceneCameras[i].name.c_str());
+              if (ImGui::Selectable(itemLabel, isSelected))
+              {
+                _sceneCameraSelectedIndex = static_cast<int>(i);
+                _latches.snapToSceneCameraIndex = static_cast<int>(i);
+              }
+              if (isSelected)
+                ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+          }
+          ImGui::PopItemWidth();
+        }
+
+        // FlyCam linear move-speed slider. Logarithmic so a Bistro-
+        // scale scene (10–50 m/s feels right) and a unit-cube fixture
+        // (~0.5 m/s feels right) both have usable resolution. Angular
+        // sensitivity is intentionally NOT exposed — mouse drag at
+        // the §29.2 default works across DPI / scale.
+        ImGui::PushItemWidth(180.0f);
+        ImGui::SliderFloat("Move speed (m/s)", &_moveSpeed, 0.05f, 200.0f, "%.2f",
+                           ImGuiSliderFlags_Logarithmic);
+        ImGui::PopItemWidth();
+
+        // Live pose readout. Position in world-space metres (after
+        // the StageWalker's stage→world correction); orientation as a
+        // unit quaternion (xyz, w). Read-only — derived from the
+        // FlyCam each frame, not user-editable through this readout.
+        ImGui::TextDisabled(
+            "Position    %.3f, %.3f, %.3f m",
+            static_cast<double>(_cameraPosition.x),
+            static_cast<double>(_cameraPosition.y),
+            static_cast<double>(_cameraPosition.z));
+        ImGui::TextDisabled(
+            "Orientation %.4f, %.4f, %.4f, %.4f (xyzw)",
+            static_cast<double>(_cameraOrientationQuat.x),
+            static_cast<double>(_cameraOrientationQuat.y),
+            static_cast<double>(_cameraOrientationQuat.z),
+            static_cast<double>(_cameraOrientationQuat.w));
+        ImGui::Separator();
+
         CameraDesc cameraDesc = scene.GetCamera();
         bool cameraEdited      = false;
         bool projectionEdited  = false;
@@ -504,6 +569,14 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
           cameraEdited = true;
           projectionEdited = true;
         }
+        // Photographic exposure (stops). Multiplies post-shading
+        // radiance by 2^exposure before ACES tonemap. Linear range
+        // -20..+5 covers the Omniverse-style "intensity 12000 + exposure
+        // -10" calibration plus normal-content room (-3..+3 stops).
+        // Doesn't touch projFromView so projectionEdited stays false.
+        if (ImGui::SliderFloat("Exposure (stops)", &cameraDesc.exposure, -20.0f, 5.0f,
+                               "%.2f"))
+          cameraEdited = true;
         ImGui::PopItemWidth();
 
         if (projectionEdited)

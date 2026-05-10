@@ -28,17 +28,14 @@ TextureHandle GpuScene::Impl::AcquireTexture(const TextureKey& textureKey)
     return found->second;
   }
 
+  // O(1) free-list pop; DestroyTexture pushes back symmetrically.
   uint32_t slot = 0;
-  for (uint32_t candidate = 1; candidate < textures.size(); ++candidate)
+  if (!freeTextureSlots.empty())
   {
-    auto& entry = textures[candidate];
-    if (!entry.live && !entry.quarantined)
-    {
-      slot = candidate;
-      break;
-    }
+    slot = freeTextureSlots.back();
+    freeTextureSlots.pop_back();
   }
-  if (slot == 0)
+  else
   {
     if (textures.size() >= (1u << HANDLE_SLOT_BITS))
       return TextureHandle::Invalid;
@@ -72,9 +69,15 @@ void GpuScene::Impl::DestroyTexture(TextureHandle textureHandle)
   entry->pixelData.clear();
   entry->pixelData.shrink_to_fit();
   if (entry->generation == HANDLE_GENERATION_QUARANTINE)
+  {
     entry->quarantined = true;
+  }
   else
+  {
     ++entry->generation;
+    const auto slot = static_cast<std::uint32_t>(entry - textures.data());
+    freeTextureSlots.push_back(slot);
+  }
 }
 
 bool GpuScene::Impl::HasTexture(TextureHandle textureHandle) const

@@ -538,17 +538,41 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
   // into ImGuiHost::IngestProfile for the Loading-panel breakdown;
   // returns true iff any meshes / cameras landed (matches the prior
   // bool semantics).
+  // Pending state captured from each ingest run. Cameras + active
+  // index are pushed to ImGuiHost::SetSceneCameras after Init runs;
+  // ingest profile + source label feed the Loading panel.
+  std::vector<ImGuiHost::SceneCameraEntry> pendingSceneCameras;
+  int                                      pendingActiveCameraIdx = -1;
   auto loadScene = [&](std::string_view             path,
                        std::string_view             adapterLabel,
                        ImGuiHost::IngestProfile&    outProfile) -> bool {
-    const pyxis::usd_ingest::IngestStats stats =
+    const pyxis::usd_ingest::IngestResult result =
         IngestUsd(adapterLabel, path, gpuScene);
-    outProfile.totalMs           = stats.totalMs;
-    outProfile.stageOpenMs       = stats.stageOpenMs;
-    outProfile.traverseSortMs    = stats.traverseSortMs;
-    outProfile.materialPassMs    = stats.materialPassMs;
-    outProfile.instancerPassMs   = stats.instancerPassMs;
-    outProfile.meshLightCameraMs = stats.meshLightCameraMs;
+    const pyxis::usd_ingest::IngestStats& stats = result.Stats();
+    outProfile.totalMs           = stats.timings.totalMs;
+    outProfile.stageOpenMs       = stats.timings.stageOpenMs;
+    outProfile.traverseSortMs    = stats.timings.traverseSortMs;
+    outProfile.materialPassMs    = stats.timings.materialPassMs;
+    outProfile.instancerPassMs   = stats.timings.instancerPassMs;
+    outProfile.meshLightCameraMs = stats.timings.meshLightCameraMs;
+    // Snapshot the camera list for the editor's Scene-Camera combo.
+    // Pull each camera through the §18.9-compliant fixed-buffer view
+    // accessor — std::strings live behind PIMPL on the result and
+    // truncate into a 256-char inline buffer here.
+    pendingSceneCameras.clear();
+    const uint32_t cameraCount = result.GetCameraCount();
+    pendingSceneCameras.reserve(cameraCount);
+    for (uint32_t i = 0; i < cameraCount; ++i)
+    {
+      pyxis::usd_ingest::NamedCameraView cameraView{};
+      if (!result.GetCameraAt(i, &cameraView))
+        continue;
+      ImGuiHost::SceneCameraEntry entry;
+      entry.name = cameraView.name;
+      entry.desc = cameraView.desc;
+      pendingSceneCameras.push_back(std::move(entry));
+    }
+    pendingActiveCameraIdx = stats.activeCameraIndex;
     return stats.meshesEmitted > 0 || stats.camerasEmitted > 0;
   };
 
@@ -636,6 +660,12 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
   {
     imguiHost.SetIngestProfile(pendingIngestProfile, pendingIngestSource);
   }
+  // Push the startup scene-camera list into the editor's combo. Empty
+  // list (cube fixture) silently disables the combo.
+  if (imguiHost.IsReady())
+  {
+    imguiHost.SetSceneCameras(pendingSceneCameras, pendingActiveCameraIdx);
+  }
   if (screenshotMode)
   {
     log.Info(log::APP, "ViewerMode: --screenshot path supplied; capturing one frame after warmup");
@@ -693,7 +723,47 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
       }
       lastFrameTime = now;
       haveLastFrameTime = true;
+
+      // Drain the editor's Scene-Camera combo selection (if any) and
+      // push the move-speed slider. Both are fire-and-forget — the
+      // controller absorbs whatever the UI provides without blocking
+      // the rest of the frame loop. Order: snap FIRST so the same-
+      // frame Update() integrates from the new pose; speed second so
+      // the WASD integration in Update() sees the latest value.
+      if (imguiHost.IsReady())
+      {
+        int snapIdx = -1;
+        if (imguiHost.TakeSnapToSceneCameraRequest(snapIdx))
+        {
+          const auto& cams = imguiHost.SceneCameras();
+          if (snapIdx >= 0 && static_cast<std::size_t>(snapIdx) < cams.size())
+          {
+            const auto& chosen = cams[static_cast<std::size_t>(snapIdx)];
+            cameraController.SnapToCamera(chosen.desc);
+            // Also push into GpuScene so the projection / lens
+            // intrinsics (focal / fStop / clip) match the chosen
+            // camera, not the previously-active one. The controller
+            // overwrites viewFromWorld each Update() but leaves the
+            // intrinsic fields alone.
+            gpuScene.SetCamera(chosen.desc);
+            log.Info(log::APP,
+                     "ViewerMode: snapped FlyCam to scene camera " + chosen.name);
+          }
+        }
+        cameraController.SetMoveSpeed(imguiHost.MoveSpeed());
+      }
+
       cameraController.Update(dtSeconds, gpuScene);
+
+      // Push the FlyCam's post-Update pose into the editor's readout.
+      // Cheap (one float3 + float4 copy); the editor's TextDisabled
+      // rows update each frame so the user sees the live pose as
+      // they fly around.
+      if (imguiHost.IsReady())
+      {
+        imguiHost.SetCameraPose(cameraController.Position(),
+                                cameraController.OrientationQuat());
+      }
     }
     {
       const Profiler::CpuScope tick(profiler, "app.scene.tick");
@@ -778,8 +848,16 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
       {
         device->waitForIdle();
         gpuScene.Clear();
+        // Reset the FlyCam's seed bit so the next Update re-seeds
+        // from whatever camera the new scene authors. Without this
+        // the FlyCam would silently keep the old scene's pose.
+        // Move-speed survives the reset (user preference).
+        cameraController.Reset();
         ImGuiHost::IngestProfile reloadProfile{};
         const bool reloadOk = loadScene(sceneReloadPath, config.app.ingest, reloadProfile);
+        // Push the new scene-camera list regardless of reloadOk —
+        // empty list on failure clears the old combo entries.
+        imguiHost.SetSceneCameras(pendingSceneCameras, pendingActiveCameraIdx);
         if (reloadOk)
         {
           imguiHost.SetIngestProfile(reloadProfile, config.app.ingest);

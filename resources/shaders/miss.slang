@@ -93,5 +93,5 @@ void main(inout HitInfo payload) {
     payload.baseColor   = float3(0.0, 0.0, 0.0);
     payload.materialId  = 0xFFFFFFFFu;
     payload.worldHit    = float3(0.0, 0.0, 0.0);
-    payload._hitInfoPad0 = 0u;
+    payload.elementId   = 0xFFFFFFFFu;  // Hydra-canonical miss sentinel
 }

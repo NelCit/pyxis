@@ -217,6 +217,16 @@ CliArgs Parse(int argc, char** argv) noexcept {
         return out;
       }
     }
+    else if (Equals(arg, "--bench-frames"))
+    {
+      if (i + 1 >= argc || !ParseUInt32(argv[i + 1], out.benchFrames))
+      {
+        out.invalid = true;
+        out.invalidArg = arg;
+        return out;
+      }
+      ++i;
+    }
     else
     {
       out.invalid = true;
@@ -258,6 +268,10 @@ void PrintUsage() noexcept {
       "                          spawns ShaderMake against (overrides the cwd walk-up\n"
       "                          heuristic). Use when the binary lives outside the\n"
       "                          build tree.\n"
+      "  --bench-frames <int>    Headless: after the regular EXR write, run N warm-up\n"
+      "                          frames + N measurement frames; print a §34 KPI table\n"
+      "                          (pass.PathTrace, frame.cpu.commitResources, p50/p99/max).\n"
+      "                          0 = disabled (default).\n"
       "\n"
       "Viewer extras:\n"
       "  --screenshot <path>     Run viewer briefly; write a PNG of the backbuffer.\n"
