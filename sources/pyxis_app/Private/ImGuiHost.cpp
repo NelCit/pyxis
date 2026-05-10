@@ -693,30 +693,18 @@ void ImGuiHost::BuildScenePanel(const FrameStats& sceneStats) noexcept {
   // degraded sentinel). All values come from a single
   // GpuScene::LastFrameStats() call the caller drained for us.
   //
-  // Bytes formatted by absolute magnitude (B / KiB / MiB / GiB)
-  // because raw byte counts are unreadable past ~1 KiB but the
-  // smaller scenes (M3 cube, M5 / M6 / M7 fixtures) live well below
-  // 1 MiB and would lose precision under a uniform MB / GB unit.
+  // Format bytes UNIFORMLY in MiB so adjacent rows are visually
+  // additive (the user can mentally check "Vertex + Index + Texture
+  // + BLAS + TLAS == Scene total" without converting between B / KiB
+  // / MiB / GiB by eye). 4 decimal places keeps tiny-fixture values
+  // readable down to ~100 B (~0.0001 MiB); Bistro-class scenes with
+  // hundreds of MiB still fit in the same column.
+  // Pre-fix this auto-picked the unit per row; the audit flagged the
+  // mixed-unit display as the underlying source of "Total doesn't
+  // seem to add right" complaints.
   auto formatBytes = [](uint64_t bytes, char* buf, std::size_t bufSize) {
-    if (bytes >= (1ull << 30))
-    {
-      const double gib = static_cast<double>(bytes) / static_cast<double>(1ull << 30);
-      std::snprintf(buf, bufSize, "%.2f GiB", gib);
-    }
-    else if (bytes >= (1ull << 20))
-    {
-      const double mib = static_cast<double>(bytes) / static_cast<double>(1ull << 20);
-      std::snprintf(buf, bufSize, "%.2f MiB", mib);
-    }
-    else if (bytes >= (1ull << 10))
-    {
-      const double kib = static_cast<double>(bytes) / static_cast<double>(1ull << 10);
-      std::snprintf(buf, bufSize, "%.2f KiB", kib);
-    }
-    else
-    {
-      std::snprintf(buf, bufSize, "%llu B", static_cast<unsigned long long>(bytes));
-    }
+    const double mib = static_cast<double>(bytes) / static_cast<double>(1ull << 20);
+    std::snprintf(buf, bufSize, "%9.4f MiB", mib);
   };
   char bytesBuf[32];
 
