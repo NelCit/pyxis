@@ -211,19 +211,9 @@ nvrhi::ITexture* GpuScene::GetDomeEnvMapTexture() const noexcept {
   {
     if (!entry.live || entry.descCopy.kind != LightDesc::Kind::Dome)
       continue;
-    const auto envMapValue = static_cast<std::uint32_t>(entry.descCopy.envMap);
-    if (envMapValue == 0)
-      continue;
-    const std::uint32_t texSlot = HandleSlot(envMapValue);
-    if (texSlot == 0 || texSlot >= _impl->textures.size())
-      continue;
-    const Impl::TextureEntry& tex = _impl->textures[texSlot];
-    if (!tex.live || tex.quarantined
-        || tex.generation != HandleGeneration(envMapValue))
-      continue;
-    if (!tex.texture)
-      continue;
-    return tex.texture.Get();
+    const Impl::TextureEntry* tex = _impl->LookupTexture(entry.descCopy.envMap);
+    if (tex != nullptr && tex->texture)
+      return tex->texture.Get();
   }
   return nullptr;
 }

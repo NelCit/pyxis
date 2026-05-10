@@ -78,17 +78,8 @@ Expected<MeshHandle> GpuScene::Impl::CreateMesh(const MeshDesc& meshDesc)
     // mesh counts but not zero) or a stale entry from a Destroy that
     // somehow missed the map cleanup falls through to a fresh
     // allocation.
-    const auto cachedValue = static_cast<std::uint32_t>(found->second);
-    const std::uint32_t cachedSlot = HandleSlot(cachedValue);
-    if (cachedSlot > 0 && cachedSlot < meshes.size())
-    {
-      const MeshEntry& cached = meshes[cachedSlot];
-      if (cached.live && !cached.quarantined
-          && cached.generation == HandleGeneration(cachedValue))
-      {
-        return found->second;
-      }
-    }
+    if (LookupMesh(found->second) != nullptr)
+      return found->second;
     // Stale map entry — drop it and fall through to allocate fresh.
     meshDescHashToHandle.erase(found);
   }
@@ -177,63 +168,40 @@ Expected<void> GpuScene::Impl::UpdateMesh(MeshHandle /*meshHandle*/, const MeshD
 
 void GpuScene::Impl::DestroyMesh(MeshHandle meshHandle)
 {
-  const auto value = static_cast<uint32_t>(meshHandle);
-  if (value == 0)
+  MeshEntry* entry = ResolveMesh(meshHandle);
+  if (entry == nullptr)
     return;
-  const uint32_t slot = HandleSlot(value);
-  if (slot == 0 || slot >= meshes.size())
-  {
-    ++lastFrameStats.staleHandleDrops;
-    return;
-  }
-  MeshEntry& entry = meshes[slot];
-  if (!entry.live || entry.quarantined || entry.generation != HandleGeneration(value))
-  {
-    ++lastFrameStats.staleHandleDrops;
-    return;
-  }
   // §15 content-dedup map cleanup. Erase by stored hash so a future
   // CreateMesh of the same content allocates fresh instead of
   // looking up a dead slot.
-  meshDescHashToHandle.erase(entry.descHash);
-  entry.descHash = 0;
-  entry.live = false;
-  entry.needsGpuUpload = false;
-  entry.needsBlasBuild = false;
-  entry.positions.clear();
-  entry.indices.clear();
-  entry.normals.clear();
-  entry.tangents.clear();
-  entry.uv0.clear();
-  entry.debugName.clear();
+  meshDescHashToHandle.erase(entry->descHash);
+  entry->descHash = 0;
+  entry->live = false;
+  entry->needsGpuUpload = false;
+  entry->needsBlasBuild = false;
+  entry->positions.clear();
+  entry->indices.clear();
+  entry->normals.clear();
+  entry->tangents.clear();
+  entry->uv0.clear();
+  entry->debugName.clear();
   // Drop the GPU resources. NVRHI's deferred-destruction queue
   // keeps them alive until any in-flight command list that
   // references them retires.
-  entry.vertexBuffer = nullptr;
-  entry.indexBuffer = nullptr;
-  entry.blas = nullptr;
-  entry.vertexCount = 0;
-  entry.indexCount = 0;
-  if (entry.generation == HANDLE_GENERATION_QUARANTINE)
-  {
-    entry.quarantined = true;
-  }
+  entry->vertexBuffer = nullptr;
+  entry->indexBuffer = nullptr;
+  entry->blas = nullptr;
+  entry->vertexCount = 0;
+  entry->indexCount = 0;
+  if (entry->generation == HANDLE_GENERATION_QUARANTINE)
+    entry->quarantined = true;
   else
-  {
-    ++entry.generation;
-  }
+    ++entry->generation;
 }
 
 bool GpuScene::Impl::HasMesh(MeshHandle meshHandle) const
 {
-  const auto value = static_cast<uint32_t>(meshHandle);
-  if (value == 0)
-    return false;
-  const uint32_t slot = HandleSlot(value);
-  if (slot == 0 || slot >= meshes.size())
-    return false;
-  const MeshEntry& entry = meshes[slot];
-  return entry.live && !entry.quarantined && entry.generation == HandleGeneration(value);
+  return LookupMesh(meshHandle) != nullptr;
 }
 
 }  // namespace pyxis

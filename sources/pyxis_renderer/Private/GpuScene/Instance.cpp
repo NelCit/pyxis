@@ -131,14 +131,7 @@ void GpuScene::Impl::DestroyInstance(InstanceHandle instanceHandle)
 
 bool GpuScene::Impl::HasInstance(InstanceHandle instanceHandle) const
 {
-  const auto value = static_cast<uint32_t>(instanceHandle);
-  if (value == 0)
-    return false;
-  const uint32_t slot = HandleSlot(value);
-  if (slot == 0 || slot >= instances.size())
-    return false;
-  const InstanceEntry& entry = instances[slot];
-  return entry.live && !entry.quarantined && entry.generation == HandleGeneration(value);
+  return LookupInstance(instanceHandle) != nullptr;
 }
 
 }  // namespace pyxis

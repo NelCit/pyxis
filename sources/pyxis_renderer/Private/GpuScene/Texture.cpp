@@ -62,43 +62,24 @@ TextureHandle GpuScene::Impl::AcquireTexture(const TextureKey& textureKey)
 
 void GpuScene::Impl::DestroyTexture(TextureHandle textureHandle)
 {
-  const auto value = static_cast<uint32_t>(textureHandle);
-  if (value == 0)
+  TextureEntry* entry = ResolveTexture(textureHandle);
+  if (entry == nullptr)
     return;
-  const uint32_t slot = HandleSlot(value);
-  if (slot == 0 || slot >= textures.size())
-  {
-    ++lastFrameStats.staleHandleDrops;
-    return;
-  }
-  TextureEntry& entry = textures[slot];
-  if (!entry.live || entry.quarantined || entry.generation != HandleGeneration(value))
-  {
-    ++lastFrameStats.staleHandleDrops;
-    return;
-  }
-  textureKeyHashToHandle.erase(entry.keyHash);
-  entry.live = false;
-  entry.texture = nullptr;
-  entry.resolvedPath.clear();
-  entry.pixelData.clear();
-  entry.pixelData.shrink_to_fit();
-  if (entry.generation == HANDLE_GENERATION_QUARANTINE)
-    entry.quarantined = true;
+  textureKeyHashToHandle.erase(entry->keyHash);
+  entry->live = false;
+  entry->texture = nullptr;
+  entry->resolvedPath.clear();
+  entry->pixelData.clear();
+  entry->pixelData.shrink_to_fit();
+  if (entry->generation == HANDLE_GENERATION_QUARANTINE)
+    entry->quarantined = true;
   else
-    ++entry.generation;
+    ++entry->generation;
 }
 
 bool GpuScene::Impl::HasTexture(TextureHandle textureHandle) const
 {
-  const auto value = static_cast<uint32_t>(textureHandle);
-  if (value == 0)
-    return false;
-  const uint32_t slot = HandleSlot(value);
-  if (slot == 0 || slot >= textures.size())
-    return false;
-  const TextureEntry& entry = textures[slot];
-  return entry.live && !entry.quarantined && entry.generation == HandleGeneration(value);
+  return LookupTexture(textureHandle) != nullptr;
 }
 
 }  // namespace pyxis

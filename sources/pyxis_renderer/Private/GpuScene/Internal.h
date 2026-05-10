@@ -463,51 +463,73 @@ struct GpuScene::Impl
   // both flags. UpdateInstanceMaterial only bumps this one.
   bool                         instanceMaterialNeedsUpload = false;
 
-  // Resolver helpers — centralise the §18.5 stale-handle policy for
-  // void-returning Update* / Destroy* verbs. Invalid silently no-ops
-  // with no counter bump; recycled / out-of-range handles bump
-  // staleHandleDrops and return nullptr.
-  [[nodiscard]] InstanceEntry* ResolveInstance(InstanceHandle handle) noexcept
+  // ---- Handle resolution -----------------------------------------------
+  //
+  // Two layers per entry type:
+  //
+  //   LookupX  — const, no side effects. Returns nullptr for any
+  //              invalid case (Invalid sentinel, slot out of range,
+  //              recycled-generation, dead). Used by Has* predicates +
+  //              read-only paths where the §18.5 stale-handle counter
+  //              must NOT bump.
+  //
+  //   ResolveX — mutating, counter-aware. Same nullptr cases as Lookup
+  //              but bumps `staleHandleDrops` whenever a non-Invalid
+  //              handle failed to resolve. Used by void-returning
+  //              Update* / Destroy* verbs per the §18.5 contract:
+  //              Invalid silently no-ops (no counter bump); recycled /
+  //              out-of-range bumps the counter and returns nullptr.
+  //
+  // Resolve composes from Lookup so the underlying validation logic
+  // stays in one place.
+
+  template <typename Entry>
+  [[nodiscard]] static const Entry* LookupEntryImpl(uint32_t handleValue,
+                                                    const std::vector<Entry>& entries) noexcept
   {
-    const auto value = static_cast<uint32_t>(handle);
-    if (value == 0)
+    if (handleValue == 0)
       return nullptr;
-    const uint32_t slot = gpuscene_detail::HandleSlot(value);
-    if (slot == 0 || slot >= instances.size())
-    {
-      ++lastFrameStats.staleHandleDrops;
+    const uint32_t slot = gpuscene_detail::HandleSlot(handleValue);
+    if (slot == 0 || slot >= entries.size())
       return nullptr;
-    }
-    InstanceEntry& entry = instances[slot];
+    const Entry& entry = entries[slot];
     if (!entry.live || entry.quarantined
-        || entry.generation != gpuscene_detail::HandleGeneration(value))
-    {
-      ++lastFrameStats.staleHandleDrops;
+        || entry.generation != gpuscene_detail::HandleGeneration(handleValue))
       return nullptr;
-    }
     return &entry;
   }
 
-  [[nodiscard]] LightEntry* ResolveLight(LightHandle handle) noexcept
+  // Promote a non-Invalid lookup miss into a stale-handle counter
+  // bump per §18.5. Returns the same pointer for transparent chaining.
+  template <typename Entry, typename Handle>
+  [[nodiscard]] Entry* BumpIfStaleAndReturn(Handle handle, const Entry* entry) noexcept
   {
-    const auto value = static_cast<uint32_t>(handle);
-    if (value == 0)
-      return nullptr;
-    const uint32_t slot = gpuscene_detail::HandleSlot(value);
-    if (slot == 0 || slot >= lights.size())
-    {
+    if (entry == nullptr && static_cast<uint32_t>(handle) != 0)
       ++lastFrameStats.staleHandleDrops;
-      return nullptr;
-    }
-    LightEntry& entry = lights[slot];
-    if (!entry.live || entry.quarantined
-        || entry.generation != gpuscene_detail::HandleGeneration(value))
-    {
-      ++lastFrameStats.staleHandleDrops;
-      return nullptr;
-    }
-    return &entry;
+    return const_cast<Entry*>(entry);
   }
+
+  [[nodiscard]] const MeshEntry*     LookupMesh(MeshHandle handle) const noexcept
+  { return LookupEntryImpl(static_cast<uint32_t>(handle), meshes); }
+  [[nodiscard]] const MaterialEntry* LookupMaterial(MaterialHandle handle) const noexcept
+  { return LookupEntryImpl(static_cast<uint32_t>(handle), materials); }
+  [[nodiscard]] const TextureEntry*  LookupTexture(TextureHandle handle) const noexcept
+  { return LookupEntryImpl(static_cast<uint32_t>(handle), textures); }
+  [[nodiscard]] const InstanceEntry* LookupInstance(InstanceHandle handle) const noexcept
+  { return LookupEntryImpl(static_cast<uint32_t>(handle), instances); }
+  [[nodiscard]] const LightEntry*    LookupLight(LightHandle handle) const noexcept
+  { return LookupEntryImpl(static_cast<uint32_t>(handle), lights); }
+
+  [[nodiscard]] MeshEntry*     ResolveMesh(MeshHandle handle) noexcept
+  { return BumpIfStaleAndReturn(handle, LookupMesh(handle)); }
+  [[nodiscard]] MaterialEntry* ResolveMaterial(MaterialHandle handle) noexcept
+  { return BumpIfStaleAndReturn(handle, LookupMaterial(handle)); }
+  [[nodiscard]] TextureEntry*  ResolveTexture(TextureHandle handle) noexcept
+  { return BumpIfStaleAndReturn(handle, LookupTexture(handle)); }
+  [[nodiscard]] InstanceEntry* ResolveInstance(InstanceHandle handle) noexcept
+  { return BumpIfStaleAndReturn(handle, LookupInstance(handle)); }
+  [[nodiscard]] LightEntry*    ResolveLight(LightHandle handle) noexcept
+  { return BumpIfStaleAndReturn(handle, LookupLight(handle)); }
 
   // Resolve a TextureHandle to its bindless slot index, or to
   // INVALID_BINDLESS_TEXTURE for Invalid / out-of-range / dead
@@ -517,17 +539,8 @@ struct GpuScene::Impl
   // outside the private PIMPL boundary.
   [[nodiscard]] std::uint32_t ResolveTextureBindlessSlot(TextureHandle handle) const noexcept
   {
-    const auto value = static_cast<std::uint32_t>(handle);
-    if (value == 0)
-      return shaderinterop::INVALID_BINDLESS_TEXTURE;
-    const std::uint32_t slot = gpuscene_detail::HandleSlot(value);
-    if (slot == 0 || slot >= textures.size())
-      return shaderinterop::INVALID_BINDLESS_TEXTURE;
-    const auto& entry = textures[slot];
-    if (!entry.live || entry.quarantined
-        || entry.generation != gpuscene_detail::HandleGeneration(value))
-      return shaderinterop::INVALID_BINDLESS_TEXTURE;
-    return entry.bindlessSlot;
+    const TextureEntry* entry = LookupTexture(handle);
+    return entry ? entry->bindlessSlot : shaderinterop::INVALID_BINDLESS_TEXTURE;
   }
 
   // ---- Verb member functions (defined in per-verb .cpp files) ----------

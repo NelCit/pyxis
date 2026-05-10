@@ -65,72 +65,41 @@ MaterialHandle GpuScene::Impl::AcquireMaterial(const OpenPBRMaterialDesc& materi
 void GpuScene::Impl::UpdateMaterial(MaterialHandle materialHandle,
                                     const OpenPBRMaterialDesc& materialDesc)
 {
-  const auto value = static_cast<uint32_t>(materialHandle);
-  if (value == 0)
+  MaterialEntry* entry = ResolveMaterial(materialHandle);
+  if (entry == nullptr)
     return;
-  const uint32_t slot = HandleSlot(value);
-  if (slot == 0 || slot >= materials.size())
-  {
-    ++lastFrameStats.staleHandleDrops;
-    return;
-  }
-  MaterialEntry& entry = materials[slot];
-  if (!entry.live || entry.quarantined || entry.generation != HandleGeneration(value))
-  {
-    ++lastFrameStats.staleHandleDrops;
-    return;
-  }
   // Re-hash + dedup-map maintenance: drop the old hash entry, add
   // the new one. If the new hash already maps to a different live
   // material, we leave that alone (Update doesn't merge handles —
   // semantics: this material's *fields* changed in place).
-  materialDescHashToHandle.erase(entry.descHash);
-  entry.descCopy = materialDesc;
-  entry.descHash = HashMaterialDesc(materialDesc);
-  entry.sourcePrim.assign(materialDesc.sourcePrim);
-  entry.descCopy.sourcePrim = entry.sourcePrim;
-  entry.needsGpuUpload = true;
-  materialDescHashToHandle.emplace(entry.descHash, materialHandle);
+  materialDescHashToHandle.erase(entry->descHash);
+  entry->descCopy = materialDesc;
+  entry->descHash = HashMaterialDesc(materialDesc);
+  entry->sourcePrim.assign(materialDesc.sourcePrim);
+  entry->descCopy.sourcePrim = entry->sourcePrim;
+  entry->needsGpuUpload = true;
+  materialDescHashToHandle.emplace(entry->descHash, materialHandle);
   materialsNeedGpuUpload = true;
 }
 
 void GpuScene::Impl::DestroyMaterial(MaterialHandle materialHandle)
 {
-  const auto value = static_cast<uint32_t>(materialHandle);
-  if (value == 0)
+  MaterialEntry* entry = ResolveMaterial(materialHandle);
+  if (entry == nullptr)
     return;
-  const uint32_t slot = HandleSlot(value);
-  if (slot == 0 || slot >= materials.size())
-  {
-    ++lastFrameStats.staleHandleDrops;
-    return;
-  }
-  MaterialEntry& entry = materials[slot];
-  if (!entry.live || entry.quarantined || entry.generation != HandleGeneration(value))
-  {
-    ++lastFrameStats.staleHandleDrops;
-    return;
-  }
-  materialDescHashToHandle.erase(entry.descHash);
-  entry.live = false;
-  entry.descCopy = OpenPBRMaterialDesc{};
-  entry.sourcePrim.clear();
-  if (entry.generation == HANDLE_GENERATION_QUARANTINE)
-    entry.quarantined = true;
+  materialDescHashToHandle.erase(entry->descHash);
+  entry->live = false;
+  entry->descCopy = OpenPBRMaterialDesc{};
+  entry->sourcePrim.clear();
+  if (entry->generation == HANDLE_GENERATION_QUARANTINE)
+    entry->quarantined = true;
   else
-    ++entry.generation;
+    ++entry->generation;
 }
 
 bool GpuScene::Impl::HasMaterial(MaterialHandle materialHandle) const
 {
-  const auto value = static_cast<uint32_t>(materialHandle);
-  if (value == 0)
-    return false;
-  const uint32_t slot = HandleSlot(value);
-  if (slot == 0 || slot >= materials.size())
-    return false;
-  const MaterialEntry& entry = materials[slot];
-  return entry.live && !entry.quarantined && entry.generation == HandleGeneration(value);
+  return LookupMaterial(materialHandle) != nullptr;
 }
 
 }  // namespace pyxis
