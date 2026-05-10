@@ -107,6 +107,65 @@ float4 SampleByConeRGBA(uint texIdx, float2 uv, float coneRadius) {
     return gBindlessTextures[texIdx].SampleLevel(gBindlessSampler, uv, lod);
 }
 
+static const float PYXIS_PI_SAFE = 3.14159265358979323846;
+
+// M9-fidelity Schlick Fresnel. F0 derives per-material:
+//   dielectrics: F0 = ((ior - 1) / (ior + 1))² — typically ~0.04
+//                 for plastics / glass at ior ≈ 1.5
+//   metals:      F0 = baseColor (each channel acts as the per-
+//                 wavelength reflectance at normal incidence)
+// metalness blends linearly between the two.
+float3 SchlickF0(float3 baseColor, float metalness, float ior) {
+    const float dielectricBase = (ior - 1.0) / (ior + 1.0);
+    const float dielectricF0   = dielectricBase * dielectricBase;
+    return lerp(float3(dielectricF0, dielectricF0, dielectricF0),
+                baseColor, metalness);
+}
+
+float3 SchlickFresnel(float3 f0, float cosTheta) {
+    const float oneMinus = 1.0 - max(0.0, cosTheta);
+    const float oneMinus5 = oneMinus * oneMinus * oneMinus * oneMinus * oneMinus;
+    return f0 + (float3(1.0, 1.0, 1.0) - f0) * oneMinus5;
+}
+
+// Simplified GGX specular evaluation for direct lighting. Trowbridge-
+// Reitz NDF + Smith correlated G — full microfacet eval but no
+// importance sampling (we evaluate per-light contribution at the
+// half-vector, not sample a bounce direction). Roughness is
+// remapped via α = roughness² (the Disney convention) so the input
+// roughness is perceptually linear.
+//
+// Returns: per-channel specular contribution. Multiply by light
+// radiance, NdotL, falloff, and cone attenuation at the call site.
+float3 GgxSpecular(float3 N, float3 V, float3 L, float3 baseColor,
+                   float metalness, float roughness, float ior) {
+    const float3 H = normalize(V + L);
+    const float NdotL = max(1e-4, dot(N, L));
+    const float NdotV = max(1e-4, dot(N, V));
+    const float NdotH = max(1e-4, dot(N, H));
+    const float VdotH = max(1e-4, dot(V, H));
+
+    // Roughness² remap (Disney). α=0 is mirror; α=1 is diffuse-like.
+    const float alpha  = max(0.001, roughness * roughness);
+    const float alpha2 = alpha * alpha;
+
+    // GGX / Trowbridge-Reitz NDF.
+    const float denomD = NdotH * NdotH * (alpha2 - 1.0) + 1.0;
+    const float D      = alpha2 / (PYXIS_PI_SAFE * denomD * denomD);
+
+    // Smith-correlated G (Heitz 2014 — single divide for both
+    // shadowing+masking).
+    const float lambdaV = NdotL * sqrt(NdotV * NdotV * (1.0 - alpha2) + alpha2);
+    const float lambdaL = NdotV * sqrt(NdotL * NdotL * (1.0 - alpha2) + alpha2);
+    const float G2      = 0.5 / (lambdaV + lambdaL);
+
+    // Schlick Fresnel at the half-vector.
+    const float3 F0 = SchlickF0(baseColor, metalness, ior);
+    const float3 F  = SchlickFresnel(F0, VdotH);
+
+    return D * G2 * F;  // (NdotL × NdotV) factor cancels with G2's denominator
+}
+
 // Slang emits the SPIR-V `OpEntryPoint` name as `"main"` regardless
 // of the source-side function name; the C++ side passes `"main"` to
 // NVRHI's createShader. See the matching note in raygen.slang.
@@ -164,6 +223,28 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
         && mat.baseColorTex < BINDLESS_TEXTURES_CAP) {
         baseColor = SampleByCone(mat.baseColorTex, uv, coneRadius);
     }
+
+    // M9-fidelity: roughness + metallic from per-material textures.
+    // Both default to the scalar in the material; per-texture sample
+    // overrides when the matching MATERIAL_FLAG_HAS_*_MAP bit is set
+    // (PackMaterialGpu sets the bit when the texture handle is valid).
+    // Roughness samples the .g channel (the GLTF / OpenPBR convention
+    // for ORM packed maps); metallic samples .b. UsdPreviewSurface
+    // authoring can split them across separate textures, in which
+    // case the .g read still hits the data channel for a single-
+    // channel roughness map.
+    float roughness = mat.roughness;
+    float metalness = mat.metalness;
+    if ((mat.flags & MATERIAL_FLAG_HAS_ROUGHNESS_MAP) != 0u
+        && mat.roughnessTex < BINDLESS_TEXTURES_CAP) {
+        roughness = SampleByConeRGBA(mat.roughnessTex, uv, coneRadius).g;
+    }
+    if ((mat.flags & MATERIAL_FLAG_HAS_METALLIC_MAP) != 0u
+        && mat.metallicTex < BINDLESS_TEXTURES_CAP) {
+        metalness = SampleByConeRGBA(mat.metallicTex, uv, coneRadius).b;
+    }
+    roughness = clamp(roughness, 0.04, 1.0);  // floor avoids singular GGX
+    metalness = saturate(metalness);
 
     // M9 smooth shading: try the per-vertex normal path first. The
     // vertex-normal flat buffer is per-mesh-vertex (3 normals per
@@ -286,10 +367,14 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
     uint lightCount;
     uint _stride;
     gLights.GetDimensions(lightCount, _stride);
-    float3 directSum = float3(0.0, 0.0, 0.0);
-    float3 ambientSum = float3(0.0, 0.0, 0.0);
+    float3 directDiffuse  = float3(0.0, 0.0, 0.0);
+    float3 directSpecular = float3(0.0, 0.0, 0.0);
+    float3 ambientSum     = float3(0.0, 0.0, 0.0);
     float  totalContribution = 0.0;
     const float3 hitWorld = WorldRayOrigin() + RayTCurrent() * WorldRayDirection();
+    // M9-fidelity: view direction (FROM surface TO eye) for the GGX
+    // microfacet half-vector + Schlick Fresnel.
+    const float3 viewDir = normalize(-WorldRayDirection());
     for (uint i = 0; i < lightCount; ++i) {
         LightGpu L = gLights[i];
         if (L.intensity <= 0.0) continue;  // sentinel / disabled
@@ -357,7 +442,22 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
                                          cosAngle);
         }
 
-        directSum += Lcol * NdotL * falloff * coneAttenuation;
+        // M9-fidelity diffuse + specular split. Diffuse: Lambert
+        // (baseColor × NdotL). Specular: GGX microfacet at the
+        // half-vector. Schlick Fresnel handles the dielectric vs
+        // metal F0 split inside GgxSpecular. Energy conservation
+        // (1 - F) on diffuse for dielectrics + (0) for metals
+        // (which absorb diffuse light) is approximated via
+        // (1 - metalness) — proper energy-conservation requires
+        // computing F at the view angle and weighting diffuse by
+        // (1 - F)·(1 - metalness), which is M11+ polish.
+        const float3 diffuseTerm =
+            baseColor * (1.0 - metalness) * NdotL * falloff * coneAttenuation;
+        const float3 specularTerm =
+            GgxSpecular(nWorld, viewDir, lightDir, baseColor, metalness, roughness, mat.specularIor)
+            * NdotL * falloff * coneAttenuation;
+        directDiffuse  += Lcol * diffuseTerm;
+        directSpecular += Lcol * specularTerm;
         // pre-NdotL, pre-falloff totalContribution drives only the
         // "any-lights / fall through to emissive baseColor" sentinel
         // below. Adding the raw intensity (rather than the attenuated
@@ -386,8 +486,13 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
         }
     }
 
+    // M9-fidelity composite: diffuse already has baseColor + (1-metalness)
+    // baked in by the per-light loop. Ambient (dome) still uses the
+    // M7-simple Lambertian-against-up approximation modulated by
+    // baseColor. Specular is energy-conserving via the per-light F0
+    // / metalness split inside GgxSpecular.
     const float3 lit = (totalContribution > 0.0)
-        ? (baseColor * (directSum + ambientSum))
+        ? (directDiffuse + directSpecular + baseColor * ambientSum)
         : baseColor;
     payload.color = lit + emission;
     payload.hitT  = RayTCurrent();
