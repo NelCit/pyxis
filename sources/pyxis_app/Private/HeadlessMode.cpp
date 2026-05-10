@@ -6,6 +6,7 @@
 #include "Output/AovExrSaver.h"
 #include "Output/ExrWriter.h"
 #include "Output/TextureReadback.h"
+#include "Render/AovRegistry.h"
 #include "Render/AovTextures.h"
 #include "HydraEngine/HydraEngine.h"
 #include "Render/HardcodedCubeScene.h"
@@ -364,24 +365,22 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
       }
     };
     auto resolveAndSave = [&](std::string_view aovName) {
-      if (aovName == "color")           saveOne("color",      aovs.colorHdr.Get());
-      else if (aovName == "normal")     saveOne("normal",     aovs.normal.Get());
-      else if (aovName == "depth")      saveOne("depth",      aovs.depth.Get());
-      else if (aovName == "instanceId") saveOne("instanceId", aovs.instanceId.Get());
-      else if (aovName == "materialId") saveOne("materialId", aovs.materialId.Get());
-      else if (aovName == "baseColor")  saveOne("baseColor",  aovs.baseColor.Get());
-      else if (aovName == "worldPos")   saveOne("worldPos",   aovs.worldPos.Get());
-      else
+      // Single source of truth for the name -> texture mapping —
+      // matches ViewerMode's Save AOV button via the same registry.
+      const AovEntry* entry = FindAovByName(aovName);
+      if (entry == nullptr)
       {
         log.Warn(log::APP, "headless: --save-aov: unknown AOV name '"
                                + std::string{aovName}
                                + "' (recognised: color,normal,depth,instanceId,"
                                  "materialId,baseColor,worldPos,all)");
+        return;
       }
+      saveOne(entry->name, (aovs.*entry->texturePtr).Get());
     };
 
     // Token-iterate the comma-list. Each name dispatches independently;
-    // an "all" token expands to every recognised AOV.
+    // an "all" token expands to every entry in AOV_REGISTRY.
     std::size_t cursor = 0;
     while (cursor < saveAovList.size())
     {
@@ -394,13 +393,8 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
         continue;
       if (name == "all")
       {
-        resolveAndSave("color");
-        resolveAndSave("normal");
-        resolveAndSave("depth");
-        resolveAndSave("instanceId");
-        resolveAndSave("materialId");
-        resolveAndSave("baseColor");
-        resolveAndSave("worldPos");
+        for (const AovEntry& entry : AOV_REGISTRY)
+          saveOne(entry.name, (aovs.*entry.texturePtr).Get());
       }
       else
       {

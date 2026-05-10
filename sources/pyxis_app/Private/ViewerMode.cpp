@@ -9,6 +9,7 @@
 #include <imgui.h>
 #include "Output/AovExrSaver.h"
 #include "Output/TextureReadback.h"
+#include "Render/AovRegistry.h"
 #include "Render/AovTextures.h"
 #include "HydraEngine/HydraEngine.h"
 #include "Render/HardcodedCubeScene.h"
@@ -774,40 +775,17 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
     if (imguiHost.IsReady() && imguiHost.TakeSaveAovRequest(saveAovPath))
     {
       const RenderSettings::DebugView pickedView = imguiHost.GetDebugView();
-      nvrhi::ITexture* sourceAov = nullptr;
-      const char* aovLabel = "color";
-      switch (pickedView)
-      {
-        case RenderSettings::DebugView::Color:
-          // Save HDR color (pre-tonemap), not the BGRA8 display copy.
-          sourceAov = aovs.colorHdr.Get();
-          aovLabel = "colorHdr";
-          break;
-        case RenderSettings::DebugView::Normal:
-          sourceAov = aovs.normal.Get();
-          aovLabel = "normal";
-          break;
-        case RenderSettings::DebugView::Depth:
-          sourceAov = aovs.depth.Get();
-          aovLabel = "depth";
-          break;
-        case RenderSettings::DebugView::InstanceId:
-          sourceAov = aovs.instanceId.Get();
-          aovLabel = "instanceId";
-          break;
-        case RenderSettings::DebugView::MaterialId:
-          sourceAov = aovs.materialId.Get();
-          aovLabel = "materialId";
-          break;
-        case RenderSettings::DebugView::BaseColor:
-          sourceAov = aovs.baseColor.Get();
-          aovLabel = "baseColor";
-          break;
-        case RenderSettings::DebugView::WorldPos:
-          sourceAov = aovs.worldPos.Get();
-          aovLabel = "worldPos";
-          break;
-      }
+      // Resolve via the shared registry — single source of truth for
+      // (DebugView -> texture + filename suffix) across viewer +
+      // headless. Pre-refactor this site carried its own switch on
+      // the enum that needed to stay in lockstep with HeadlessMode's
+      // separate `if (name == "color") ...` chain.
+      const AovEntry* entry = FindAovByDebugView(pickedView);
+      nvrhi::ITexture* sourceAov = (entry != nullptr)
+                                       ? (aovs.*entry->texturePtr).Get()
+                                       : nullptr;
+      const std::string_view aovLabel =
+          (entry != nullptr) ? entry->name : std::string_view{"color"};
       if (sourceAov == nullptr)
       {
         log.Error(log::APP, "ViewerMode: save AOV: source texture is null");
