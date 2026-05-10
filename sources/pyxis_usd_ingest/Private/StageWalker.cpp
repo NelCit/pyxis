@@ -146,41 +146,27 @@ namespace {
 // duplicating shared positions only as needed. UV seams + hard
 // crease edges then render correctly.
 //
-// VertexKey captures the discriminator: the original positionIdx
-// (so we never merge across distinct positions) plus the bit-cast
-// of normal + uv. Bit-cast (vs value-cast) is intentional — two
-// mathematically-equal floats with different representations
-// (e.g. -0 vs +0) compare equal under operator==, and the
-// std::unordered_map uses operator== for collision resolution.
-// FNV-1a 64-bit hash keeps the hash distribution uniform across
-// 6 uint32 slots without pulling a heavyweight hashing library.
-struct VertexKey {
-  std::uint32_t positionIdx;
-  std::uint32_t normalBits[3];
-  std::uint32_t uvBits[2];
-
-  bool operator==(const VertexKey& other) const noexcept {
-    return positionIdx     == other.positionIdx
-        && normalBits[0]   == other.normalBits[0]
-        && normalBits[1]   == other.normalBits[1]
-        && normalBits[2]   == other.normalBits[2]
-        && uvBits[0]       == other.uvBits[0]
-        && uvBits[1]       == other.uvBits[1];
-  }
-};
-
-struct VertexKeyHash {
-  std::size_t operator()(const VertexKey& key) const noexcept {
-    std::uint64_t hash = 0xcbf29ce484222325ULL;
-    auto mix = [&](std::uint32_t word) {
-      hash ^= static_cast<std::uint64_t>(word);
-      hash *= 0x100000001b3ULL;
-    };
-    mix(key.positionIdx);
-    mix(key.normalBits[0]); mix(key.normalBits[1]); mix(key.normalBits[2]);
-    mix(key.uvBits[0]);     mix(key.uvBits[1]);
-    return static_cast<std::size_t>(hash);
-  }
+// **Chained per-position dedup** (not std::unordered_map). The
+// initial implementation used unordered_map<VertexKey, uint32_t>
+// keyed on (positionIdx + bit-cast normal + bit-cast uv); it was
+// correct but catastrophically slow in MSVC Debug builds —
+// std::unordered_map node allocations + iterator-debugging
+// overhead dragged lobby ingest from ~15s to ~160s.
+//
+// Replacement: per parent-mesh-position, a singly-linked chain
+// of (normal, uv, outIdx) entries pooled in a flat vector.
+// Lookup walks the chain comparing bit-patterns; in production
+// scenes most positions have one entry (chain length 1, one
+// memcmp per face-vertex), UV-seam corners + hard-edge vertices
+// have 2–4 entries. Zero per-FV allocations once the entry pool
+// is reserved. Same dedup semantics as the unordered_map — bit-
+// equal (n, uv) tuples collapse to the same slot, distinct
+// tuples split — but ~50× faster in Debug.
+struct VertexEntry {
+  std::uint32_t normalBits[3];   // bit-cast hlslpp::float3
+  std::uint32_t uvBits[2];       // bit-cast hlslpp::float2
+  std::uint32_t outIdx;          // slot in outPositions
+  std::int32_t  next;            // chain link, -1 = end
 };
 
 // MikkTSpace user-data + callbacks for per-mesh tangent generation.
@@ -191,18 +177,28 @@ struct VertexKeyHash {
 // emitted vertex slot, where face-varying boundaries already split
 // into distinct slots), so each tangent write naturally lands on a
 // unique slot and the first-tangent-wins guard becomes a no-op.
+//
+// Pointers (not std::vector*) are intentional: MikkTSpace fires its
+// callbacks ~12 times per face, and MSVC Debug's std::vector<T>::
+// operator[] does iterator-debugging bounds checks each access. On
+// the lobby that overhead alone added tens of seconds to ingest;
+// caching raw const pointers + sizes once per mesh skirts the
+// per-callback std::vector machinery entirely.
 struct MikkContext {
-  const std::vector<hlslpp::float3>* positions       = nullptr;
-  const std::vector<std::uint32_t>*  triangleIndices = nullptr;  // post-triangulation
-  const std::vector<hlslpp::float3>* vertexNormals   = nullptr;
-  const std::vector<hlslpp::float2>* vertexUvs       = nullptr;
-  std::vector<hlslpp::float4>*       outVertexTangents = nullptr;  // x,y,z,sign
-  std::vector<bool>*                 outTangentAssigned = nullptr;
+  const std::uint32_t*    triangleIndices   = nullptr;
+  std::size_t             triangleVertCount = 0;  // = triangleIndices length
+  const hlslpp::float3*   positions         = nullptr;
+  std::size_t             positionsCount    = 0;
+  const hlslpp::float3*   vertexNormals     = nullptr;
+  const hlslpp::float2*   vertexUvs         = nullptr;
+  hlslpp::float4*         outVertexTangents = nullptr;  // x,y,z,sign
+  bool*                   outTangentAssigned = nullptr;
+  std::size_t             outVertexCount    = 0;
 };
 
 int MikkGetNumFaces(const SMikkTSpaceContext* ctx) {
   const auto* user = static_cast<const MikkContext*>(ctx->m_pUserData);
-  return static_cast<int>(user->triangleIndices->size() / 3u);
+  return static_cast<int>(user->triangleVertCount / 3u);
 }
 
 int MikkGetNumVerticesOfFace(const SMikkTSpaceContext* /*ctx*/, int /*face*/) {
@@ -213,9 +209,9 @@ void MikkGetPosition(const SMikkTSpaceContext* ctx, float* outPos,
                      int face, int vert) {
   const auto* user = static_cast<const MikkContext*>(ctx->m_pUserData);
   const std::uint32_t vertexIdx =
-      (*user->triangleIndices)[static_cast<std::size_t>(face) * 3u
-                               + static_cast<std::size_t>(vert)];
-  const hlslpp::float3& pos = (*user->positions)[vertexIdx];
+      user->triangleIndices[static_cast<std::size_t>(face) * 3u
+                            + static_cast<std::size_t>(vert)];
+  const hlslpp::float3& pos = user->positions[vertexIdx];
   outPos[0] = static_cast<float>(pos.x);
   outPos[1] = static_cast<float>(pos.y);
   outPos[2] = static_cast<float>(pos.z);
@@ -225,9 +221,9 @@ void MikkGetNormal(const SMikkTSpaceContext* ctx, float* outNormal,
                    int face, int vert) {
   const auto* user = static_cast<const MikkContext*>(ctx->m_pUserData);
   const std::uint32_t vertexIdx =
-      (*user->triangleIndices)[static_cast<std::size_t>(face) * 3u
-                               + static_cast<std::size_t>(vert)];
-  const hlslpp::float3& nrm = (*user->vertexNormals)[vertexIdx];
+      user->triangleIndices[static_cast<std::size_t>(face) * 3u
+                            + static_cast<std::size_t>(vert)];
+  const hlslpp::float3& nrm = user->vertexNormals[vertexIdx];
   outNormal[0] = static_cast<float>(nrm.x);
   outNormal[1] = static_cast<float>(nrm.y);
   outNormal[2] = static_cast<float>(nrm.z);
@@ -237,9 +233,9 @@ void MikkGetTexCoord(const SMikkTSpaceContext* ctx, float* outUv,
                      int face, int vert) {
   const auto* user = static_cast<const MikkContext*>(ctx->m_pUserData);
   const std::uint32_t vertexIdx =
-      (*user->triangleIndices)[static_cast<std::size_t>(face) * 3u
-                               + static_cast<std::size_t>(vert)];
-  const hlslpp::float2& uvCoord = (*user->vertexUvs)[vertexIdx];
+      user->triangleIndices[static_cast<std::size_t>(face) * 3u
+                            + static_cast<std::size_t>(vert)];
+  const hlslpp::float2& uvCoord = user->vertexUvs[vertexIdx];
   outUv[0] = static_cast<float>(uvCoord.x);
   outUv[1] = static_cast<float>(uvCoord.y);
 }
@@ -248,15 +244,15 @@ void MikkSetTSpaceBasic(const SMikkTSpaceContext* ctx, const float* tangent,
                         float sign, int face, int vert) {
   auto* user = static_cast<MikkContext*>(ctx->m_pUserData);
   const std::uint32_t vertexIdx =
-      (*user->triangleIndices)[static_cast<std::size_t>(face) * 3u
-                               + static_cast<std::size_t>(vert)];
-  if (vertexIdx >= user->outVertexTangents->size())
+      user->triangleIndices[static_cast<std::size_t>(face) * 3u
+                            + static_cast<std::size_t>(vert)];
+  if (vertexIdx >= user->outVertexCount)
     return;
-  if (!(*user->outTangentAssigned)[vertexIdx])
+  if (!user->outTangentAssigned[vertexIdx])
   {
-    (*user->outVertexTangents)[vertexIdx] =
+    user->outVertexTangents[vertexIdx] =
         hlslpp::float4{tangent[0], tangent[1], tangent[2], sign};
-    (*user->outTangentAssigned)[vertexIdx] = true;
+    user->outTangentAssigned[vertexIdx] = true;
   }
 }
 
@@ -366,6 +362,15 @@ hlslpp::float4x4 ComposeWorldFromLocal(const pxr::UsdPrim& prim,
 
 using MaterialHandleByPath = std::unordered_map<std::string, MaterialHandle>;
 using ConsumedPrototypePaths = std::unordered_set<std::string>;
+// MikkTSpace tangent generation is the most expensive step in mesh
+// ingest (the lobby's 955 sub-meshes × ~140ms each = ~130s in Debug
+// before this gate). Tangents are only sampled by the closesthit's
+// normal-mapping branch, so we can skip MikkTSpace entirely on
+// meshes whose bound materials don't carry a normal map. Pass 1
+// fills this set with material handles whose OpenPBRMaterialDesc
+// resolved a non-Invalid normalMap; the per-subset emit checks
+// before invoking genTangSpaceDefault.
+using MaterialsNeedingTangents = std::unordered_set<MaterialHandle>;
 
 // Build a Pyxis MeshDesc from a UsdGeomMesh prim. Returns
 // std::nullopt for ngon-only / empty / invalid meshes — the M5
@@ -1117,6 +1122,7 @@ void EmitPointInstancer(const pxr::UsdPrim& instancerPrim,
 // caller's local diagnostics.
 std::size_t EmitMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCache,
                      const MaterialHandleByPath& materialsByPath,
+                     const MaterialsNeedingTangents& materialsNeedingTangents,
                      const StageContext& stageCtx, GpuScene& scene,
                      IngestStats& stats) noexcept {
   auto& log = Logging::Get();
@@ -1372,7 +1378,13 @@ std::size_t EmitMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCach
       return hlslpp::float2{0.0f, 0.0f};
     };
 
-    std::unordered_map<VertexKey, std::uint32_t, VertexKeyHash> uniqueMap;
+    // Per-position chain head — `headByPosition[pi]` indexes into
+    // `entries` for the first VertexEntry attached to USD-position
+    // `pi`, or -1 if none yet. Walked linearly per face-vertex
+    // lookup; chain length is 1 for interior shared positions, 2–4
+    // for UV-seam / crease corners.
+    std::vector<std::int32_t> headByPosition(usdPoints.size(), -1);
+    std::vector<VertexEntry>  entries;
     std::vector<hlslpp::float3> outPositions;
     std::vector<hlslpp::float3> outNormals;   // sized iff emitNormals
     std::vector<hlslpp::float2> outUvs;       // always size-matched (zero when no UVs)
@@ -1381,7 +1393,7 @@ std::size_t EmitMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCach
       const std::size_t fvUpperBound =
           subset.faceIndices.empty() ? usdIndices.size()
                                      : subset.faceIndices.size() * 4u;
-      uniqueMap.reserve(fvUpperBound);
+      entries.reserve(fvUpperBound);
       outPositions.reserve(fvUpperBound);
       if (emitNormals)
         outNormals.reserve(fvUpperBound);
@@ -1395,25 +1407,51 @@ std::size_t EmitMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCach
         return 0u;  // bounds-check defence; broken meshes drop bad fv refs
       const hlslpp::float3 normal = getNormal(fvIdx, positionIdx);
       const hlslpp::float2 uvOut  = getUv(fvIdx, positionIdx);
-      VertexKey key{};
-      key.positionIdx = positionIdx;
+
+      // Bit-cast key components — operator== over bit-patterns
+      // catches mathematically-distinct floats (e.g. NaNs) that
+      // memcmp also distinguishes, and keeps -0 / +0 as separate
+      // keys (deterministic, matches authoring intent).
       const float normalArr[3] = {static_cast<float>(normal.x),
                                   static_cast<float>(normal.y),
                                   static_cast<float>(normal.z)};
       const float uvArr[2]     = {static_cast<float>(uvOut.x),
                                   static_cast<float>(uvOut.y)};
-      std::memcpy(&key.normalBits[0], normalArr, sizeof(normalArr));
-      std::memcpy(&key.uvBits[0],     uvArr,     sizeof(uvArr));
-      const auto [iter, inserted] =
-          uniqueMap.try_emplace(key, static_cast<std::uint32_t>(outPositions.size()));
-      if (inserted)
+      std::uint32_t normalBits[3];
+      std::uint32_t uvBits[2];
+      std::memcpy(normalBits, normalArr, sizeof(normalArr));
+      std::memcpy(uvBits,     uvArr,     sizeof(uvArr));
+
+      // Walk the chain attached to this position; reuse on match.
+      for (std::int32_t cur = headByPosition[positionIdx]; cur >= 0; )
       {
-        outPositions.push_back(positions[positionIdx]);
-        if (emitNormals)
-          outNormals.push_back(normal);
-        outUvs.push_back(uvOut);
+        const VertexEntry& cand = entries[static_cast<std::size_t>(cur)];
+        if (cand.normalBits[0] == normalBits[0]
+            && cand.normalBits[1] == normalBits[1]
+            && cand.normalBits[2] == normalBits[2]
+            && cand.uvBits[0]     == uvBits[0]
+            && cand.uvBits[1]     == uvBits[1])
+          return cand.outIdx;
+        cur = cand.next;
       }
-      return iter->second;
+
+      // No match — emit a new vertex slot + link into the chain.
+      const auto newIdx = static_cast<std::uint32_t>(outPositions.size());
+      outPositions.push_back(positions[positionIdx]);
+      if (emitNormals)
+        outNormals.push_back(normal);
+      outUvs.push_back(uvOut);
+      VertexEntry entry{};
+      entry.normalBits[0] = normalBits[0];
+      entry.normalBits[1] = normalBits[1];
+      entry.normalBits[2] = normalBits[2];
+      entry.uvBits[0]     = uvBits[0];
+      entry.uvBits[1]     = uvBits[1];
+      entry.outIdx        = newIdx;
+      entry.next          = headByPosition[positionIdx];
+      entries.push_back(entry);
+      headByPosition[positionIdx] = static_cast<std::int32_t>(entries.size() - 1u);
+      return newIdx;
     };
 
     auto emitTrianglesForFace = [&](std::size_t faceIdx) {
@@ -1450,21 +1488,34 @@ std::size_t EmitMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCach
     // unique to its UV/normal combination, so MikkTSpace's per-(face,
     // vert) tangent writes naturally land on the right slot — the
     // first-tangent-wins guard becomes a no-op. Requires non-empty
-    // UVs + vertex normals + at least one triangle; falls through to
-    // empty when any are missing.
+    // UVs + vertex normals + at least one triangle, AND the bound
+    // material to actually carry a normal map (the closesthit's
+    // MATERIAL_FLAG_HAS_NORMAL_MAP gate is the only consumer). The
+    // material check is the dominant perf win — 40% of lobby
+    // sub-meshes have no normal map and now skip MikkTSpace entirely.
+    const bool subsetNeedsTangents =
+        subset.material != MaterialHandle::Invalid
+        && materialsNeedingTangents.contains(subset.material);
     std::vector<hlslpp::float4> vertexTangents;
-    if (!indices.empty() && emitNormals && (uvsFv || uvsVertex || uvsConstant))
+    if (subsetNeedsTangents && !indices.empty() && emitNormals
+        && (uvsFv || uvsVertex || uvsConstant))
     {
       vertexTangents.assign(outPositions.size(),
                             hlslpp::float4{0.0f, 0.0f, 0.0f, 0.0f});
-      std::vector<bool> tangentAssigned(outPositions.size(), false);
+      // std::vector<bool> is bit-packed; MikkTSpace's per-FV write
+      // path needs a plain bool* for the cached-pointer path. Use
+      // a uint8_t-typed vector so &v[i] is a sane T* pointer.
+      std::vector<std::uint8_t> tangentAssigned(outPositions.size(), 0u);
       MikkContext userData{};
-      userData.positions          = &outPositions;
-      userData.triangleIndices    = &indices;
-      userData.vertexNormals      = &outNormals;
-      userData.vertexUvs          = &outUvs;
-      userData.outVertexTangents  = &vertexTangents;
-      userData.outTangentAssigned = &tangentAssigned;
+      userData.triangleIndices    = indices.data();
+      userData.triangleVertCount  = indices.size();
+      userData.positions          = outPositions.data();
+      userData.positionsCount     = outPositions.size();
+      userData.vertexNormals      = outNormals.data();
+      userData.vertexUvs          = outUvs.data();
+      userData.outVertexTangents  = vertexTangents.data();
+      userData.outTangentAssigned = reinterpret_cast<bool*>(tangentAssigned.data());
+      userData.outVertexCount     = vertexTangents.size();
       SMikkTSpaceInterface mikkInterface{};
       mikkInterface.m_getNumFaces           = MikkGetNumFaces;
       mikkInterface.m_getNumVerticesOfFace  = MikkGetNumVerticesOfFace;
@@ -1692,7 +1743,8 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
   // (HydraEngine routes through StageWalker at M5 — see HydraEngine.h)
   // so any difference in material translation breaks the §25.O.3
   // byte-equal invariant.
-  MaterialHandleByPath materialsByPath;
+  MaterialHandleByPath       materialsByPath;
+  MaterialsNeedingTangents   materialsNeedingTangents;
   // Texture-acquisition callback for the translator — stateless
   // function pointer + opaque scene-pointer userData. The translator
   // stays renderer-agnostic; the role passes through unchanged so
@@ -1719,6 +1771,12 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
     materialDesc.sourcePrim = primPath;
     const MaterialHandle handle = scene.AcquireMaterial(materialDesc);
     materialsByPath.emplace(primPath, handle);
+    // Track which materials carry a normal map so the mesh pass can
+    // skip MikkTSpace tangent generation on meshes that don't need
+    // them. ~40% of lobby materials are normal-map-free; skipping
+    // their meshes' MikkTSpace was the dominant ingest-perf win.
+    if (materialDesc.normalMap != TextureHandle::Invalid)
+      materialsNeedingTangents.insert(handle);
     ++stats.materialsEmitted;
   }
   const auto materialPassEnd = Clock::now();
@@ -1759,7 +1817,8 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
       // GeomSubsets emits N meshes + N instances). The return value is
       // available for per-prim diagnostics; the running counters drive
       // the post-pass log line below.
-      EmitMesh(prim, xformCache, materialsByPath, stageCtx, scene, stats);
+      EmitMesh(prim, xformCache, materialsByPath, materialsNeedingTangents,
+               stageCtx, scene, stats);
     }
     else if (prim.IsA<pxr::UsdGeomCamera>())
     {

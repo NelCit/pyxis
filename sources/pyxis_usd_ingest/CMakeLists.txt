@@ -30,6 +30,27 @@ target_sources(pyxis_usd_ingest PRIVATE
 find_package(pxr CONFIG REQUIRED)
 find_package(mikktspace CONFIG REQUIRED)
 
+# MikkTSpace is a tiny third-party C library (~600 lines) that we hit
+# very hard during ingest — once per sub-mesh, with N internal qsorts
+# and N tangent computations. vcpkg ships an unoptimised Debug build
+# (`mikktspaced.lib`, /Od) that runs ~10× slower than its Release
+# variant; on the World Lobby that turned 10s of MikkTSpace work
+# into 130s of MikkTSpace work in our Debug builds.
+#
+# Override the CONFIG-imported target's IMPORTED_LOCATION_DEBUG to
+# point at the Release variant. Mikktspace has no debug-only state
+# (pure C, no TLS, no debug iterators) so this is safe — the
+# Release lib runs in a Debug app without complaint, and we keep
+# our own ingest TU in Debug for breakpoint debugging.
+get_target_property(_pyxis_mikk_release_lib mikktspace::mikktspace IMPORTED_LOCATION_RELEASE)
+if(_pyxis_mikk_release_lib)
+    set_target_properties(mikktspace::mikktspace PROPERTIES
+        IMPORTED_LOCATION_DEBUG "${_pyxis_mikk_release_lib}")
+    message(STATUS "Pyxis: forcing Release-built mikktspace.lib in Debug "
+                   "(${_pyxis_mikk_release_lib}) — ~10× ingest speedup vs "
+                   "vcpkg's mikktspaced.lib.")
+endif()
+
 # Same C++20 std::is_pod deprecation silence as pyxis_hydra — see
 # the comment block there. USD's tf headers use the deprecated
 # trait; the silence belongs in every TU that pulls them in.
