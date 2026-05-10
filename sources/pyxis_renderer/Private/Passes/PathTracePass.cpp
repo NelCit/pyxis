@@ -82,6 +82,7 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
   const AssetLocator locator;
   const Path raygenPath = locator.LocateResource("shaders/raygen.spv");
   const Path missPath = locator.LocateResource("shaders/miss.spv");
+  const Path shadowMissPath = locator.LocateResource("shaders/shadow_miss.spv");
   const Path closestHitPath = locator.LocateResource("shaders/closesthit.spv");
   const Path anyHitPath = locator.LocateResource("shaders/anyhit.spv");
 
@@ -93,10 +94,12 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
   // VUID-VkPipelineShaderStageCreateInfo-pName-00707.
   _raygenShader = LoadSpirv(_device, raygenPath.View(), nvrhi::ShaderType::RayGeneration, "main");
   _missShader = LoadSpirv(_device, missPath.View(), nvrhi::ShaderType::Miss, "main");
+  _shadowMissShader =
+      LoadSpirv(_device, shadowMissPath.View(), nvrhi::ShaderType::Miss, "main");
   _closestHitShader =
       LoadSpirv(_device, closestHitPath.View(), nvrhi::ShaderType::ClosestHit, "main");
   _anyHitShader = LoadSpirv(_device, anyHitPath.View(), nvrhi::ShaderType::AnyHit, "main");
-  if (!_raygenShader || !_missShader || !_closestHitShader || !_anyHitShader)
+  if (!_raygenShader || !_missShader || !_shadowMissShader || !_closestHitShader || !_anyHitShader)
   {
     Logging::Get().Error(log::RENDER, "PathTracePass: shader load failed; pass will skip");
     return;
@@ -183,14 +186,16 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
     return;
   }
 
-  // Pipeline state — three shader stages registered by `exportName`,
-  // one hit group bundling closesthit (no anyhit / intersection in
-  // M3), maxRecursionDepth=1 because we only TraceRay from raygen
-  // and the closesthit doesn't recurse.
+  // Pipeline state — four shader stages registered by `exportName`,
+  // one hit group bundling closesthit + anyhit. M9-fidelity:
+  // maxRecursionDepth=2 (raygen→primary closesthit + closesthit→
+  // shadow ray which only invokes anyhit/miss, but RT pipeline
+  // accounting still counts it as a recursion level).
   nvrhi::rt::PipelineDesc pipelineDesc;
   pipelineDesc.shaders = {
       nvrhi::rt::PipelineShaderDesc{}.setExportName("RayGenMain").setShader(_raygenShader),
       nvrhi::rt::PipelineShaderDesc{}.setExportName("MissMain").setShader(_missShader),
+      nvrhi::rt::PipelineShaderDesc{}.setExportName("ShadowMissMain").setShader(_shadowMissShader),
   };
   pipelineDesc.hitGroups = {
       nvrhi::rt::PipelineHitGroupDesc{}
@@ -199,7 +204,7 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
           .setAnyHitShader(_anyHitShader),
   };
   pipelineDesc.globalBindingLayouts = {_bindingLayout};
-  pipelineDesc.maxRecursionDepth = 1;
+  pipelineDesc.maxRecursionDepth = 2;
   _pipeline = _device->createRayTracingPipeline(pipelineDesc);
   if (!_pipeline)
   {
@@ -217,7 +222,8 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
     return;
   }
   _shaderTable->setRayGenerationShader("RayGenMain");
-  _shaderTable->addMissShader("MissMain");
+  _shaderTable->addMissShader("MissMain");        // miss-index 0: primary rays (sky / dome)
+  _shaderTable->addMissShader("ShadowMissMain");  // miss-index 1: shadow rays (visibility)
   _shaderTable->addHitGroup("HitGroupDefault");
 
   // Camera uniforms constant buffer — sized for one CameraUniforms
@@ -589,6 +595,7 @@ bool PathTracePass::ReloadShaders() noexcept {
   const AssetLocator locator;
   const Path raygenPath     = locator.LocateResource("shaders/raygen.spv");
   const Path missPath       = locator.LocateResource("shaders/miss.spv");
+  const Path shadowMissPath = locator.LocateResource("shaders/shadow_miss.spv");
   const Path closestHitPath = locator.LocateResource("shaders/closesthit.spv");
   const Path anyHitPath     = locator.LocateResource("shaders/anyhit.spv");
 
@@ -596,11 +603,13 @@ bool PathTracePass::ReloadShaders() noexcept {
       LoadSpirv(_device, raygenPath.View(), nvrhi::ShaderType::RayGeneration, "main");
   nvrhi::ShaderHandle newMiss =
       LoadSpirv(_device, missPath.View(), nvrhi::ShaderType::Miss, "main");
+  nvrhi::ShaderHandle newShadowMiss =
+      LoadSpirv(_device, shadowMissPath.View(), nvrhi::ShaderType::Miss, "main");
   nvrhi::ShaderHandle newClosestHit =
       LoadSpirv(_device, closestHitPath.View(), nvrhi::ShaderType::ClosestHit, "main");
   nvrhi::ShaderHandle newAnyHit =
       LoadSpirv(_device, anyHitPath.View(), nvrhi::ShaderType::AnyHit, "main");
-  if (!newRaygen || !newMiss || !newClosestHit || !newAnyHit)
+  if (!newRaygen || !newMiss || !newShadowMiss || !newClosestHit || !newAnyHit)
   {
     log.Error(log::RENDER, "PathTracePass::ReloadShaders: shader load failed; keeping old pipeline");
     return false;
@@ -610,6 +619,7 @@ bool PathTracePass::ReloadShaders() noexcept {
   pipelineDesc.shaders = {
       nvrhi::rt::PipelineShaderDesc{}.setExportName("RayGenMain").setShader(newRaygen),
       nvrhi::rt::PipelineShaderDesc{}.setExportName("MissMain").setShader(newMiss),
+      nvrhi::rt::PipelineShaderDesc{}.setExportName("ShadowMissMain").setShader(newShadowMiss),
   };
   pipelineDesc.hitGroups = {
       nvrhi::rt::PipelineHitGroupDesc{}
@@ -618,7 +628,7 @@ bool PathTracePass::ReloadShaders() noexcept {
           .setAnyHitShader(newAnyHit),
   };
   pipelineDesc.globalBindingLayouts = {_bindingLayout};
-  pipelineDesc.maxRecursionDepth = 1;
+  pipelineDesc.maxRecursionDepth = 2;
   nvrhi::rt::PipelineHandle newPipeline = _device->createRayTracingPipeline(pipelineDesc);
   if (!newPipeline)
   {
@@ -635,7 +645,8 @@ bool PathTracePass::ReloadShaders() noexcept {
     return false;
   }
   newShaderTable->setRayGenerationShader("RayGenMain");
-  newShaderTable->addMissShader("MissMain");
+  newShaderTable->addMissShader("MissMain");        // miss-index 0: primary rays
+  newShaderTable->addMissShader("ShadowMissMain");  // miss-index 1: shadow rays
   newShaderTable->addHitGroup("HitGroupDefault");
 
   // Atomic-ish swap: every reference taken in Execute reads from the
@@ -644,6 +655,7 @@ bool PathTracePass::ReloadShaders() noexcept {
   // side) the next Execute picks up the new pipeline + table.
   _raygenShader     = std::move(newRaygen);
   _missShader       = std::move(newMiss);
+  _shadowMissShader = std::move(newShadowMiss);
   _closestHitShader = std::move(newClosestHit);
   _anyHitShader     = std::move(newAnyHit);
   _pipeline         = std::move(newPipeline);

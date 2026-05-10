@@ -73,6 +73,11 @@ class PathTracePass final : public IRenderPass {
   // in the ctor; reused every frame.
   nvrhi::ShaderHandle _raygenShader;
   nvrhi::ShaderHandle _missShader;
+  // M9-fidelity: second miss shader for shadow rays. Closesthit
+  // TraceRays with miss-shader-index=1; this miss writes
+  // payload.color=1.0 = visible. Pre-trace closesthit zeroes the
+  // payload, so any opaque blocker leaves visibility=0 = occluded.
+  nvrhi::ShaderHandle _shadowMissShader;
   nvrhi::ShaderHandle _closestHitShader;
   nvrhi::ShaderHandle _anyHitShader;
   nvrhi::BindingLayoutHandle _bindingLayout;

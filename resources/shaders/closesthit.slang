@@ -65,6 +65,10 @@
 #include "ShaderInterop.slang"
 
 [[vk::binding(0, 0)]]  ConstantBuffer<CameraUniforms>      gCamera;
+// M9-fidelity shadow rays: closesthit re-uses the same TLAS the
+// raygen launched into to TraceRay shadow rays per direct light.
+// Same binding-set entry — no new layout slot needed.
+[[vk::binding(1, 0)]]  RaytracingAccelerationStructure     gTlas;
 [[vk::binding(3, 0)]]  StructuredBuffer<OpenPBRMaterialGPU> gMaterials;
 [[vk::binding(4, 0)]]  StructuredBuffer<uint>               gInstanceMaterial;
 [[vk::binding(5, 0)]]  StructuredBuffer<LightGpu>           gLights;
@@ -442,6 +446,61 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
                                          cosAngle);
         }
 
+        // M9-fidelity shadow ray. Skip when the surface is back-
+        // facing the light (NdotL <= 0 contributes nothing anyway)
+        // or when the cone attenuation has zeroed the contribution
+        // — both cases would multiply the result by 0 below, so the
+        // TraceRay would be wasted bandwidth.
+        //
+        // Ray-flag combo: SKIP_CLOSEST_HIT_SHADER (we don't want to
+        // recursively shade — that would also blow past
+        // maxRecursionDepth=2) + ACCEPT_FIRST_HIT_AND_END_SEARCH
+        // (any opaque blocker is enough — no need to keep traversing
+        // for the closest one). The hit-group's anyhit still fires
+        // and may IgnoreHit() for translucent materials (M9 stub).
+        //
+        // Origin offset: push the ray start along the normal by
+        // 1e-3 to avoid self-intersection from the surface that
+        // generated this closesthit invocation. TMin also takes
+        // the same eps as a belt-and-braces measure.
+        // TMax: for finite-distance lights, cap at the distance to
+        // the light's centre so geometry behind the light doesn't
+        // shadow it; Distant lights use 1e30 (effectively infinity).
+        // miss-shader-index = 1 (= ShadowMissMain) writes
+        // payload.color = (1,1,1) iff the path is unoccluded.
+        float visibility = 1.0;
+        if (NdotL > 0.0 && coneAttenuation > 0.0) {
+            float lightDist = 1e30;
+            if (L.kind == LIGHT_KIND_RECT) {
+                const float3 toLight = float3(L.posX, L.posY, L.posZ) - hitWorld;
+                lightDist = length(toLight);
+            }
+            RayDesc shadowRay;
+            shadowRay.Origin    = hitWorld + nWorld * 1e-3;
+            shadowRay.Direction = lightDir;
+            shadowRay.TMin      = 1e-3;
+            shadowRay.TMax      = max(1e-3, lightDist - 1e-3);
+            HitInfo shadowPayload;
+            shadowPayload.color       = float3(0.0, 0.0, 0.0);  // pre-trace = occluded
+            shadowPayload.hitT        = -1.0;
+            shadowPayload.normalWorld = float3(0.0, 0.0, 0.0);
+            shadowPayload.instanceId  = 0xFFFFFFFFu;
+            shadowPayload.baseColor   = float3(0.0, 0.0, 0.0);
+            shadowPayload.materialId  = 0xFFFFFFFFu;
+            shadowPayload.worldHit    = float3(0.0, 0.0, 0.0);
+            shadowPayload.elementId   = 0xFFFFFFFFu;
+            TraceRay(gTlas,
+                     RAY_FLAG_SKIP_CLOSEST_HIT_SHADER
+                       | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH,
+                     0xFFu,
+                     /*RayContributionToHitGroupIndex*/ 0,
+                     /*MultiplierForGeometryContributionToHitGroupIndex*/ 0,
+                     /*MissShaderIndex*/ 1,
+                     shadowRay,
+                     shadowPayload);
+            visibility = shadowPayload.color.x;
+        }
+
         // M9-fidelity diffuse + specular split. Diffuse: Lambert
         // (baseColor × NdotL). Specular: GGX microfacet at the
         // half-vector. Schlick Fresnel handles the dielectric vs
@@ -452,10 +511,10 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
         // computing F at the view angle and weighting diffuse by
         // (1 - F)·(1 - metalness), which is M11+ polish.
         const float3 diffuseTerm =
-            baseColor * (1.0 - metalness) * NdotL * falloff * coneAttenuation;
+            baseColor * (1.0 - metalness) * NdotL * falloff * coneAttenuation * visibility;
         const float3 specularTerm =
             GgxSpecular(nWorld, viewDir, lightDir, baseColor, metalness, roughness, mat.specularIor)
-            * NdotL * falloff * coneAttenuation;
+            * NdotL * falloff * coneAttenuation * visibility;
         directDiffuse  += Lcol * diffuseTerm;
         directSpecular += Lcol * specularTerm;
         // pre-NdotL, pre-falloff totalContribution drives only the
