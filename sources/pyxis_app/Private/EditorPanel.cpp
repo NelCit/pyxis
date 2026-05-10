@@ -268,11 +268,14 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
       }
 
       // Per-AOV display knob: WorldPos period slider. Only useful
-      // (and only visible) when WorldPos is the picked display.
+      // (and only visible) when a WorldPos display is picked.
       // Range: 0.1 m for unit-scale fixtures up to 200 m for
       // Bistro / outdoor environments. ViewerMode pushes the value
-      // into RenderSettings::worldPosPeriod each frame.
-      if (_editorDebugView == RenderSettings::DebugView::WorldPos)
+      // into RenderSettings::worldPosPeriod each frame; the same
+      // slider feeds both world-space + eye-space periodic encodes
+      // (raygen branches both on `gFrameUi.worldPosPeriod`).
+      if (_editorDebugView == RenderSettings::DebugView::WorldPos
+          || _editorDebugView == RenderSettings::DebugView::WorldPosEye)
       {
         ImGui::PushItemWidth(180.0f);
         ImGui::SliderFloat("WorldPos period (m)", &_editorWorldPosPeriod,
