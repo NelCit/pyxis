@@ -30,6 +30,14 @@ target_sources(pyxis_usd_ingest PRIVATE
 find_package(pxr CONFIG REQUIRED)
 find_package(mikktspace CONFIG REQUIRED)
 
+# OpenMP — used for parallel mesh prep in StageWalker. Use the LLVM
+# runtime (`/openmp:llvm`) rather than MSVC's legacy `/openmp` since
+# clang-cl ships with libomp and supports the modern OpenMP 4.5+
+# pragmas (the legacy MSVC runtime is OpenMP 2.0). Both Debug and
+# Release link against the same libomp.dll.
+target_compile_options(pyxis_usd_ingest PRIVATE -openmp:llvm)
+target_link_options(pyxis_usd_ingest    PRIVATE -openmp:llvm)
+
 # MikkTSpace is a tiny third-party C library (~600 lines) that we hit
 # very hard during ingest — once per sub-mesh, with N internal qsorts
 # and N tangent computations. vcpkg ships an unoptimised Debug build

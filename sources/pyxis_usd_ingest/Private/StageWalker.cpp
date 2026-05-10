@@ -1886,22 +1886,24 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
   // PrepareMesh writes only to its assigned slot in preparedMeshes
   // and to the worker's local xformCache; no cross-worker state.
   std::vector<PreparedMesh> preparedMeshes(meshPrimIndices.size());
-  std::vector<std::size_t>  meshOutputIndices(meshPrimIndices.size());
-  std::iota(meshOutputIndices.begin(), meshOutputIndices.end(), 0u);
-  std::for_each(std::execution::par, meshOutputIndices.begin(), meshOutputIndices.end(),
-      [&](std::size_t outIdx)
-      {
-        // Per-task xformCache — pxr::UsdGeomXformCache isn't thread-
-        // safe and `thread_local` on an exported DLL TU is rejected
-        // by clang-cl. We lose cross-sibling-mesh xform caching but
-        // each per-prim xform-chain walk is small (lobby's deepest
-        // chains are 5-6 levels) and the parallelism win dominates.
-        pxr::UsdGeomXformCache localXformCache;
-        const std::size_t primIdx = meshPrimIndices[outIdx];
-        preparedMeshes[outIdx] = PrepareMesh(prims[primIdx], localXformCache,
-                                             materialsByPath,
-                                             materialsNeedingTangents, stageCtx);
-      });
+  // OpenMP parallel-for. Lower per-task overhead than MSVC's PPL/
+  // ConcRT (used by std::execution::par) — measured benefit on the
+  // lobby in Debug (where PPL's task-tracking machinery + Debug
+  // heap contention made std::execution::par 25% SLOWER than seq).
+  // Release: ~3-4x speedup with 8 cores.
+  const std::int64_t meshCount = static_cast<std::int64_t>(meshPrimIndices.size());
+#pragma omp parallel for schedule(dynamic, 4)
+  for (std::int64_t outIdx = 0; outIdx < meshCount; ++outIdx)
+  {
+    // Per-task xformCache — pxr::UsdGeomXformCache isn't thread-
+    // safe. We lose cross-sibling-mesh xform caching but each
+    // per-prim xform-chain walk is small.
+    pxr::UsdGeomXformCache localXformCache;
+    const std::size_t primIdx = meshPrimIndices[static_cast<std::size_t>(outIdx)];
+    preparedMeshes[static_cast<std::size_t>(outIdx)] =
+        PrepareMesh(prims[primIdx], localXformCache, materialsByPath,
+                    materialsNeedingTangents, stageCtx);
+  }
 
   // Pass 3c — single-writer drain: walk prims in SdfPath order and
   // emit prepared meshes / cameras / lights in lockstep.
