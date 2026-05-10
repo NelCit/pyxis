@@ -66,6 +66,253 @@ std::string DeriveAovPrefix(std::string_view outputPath) noexcept {
   return result;
 }
 
+// Log the §33.7 determinism pin summary at headless startup. Pure
+// logging — no state mutation — extracted so the orchestrator stays
+// linear.
+void LogDeterminismPin(const Configuration& config, uint32_t framesInFlight) noexcept
+{
+  auto& log = Logging::Get();
+  if (config.limits.framesInFlight != framesInFlight)
+  {
+    log.Info(log::APP,
+             "headless: §33.7 pinning framesInFlight=" + std::to_string(framesInFlight)
+                 + " (config requested " + std::to_string(config.limits.framesInFlight) + ")");
+  }
+  std::string summary = "headless: determinism pin — seed=";
+  summary += std::to_string(config.render.seed);
+  summary += "  framesInFlight=" + std::to_string(framesInFlight);
+  summary += "  dims=" + std::to_string(config.render.width) + "x"
+             + std::to_string(config.render.height);
+  summary += "  samples=" + std::to_string(config.render.samplesPerFrame);
+  log.Info(log::APP, summary);
+}
+
+// Load the resolved scene through the active ingest adapter, falling
+// back to the M3 hardcoded cube if the path is empty or no meshes /
+// cameras landed. Returns false only if the cube fallback itself
+// failed (catastrophic — no renderable scene available).
+[[nodiscard]] bool LoadSceneOrFallback(const Configuration& config,
+                                       const ResolvedScene& resolvedScene,
+                                       GpuScene& gpuScene) noexcept
+{
+  bool sceneLoaded = false;
+  if (!resolvedScene.path.empty())
+  {
+    const pyxis::usd_ingest::IngestStats stats =
+        IngestUsd(config.app.ingest, resolvedScene.path, gpuScene);
+    sceneLoaded = stats.meshesEmitted > 0 || stats.camerasEmitted > 0;
+  }
+  if (!sceneLoaded)
+  {
+    if (auto cubeResult =
+            BuildHardcodedCubeScene(gpuScene, config.render.width, config.render.height);
+        !cubeResult)
+    {
+      Logging::Get().Error(log::APP, "headless: " + cubeResult.error());
+      return false;
+    }
+  }
+  return true;
+}
+
+// Open the command list, drain GpuScene mutations, dispatch one
+// PathTracePass via PyxisRenderer, transition the offscreen RT to
+// CopySource, close + execute. Returns false if CommitResources
+// failed; caller's responsibility to clean up after a false return.
+[[nodiscard]] bool RecordAndExecuteRenderFrame(nvrhi::IDevice* device,
+                                               nvrhi::ICommandList* commandList,
+                                               GpuScene& gpuScene,
+                                               PyxisRenderer& renderer,
+                                               const AovTextures& aovs,
+                                               nvrhi::ITexture* renderTarget) noexcept
+{
+  commandList->open();
+
+  // Drain pending GpuScene mutations onto the open command list
+  // (mesh upload, BLAS build, TLAS rebuild). Failure aborts the
+  // frame; partial state stays dirty so the next CommitResources
+  // retries.
+  if (auto commitResult = gpuScene.CommitResources(commandList); !commitResult)
+  {
+    Logging::Get().Error(log::APP,
+                         "headless: " + std::string{commitResult.error().message.View()});
+    commandList->close();
+    return false;
+  }
+
+  RenderTargets targets{};
+  targets.color = renderTarget;
+  // M7 follow-up — bind the raw AOV outputs so the user can dump
+  // them via --save-aov. Always bound (not just when --save-aov is
+  // set) because PathTracePass's UAV writes are unconditional;
+  // without these the writes go to the 1×1 fallbacks PathTracePass
+  // owns, which is fine but wastes the already-allocated AovTextures
+  // memory. Same RenderTargets shape ViewerMode wires.
+  targets.colorHdr      = aovs.colorHdr.Get();
+  targets.normalAov     = aovs.normal.Get();
+  targets.depthAov      = aovs.depth.Get();
+  targets.instanceIdAov = aovs.instanceId.Get();
+  targets.materialIdAov = aovs.materialId.Get();
+  targets.baseColorAov  = aovs.baseColor.Get();
+  targets.worldPosAov   = aovs.worldPos.Get();
+  RenderSettings settings{};
+  settings.width = renderTarget->getDesc().width;
+  settings.height = renderTarget->getDesc().height;
+  renderer.RenderFrame(commandList, settings, targets);
+  // Force the offscreen RT into CopySource before we close the
+  // command list. Without this we relied on NVRHI's auto-barrier
+  // logic spanning two separate executeCommandList submissions —
+  // technically fine today (NVRHI tracks state across submits) but
+  // brittle: a future refactor that takes the readback path through
+  // a separate command-list pool would lose that tracking and we'd
+  // get UB on the copy. Explicit is cheaper than mysterious.
+  commandList->setTextureState(renderTarget, nvrhi::AllSubresources,
+                               nvrhi::ResourceStates::CopySource);
+  commandList->commitBarriers();
+  commandList->close();
+  device->executeCommandList(commandList);
+  return true;
+}
+
+// Run TextureReadback through phase 1 (record copy) + phase 2 (map
+// the staging buffer), warn if the entire image is black (silent
+// PathTracePass no-op detector), then write the BGRA8 EXR to disk.
+// Returns false on any failure.
+[[nodiscard]] bool ReadbackAndWriteExr(nvrhi::IDevice* device,
+                                       nvrhi::ICommandList* commandList,
+                                       nvrhi::ITexture* renderTarget,
+                                       std::string_view outputPath) noexcept
+{
+  auto& log = Logging::Get();
+
+  // TextureReadback is the shared helper — same pattern is used by
+  // ViewerMode::CaptureBackbufferToPng. Phase 1 (RecordCopy) records
+  // the staging-texture allocation + copy on a fresh command list;
+  // we then close + execute + waitForIdle so the GPU has retired the
+  // copy before Phase 2 (Map) hands us the host pointer. The handle
+  // unmaps on scope exit.
+  commandList->open();
+  auto readback =
+      TextureReadback::RecordCopy(device, commandList, renderTarget, "headless-readback-staging");
+  if (!readback)
+  {
+    log.Error(log::APP, "headless: " + readback.error());
+    return false;
+  }
+  commandList->close();
+  device->executeCommandList(commandList);
+  device->waitForIdle();
+  device->runGarbageCollection();
+
+  if (auto mapResult = readback->Map(); !mapResult)
+  {
+    log.Error(log::APP, "headless: " + mapResult.error());
+    return false;
+  }
+  // Sanity check: a render that worked has SOME non-black pixels
+  // (cube colour from closesthit or sky from miss). All-zero output
+  // would mean PathTracePass silently no-op'd; surface that as a
+  // log warning so a regression doesn't go quietly.
+  {
+    const auto* bytes = static_cast<const uint8_t*>(readback->Data());
+    bool anyNonBlack = false;
+    for (uint32_t row = 0; row < readback->Height() && !anyNonBlack; ++row)
+    {
+      const uint8_t* rowPtr = bytes + (row * readback->RowPitch());
+      for (uint32_t col = 0; col < readback->Width(); ++col)
+      {
+        if (rowPtr[col * 4 + 0] != 0 || rowPtr[col * 4 + 1] != 0 || rowPtr[col * 4 + 2] != 0)
+        {
+          anyNonBlack = true;
+          break;
+        }
+      }
+    }
+    log.Info(log::APP,
+             anyNonBlack ? "headless: render produced non-black pixels (looks valid)"
+                         : "headless: render output is fully black — PathTracePass likely skipped");
+  }
+
+  auto writeResult = WriteExrBgra8(outputPath, readback->Width(), readback->Height(),
+                                   readback->Data(), readback->RowPitch());
+  if (!writeResult)
+  {
+    log.Error(log::APP, "headless: " + writeResult.error());
+    return false;
+  }
+  return true;
+}
+
+// Parse the --save-aov comma-separated list and dispatch one
+// SaveAovAsExr per entry. The "all" alias expands to every entry in
+// AOV_REGISTRY. Unknown names log a warning but don't fail the run —
+// keeps each per-AOV write independent so a typo doesn't drop
+// legitimate outputs. Always succeeds (errors are per-entry warnings).
+void SaveAovsFromList(std::string_view saveAovList,
+                      std::string_view aovPrefix,
+                      const AovTextures& aovs,
+                      nvrhi::IDevice* device,
+                      nvrhi::ICommandList* commandList) noexcept
+{
+  auto& log = Logging::Get();
+  auto saveOne = [&](std::string_view aovName, nvrhi::ITexture* sourceAov) {
+    if (sourceAov == nullptr)
+    {
+      log.Warn(log::APP, "headless: --save-aov: source for '" + std::string{aovName}
+                             + "' is null; skipping");
+      return;
+    }
+    const std::string targetPath = BuildAovOutputPath(aovPrefix, aovName);
+    if (auto saveResult = SaveAovAsExr(device, commandList, sourceAov, aovName, targetPath);
+        !saveResult)
+    {
+      log.Error(log::APP, "headless: " + saveResult.error());
+    }
+    else
+    {
+      log.Info(log::APP, "headless: --save-aov " + std::string{aovName}
+                             + " -> " + targetPath);
+    }
+  };
+  auto resolveAndSave = [&](std::string_view aovName) {
+    // Single source of truth for the name -> texture mapping —
+    // matches ViewerMode's Save AOV button via the same registry.
+    const AovEntry* entry = FindAovByName(aovName);
+    if (entry == nullptr)
+    {
+      log.Warn(log::APP, "headless: --save-aov: unknown AOV name '"
+                             + std::string{aovName}
+                             + "' (recognised: color,normal,depth,instanceId,"
+                               "materialId,baseColor,worldPos,all)");
+      return;
+    }
+    saveOne(entry->name, (aovs.*entry->texturePtr).Get());
+  };
+
+  // Token-iterate the comma-list. Each name dispatches independently;
+  // an "all" token expands to every entry in AOV_REGISTRY.
+  std::size_t cursor = 0;
+  while (cursor < saveAovList.size())
+  {
+    const std::size_t comma = saveAovList.find(',', cursor);
+    const std::string_view name = (comma == std::string_view::npos)
+                                      ? saveAovList.substr(cursor)
+                                      : saveAovList.substr(cursor, comma - cursor);
+    cursor = (comma == std::string_view::npos) ? saveAovList.size() : (comma + 1);
+    if (name.empty())
+      continue;
+    if (name == "all")
+    {
+      for (const AovEntry& entry : AOV_REGISTRY)
+        saveOne(entry.name, (aovs.*entry.texturePtr).Get());
+    }
+    else
+    {
+      resolveAndSave(name);
+    }
+  }
+}
+
 }  // namespace
 
 int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
@@ -81,40 +328,20 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
     return EXIT_CONFIG_FAIL;
   }
 
-  // ---- §33.7 determinism pinning -------------------------------------
-  // Headless raises framesInFlight to the §33.1 compile-time cap
-  // regardless of config. Rationale: M3+'s samplesPerFrame *
-  // accumulationFrameLimit loop submits work in flight, and the
-  // byte-identical EXR contract requires consistent FIF across runs
-  // (different FIF changes the submission interleaving + thus
-  // floating-point reduction order for accumulation). RNG seed != 0
-  // + non-empty output.image were already validated.
-  //
-  // The static_assert below ties the headless determinism pin to the
-  // renderer's compile-time cap: if a future RFC bumps
-  // MAX_FRAMES_IN_FLIGHT, this site fails to compile and forces the
-  // author to reconsider whether headless determinism is still
-  // satisfied at the new cap. Without it the two constants could
-  // silently drift.
+  // §33.7 determinism pin: headless raises framesInFlight to the §33.1
+  // compile-time cap regardless of config. Rationale: M3+'s
+  // samplesPerFrame * accumulationFrameLimit loop submits work in
+  // flight, and the byte-identical EXR contract requires consistent
+  // FIF across runs (different FIF changes the submission
+  // interleaving + thus floating-point reduction order for
+  // accumulation). The static_assert ties the headless pin to the
+  // renderer's compile-time cap so an RFC bumping
+  // MAX_FRAMES_IN_FLIGHT can't silently drift.
   constexpr uint32_t HEADLESS_FRAMES_IN_FLIGHT = MAX_FRAMES_IN_FLIGHT;
   static_assert(HEADLESS_FRAMES_IN_FLIGHT == 3,
                 "Headless §33.7 determinism pin assumes a 3-deep ring; "
                 "revisit before changing MAX_FRAMES_IN_FLIGHT.");
-  if (config.limits.framesInFlight != HEADLESS_FRAMES_IN_FLIGHT)
-  {
-    log.Info(log::APP,
-             "headless: §33.7 pinning framesInFlight=" + std::to_string(HEADLESS_FRAMES_IN_FLIGHT)
-                 + " (config requested " + std::to_string(config.limits.framesInFlight) + ")");
-  }
-  {
-    std::string summary = "headless: determinism pin — seed=";
-    summary += std::to_string(config.render.seed);
-    summary += "  framesInFlight=" + std::to_string(HEADLESS_FRAMES_IN_FLIGHT);
-    summary += "  dims=" + std::to_string(config.render.width) + "x"
-               + std::to_string(config.render.height);
-    summary += "  samples=" + std::to_string(config.render.samplesPerFrame);
-    log.Info(log::APP, summary);
-  }
+  LogDeterminismPin(config, HEADLESS_FRAMES_IN_FLIGHT);
 
   // ---- Device manager ------------------------------------------------
   DeviceCreationParams params{};
@@ -155,9 +382,7 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
   // ---- SceneWorld + Profiler + GpuScene + Renderer -------------------
   // GpuScene is the canonical scene-mutation API (§18.5);
   // PyxisRenderer's ctor takes it by reference per §18.6 and
-  // PathTracePass binds its TLAS + camera every frame. Headless
-  // raises framesInFlight to the §33.7 byte-equal pin
-  // (MAX_FRAMES_IN_FLIGHT == 3).
+  // PathTracePass binds its TLAS + camera every frame.
   SceneWorldFacade scene;
   if (scene.Init() != SceneWorldStatus::Ok)
   {
@@ -169,28 +394,13 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
   gpuSceneDesc.framesInFlight = HEADLESS_FRAMES_IN_FLIGHT;
   GpuScene gpuScene{device, profiler, gpuSceneDesc};
 
-  // M4 ingest. Both adapters share the unified IngestUsd entry point
-  // (StageWalker covers both today, satisfying §25.O.3 byte-equal).
-  // Empty path or "nothing emitted" falls back to the M3 hardcoded
-  // cube so pyxis.exe always produces a renderable image (the
-  // §29.4.a "must produce a renderable image" contract).
-  bool sceneLoaded = false;
-  if (!resolvedScene.path.empty())
+  // M4 ingest with cube fallback so pyxis.exe always produces a
+  // renderable image (the §29.4.a contract). False return means the
+  // cube fallback also failed — catastrophic.
+  if (!LoadSceneOrFallback(config, resolvedScene, gpuScene))
   {
-    const pyxis::usd_ingest::IngestStats stats =
-        IngestUsd(config.app.ingest, resolvedScene.path, gpuScene);
-    sceneLoaded = stats.meshesEmitted > 0 || stats.camerasEmitted > 0;
-  }
-  if (!sceneLoaded)
-  {
-    if (auto cubeResult =
-            BuildHardcodedCubeScene(gpuScene, config.render.width, config.render.height);
-        !cubeResult)
-    {
-      log.Error(log::APP, "headless: " + cubeResult.error());
-      scene.Shutdown();
-      return EXIT_RUNTIME_FAIL;
-    }
+    scene.Shutdown();
+    return EXIT_RUNTIME_FAIL;
   }
 
   RendererCreateDesc rendererDesc{};
@@ -217,52 +427,11 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
 
   {
     const Profiler::CpuScope frameScope(profiler, "headless.frame");
-
-    commandList->open();
-
-    // Drain pending GpuScene mutations onto the open command list
-    // (mesh upload, BLAS build, TLAS rebuild). Failure aborts the
-    // frame; partial state stays dirty so the next CommitResources
-    // retries.
-    if (auto commitResult = gpuScene.CommitResources(commandList); !commitResult)
+    if (!RecordAndExecuteRenderFrame(device, commandList, gpuScene, renderer, aovs, renderTarget))
     {
-      log.Error(log::APP, "headless: " + std::string{commitResult.error().message.View()});
-      commandList->close();
       scene.Shutdown();
       return EXIT_RUNTIME_FAIL;
     }
-
-    RenderTargets targets{};
-    targets.color = renderTarget;
-    // M7 follow-up — bind the raw AOV outputs so the user can dump
-    // them via --save-aov. Always bound (not just when --save-aov is
-    // set) because PathTracePass's UAV writes are unconditional;
-    // without these the writes go to the 1×1 fallbacks PathTracePass
-    // owns, which is fine but wastes the already-allocated AovTextures
-    // memory. Same RenderTargets shape ViewerMode wires.
-    targets.colorHdr      = aovs.colorHdr.Get();
-    targets.normalAov     = aovs.normal.Get();
-    targets.depthAov      = aovs.depth.Get();
-    targets.instanceIdAov = aovs.instanceId.Get();
-    targets.materialIdAov = aovs.materialId.Get();
-    targets.baseColorAov  = aovs.baseColor.Get();
-    targets.worldPosAov   = aovs.worldPos.Get();
-    RenderSettings settings{};
-    settings.width = renderTarget->getDesc().width;
-    settings.height = renderTarget->getDesc().height;
-    renderer.RenderFrame(commandList, settings, targets);
-    // Force the offscreen RT into CopySource before we close the
-    // command list. Without this we relied on NVRHI's auto-barrier
-    // logic spanning two separate executeCommandList submissions —
-    // technically fine today (NVRHI tracks state across submits) but
-    // brittle: a future refactor that takes the readback path through
-    // a separate command-list pool would lose that tracking and we'd
-    // get UB on the copy. Explicit is cheaper than mysterious.
-    commandList->setTextureState(renderTarget, nvrhi::AllSubresources,
-                                 nvrhi::ResourceStates::CopySource);
-    commandList->commitBarriers();
-    commandList->close();
-    device->executeCommandList(commandList);
   }
 
   deviceManager->EndFrame();
@@ -270,131 +439,19 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
   device->runGarbageCollection();
 
   // ---- Readback + EXR write ------------------------------------------
-  // TextureReadback is the shared helper — same pattern is used by
-  // ViewerMode::CaptureBackbufferToPng. Phase 1 (RecordCopy) records
-  // the staging-texture allocation + copy on a fresh command list;
-  // we then close + execute + waitForIdle so the GPU has retired the
-  // copy before Phase 2 (Map) hands us the host pointer. The handle
-  // unmaps on scope exit.
-  commandList->open();
-  auto readback =
-      TextureReadback::RecordCopy(device, commandList, renderTarget, "headless-readback-staging");
-  if (!readback)
+  if (!ReadbackAndWriteExr(device, commandList, renderTarget, config.output.image))
   {
-    log.Error(log::APP, "headless: " + readback.error());
-    scene.Shutdown();
-    return EXIT_RUNTIME_FAIL;
-  }
-  commandList->close();
-  device->executeCommandList(commandList);
-  device->waitForIdle();
-  device->runGarbageCollection();
-
-  if (auto mapResult = readback->Map(); !mapResult)
-  {
-    log.Error(log::APP, "headless: " + mapResult.error());
-    scene.Shutdown();
-    return EXIT_RUNTIME_FAIL;
-  }
-  // Sanity check: a render that worked has SOME non-black pixels
-  // (cube colour from closesthit or sky from miss). All-zero output
-  // would mean PathTracePass silently no-op'd; surface that as a
-  // log warning so a regression doesn't go quietly.
-  {
-    const auto* bytes = static_cast<const uint8_t*>(readback->Data());
-    bool anyNonBlack = false;
-    for (uint32_t row = 0; row < readback->Height() && !anyNonBlack; ++row)
-    {
-      const uint8_t* rowPtr = bytes + (row * readback->RowPitch());
-      for (uint32_t col = 0; col < readback->Width(); ++col)
-      {
-        if (rowPtr[col * 4 + 0] != 0 || rowPtr[col * 4 + 1] != 0 || rowPtr[col * 4 + 2] != 0)
-        {
-          anyNonBlack = true;
-          break;
-        }
-      }
-    }
-    log.Info(log::APP,
-             anyNonBlack ? "headless: render produced non-black pixels (looks valid)"
-                         : "headless: render output is fully black — PathTracePass likely skipped");
-  }
-
-  auto writeResult = WriteExrBgra8(config.output.image, readback->Width(), readback->Height(),
-                                   readback->Data(), readback->RowPitch());
-  if (!writeResult)
-  {
-    log.Error(log::APP, "headless: " + writeResult.error());
     scene.Shutdown();
     return EXIT_RUNTIME_FAIL;
   }
 
   // ---- M7 follow-up: --save-aov dispatch -----------------------------
-  // Parse the comma-separated list and dispatch one SaveAovAsExr per
-  // entry. Output paths are `<prefix>_<aov>.exr` where `<prefix>` is
-  // `config.output.image` stripped of its `.exr` extension. The "all"
-  // alias expands to every recognised AOV. Unknown names log a
-  // warning but don't fail the run — keeps the per-AOV write
-  // independent so a typo doesn't drop legitimate outputs.
+  // Output paths are `<prefix>_<aov>.exr` where `<prefix>` is
+  // `config.output.image` stripped of its `.exr` extension.
   if (!saveAovList.empty())
   {
     const std::string aovPrefix = DeriveAovPrefix(config.output.image);
-    auto saveOne = [&](std::string_view aovName, nvrhi::ITexture* sourceAov) {
-      if (sourceAov == nullptr)
-      {
-        log.Warn(log::APP, "headless: --save-aov: source for '" + std::string{aovName}
-                               + "' is null; skipping");
-        return;
-      }
-      const std::string targetPath = BuildAovOutputPath(aovPrefix, aovName);
-      if (auto saveResult = SaveAovAsExr(device, commandList, sourceAov, aovName, targetPath);
-          !saveResult)
-      {
-        log.Error(log::APP, "headless: " + saveResult.error());
-      }
-      else
-      {
-        log.Info(log::APP, "headless: --save-aov " + std::string{aovName}
-                               + " -> " + targetPath);
-      }
-    };
-    auto resolveAndSave = [&](std::string_view aovName) {
-      // Single source of truth for the name -> texture mapping —
-      // matches ViewerMode's Save AOV button via the same registry.
-      const AovEntry* entry = FindAovByName(aovName);
-      if (entry == nullptr)
-      {
-        log.Warn(log::APP, "headless: --save-aov: unknown AOV name '"
-                               + std::string{aovName}
-                               + "' (recognised: color,normal,depth,instanceId,"
-                                 "materialId,baseColor,worldPos,all)");
-        return;
-      }
-      saveOne(entry->name, (aovs.*entry->texturePtr).Get());
-    };
-
-    // Token-iterate the comma-list. Each name dispatches independently;
-    // an "all" token expands to every entry in AOV_REGISTRY.
-    std::size_t cursor = 0;
-    while (cursor < saveAovList.size())
-    {
-      const std::size_t comma = saveAovList.find(',', cursor);
-      const std::string_view name = (comma == std::string_view::npos)
-                                        ? saveAovList.substr(cursor)
-                                        : saveAovList.substr(cursor, comma - cursor);
-      cursor = (comma == std::string_view::npos) ? saveAovList.size() : (comma + 1);
-      if (name.empty())
-        continue;
-      if (name == "all")
-      {
-        for (const AovEntry& entry : AOV_REGISTRY)
-          saveOne(entry.name, (aovs.*entry.texturePtr).Get());
-      }
-      else
-      {
-        resolveAndSave(name);
-      }
-    }
+    SaveAovsFromList(saveAovList, aovPrefix, aovs, device, commandList);
   }
 
   // ---- Effective-config dump + teardown ------------------------------

@@ -143,6 +143,230 @@ struct ShaderRebuildResult {
 #endif
 }
 
+// Shader-rebuild state machine. Pre-async this whole flow ran
+// synchronously inside the click-handler and froze the UI for ~2 s
+// while cmake built the .spv. Now the spawn happens on a worker
+// thread; ImGuiHost shows "Rebuilding..." while in-flight; the main
+// thread polls per-frame and runs waitForIdle + ReloadShaders when
+// the worker reports back. The state moves Idle -> InFlight ->
+// ResultPending -> Idle. Atomics are unnecessary semantically since
+// the only cross-thread write is the state flag and the worker
+// writes it exactly once at the end of its body, but we use
+// atomic<int> for the formal happens-before.
+enum class ShaderRebuildState : int { Idle = 0, InFlight = 1, ResultPending = 2 };
+
+struct ShaderRebuildLatch
+{
+  std::atomic<int>      state{static_cast<int>(ShaderRebuildState::Idle)};
+  ShaderRebuildResult   result{};
+  std::filesystem::path lastDir;
+  std::thread           worker;
+};
+
+// Drain the editor's "Reload shaders" latch + advance the
+// rebuild state machine. Click latch is consulted ONLY when the
+// state is Idle so a second click during a rebuild can't queue
+// parallel work. Called once per frame from the main loop.
+void HandleShaderReloadStateMachine(ShaderRebuildLatch& latch,
+                                    std::string_view shaderRebuildDirOverride,
+                                    ImGuiHost& imguiHost,
+                                    nvrhi::IDevice* device,
+                                    PyxisRenderer& renderer) noexcept
+{
+  auto& log = Logging::Get();
+  const auto current = static_cast<ShaderRebuildState>(latch.state.load());
+
+  if (current == ShaderRebuildState::Idle && imguiHost.TakeShaderReloadRequest())
+  {
+    // Resolve build dir: explicit --shader-rebuild-dir override
+    // wins; otherwise walk up from cwd looking for CMakeCache.txt.
+    std::filesystem::path buildDir;
+    if (!shaderRebuildDirOverride.empty())
+      buildDir = std::filesystem::path{std::string{shaderRebuildDirOverride}};
+    else
+      buildDir = FindCMakeBuildDir(std::filesystem::current_path());
+
+    if (buildDir.empty())
+    {
+      log.Warn(log::APP,
+               "ViewerMode: shader reload — no CMakeCache.txt found near cwd "
+               "(use --shader-rebuild-dir <path> to override); skipping "
+               "ShaderMake rebuild and re-loading the existing .spv.");
+      // Skip rebuild but still re-read .spv on the main thread —
+      // immediate, no worker needed.
+      device->waitForIdle();
+      const bool reloadOk = renderer.ReloadShaders();
+      log.Info(log::APP, std::string{"ViewerMode: shader reload "}
+                              + (reloadOk ? "OK (no rebuild)"
+                                          : "FAILED (kept old pipeline)"));
+    }
+    else
+    {
+      // Spawn the worker. References capture the latch — the worker
+      // writes result and flips the state to ResultPending exactly
+      // once before exiting.
+      latch.lastDir = buildDir;
+      latch.state.store(static_cast<int>(ShaderRebuildState::InFlight));
+      latch.worker = std::thread([&latch, buildDir]() noexcept {
+        latch.result = RebuildShaderTarget(buildDir);
+        latch.state.store(static_cast<int>(ShaderRebuildState::ResultPending));
+      });
+    }
+  }
+  else if (current == ShaderRebuildState::ResultPending)
+  {
+    // Worker is done — join it (cheap; thread already exited),
+    // log the outcome with a useful hint when cmake itself wasn't
+    // found, then drain the GPU and re-read .spv from disk.
+    if (latch.worker.joinable())
+      latch.worker.join();
+    if (latch.result.ok)
+    {
+      log.Info(log::APP, "ViewerMode: shader rebuild OK ("
+                             + latch.lastDir.generic_string() + ")");
+    }
+    else if (latch.result.errnoCode == ENOENT)
+    {
+      log.Error(log::APP,
+                "ViewerMode: shader rebuild FAILED — `cmake` not found on PATH. "
+                "Install CMake or add it to PATH; re-loading the existing .spv "
+                "anyway (any .slang edits won't be picked up).");
+    }
+    else if (latch.result.errnoCode != 0)
+    {
+      log.Error(log::APP, "ViewerMode: shader rebuild FAILED — _spawnvp errno="
+                              + std::to_string(latch.result.errnoCode)
+                              + "; re-loading the existing .spv anyway.");
+    }
+    else
+    {
+      log.Warn(log::APP, "ViewerMode: shader rebuild FAILED — cmake exit="
+                             + std::to_string(latch.result.exitCode)
+                             + " (your .slang has a compile error?); re-loading "
+                               "the existing .spv anyway.");
+    }
+    device->waitForIdle();
+    const bool reloadOk = renderer.ReloadShaders();
+    log.Info(log::APP, std::string{"ViewerMode: shader reload "}
+                            + (reloadOk ? "OK" : "FAILED (kept old pipeline)"));
+    latch.state.store(static_cast<int>(ShaderRebuildState::Idle));
+  }
+  // Push the in-flight flag to the editor so the button can show
+  // "Rebuilding..." disabled. Done unconditionally each frame.
+  imguiHost.SetShaderRebuildInFlight(
+      latch.state.load() != static_cast<int>(ShaderRebuildState::Idle));
+}
+
+// Per-frame log line for the load profile, fired once after the
+// first complete frame. M3+: that frame's spend is effectively the
+// LOAD profile (mesh upload, BLAS build, TLAS rebuild, first
+// PathTracePass dispatch); the steady-state per-frame cost is
+// captured by the ImGui Performance panel from then on.
+void LogFirstFrameProfile(const PyxisRenderer& renderer) noexcept
+{
+  auto& log = Logging::Get();
+  const FrameProfile frameProfile = renderer.LastFrameProfile();
+  const double fps = frameProfile.cpuFrameMs > 0.0
+                         ? 1000.0 / frameProfile.cpuFrameMs
+                         : 0.0;
+  char buf[256];
+  std::snprintf(buf, sizeof(buf),
+                "profiler: load complete — cpu %.3f ms  gpu %.3f ms  fps %.1f",
+                frameProfile.cpuFrameMs, frameProfile.gpuFrameMs, fps);
+  log.Info(log::APP, buf);
+  for (const FrameProfile::PassTiming& timing : frameProfile.passes)
+  {
+    const char* kind = (timing.kind == FrameProfile::ScopeKind::Cpu) ? "CPU" : "GPU";
+    const std::string_view name = timing.name.View();
+    char line[256];
+    std::snprintf(line, sizeof(line), "profiler:   %*s%s %.*s  %.3f ms",
+                  static_cast<int>(timing.depth * 2), "", kind,
+                  static_cast<int>(name.size()), name.data(), timing.durationMs);
+    log.Info(log::APP, line);
+  }
+}
+
+// Resolve the picker pixel for this frame. Pinned takes the latched
+// UV (renormalised against the current AOV size so the pin stays at
+// the same screen location through resize); otherwise the live
+// cursor, clamped to the AOV bounds, with the sentinel
+// MOUSE_PIXEL_NONE for "no hover".
+void ResolvePickerPixel(const ImGuiHost& imguiHost,
+                        const AovTextures& aovs,
+                        std::atomic<int32_t>& latestMousePixelX,
+                        std::atomic<int32_t>& latestMousePixelY,
+                        RenderSettings& settings) noexcept
+{
+  if (imguiHost.IsReady() && imguiHost.IsPickerPinned())
+  {
+    const uint32_t pinnedX = static_cast<uint32_t>(
+        imguiHost.PickerPinnedU() * static_cast<float>(aovs.width));
+    const uint32_t pinnedY = static_cast<uint32_t>(
+        imguiHost.PickerPinnedV() * static_cast<float>(aovs.height));
+    // Clamp to last-row / last-column in case the float
+    // multiplication landed on an exclusive upper bound.
+    settings.mousePixelX = (pinnedX < aovs.width)  ? pinnedX  : (aovs.width  - 1);
+    settings.mousePixelY = (pinnedY < aovs.height) ? pinnedY  : (aovs.height - 1);
+  }
+  else
+  {
+    const int32_t mouseX = latestMousePixelX.load();
+    const int32_t mouseY = latestMousePixelY.load();
+    if (mouseX >= 0 && mouseY >= 0
+        && static_cast<uint32_t>(mouseX) < aovs.width
+        && static_cast<uint32_t>(mouseY) < aovs.height)
+    {
+      settings.mousePixelX = static_cast<uint32_t>(mouseX);
+      settings.mousePixelY = static_cast<uint32_t>(mouseY);
+    }
+  }
+}
+
+// Drain the editor's "Save current AOV..." latch. Opens a one-shot
+// command list on the existing handle, copies the chosen raw AOV
+// into a CpuAccessMode::Read staging texture, runs through
+// executeCommandList + waitForIdle, then maps + converts to RGBA32F
+// and writes the EXR. Stalls the loop briefly — acceptable for a
+// one-click human action.
+void HandleSaveAovLatch(ImGuiHost& imguiHost,
+                        const AovTextures& aovs,
+                        nvrhi::IDevice* device,
+                        nvrhi::ICommandList* commandList) noexcept
+{
+  if (!imguiHost.IsReady())
+    return;
+  std::string saveAovPath;
+  if (!imguiHost.TakeSaveAovRequest(saveAovPath))
+    return;
+
+  auto& log = Logging::Get();
+  const RenderSettings::DebugView pickedView = imguiHost.GetDebugView();
+  // Resolve via the shared registry — single source of truth for
+  // (DebugView -> texture + filename suffix) across viewer +
+  // headless.
+  const AovEntry* entry = FindAovByDebugView(pickedView);
+  nvrhi::ITexture* sourceAov = (entry != nullptr)
+                                   ? (aovs.*entry->texturePtr).Get()
+                                   : nullptr;
+  const std::string_view aovLabel =
+      (entry != nullptr) ? entry->name : std::string_view{"color"};
+  if (sourceAov == nullptr)
+  {
+    log.Error(log::APP, "ViewerMode: save AOV: source texture is null");
+  }
+  else if (auto saveResult = SaveAovAsExr(device, commandList, sourceAov,
+                                          aovLabel, saveAovPath);
+           !saveResult)
+  {
+    log.Error(log::APP, "ViewerMode: " + saveResult.error());
+  }
+  else
+  {
+    log.Info(log::APP, "ViewerMode: save AOV (" + std::string{aovLabel}
+                           + ") -> " + saveAovPath);
+  }
+}
+
 }  // namespace
 
 
@@ -151,22 +375,11 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
                   std::string_view shaderRebuildDirOverride) noexcept {
   auto& log = Logging::Get();
 
-  // ShaderMake rebuild state machine. Pre-async this whole flow ran
-  // synchronously inside the click-handler and froze the UI for ~2 s
-  // while cmake built the .spv. Now the spawn happens on a worker
-  // thread; ImGuiHost shows "Rebuilding..." while in-flight; the
-  // main thread polls per-frame and runs waitForIdle + ReloadShaders
-  // when the worker reports back. The state moves Idle -> InFlight
-  // -> ResultPending -> Idle. Atomics are unnecessary since the only
-  // cross-thread write is the state flag and the worker writes it
-  // exactly once at the end of its body (with sequenced-before
-  // memory_order — we use atomic<int> for the formal happens-before).
-  enum class ShaderRebuildState : int { Idle = 0, InFlight = 1, ResultPending = 2 };
-  std::atomic<int>           shaderRebuildState{
-      static_cast<int>(ShaderRebuildState::Idle)};
-  ShaderRebuildResult        shaderRebuildResult{};
-  std::filesystem::path      shaderRebuildLastDir;
-  std::thread                shaderRebuildWorker;
+  // ShaderMake rebuild latch + state machine. Click handler in
+  // HandleShaderReloadStateMachine spawns a worker thread; main loop
+  // polls per-frame for the result. See the helper for state-flow
+  // details.
+  ShaderRebuildLatch shaderRebuild;
 
   // ---- Window ----------------------------------------------------------
   // §27 render.{width,height} drive the swapchain dims; the window
@@ -547,107 +760,14 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
       imguiHost.BuildScenePanel(sceneStats);
       imguiHost.BuildEditorPanel(gpuScene);
 
-      // Drain the editor's "Reload shaders" latch. Wait the GPU idle
-      // (so no in-flight command buffer references the old pipeline /
-      // shader table) before asking the renderer to re-load every
-      // pass's shaders. PyxisRenderer::ReloadShaders walks each pass
-      // that overrides IRenderPass::ReloadShaders — at M7 that's
-      // PathTracePass only. Failure stays silent in the panel; the
-      // log line is the user-visible feedback.
-      // Async ShaderMake rebuild + .spv reload. State machine:
-      //   Idle          : button enabled; click moves to InFlight
-      //   InFlight      : worker thread spawning cmake; button shows
-      //                   "Rebuilding..." disabled
-      //   ResultPending : worker done, main thread joins + drains
-      //                   the result, runs waitForIdle + ReloadShaders,
-      //                   moves back to Idle
-      // Click latch is drained ONLY when state == Idle so a second
-      // click during a rebuild can't queue parallel work.
-      const auto state = static_cast<ShaderRebuildState>(shaderRebuildState.load());
-      if (state == ShaderRebuildState::Idle && imguiHost.TakeShaderReloadRequest())
-      {
-        // Resolve build dir: explicit --shader-rebuild-dir override
-        // wins; otherwise walk up from cwd looking for CMakeCache.txt.
-        std::filesystem::path buildDir;
-        if (!shaderRebuildDirOverride.empty())
-        {
-          buildDir = std::filesystem::path{std::string{shaderRebuildDirOverride}};
-        }
-        else
-        {
-          buildDir = FindCMakeBuildDir(std::filesystem::current_path());
-        }
-        if (buildDir.empty())
-        {
-          log.Warn(log::APP,
-                   "ViewerMode: shader reload — no CMakeCache.txt found near cwd "
-                   "(use --shader-rebuild-dir <path> to override); skipping "
-                   "ShaderMake rebuild and re-loading the existing .spv.");
-          // Skip rebuild but still re-read .spv on the main thread —
-          // immediate, no worker needed.
-          device->waitForIdle();
-          const bool reloadOk = renderer.ReloadShaders();
-          log.Info(log::APP, std::string{"ViewerMode: shader reload "}
-                                  + (reloadOk ? "OK (no rebuild)"
-                                              : "FAILED (kept old pipeline)"));
-        }
-        else
-        {
-          // Spawn the worker. References capture the locals — the
-          // worker writes shaderRebuildResult and flips the state to
-          // ResultPending exactly once before exiting.
-          shaderRebuildLastDir = buildDir;
-          shaderRebuildState.store(static_cast<int>(ShaderRebuildState::InFlight));
-          shaderRebuildWorker = std::thread([buildDir, &shaderRebuildResult,
-                                             &shaderRebuildState]() noexcept {
-            shaderRebuildResult = RebuildShaderTarget(buildDir);
-            shaderRebuildState.store(
-                static_cast<int>(ShaderRebuildState::ResultPending));
-          });
-        }
-      }
-      else if (state == ShaderRebuildState::ResultPending)
-      {
-        // Worker is done — join it (cheap; thread already exited),
-        // log the outcome with a useful hint when cmake itself wasn't
-        // found, then drain the GPU and re-read .spv from disk.
-        if (shaderRebuildWorker.joinable())
-          shaderRebuildWorker.join();
-        if (shaderRebuildResult.ok)
-        {
-          log.Info(log::APP, "ViewerMode: shader rebuild OK ("
-                                 + shaderRebuildLastDir.generic_string() + ")");
-        }
-        else if (shaderRebuildResult.errnoCode == ENOENT)
-        {
-          log.Error(log::APP,
-                    "ViewerMode: shader rebuild FAILED — `cmake` not found on PATH. "
-                    "Install CMake or add it to PATH; re-loading the existing .spv "
-                    "anyway (any .slang edits won't be picked up).");
-        }
-        else if (shaderRebuildResult.errnoCode != 0)
-        {
-          log.Error(log::APP, "ViewerMode: shader rebuild FAILED — _spawnvp errno="
-                                  + std::to_string(shaderRebuildResult.errnoCode)
-                                  + "; re-loading the existing .spv anyway.");
-        }
-        else
-        {
-          log.Warn(log::APP, "ViewerMode: shader rebuild FAILED — cmake exit="
-                                 + std::to_string(shaderRebuildResult.exitCode)
-                                 + " (your .slang has a compile error?); re-loading "
-                                   "the existing .spv anyway.");
-        }
-        device->waitForIdle();
-        const bool reloadOk = renderer.ReloadShaders();
-        log.Info(log::APP, std::string{"ViewerMode: shader reload "}
-                                + (reloadOk ? "OK" : "FAILED (kept old pipeline)"));
-        shaderRebuildState.store(static_cast<int>(ShaderRebuildState::Idle));
-      }
-      // Push the in-flight flag to the editor so the button can show
-      // "Rebuilding..." disabled. Done unconditionally each frame.
-      imguiHost.SetShaderRebuildInFlight(
-          shaderRebuildState.load() != static_cast<int>(ShaderRebuildState::Idle));
+      // Drain the editor's "Reload shaders" latch + advance the
+      // async-rebuild state machine. Click handler waits for the GPU
+      // idle (so no in-flight command buffer references the old
+      // pipeline) before asking the renderer to re-read .spv from
+      // disk. Failure stays silent in the panel; the log line is the
+      // user-visible feedback.
+      HandleShaderReloadStateMachine(shaderRebuild, shaderRebuildDirOverride,
+                                     imguiHost, device, renderer);
 
       // Drain the editor's "Open scene..." latch. Same waitForIdle
       // discipline plus a GpuScene::Clear before re-running the
@@ -738,37 +858,11 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
         settings.debugView = imguiHost.GetDebugView();
         settings.worldPosPeriod = imguiHost.GetWorldPosPeriod();
       }
-      // Picker pin: when the editor has pinned the picker, the
-      // raygen keeps sampling the locked pixel regardless of cursor
-      // movement. Otherwise we feed the live cursor (clamped to the
-      // AOV bounds; out-of-bounds = sentinel "no pick").
-      // The pinned UV is normalised [0, 1] so a window resize after
-      // pinning denormalises against the NEW dims and the pin stays
-      // at the same screen location (pre-fix the pinned pixel went
-      // out-of-bounds and silently died).
-      if (imguiHost.IsReady() && imguiHost.IsPickerPinned())
-      {
-        const uint32_t pinnedX = static_cast<uint32_t>(
-            imguiHost.PickerPinnedU() * static_cast<float>(aovs.width));
-        const uint32_t pinnedY = static_cast<uint32_t>(
-            imguiHost.PickerPinnedV() * static_cast<float>(aovs.height));
-        // Clamp to last-row / last-column in case the float
-        // multiplication landed on an exclusive upper bound.
-        settings.mousePixelX = (pinnedX < aovs.width)  ? pinnedX  : (aovs.width  - 1);
-        settings.mousePixelY = (pinnedY < aovs.height) ? pinnedY  : (aovs.height - 1);
-      }
-      else
-      {
-        const int32_t mouseX = latestMousePixelX.load();
-        const int32_t mouseY = latestMousePixelY.load();
-        if (mouseX >= 0 && mouseY >= 0
-            && static_cast<uint32_t>(mouseX) < aovs.width
-            && static_cast<uint32_t>(mouseY) < aovs.height)
-        {
-          settings.mousePixelX = static_cast<uint32_t>(mouseX);
-          settings.mousePixelY = static_cast<uint32_t>(mouseY);
-        }
-      }
+      // Picker pixel: pinned takes the latched normalised UV
+      // (renormalised against the current AOV size each frame so a
+      // resize keeps the pin at the same screen location);
+      // otherwise the live cursor clamped to AOV bounds.
+      ResolvePickerPixel(imguiHost, aovs, latestMousePixelX, latestMousePixelY, settings);
 
       renderer.RenderFrame(commandList, settings, targets);
 
@@ -862,44 +956,12 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
       deviceManager->EndFrame();
     }
 
-    // ---- Save AOV (Editor "Save current AOV..." button) ---------------
-    // Drained AFTER the frame's main submit + present so the AOV holds
-    // freshly-written data. We open a one-shot command list, copy the
-    // selected raw AOV into a CpuAccessMode::Read staging texture, run
-    // it through executeCommandList + waitForIdle, then map + convert
-    // to RGBA32F + WriteExrRgba32f. Stalls the render loop briefly —
-    // acceptable for a one-click human action.
-    std::string saveAovPath;
-    if (imguiHost.IsReady() && imguiHost.TakeSaveAovRequest(saveAovPath))
-    {
-      const RenderSettings::DebugView pickedView = imguiHost.GetDebugView();
-      // Resolve via the shared registry — single source of truth for
-      // (DebugView -> texture + filename suffix) across viewer +
-      // headless. Pre-refactor this site carried its own switch on
-      // the enum that needed to stay in lockstep with HeadlessMode's
-      // separate `if (name == "color") ...` chain.
-      const AovEntry* entry = FindAovByDebugView(pickedView);
-      nvrhi::ITexture* sourceAov = (entry != nullptr)
-                                       ? (aovs.*entry->texturePtr).Get()
-                                       : nullptr;
-      const std::string_view aovLabel =
-          (entry != nullptr) ? entry->name : std::string_view{"color"};
-      if (sourceAov == nullptr)
-      {
-        log.Error(log::APP, "ViewerMode: save AOV: source texture is null");
-      }
-      else if (auto saveResult = SaveAovAsExr(device, commandListHandle.Get(), sourceAov,
-                                              aovLabel, saveAovPath);
-               !saveResult)
-      {
-        log.Error(log::APP, "ViewerMode: " + saveResult.error());
-      }
-      else
-      {
-        log.Info(log::APP, "ViewerMode: save AOV (" + std::string{aovLabel}
-                               + ") -> " + saveAovPath);
-      }
-    }
+    // Drain the editor's "Save current AOV..." latch AFTER the
+    // frame's main submit + present so the AOV holds freshly-written
+    // data. The helper opens a one-shot command list on the existing
+    // handle and stalls briefly on waitForIdle — acceptable for a
+    // one-click human action.
+    HandleSaveAovLatch(imguiHost, aovs, device, commandListHandle.Get());
 
     // Drain NVRHI's deferred-destruction queue. nvrhi.h's contract is
     // explicit: "Call this method at least once per frame." Without
@@ -922,27 +984,7 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
     // the console. The Performance panel's Loading section keeps the
     // same data visually for users who want to drill in.
     if (frameIndex == 1)
-    {
-      const FrameProfile frameProfile = renderer.LastFrameProfile();
-      const double fps = frameProfile.cpuFrameMs > 0.0
-                             ? 1000.0 / frameProfile.cpuFrameMs
-                             : 0.0;
-      char buf[256];
-      std::snprintf(buf, sizeof(buf),
-                    "profiler: load complete — cpu %.3f ms  gpu %.3f ms  fps %.1f",
-                    frameProfile.cpuFrameMs, frameProfile.gpuFrameMs, fps);
-      log.Info(log::APP, buf);
-      for (const FrameProfile::PassTiming& timing : frameProfile.passes)
-      {
-        const char* kind = (timing.kind == FrameProfile::ScopeKind::Cpu) ? "CPU" : "GPU";
-        const std::string_view name = timing.name.View();
-        char line[256];
-        std::snprintf(line, sizeof(line), "profiler:   %*s%s %.*s  %.3f ms",
-                      static_cast<int>(timing.depth * 2), "", kind,
-                      static_cast<int>(name.size()), name.data(), timing.durationMs);
-        log.Info(log::APP, line);
-      }
-    }
+      LogFirstFrameProfile(renderer);
   }
 
   log.Info(log::APP, "ViewerMode: frame loop exited; tearing down");
@@ -950,8 +992,8 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
   // worker thread — std::thread's destructor calls std::terminate on
   // a joinable thread. The worker is just spawning cmake so the join
   // is bounded by ShaderMake's runtime (~2 s); fine for shutdown.
-  if (shaderRebuildWorker.joinable())
-    shaderRebuildWorker.join();
+  if (shaderRebuild.worker.joinable())
+    shaderRebuild.worker.join();
   deviceManager->WaitIdle();
   imguiHost.Shutdown();
   return EXIT_OK;
