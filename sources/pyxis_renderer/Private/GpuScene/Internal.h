@@ -247,6 +247,46 @@ inline shaderinterop::LightGpu PackLightGpu(const LightDesc& desc,
   return gpu;
 }
 
+// Lazily (re)create a structured buffer if `handle` is null or
+// smaller than `byteSize`. The 6 CommitResources upload phases all
+// hit the same shape: structured buffer, ShaderResource state,
+// keepInitialState=true, no raw / typed views — only the stride,
+// debug name, and error label vary. Returns Expected<void>; the
+// caller PYXIS_TRYs to short-circuit on createBuffer failure.
+//
+// Lives in `gpuscene_detail::` rather than on Impl because it
+// doesn't touch any Impl state — just the device + the borrowed
+// handle reference.
+[[nodiscard]] inline Expected<void> EnsureStructuredBuffer(
+    nvrhi::IDevice* device,
+    nvrhi::BufferHandle& handle,
+    std::size_t byteSize,
+    std::size_t structStride,
+    std::string_view debugName,
+    std::string_view errorLabel) noexcept
+{
+  if (handle && handle->getDesc().byteSize >= byteSize)
+    return {};
+  nvrhi::BufferDesc bufDesc;
+  bufDesc.byteSize = byteSize;
+  bufDesc.structStride = structStride;
+  bufDesc.canHaveRawViews = false;
+  bufDesc.canHaveTypedViews = false;
+  bufDesc.format = nvrhi::Format::UNKNOWN;
+  bufDesc.debugName = std::string{debugName};
+  bufDesc.initialState = nvrhi::ResourceStates::ShaderResource;
+  bufDesc.keepInitialState = true;
+  handle = device->createBuffer(bufDesc);
+  if (!handle)
+  {
+    return std::unexpected{PYXIS_ERROR(
+        ErrorKind::OutOfMemoryGpu,
+        "CommitResources: createBuffer(%.*s, %zu bytes) failed",
+        static_cast<int>(errorLabel.size()), errorLabel.data(), byteSize)};
+  }
+  return {};
+}
+
 }  // namespace gpuscene_detail
 
 // PIMPL body. Defined here so per-verb .cpp files can declare member

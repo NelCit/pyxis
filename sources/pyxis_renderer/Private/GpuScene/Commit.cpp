@@ -463,27 +463,9 @@ Expected<void> GpuScene::Impl::UploadMaterialBuffer(nvrhi::ICommandList* command
   // (Re)create the GPU buffer if it doesn't exist or grew. M5 stub
   // grows monotonically — DestroyMaterial leaves a hole rather
   // than reclaiming the slot index. M8 perf sweep adds compaction.
-  if (!materialGpuBuffer
-      || materialGpuBuffer->getDesc().byteSize < bufferBytes)
-  {
-    nvrhi::BufferDesc bufDesc;
-    bufDesc.byteSize = bufferBytes;
-    bufDesc.structStride = sizeof(shaderinterop::OpenPBRMaterialGPU);
-    bufDesc.canHaveRawViews = false;
-    bufDesc.canHaveTypedViews = false;
-    bufDesc.format = nvrhi::Format::UNKNOWN;
-    bufDesc.debugName = "scene.materials";
-    bufDesc.initialState = nvrhi::ResourceStates::ShaderResource;
-    bufDesc.keepInitialState = true;
-    materialGpuBuffer = device->createBuffer(bufDesc);
-    if (!materialGpuBuffer)
-    {
-      return std::unexpected{
-          PYXIS_ERROR(ErrorKind::OutOfMemoryGpu,
-                      "CommitResources: createBuffer(materials, %zu bytes) failed",
-                      bufferBytes)};
-    }
-  }
+  PYXIS_TRY(EnsureStructuredBuffer(device, materialGpuBuffer, bufferBytes,
+                                   sizeof(shaderinterop::OpenPBRMaterialGPU),
+                                   "scene.materials", "materials"));
   commandList->writeBuffer(materialGpuBuffer.Get(), packed.data(), bufferBytes);
   // Per-entry needsGpuUpload flags are advisory only since we
   // always re-upload the whole table; clearing them keeps the
@@ -521,29 +503,10 @@ Expected<void> GpuScene::Impl::UploadLightBuffer(nvrhi::ICommandList* commandLis
   {
     const std::size_t lightBytes =
         packedLights.size() * sizeof(shaderinterop::LightGpu);
-    if (!lightsGpuBuffer
-        || lightsGpuBuffer->getDesc().byteSize < lightBytes)
-    {
-      nvrhi::BufferDesc bufDesc;
-      bufDesc.byteSize = lightBytes;
-      bufDesc.structStride = sizeof(shaderinterop::LightGpu);
-      bufDesc.canHaveRawViews = false;
-      bufDesc.canHaveTypedViews = false;
-      bufDesc.format = nvrhi::Format::UNKNOWN;
-      bufDesc.debugName = "scene.lights";
-      bufDesc.initialState = nvrhi::ResourceStates::ShaderResource;
-      bufDesc.keepInitialState = true;
-      lightsGpuBuffer = device->createBuffer(bufDesc);
-      if (!lightsGpuBuffer)
-      {
-        return std::unexpected{
-            PYXIS_ERROR(ErrorKind::OutOfMemoryGpu,
-                        "CommitResources: createBuffer(lights, %zu bytes) failed",
-                        lightBytes)};
-      }
-    }
-    commandList->writeBuffer(lightsGpuBuffer.Get(), packedLights.data(),
-                             lightBytes);
+    PYXIS_TRY(EnsureStructuredBuffer(device, lightsGpuBuffer, lightBytes,
+                                     sizeof(shaderinterop::LightGpu),
+                                     "scene.lights", "lights"));
+    commandList->writeBuffer(lightsGpuBuffer.Get(), packedLights.data(), lightBytes);
   }
   lightsNeedGpuUpload = false;
   return {};
@@ -729,26 +692,10 @@ Expected<void> GpuScene::Impl::UploadInstanceSideTables(nvrhi::ICommandList* com
   }
   const std::size_t instanceTableBytes =
       instanceMaterialTable.size() * sizeof(std::uint32_t);
-  if (!instanceMaterialBuffer
-      || instanceMaterialBuffer->getDesc().byteSize < instanceTableBytes)
-  {
-    nvrhi::BufferDesc bufDesc;
-    bufDesc.byteSize = instanceTableBytes;
-    bufDesc.structStride = sizeof(std::uint32_t);
-    bufDesc.canHaveRawViews = false;
-    bufDesc.canHaveTypedViews = false;
-    bufDesc.format = nvrhi::Format::UNKNOWN;
-    bufDesc.debugName = "GpuScene.instanceMaterialBuffer";
-    bufDesc.initialState = nvrhi::ResourceStates::ShaderResource;
-    bufDesc.keepInitialState = true;
-    instanceMaterialBuffer = device->createBuffer(bufDesc);
-    if (!instanceMaterialBuffer)
-    {
-      return std::unexpected{
-          PYXIS_ERROR(ErrorKind::OutOfMemoryGpu,
-                      "CommitResources: createBuffer(instanceMaterialBuffer) failed")};
-    }
-  }
+  PYXIS_TRY(EnsureStructuredBuffer(device, instanceMaterialBuffer, instanceTableBytes,
+                                   sizeof(std::uint32_t),
+                                   "GpuScene.instanceMaterialBuffer",
+                                   "instanceMaterialBuffer"));
   commandList->writeBuffer(instanceMaterialBuffer.Get(),
                            instanceMaterialTable.data(), instanceTableBytes);
 
@@ -767,26 +714,10 @@ Expected<void> GpuScene::Impl::UploadInstanceSideTables(nvrhi::ICommandList* com
     instanceMeshTable[entrySlot] =
         (meshValue == 0) ? 0u : HandleSlot(meshValue);
   }
-  if (!instanceMeshBuffer
-      || instanceMeshBuffer->getDesc().byteSize < instanceTableBytes)
-  {
-    nvrhi::BufferDesc bufDesc;
-    bufDesc.byteSize = instanceTableBytes;
-    bufDesc.structStride = sizeof(std::uint32_t);
-    bufDesc.canHaveRawViews = false;
-    bufDesc.canHaveTypedViews = false;
-    bufDesc.format = nvrhi::Format::UNKNOWN;
-    bufDesc.debugName = "GpuScene.instanceMeshBuffer";
-    bufDesc.initialState = nvrhi::ResourceStates::ShaderResource;
-    bufDesc.keepInitialState = true;
-    instanceMeshBuffer = device->createBuffer(bufDesc);
-    if (!instanceMeshBuffer)
-    {
-      return std::unexpected{
-          PYXIS_ERROR(ErrorKind::OutOfMemoryGpu,
-                      "CommitResources: createBuffer(instanceMeshBuffer) failed")};
-    }
-  }
+  PYXIS_TRY(EnsureStructuredBuffer(device, instanceMeshBuffer, instanceTableBytes,
+                                   sizeof(std::uint32_t),
+                                   "GpuScene.instanceMeshBuffer",
+                                   "instanceMeshBuffer"));
   commandList->writeBuffer(instanceMeshBuffer.Get(),
                            instanceMeshTable.data(), instanceTableBytes);
 
@@ -827,46 +758,14 @@ Expected<void> GpuScene::Impl::UploadMeshFaceNormals(nvrhi::ICommandList* comman
   const std::size_t normalsBytes = packedNormals.size() * sizeof(hlslpp::float4);
   const std::size_t offsetsBytes = perMeshOffsets.size() * sizeof(std::uint32_t);
 
-  if (!meshFaceNormalsBuffer
-      || meshFaceNormalsBuffer->getDesc().byteSize < normalsBytes)
-  {
-    nvrhi::BufferDesc bufDesc;
-    bufDesc.byteSize = normalsBytes;
-    bufDesc.structStride = sizeof(hlslpp::float4);
-    bufDesc.canHaveRawViews = false;
-    bufDesc.canHaveTypedViews = false;
-    bufDesc.format = nvrhi::Format::UNKNOWN;
-    bufDesc.debugName = "GpuScene.meshFaceNormalsBuffer";
-    bufDesc.initialState = nvrhi::ResourceStates::ShaderResource;
-    bufDesc.keepInitialState = true;
-    meshFaceNormalsBuffer = device->createBuffer(bufDesc);
-    if (!meshFaceNormalsBuffer)
-    {
-      return std::unexpected{
-          PYXIS_ERROR(ErrorKind::OutOfMemoryGpu,
-                      "CommitResources: createBuffer(meshFaceNormalsBuffer) failed")};
-    }
-  }
-  if (!meshFaceOffsetsBuffer
-      || meshFaceOffsetsBuffer->getDesc().byteSize < offsetsBytes)
-  {
-    nvrhi::BufferDesc bufDesc;
-    bufDesc.byteSize = offsetsBytes;
-    bufDesc.structStride = sizeof(std::uint32_t);
-    bufDesc.canHaveRawViews = false;
-    bufDesc.canHaveTypedViews = false;
-    bufDesc.format = nvrhi::Format::UNKNOWN;
-    bufDesc.debugName = "GpuScene.meshFaceOffsetsBuffer";
-    bufDesc.initialState = nvrhi::ResourceStates::ShaderResource;
-    bufDesc.keepInitialState = true;
-    meshFaceOffsetsBuffer = device->createBuffer(bufDesc);
-    if (!meshFaceOffsetsBuffer)
-    {
-      return std::unexpected{
-          PYXIS_ERROR(ErrorKind::OutOfMemoryGpu,
-                      "CommitResources: createBuffer(meshFaceOffsetsBuffer) failed")};
-    }
-  }
+  PYXIS_TRY(EnsureStructuredBuffer(device, meshFaceNormalsBuffer, normalsBytes,
+                                   sizeof(hlslpp::float4),
+                                   "GpuScene.meshFaceNormalsBuffer",
+                                   "meshFaceNormalsBuffer"));
+  PYXIS_TRY(EnsureStructuredBuffer(device, meshFaceOffsetsBuffer, offsetsBytes,
+                                   sizeof(std::uint32_t),
+                                   "GpuScene.meshFaceOffsetsBuffer",
+                                   "meshFaceOffsetsBuffer"));
   commandList->writeBuffer(meshFaceNormalsBuffer.Get(), packedNormals.data(),
                            normalsBytes);
   commandList->writeBuffer(meshFaceOffsetsBuffer.Get(), perMeshOffsets.data(),
