@@ -121,6 +121,16 @@ class PathTracePass final : public IRenderPass {
   nvrhi::BufferHandle _fallbackMeshFaceNormalsBuffer;
   nvrhi::BufferHandle _fallbackMeshFaceOffsetsBuffer;
 
+  // M8a UV pipeline: 1-element fallbacks for the four new mesh-data
+  // buffers (UVs, UV offsets, indices, index offsets). Closesthit
+  // never indexes through these on an empty scene (no hits → no
+  // closesthit invocations) but the binding slots must point at a
+  // non-null structured buffer for the descriptor set to validate.
+  nvrhi::BufferHandle _fallbackMeshUvsBuffer;
+  nvrhi::BufferHandle _fallbackMeshUvOffsetsBuffer;
+  nvrhi::BufferHandle _fallbackMeshIndicesBuffer;
+  nvrhi::BufferHandle _fallbackMeshIndexOffsetsBuffer;
+
   // M7-IBL: 1×1 black RGBA32F fallback texture + a default linear-
   // clamp sampler. Bound at bindings 9/10 when the scene has no dome
   // light with a resolved env-map — sampling returns black so the
@@ -150,6 +160,10 @@ class PathTracePass final : public IRenderPass {
     MeshFaceOffsets,
     DomeTexture,
     BindlessSampler,
+    MeshUvs,
+    MeshUvOffsets,
+    MeshIndices,
+    MeshIndexOffsets,
     ColorHdrAov,
     NormalAov,
     DepthAov,
@@ -169,6 +183,19 @@ class PathTracePass final : public IRenderPass {
       static_cast<std::size_t>(BindingSlot::Count);
   using BindingsSnapshot = std::array<const void*, BINDING_SLOT_COUNT>;
   BindingsSnapshot _lastBindings{};
+
+  // M8a bindless textures: cached fingerprint of the scene's bindless-
+  // texture array (binding 28). The textures-array writes one
+  // BindingSetItem per live texture; cached binding sets become stale
+  // when EITHER the array length grows / shrinks OR a slot's
+  // ITexture* changes (the M8a audit caught the latter — with the
+  // free-list slot-recycle, DestroyTexture + later AcquireTexture
+  // reuses the same slot index but with a different pointer, leaving
+  // the count unchanged). Fingerprint = FNV1a-64 over (count, every
+  // live ITexture*); recompute each Execute, invalidate on mismatch.
+  // Cheap: one pointer-load + xor-multiply per live texture per
+  // frame, well under 1µs even at Bistro scale.
+  std::uint64_t _lastBindlessTextureFingerprint = 0;
 
   bool _shadersOk = false;  // true if ctor loaded all three shaders + built pipeline.
   // Tiny no-UAV fallback textures for each raw AOV format. Bound when

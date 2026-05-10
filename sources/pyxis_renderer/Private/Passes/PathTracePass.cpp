@@ -149,6 +149,21 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
       nvrhi::BindingLayoutItem::Texture_UAV(21),             // binding 21 elementId AOV
       nvrhi::BindingLayoutItem::Texture_UAV(22),             // binding 22 normalEye AOV
       nvrhi::BindingLayoutItem::Texture_UAV(23),             // binding 23 worldPosEye AOV
+      // M8a UV pipeline + bindless materials.
+      nvrhi::BindingLayoutItem::StructuredBuffer_SRV(24),    // binding 24 mesh UVs
+      nvrhi::BindingLayoutItem::StructuredBuffer_SRV(25),    // binding 25 mesh UV offsets
+      nvrhi::BindingLayoutItem::StructuredBuffer_SRV(26),    // binding 26 mesh indices
+      nvrhi::BindingLayoutItem::StructuredBuffer_SRV(27),    // binding 27 mesh index offsets
+      // Bindless material textures. NVRHI's vulkan backend applies
+      // ePartiallyBound to every layout entry (vulkan-resource-bindings
+      // .cpp:184), so unbound array slots are safe as long as the
+      // closesthit's `mat.flags & MATERIAL_FLAG_HAS_BASE_COLOR_MAP`
+      // gate prevents access to them. Cap mirrors BINDLESS_TEXTURES_CAP
+      // in ShaderInterop.slang. True createBindlessLayout (plan §5
+      // ~80K capacity) is a post-v1 sweep — 4096 covers Bistro + every
+      // v1 production scene.
+      nvrhi::BindingLayoutItem::Texture_SRV(28).setSize(
+          shaderinterop::BINDLESS_TEXTURES_CAP),             // binding 28 bindless textures
   };
   _bindingLayout = _device->createBindingLayout(layoutDesc);
   if (!_bindingLayout)
@@ -318,6 +333,37 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
     Logging::Get().Error(log::RENDER,
                          "PathTracePass: createBuffer(Fallback{InstanceMesh,MeshFaceOffsets}) "
                          "failed");
+    return;
+  }
+
+  // M8a UV pipeline fallbacks. Same uint-stride shape for the index
+  // and offset buffers; the UV fallback is a single zero float2.
+  _fallbackMeshUvOffsetsBuffer    = makeUintFallback("PathTrace.FallbackMeshUvOffsets");
+  _fallbackMeshIndicesBuffer      = makeUintFallback("PathTrace.FallbackMeshIndices");
+  _fallbackMeshIndexOffsetsBuffer = makeUintFallback("PathTrace.FallbackMeshIndexOffsets");
+  if (!_fallbackMeshUvOffsetsBuffer || !_fallbackMeshIndicesBuffer
+      || !_fallbackMeshIndexOffsetsBuffer)
+  {
+    Logging::Get().Error(log::RENDER,
+                         "PathTracePass: createBuffer(Fallback{MeshUvOffsets,MeshIndices,"
+                         "MeshIndexOffsets}) failed");
+    return;
+  }
+  {
+    nvrhi::BufferDesc uvFallbackDesc;
+    uvFallbackDesc.byteSize = sizeof(hlslpp::float2);
+    uvFallbackDesc.structStride = sizeof(hlslpp::float2);
+    uvFallbackDesc.canHaveRawViews = false;
+    uvFallbackDesc.canHaveTypedViews = false;
+    uvFallbackDesc.format = nvrhi::Format::UNKNOWN;
+    uvFallbackDesc.debugName = "PathTrace.FallbackMeshUvs";
+    uvFallbackDesc.initialState = nvrhi::ResourceStates::ShaderResource;
+    uvFallbackDesc.keepInitialState = true;
+    _fallbackMeshUvsBuffer = _device->createBuffer(uvFallbackDesc);
+  }
+  if (!_fallbackMeshUvsBuffer)
+  {
+    Logging::Get().Error(log::RENDER, "PathTracePass: createBuffer(FallbackMeshUvs) failed");
     return;
   }
 
@@ -553,6 +599,10 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(RenderTargets const
   current[slot(BindingSlot::MeshFaceOffsets)]  = _scene->GetMeshFaceOffsetsBuffer();
   current[slot(BindingSlot::DomeTexture)]      = _scene->GetDomeEnvMapTexture();
   current[slot(BindingSlot::BindlessSampler)]  = _scene->GetBindlessSampler();
+  current[slot(BindingSlot::MeshUvs)]          = _scene->GetMeshUvsBuffer();
+  current[slot(BindingSlot::MeshUvOffsets)]    = _scene->GetMeshUvOffsetsBuffer();
+  current[slot(BindingSlot::MeshIndices)]      = _scene->GetMeshIndicesBuffer();
+  current[slot(BindingSlot::MeshIndexOffsets)] = _scene->GetMeshIndexOffsetsBuffer();
   current[slot(BindingSlot::ColorHdrAov)]      = targets.colorHdr;
   current[slot(BindingSlot::NormalAov)]        = targets.normalAov;
   current[slot(BindingSlot::DepthAov)]         = targets.depthAov;
@@ -565,10 +615,28 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(RenderTargets const
   current[slot(BindingSlot::ElementIdAov)]     = targets.elementIdAov;
   current[slot(BindingSlot::NormalEyeAov)]     = targets.normalEyeAov;
   current[slot(BindingSlot::WorldPosEyeAov)]   = targets.worldPosEyeAov;
-  if (current != _lastBindings)
+  // Bindless-texture cache invalidation. We need to detect BOTH
+  // grow/shrink of the array AND slot-pointer churn (the §M8a
+  // free-list slot-recycle path lets DestroyTexture + later
+  // AcquireTexture reuse a slot with a fresh ITexture*, leaving the
+  // count unchanged). Fingerprint = FNV1a-64 over (count, every live
+  // ITexture*); on mismatch with the prior frame's, invalidate.
+  const uint32_t bindlessTextureCount = _scene->GetBindlessTextureCount();
+  std::uint64_t bindlessFingerprint = 0xcbf29ce484222325ULL;
+  bindlessFingerprint ^= bindlessTextureCount;
+  bindlessFingerprint *= 0x100000001b3ULL;
+  for (uint32_t bindlessSlot = 0; bindlessSlot < bindlessTextureCount; ++bindlessSlot)
+  {
+    const auto ptrAsInt =
+        reinterpret_cast<std::uintptr_t>(_scene->GetBindlessTextureAt(bindlessSlot));
+    bindlessFingerprint ^= static_cast<std::uint64_t>(ptrAsInt);
+    bindlessFingerprint *= 0x100000001b3ULL;
+  }
+  if (current != _lastBindings || bindlessFingerprint != _lastBindlessTextureFingerprint)
   {
     _bindingSetCache.clear();
     _lastBindings = current;
+    _lastBindlessTextureFingerprint = bindlessFingerprint;
   }
 
   if (auto cached = _bindingSetCache.find(output); cached != _bindingSetCache.end())
@@ -613,6 +681,19 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(RenderTargets const
   nvrhi::IBuffer* meshFaceOffsetsBuffer = _scene->GetMeshFaceOffsetsBuffer();
   if (meshFaceOffsetsBuffer == nullptr)
     meshFaceOffsetsBuffer = _fallbackMeshFaceOffsetsBuffer.Get();
+  // M8a UV pipeline — same fallback shape as the M7-NdotL buffers.
+  nvrhi::IBuffer* meshUvsBuffer = _scene->GetMeshUvsBuffer();
+  if (meshUvsBuffer == nullptr)
+    meshUvsBuffer = _fallbackMeshUvsBuffer.Get();
+  nvrhi::IBuffer* meshUvOffsetsBuffer = _scene->GetMeshUvOffsetsBuffer();
+  if (meshUvOffsetsBuffer == nullptr)
+    meshUvOffsetsBuffer = _fallbackMeshUvOffsetsBuffer.Get();
+  nvrhi::IBuffer* meshIndicesBuffer = _scene->GetMeshIndicesBuffer();
+  if (meshIndicesBuffer == nullptr)
+    meshIndicesBuffer = _fallbackMeshIndicesBuffer.Get();
+  nvrhi::IBuffer* meshIndexOffsetsBuffer = _scene->GetMeshIndexOffsetsBuffer();
+  if (meshIndexOffsetsBuffer == nullptr)
+    meshIndexOffsetsBuffer = _fallbackMeshIndexOffsetsBuffer.Get();
   // M7-IBL: dome HDRI texture + sampler. Scene's first live dome
   // wins; falls back to the 1×1 black texture + the local linear-
   // clamp sampler when no dome with a resolved env-map exists. The
@@ -681,7 +762,43 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(RenderTargets const
       nvrhi::BindingSetItem::Texture_UAV(21, elementIdAov),
       nvrhi::BindingSetItem::Texture_UAV(22, normalEyeAov),
       nvrhi::BindingSetItem::Texture_UAV(23, worldPosEyeAov),
+      nvrhi::BindingSetItem::StructuredBuffer_SRV(24, meshUvsBuffer),
+      nvrhi::BindingSetItem::StructuredBuffer_SRV(25, meshUvOffsetsBuffer),
+      nvrhi::BindingSetItem::StructuredBuffer_SRV(26, meshIndicesBuffer),
+      nvrhi::BindingSetItem::StructuredBuffer_SRV(27, meshIndexOffsetsBuffer),
   };
+
+  // ---- Bindless texture array (binding 28) -----------------------------
+  // Walk the scene's texture table and emit one Texture_SRV(28,
+  // arrayElement=slot, tex) per live entry. Slot 0 is bound to the
+  // 4×4 magenta missingTexture as a defence-in-depth fallback for
+  // texture-decode failures (texture entry's bindlessSlot is reset
+  // to 0 in Commit.cpp's stb_image / tinyexr error paths). The
+  // shader's MATERIAL_FLAG_HAS_BASE_COLOR_MAP gate normally prevents
+  // any sample of slot 0 — INVALID_BINDLESS_TEXTURE (=0xFFFFFFFF)
+  // fails the cap check before sampling — so the magenta only fires
+  // when a translation succeeded but the decode then failed. NVRHI
+  // vulkan applies ePartiallyBound to every layout (vulkan-resource-
+  // bindings.cpp:184) so unbound array slots are safe.
+  nvrhi::ITexture* const missingTexture = _scene->GetMissingTexture();
+  if (missingTexture != nullptr)
+  {
+    auto missingItem = nvrhi::BindingSetItem::Texture_SRV(28, missingTexture);
+    missingItem.arrayElement = 0;
+    setDesc.bindings.push_back(missingItem);
+  }
+  for (uint32_t bindlessSlot = 1;
+       bindlessSlot < bindlessTextureCount && bindlessSlot < shaderinterop::BINDLESS_TEXTURES_CAP;
+       ++bindlessSlot)
+  {
+    nvrhi::ITexture* const sceneTex = _scene->GetBindlessTextureAt(bindlessSlot);
+    if (sceneTex == nullptr)
+      continue;
+    auto item = nvrhi::BindingSetItem::Texture_SRV(28, sceneTex);
+    item.arrayElement = bindlessSlot;
+    setDesc.bindings.push_back(item);
+  }
+
   nvrhi::BindingSetHandle set = _device->createBindingSet(setDesc, _bindingLayout);
   _bindingSetCache[output] = set;
   return set;
@@ -851,6 +968,7 @@ void PathTracePass::Execute(nvrhi::ICommandList* commandList, const PassContext&
   static const shaderinterop::LightGpu FALLBACK_LIGHT_DISABLED{};
   static const std::uint32_t           FALLBACK_UINT_ZERO = 0u;
   static const float                   FALLBACK_FLOAT4_ZERO[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  static const float                   FALLBACK_FLOAT2_ZERO[2] = {0.0f, 0.0f};
 
   struct BufferFallbackSpec {
     nvrhi::IBuffer* (GpuScene::*sceneGetter)() const noexcept;
@@ -858,7 +976,7 @@ void PathTracePass::Execute(nvrhi::ICommandList* commandList, const PassContext&
     const void*  defaultBytes;
     std::size_t  defaultByteSize;
   };
-  const std::array<BufferFallbackSpec, 6> bufferFallbacks{{
+  const std::array<BufferFallbackSpec, 10> bufferFallbacks{{
       {&GpuScene::GetMaterialBuffer,         &PathTracePass::_fallbackMaterialBuffer,
        &FALLBACK_MATERIAL_GREY,    sizeof(FALLBACK_MATERIAL_GREY)   },
       {&GpuScene::GetInstanceMaterialBuffer, &PathTracePass::_fallbackInstanceMaterialBuffer,
@@ -871,6 +989,15 @@ void PathTracePass::Execute(nvrhi::ICommandList* commandList, const PassContext&
        &FALLBACK_UINT_ZERO,        sizeof(FALLBACK_UINT_ZERO)       },
       {&GpuScene::GetMeshFaceNormalsBuffer,  &PathTracePass::_fallbackMeshFaceNormalsBuffer,
        FALLBACK_FLOAT4_ZERO,       sizeof(FALLBACK_FLOAT4_ZERO)     },
+      // M8a UV pipeline.
+      {&GpuScene::GetMeshUvsBuffer,          &PathTracePass::_fallbackMeshUvsBuffer,
+       FALLBACK_FLOAT2_ZERO,       sizeof(FALLBACK_FLOAT2_ZERO)     },
+      {&GpuScene::GetMeshUvOffsetsBuffer,    &PathTracePass::_fallbackMeshUvOffsetsBuffer,
+       &FALLBACK_UINT_ZERO,        sizeof(FALLBACK_UINT_ZERO)       },
+      {&GpuScene::GetMeshIndicesBuffer,      &PathTracePass::_fallbackMeshIndicesBuffer,
+       &FALLBACK_UINT_ZERO,        sizeof(FALLBACK_UINT_ZERO)       },
+      {&GpuScene::GetMeshIndexOffsetsBuffer, &PathTracePass::_fallbackMeshIndexOffsetsBuffer,
+       &FALLBACK_UINT_ZERO,        sizeof(FALLBACK_UINT_ZERO)       },
   }};
   for (const BufferFallbackSpec& spec : bufferFallbacks)
   {

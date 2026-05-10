@@ -62,11 +62,10 @@ constexpr uint8_t HandleGeneration(uint32_t handleValue) noexcept
 // §19.7: generation 255 quarantines the slot — never reused.
 constexpr uint8_t HANDLE_GENERATION_QUARANTINE = 255;
 
-// TLAS capacity. M3 stub used 256 (default scene has ~5 instances).
-// M8a bumps to 64K to accommodate Omniverse-Collected production
-// scenes (World Lobby has 850 instances; ALAB hero set ~5K; Bistro
-// ~50K). Cost is ~8 MB TLAS scratch (each instance is ~128 B of
-// metadata + a BLAS pointer). §16.5 sharding kicks in past 16M.
+// TLAS capacity. 64K covers v1 production-class scenes; cost is
+// ~8 MB TLAS scratch (each instance is ~128 B of metadata + a BLAS
+// pointer). §16.5 sharding kicks in past 16M. See _rfcs/RFC-001-
+// tlas-cap.md for the sizing rationale + future scaling plan.
 constexpr std::size_t TLAS_MAX_INSTANCES = 65536u;
 
 // §16 split rule threshold: BLAS for meshes ≥ 64k tris adds
@@ -212,6 +211,13 @@ inline shaderinterop::OpenPBRMaterialGPU PackMaterialGpu(
 // dome's lat-long EXR (or INVALID_BINDLESS_TEXTURE for a
 // procedural dome — M7-simple ignores it; M7-full's IBL importance-
 // sampling lands when the user fills in the closesthit body).
+//
+// M8a UsdLux coverage: LightDesc gained Cylinder / Geometry / Portal
+// kinds that the M7-simple closesthit doesn't render yet. We force
+// their `intensity` to 0 here so the shader's existing
+// `intensity <= 0 → skip` sentinel keeps them inert; the descCopy on
+// LightEntry still carries the original authored intensity so the
+// M9 polish pass (which adds proper rendering) can read it back.
 inline shaderinterop::LightGpu PackLightGpu(const LightDesc& desc,
                                             std::uint32_t envMapSlot) noexcept
 {
@@ -219,7 +225,13 @@ inline shaderinterop::LightGpu PackLightGpu(const LightDesc& desc,
   gpu.colorR = static_cast<float>(desc.color.x);
   gpu.colorG = static_cast<float>(desc.color.y);
   gpu.colorB = static_cast<float>(desc.color.z);
-  gpu.intensity = desc.intensity;
+  // Force-disable kinds the closesthit doesn't render. Stays in
+  // lockstep with the LIGHT_KIND_* mirror in ShaderInterop.slang
+  // (Distant=0, Dome=1, Rect=2).
+  const bool kindIsRenderable = (desc.kind == LightDesc::Kind::Distant
+                                 || desc.kind == LightDesc::Kind::Dome
+                                 || desc.kind == LightDesc::Kind::Rect);
+  gpu.intensity = kindIsRenderable ? desc.intensity : 0.0f;
   // Normalise direction defensively — USD's UsdLuxDistantLight
   // authoring conventions sometimes ship un-normalised vectors;
   // the shader assumes unit length so the simple Lambert pass the
@@ -413,6 +425,20 @@ struct GpuScene::Impl
   std::vector<MaterialEntry> materials;
   std::vector<TextureEntry>  textures;
 
+  // O(1) slot recycling. Each Destroy verb pushes the freed slot;
+  // each Acquire / Append verb pops the latest one. Stack ordering
+  // keeps the most-recently-freed slot first, which matches CPU
+  // cache + keeps the §15 dedup-by-content hash stable for repeated
+  // CreateMesh calls with identical geometry. Without these, the
+  // per-verb bodies would linear-scan their entry vectors looking
+  // for a free slot — quadratic over the lifetime of an
+  // append-heavy load.
+  std::vector<std::uint32_t> freeMeshSlots;
+  std::vector<std::uint32_t> freeInstanceSlots;
+  std::vector<std::uint32_t> freeMaterialSlots;
+  std::vector<std::uint32_t> freeTextureSlots;
+  std::vector<std::uint32_t> freeLightSlots;
+
   // M5 dedup maps: hash → handle. AcquireMaterial / AcquireTexture
   // hash their input desc / key, look up here, and return the
   // existing handle on a hit. The §11 OpenPBR architecture rule
@@ -478,6 +504,24 @@ struct GpuScene::Impl
   nvrhi::BufferHandle  meshFaceOffsetsBuffer;
   bool                 meshFaceNormalsNeedUpload = false;
   nvrhi::BufferHandle  instanceMeshBuffer;
+
+  // M8a UV pipeline: per-mesh UVs + per-triangle indices concatenated
+  // into flat structured buffers + per-mesh-slot start-offset tables.
+  // Closesthit reads:
+  //   indexOffset = gMeshIndexOffsets[meshSlot]
+  //   uvOffset    = gMeshUvOffsets[meshSlot]
+  //   v0,v1,v2    = gMeshIndices[indexOffset + PrimitiveIndex()*3 + {0,1,2}]
+  //   uv0,uv1,uv2 = gMeshUvs[uvOffset + v_i]
+  //   uv          = barycentric_interp(uv0, uv1, uv2, attribs.bary)
+  // Then samples bindless gBindlessTextures[mat.baseColorTex] at uv.
+  // Sized + uploaded by UploadMeshUvs / UploadMeshIndices in
+  // Commit.cpp; same dirty-flag shape as meshFaceNormals.
+  nvrhi::BufferHandle  meshUvsBuffer;
+  nvrhi::BufferHandle  meshUvOffsetsBuffer;
+  nvrhi::BufferHandle  meshIndicesBuffer;
+  nvrhi::BufferHandle  meshIndexOffsetsBuffer;
+  bool                 meshUvsNeedUpload     = false;
+  bool                 meshIndicesNeedUpload = false;
 
   // Magenta 4x4 fallback texture — slot 0 in the bindless table is
   // permanently the "missing texture" colour so any material whose
@@ -639,6 +683,8 @@ struct GpuScene::Impl
   [[nodiscard]] Expected<void> RebuildTlasIfDirty(nvrhi::ICommandList* commandList);
   [[nodiscard]] Expected<void> UploadInstanceSideTables(nvrhi::ICommandList* commandList);
   [[nodiscard]] Expected<void> UploadMeshFaceNormals(nvrhi::ICommandList* commandList);
+  [[nodiscard]] Expected<void> UploadMeshUvs(nvrhi::ICommandList* commandList);
+  [[nodiscard]] Expected<void> UploadMeshIndices(nvrhi::ICommandList* commandList);
 };
 
 }  // namespace pyxis

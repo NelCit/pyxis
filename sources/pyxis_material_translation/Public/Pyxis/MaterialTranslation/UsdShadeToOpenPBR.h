@@ -23,7 +23,6 @@
 // pyxis_usd_ingest) already need USD anyway.
 #include <pxr/usd/usdShade/material.h>
 
-#include <functional>
 #include <string_view>
 
 namespace pyxis::material_translation {
@@ -36,11 +35,15 @@ namespace pyxis::material_translation {
 // makes the corresponding map slot fall back to the scalar value
 // (the §M5 fallback path).
 //
-// std::function works here because pyxis_material_translation is a
-// STATIC library — the closure runs in the calling TU's address
-// space, no DLL boundary crossing.
-using AcquireTextureFn =
-    std::function<TextureHandle(std::string_view resolvedPath, TextureKey::Role role)>;
+// Stateless function pointer + opaque `userData` rather than
+// std::function — keeps `<functional>` out of every TU that includes
+// this header (pyxis_hydra + pyxis_usd_ingest both pick it up
+// transitively). Bind a renderer pointer in `userData` and cast it
+// back inside the callback. §18.9-clean across the SHARED-DLL
+// boundary even though this lib is STATIC today.
+using AcquireTextureFn = TextureHandle (*)(std::string_view resolvedPath,
+                                           TextureKey::Role  role,
+                                           void*             userData);
 
 // Convert a UsdShadeMaterial into an OpenPBRMaterialDesc. Never
 // fails — unsupported shader graphs (no `info:id =
@@ -55,8 +58,10 @@ using AcquireTextureFn =
 // normal / metallic / roughness / emissiveColor / opacity inputs and
 // stamps the returned handles into desc.{baseColor,normal,...}Map.
 // Pass `nullptr` to skip texture resolution (legacy callers + the
-// scalar-only M4 contract).
+// scalar-only M4 contract). `userData` is forwarded unchanged on
+// every callback invocation.
 [[nodiscard]] OpenPBRMaterialDesc FromUsdShade(const pxr::UsdShadeMaterial& material,
-                                               const AcquireTextureFn& acquire = nullptr) noexcept;
+                                               AcquireTextureFn acquire = nullptr,
+                                               void* userData = nullptr) noexcept;
 
 }  // namespace pyxis::material_translation

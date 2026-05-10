@@ -38,21 +38,31 @@
 #include <pxr/usd/usdGeom/camera.h>
 #include <pxr/usd/usdGeom/metrics.h>
 #include <pxr/usd/usdGeom/pointInstancer.h>
+#include <pxr/usd/usdGeom/primvarsAPI.h>
+#include <pxr/usd/usdGeom/subset.h>
 #include <pxr/usd/usdGeom/tokens.h>
 #include <pxr/usd/usdGeom/xformCache.h>
 #include <Pyxis/Platform/FileSystem/AssetLocator.h>
 
+#include <pxr/usd/usdLux/blackbody.h>
+#include <pxr/usd/usdLux/cylinderLight.h>
 #include <pxr/usd/usdLux/diskLight.h>
 #include <pxr/usd/usdLux/distantLight.h>
 #include <pxr/usd/usdLux/domeLight.h>
+#include <pxr/usd/usdLux/geometryLight.h>
+#include <pxr/usd/usdLux/lightAPI.h>
+#include <pxr/usd/usdLux/portalLight.h>
 #include <pxr/usd/usdLux/rectLight.h>
+#include <pxr/usd/usdLux/shapingAPI.h>
 #include <pxr/usd/usdLux/sphereLight.h>
+#include <pxr/usd/usdGeom/imageable.h>
 #include <pxr/usd/usdShade/material.h>
 #include <pxr/usd/usdShade/materialBindingAPI.h>
 #include <pxr/usd/sdf/path.h>
 #include <pxr/base/gf/matrix4d.h>
 
 #include <cmath>
+#include <numbers>
 #include <optional>
 #include <pxr/base/gf/camera.h>
 #include <pxr/base/gf/frustum.h>
@@ -72,6 +82,51 @@
 #include <vector>
 
 namespace pyxis::usd_ingest {
+
+// ---- IngestResult PIMPL ---------------------------------------------------
+// STL containers + std::strings live behind this opaque body so the
+// public IngestResult class stays §18.9-compliant (no STL across the
+// SHARED-DLL boundary).
+struct IngestResult::Impl {
+  IngestStats stats{};
+  // Internal-only camera record — the std::string lives in the DLL's
+  // allocator space and never crosses the boundary; GetCameraAt
+  // memcpy-truncates it into the public NamedCameraView::name char
+  // buffer.
+  struct Entry {
+    std::string name;       // SdfPath of the camera prim
+    CameraDesc  desc;       // intrinsics + viewFromWorld
+  };
+  std::vector<Entry> cameras;
+};
+
+IngestResult::IngestResult() : _impl(std::make_unique<Impl>()) {}
+IngestResult::~IngestResult() = default;
+IngestResult::IngestResult(IngestResult&&) noexcept            = default;
+IngestResult& IngestResult::operator=(IngestResult&&) noexcept = default;
+
+const IngestStats& IngestResult::Stats() const noexcept { return _impl->stats; }
+
+uint32_t IngestResult::GetCameraCount() const noexcept {
+  return static_cast<uint32_t>(_impl->cameras.size());
+}
+
+bool IngestResult::GetCameraAt(uint32_t index, NamedCameraView* out) const noexcept {
+  if (out == nullptr || index >= _impl->cameras.size())
+    return false;
+  const auto& entry = _impl->cameras[index];
+  out->desc = entry.desc;
+  // Truncate to NamedCameraView::name's 256-char inline buffer; null-
+  // terminate. The truncation only matters for diagnostics-display
+  // since the active-camera selection lookup uses the truncated form
+  // too (matches against the same truncated `boundCamera` hint).
+  const std::size_t copyLen = std::min<std::size_t>(entry.name.size(), sizeof(out->name) - 1u);
+  std::memcpy(out->name, entry.name.data(), copyLen);
+  out->name[copyLen] = '\0';
+  return true;
+}
+
+IngestResult::Impl& IngestResult::GetImpl() noexcept { return *_impl; }
 
 namespace {
 
@@ -240,12 +295,11 @@ MaterialHandle ResolveBoundMaterial(const pxr::UsdPrim& meshPrim,
   return found->second;
 }
 
-// M7: translate a UsdLuxDistantLight / UsdLuxDomeLight / UsdLuxRectLight
-// prim into a LightDesc + push via GpuScene::AddLight. The simple
-// closesthit consumes color × intensity per kind (NdotL Lambert for
-// Distant + Rect, uniform ambient for Dome). The user's M7-full pass
-// replaces the closesthit body alongside NEE + MIS + IBL importance
-// sampling per §7.
+// M7 / M8a: translate a UsdLux* prim into a LightDesc + push via
+// GpuScene::AddLight. The simple closesthit consumes color × intensity
+// per kind (NdotL Lambert for Distant + Rect, uniform ambient for
+// Dome). The user's M7-full pass replaces the closesthit body
+// alongside NEE + MIS + IBL importance sampling per §7.
 //
 // USD light conventions:
 //   * UsdLuxDistantLight emits along the prim's local -Z axis. Its
@@ -259,15 +313,64 @@ MaterialHandle ResolveBoundMaterial(const pxr::UsdPrim& meshPrim,
 //   * UsdLuxDomeLight has color + intensity + texture:file; M7-simple
 //     ignores the env-map and treats it as uniform ambient.
 //
-// Per UsdLuxLight authoring: `inputs:intensity` × `inputs:exposure`
-// is the canonical scale. exposure is in stops; final intensity =
-// raw_intensity * 2^exposure. M7-simple skips the exposure
-// multiplier (defaults to 0 → 2^0 = 1, harmless for the common case);
-// M9 polish picks it up alongside the rest of the UsdLux input
-// surface.
+// M8a UsdLux coverage expansion — every commonly-authored UsdLux
+// input is now READ at ingest and forwarded into LightDesc, even
+// when the M7-simple closesthit ignores the field. The data flows
+// through GpuScene → LightEntry so the M9 polish pass + the user's
+// M7-full closesthit can pick them up without re-walking the stage.
+//
+// Inputs we COLLAPSE at load (so the closesthit reads the
+// already-modulated value):
+//   * `inputs:exposure`  → multiplies intensity by 2^stops
+//   * `inputs:colorTemperature` (when `enableColorTemperature` true)
+//                        → multiplies color by Planckian blackbody
+//                          (USD's UsdLuxBlackbodyTemperatureAsRgb)
+//   * `inputs:normalize` → divides intensity by the light's surface
+//                          area (Rect = w·h, Disk = π·r², Sphere =
+//                          4π·r², Cylinder = 2π·r·length, Dome = 4π
+//                          steradians treated as area=1, Distant
+//                          ignored — direct lights don't normalise)
+//
+// Inputs we STASH on LightDesc for the future shading pass:
+//   * `inputs:diffuse` / `inputs:specular` — per-contribution scalars
+//   * `inputs:angle` (DistantLight) — sun angular diameter
+//   * UsdLuxShapingAPI (`shaping:cone:angle / softness / focus /
+//     focusTint`) — spotlight cone falloff
+//   * UsdLuxDomeLight `inputs:texture:format` — latlong / mirroredBall /
+//     angular — closesthit picks the matching UV mapping.
+//
+// Light kinds we now LOAD but defer rendering of:
+//   * UsdLuxCylinderLight  → Kind::Cylinder
+//   * UsdLuxGeometryLight  → Kind::Geometry
+//   * UsdLuxPortalLight    → Kind::Portal
+//
+// IES profiles (`shaping:ies:file`) and the Geometry / Portal
+// per-prim refs are LOGGED + ignored — the LightDesc surface doesn't
+// have a slot for them yet (they'd want a separate handle pool, M9
+// follow-up).
+//
+// Visibility (`UsdGeomImageable::ComputeVisibility()`) gates the
+// whole pipeline at the top — `invisible` lights skip the AddLight
+// entirely so a world authoring a "vis = invisible" backup light
+// doesn't double-shade with the active one.
 void EmitLight(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCache,
                const StageContext& stageCtx, GpuScene& scene) noexcept {
   auto& log = Logging::Get();
+
+  // ---- Visibility gate ---------------------------------------------------
+  // UsdGeomImageable::ComputeVisibility walks up the hierarchy honouring
+  // inherited `visibility`. Skipping invisible lights here means a USD
+  // scene with a default-on light authored alongside a `visibility =
+  // invisible` backup doesn't double-up — matches usdview / Storm
+  // semantics.
+  const pxr::UsdGeomImageable imageable(prim);
+  if (imageable
+      && imageable.ComputeVisibility(pxr::UsdTimeCode::Default())
+             == pxr::UsdGeomTokens->invisible)
+  {
+    return;
+  }
+
   // Compose USD's local-to-world with the stage-to-world correction
   // (metersPerUnit + Z->Y if needed) so light positions land in
   // Pyxis-world (metres + Y-up). Direction extraction uses Pyxis
@@ -295,18 +398,104 @@ void EmitLight(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCache,
     attr.Get(&value);
     return hlslpp::float3{value[0], value[1], value[2]};
   };
+  auto readBool = [&](const char* name, bool fallback) {
+    const pxr::UsdAttribute attr = prim.GetAttribute(pxr::TfToken(std::string("inputs:") + name));
+    if (!attr)
+      return fallback;
+    bool value = fallback;
+    attr.Get(&value);
+    return value;
+  };
+  auto readToken = [&](const char* name, const pxr::TfToken& fallback) {
+    const pxr::UsdAttribute attr = prim.GetAttribute(pxr::TfToken(std::string("inputs:") + name));
+    if (!attr)
+      return fallback;
+    pxr::TfToken value = fallback;
+    attr.Get(&value);
+    return value;
+  };
 
   LightDesc desc;
   desc.color = readColor("color", hlslpp::float3{1.0f, 1.0f, 1.0f});
+  // ---- Color temperature collapse ---------------------------------------
+  // USD: when enableColorTemperature is true, the light's tint is
+  // `color * blackbody(colorTemperature_K)`. Default Kelvin = 6500 (D65).
+  // We bake the multiplier into desc.color so the runtime stays
+  // colorTemperature-unaware — matches usdview / Hydra behaviour.
+  const bool  enableColorTemp  = readBool("enableColorTemperature", false);
+  const float colorTemperature = readFloat("colorTemperature", 6500.0f);
+  if (enableColorTemp)
+  {
+    const pxr::GfVec3f blackbodyRgb = pxr::UsdLuxBlackbodyTemperatureAsRgb(colorTemperature);
+    desc.color = hlslpp::float3{
+        desc.color.x * blackbodyRgb[0],
+        desc.color.y * blackbodyRgb[1],
+        desc.color.z * blackbodyRgb[2]};
+  }
+
   // UsdLuxLightAPI canonical scale: intensity * 2^exposure. Omniverse
   // + DCC content typically authors a high `intensity` (e.g. 12000 for
   // a sky dome) and zero exposure; some pipelines push the scale into
   // exposure stops instead. Both together cover the common cases.
   // Default exposure = 0 → 2^0 = 1 (no-op for fixtures that don't
   // author it).
-  const float rawIntensity = readFloat("intensity", 1.0f);
-  const float exposureStops = readFloat("exposure", 0.0f);
+  const float rawIntensity  = readFloat("intensity", 1.0f);
+  const float exposureStops = readFloat("exposure",  0.0f);
   desc.intensity = rawIntensity * std::exp2(exposureStops);
+
+  // ---- M8a UsdLux modifiers stashed on LightDesc -----------------------
+  // diffuse / specular are per-lobe multipliers the M9 BSDF split
+  // applies; default 1.0 = no-op.
+  desc.diffuse   = readFloat("diffuse",  1.0f);
+  desc.specular  = readFloat("specular", 1.0f);
+  desc.normalize = readBool("normalize", false);
+
+  // UsdLuxShapingAPI — read whether or not the prim opts in (the API
+  // is metadata-only on the prim's customData; reading the attrs
+  // directly + falling back to defaults is ABI-stable across USD
+  // versions). Default conn:angle=90 means "no spotlight cone";
+  // closesthit's M9 spot pass picks this up.
+  desc.shapingConeAngle    = readFloat("shaping:cone:angle",    90.0f);
+  desc.shapingConeSoftness = readFloat("shaping:cone:softness", 0.0f);
+  desc.shapingFocus        = readFloat("shaping:focus",         0.0f);
+  desc.shapingFocusTint    = readColor("shaping:focusTint",
+                                       hlslpp::float3{1.0f, 1.0f, 1.0f});
+
+  // IES profile — common for archviz scenes (real luminaire
+  // distributions). LightDesc has no slot for it yet (would need a
+  // dedicated photometric-profile pool, M9 follow-up). Log so the
+  // user knows the data was seen + ignored, not silently dropped.
+  const pxr::UsdAttribute iesFileAttr =
+      prim.GetAttribute(pxr::TfToken("inputs:shaping:ies:file"));
+  if (iesFileAttr)
+  {
+    pxr::SdfAssetPath iesPath;
+    if (iesFileAttr.Get(&iesPath) && !iesPath.GetAssetPath().empty())
+    {
+      log.Info(log::APP, "StageWalker: " + prim.GetPath().GetString()
+                             + " authors IES profile " + iesPath.GetAssetPath()
+                             + " — read but not yet rendered (M9 follow-up).");
+    }
+  }
+
+  // ---- Per-kind dispatch ------------------------------------------------
+  // areaForNormalize is the WORLD-space surface area of the light,
+  // used by the `normalize` divisor at the bottom of this function.
+  // Area lights compute it AFTER the local axisU/V are transformed
+  // through worldFromLocal — so an xform scale on the light prim (or
+  // on a parent Xform group) rolls into the divisor naturally. A
+  // 2×-scaled RectLight integrates over 4× area; a uniformly scaled
+  // SphereLight integrates over (scale²)× area; etc. Without this,
+  // a normalised scaled light would render {scale²}× too bright.
+  // Helper for world-space axis length — std::hypot for the
+  // 3-component case avoids overflow on very large scales.
+  auto worldLength3 = [](const hlslpp::float3& vec) noexcept {
+    return std::sqrt(static_cast<float>(vec.x) * static_cast<float>(vec.x)
+                     + static_cast<float>(vec.y) * static_cast<float>(vec.y)
+                     + static_cast<float>(vec.z) * static_cast<float>(vec.z));
+  };
+  constexpr float PI_F = std::numbers::pi_v<float>;
+  float areaForNormalize = 1.0f;
 
   if (prim.IsA<pxr::UsdLuxDistantLight>())
   {
@@ -317,7 +506,11 @@ void EmitLight(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCache,
     // optional uniform scale (Pack normalises before upload).
     const hlslpp::float4 dirWorld =
         mul(worldFromLocal, hlslpp::float4{0.0f, 0.0f, -1.0f, 0.0f});
-    desc.direction = hlslpp::float3{dirWorld.x, dirWorld.y, dirWorld.z};
+    desc.direction    = hlslpp::float3{dirWorld.x, dirWorld.y, dirWorld.z};
+    desc.distantAngle = readFloat("angle", 0.53f);
+    // DistantLight intensity is per-square-metre at the surface; no
+    // area normalisation regardless of the `normalize` flag.
+    areaForNormalize = 1.0f;
   }
   else if (prim.IsA<pxr::UsdLuxRectLight>()
         || prim.IsA<pxr::UsdLuxDiskLight>()
@@ -326,20 +519,10 @@ void EmitLight(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCache,
     // Three area-light shapes folded into Kind::Rect for the M7-simple
     // closesthit: it treats Rect as a point-at-center with axisU/V
     // packed for the M7-full pass to do real area sampling.
-    //   * RectLight:   inputs:width / inputs:height define the local-
-    //                  X / -Y extents centred at origin.
-    //   * DiskLight:   inputs:radius defines a circle on local XY,
-    //                  facing -Z. Approximated as a (2r × 2r) square.
-    //   * SphereLight: inputs:radius defines an omnidirectional ball.
-    //                  Approximated as a (2r × 2r) facing-camera-ish
-    //                  square; M7-simple ignores the axes anyway.
     desc.kind = LightDesc::Kind::Rect;
     const hlslpp::float4 originWorld =
         mul(worldFromLocal, hlslpp::float4{0.0f, 0.0f, 0.0f, 1.0f});
     desc.position = hlslpp::float3{originWorld.x, originWorld.y, originWorld.z};
-    // Per-shape scale for the local-space axisU/V extents. Rect uses
-    // half-width/half-height (so axisU/V land on the rect edges from
-    // centre); Disk + Sphere use full radius.
     float halfU = 1.0f;
     float halfV = 1.0f;
     if (prim.IsA<pxr::UsdLuxRectLight>())
@@ -347,7 +530,7 @@ void EmitLight(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCache,
       halfU = readFloat("width",  2.0f) * 0.5f;
       halfV = readFloat("height", 2.0f) * 0.5f;
     }
-    else
+    else  // DiskLight or SphereLight — both author `radius`
     {
       const float radius = readFloat("radius", 0.5f);
       halfU = radius;
@@ -359,10 +542,121 @@ void EmitLight(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCache,
     const hlslpp::float4 vWorld =
         mul(worldFromLocal, hlslpp::float4{0.0f, halfV, 0.0f, 0.0f});
     desc.axisV = hlslpp::float3{vWorld.x, vWorld.y, vWorld.z};
+    // World-space area: derive from the post-transform axisU/V so any
+    // xform scale on the light prim (or a parent Xform) rolls into
+    // the normalize divisor automatically. For Rect / Disk this also
+    // correctly handles non-uniform scale (the disk becomes an
+    // ellipse with area π·rU·rV). Sphere keeps the canonical 4π·r²
+    // shape — non-uniform scale on a Sphere is rare + ill-defined
+    // (the volume is no longer a sphere); we use the U axis as the
+    // representative radius to keep behaviour stable, with a code-
+    // level note pointing at the M9 ellipsoid-area refinement.
+    const float worldHalfU = worldLength3(desc.axisU);
+    const float worldHalfV = worldLength3(desc.axisV);
+    if (prim.IsA<pxr::UsdLuxRectLight>())
+      areaForNormalize = 4.0f * worldHalfU * worldHalfV;
+    else if (prim.IsA<pxr::UsdLuxDiskLight>())
+      areaForNormalize = PI_F * worldHalfU * worldHalfV;
+    else  // SphereLight
+      areaForNormalize = 4.0f * PI_F * worldHalfU * worldHalfU;
+  }
+  else if (prim.IsA<pxr::UsdLuxCylinderLight>())
+  {
+    // M8a stub: load the geometry into LightDesc but the M7-simple
+    // closesthit doesn't render Cylinder yet.
+    desc.kind = LightDesc::Kind::Cylinder;
+    const float length = readFloat("length", 1.0f);
+    const float radius = readFloat("radius", 0.5f);
+    const hlslpp::float4 originWorld =
+        mul(worldFromLocal, hlslpp::float4{0.0f, 0.0f, 0.0f, 1.0f});
+    desc.position = hlslpp::float3{originWorld.x, originWorld.y, originWorld.z};
+    // axisU = tube direction (USD convention: cylinder length along
+    // local X), scaled to half-length. axisV = radial (along local Y),
+    // scaled to radius. Closesthit's M9 cylinder pass reads both.
+    const hlslpp::float4 uWorld =
+        mul(worldFromLocal, hlslpp::float4{length * 0.5f, 0.0f, 0.0f, 0.0f});
+    const hlslpp::float4 vWorld =
+        mul(worldFromLocal, hlslpp::float4{0.0f, radius, 0.0f, 0.0f});
+    desc.axisU = hlslpp::float3{uWorld.x, uWorld.y, uWorld.z};
+    desc.axisV = hlslpp::float3{vWorld.x, vWorld.y, vWorld.z};
+    // World-space cylinder lateral area = 2π · r · L. axisU is the
+    // half-length, axisV is the radius — both already in world space
+    // so xform scale flows through.
+    const float worldHalfLen = worldLength3(desc.axisU);
+    const float worldRadius  = worldLength3(desc.axisV);
+    areaForNormalize = 2.0f * PI_F * worldRadius * (2.0f * worldHalfLen);
+    log.Info(log::APP, "StageWalker: " + prim.GetPath().GetString()
+                           + " UsdLuxCylinderLight loaded — closesthit "
+                             "rendering deferred to M9.");
+  }
+  else if (prim.IsA<pxr::UsdLuxGeometryLight>())
+  {
+    // M8a stub: the geometry rel target → emitting mesh is the
+    // structural piece we'd need a dedicated handle for. For now
+    // carry the prim through as Kind::Geometry with position-at-origin;
+    // M9 wires the `inputs:geometry` rel resolution + per-tri sampling.
+    desc.kind = LightDesc::Kind::Geometry;
+    const hlslpp::float4 originWorld =
+        mul(worldFromLocal, hlslpp::float4{0.0f, 0.0f, 0.0f, 1.0f});
+    desc.position = hlslpp::float3{originWorld.x, originWorld.y, originWorld.z};
+    areaForNormalize = 1.0f;  // unknown until the geometry is resolved
+    log.Info(log::APP, "StageWalker: " + prim.GetPath().GetString()
+                           + " UsdLuxGeometryLight loaded — geometry rel "
+                             "resolution + emission rendering deferred to M9.");
+  }
+  else if (prim.IsA<pxr::UsdLuxPortalLight>())
+  {
+    // M8a stub: portal lights are a sampling-variance hint for the
+    // dome importance sampler. Carry as Kind::Portal so an M9 NEE
+    // pass with importance sampling can link them to the active
+    // dome; M7-simple just drops them on the floor (no contribution
+    // to the simple Lambert sum).
+    desc.kind = LightDesc::Kind::Portal;
+    const hlslpp::float4 originWorld =
+        mul(worldFromLocal, hlslpp::float4{0.0f, 0.0f, 0.0f, 1.0f});
+    desc.position = hlslpp::float3{originWorld.x, originWorld.y, originWorld.z};
+    const float width  = readFloat("width",  1.0f);
+    const float height = readFloat("height", 1.0f);
+    const hlslpp::float4 uWorld =
+        mul(worldFromLocal, hlslpp::float4{width * 0.5f, 0.0f, 0.0f, 0.0f});
+    const hlslpp::float4 vWorld =
+        mul(worldFromLocal, hlslpp::float4{0.0f, height * 0.5f, 0.0f, 0.0f});
+    desc.axisU = hlslpp::float3{uWorld.x, uWorld.y, uWorld.z};
+    desc.axisV = hlslpp::float3{vWorld.x, vWorld.y, vWorld.z};
+    // World portal area — same shape as a Rect (4 · halfU_world · halfV_world).
+    const float worldHalfW = worldLength3(desc.axisU);
+    const float worldHalfH = worldLength3(desc.axisV);
+    areaForNormalize = 4.0f * worldHalfW * worldHalfH;
+    log.Info(log::APP, "StageWalker: " + prim.GetPath().GetString()
+                           + " UsdLuxPortalLight loaded — dome-importance "
+                             "linking deferred to M9.");
   }
   else if (prim.IsA<pxr::UsdLuxDomeLight>())
   {
     desc.kind = LightDesc::Kind::Dome;
+    // Dome texture format — USD allows latlong (default), mirroredBall,
+    // angular. The miss shader currently assumes latlong; an M9 pass
+    // adds the other UV mappings. Stash the format so the data
+    // survives the ingest boundary.
+    static const pxr::TfToken latLongTok("latlong");          // NOLINT(readability-identifier-naming)
+    static const pxr::TfToken mirroredBallTok("mirroredBall");// NOLINT(readability-identifier-naming)
+    static const pxr::TfToken angularTok("angular");          // NOLINT(readability-identifier-naming)
+    static const pxr::TfToken automaticTok("automatic");      // NOLINT(readability-identifier-naming)
+    const pxr::TfToken format = readToken("texture:format", automaticTok);
+    if (format == mirroredBallTok)
+      desc.domeFormat = LightDesc::DomeFormat::MirroredBall;
+    else if (format == angularTok)
+      desc.domeFormat = LightDesc::DomeFormat::Angular;
+    else
+      desc.domeFormat = LightDesc::DomeFormat::LatLong;
+    if (desc.domeFormat != LightDesc::DomeFormat::LatLong)
+    {
+      log.Info(log::APP, "StageWalker: " + prim.GetPath().GetString()
+                             + " dome texture:format = " + format.GetString()
+                             + " — read but miss shader still samples as "
+                               "lat-long (M9 follow-up).");
+    }
+
     // Resolve the dome's `inputs:texture:file` SdfAssetPath through
     // USD's ArResolver (handles relative `@./default_sky.exr@`-style
     // refs against the .usd's parent directory) and AcquireTexture
@@ -407,10 +701,42 @@ void EmitLight(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCache,
       key.role = TextureKey::Role::Emission;  // HDR env-map: linear, no sRGB EOTF
       desc.envMap = scene.AcquireTexture(key);
     }
+    // Dome's "area" is a full sphere of solid angle; the closesthit
+    // already integrates over the sphere when sampling the env-map,
+    // so leave areaForNormalize at 1 and let the dome's intensity
+    // carry the radiance unit straight through.
+    areaForNormalize = 1.0f;
   }
   else
   {
     return;  // unknown light kind
+  }
+
+  // ---- M8a area-to-power conversion (OVRTX / RenderMan / Karma) -------
+  // USD's `inputs:intensity` semantics:
+  //   normalize=false (default): intensity is per-area surface radiance
+  //                              in nits (cd/m²) — what each square
+  //                              metre of the light emits.
+  //   normalize=true:  intensity is the TOTAL emitted radiant power
+  //                    (candela-equivalent for the whole light).
+  // The closesthit's M7-simple area-light path treats every light as a
+  // point at centre and applies inverse-square distance falloff:
+  //   contribution = (color × intensity) × NdotL / r²
+  // For that to be dimensionally correct, `intensity` must be in
+  // RADIANT INTENSITY units (candela). Convert at load time:
+  //   normalize=true:  intensity already total power, pass through.
+  //   normalize=false: multiply by world-space area to get total power
+  //                    (= per-sqm radiance × m² of emitting surface).
+  // Without this conversion, a 60000-nit DiskLight (radius 2cm, area
+  // ≈ 0.00126 m²) would render as if it were 60000 cd — ~800× too
+  // bright. With the conversion, it becomes the correct ~75 cd that a
+  // small bright LED downlight actually emits, and the camera's heavy
+  // negative exposure stops bring the result into display range.
+  // Distant + Dome leave areaForNormalize at 1.0 (no area concept) so
+  // the multiply collapses to a no-op for them.
+  if (!desc.normalize && areaForNormalize > 1e-6f)
+  {
+    desc.intensity *= areaForNormalize;
   }
 
   const LightHandle handle = scene.AddLight(desc);
@@ -609,8 +935,11 @@ void EmitPointInstancer(const pxr::UsdPrim& instancerPrim,
   }
 }
 
-// Emit a single UsdGeomMesh into `scene`. Returns true iff the mesh
-// was emitted (false skips the matching instance increment).
+// Emit a single UsdGeomMesh into `scene`. Returns the number of
+// (mesh, instance) pairs successfully emitted — typically 1 for a
+// plain mesh; N for a mesh with N face-bound UsdGeomSubsets (each
+// subset becomes its own MeshHandle + InstanceHandle so the §15
+// instance→material side-table can route closesthits per subset).
 //
 // Triangulation: GpuScene::CreateMesh expects a triangle list, but USD
 // authors arbitrary faceVertexCounts (most production / Omniverse
@@ -619,13 +948,28 @@ void EmitPointInstancer(const pxr::UsdPrim& instancerPrim,
 // polygon assumption — concave faces produce visually-wrong (but
 // non-crashing) triangles. Subdivision is §42-deferred so authoring
 // concave ngons that need ear-clipping is post-v1.
-bool EmitMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCache,
-              const MaterialHandleByPath& materialsByPath,
-              const StageContext& stageCtx, GpuScene& scene) noexcept {
+//
+// M8a face-subset support: when the prim has children of type
+// `UsdGeomSubset` with `elementType = "face"`, each subset's face
+// list is sliced out into its own sub-mesh + sub-instance, bound to
+// the subset's `material:binding`. Faces NOT covered by any subset
+// fall back to the prim-level material in a "_unassigned" sub-mesh.
+// Positions are duplicated across subsets (each sub-BLAS holds the
+// full vertex array but only references its subset's faces) — the
+// canonical position-reindexing optimisation is M9 polish.
+//
+// Side-effect: `stats.meshesEmitted` and `stats.instancesEmitted`
+// are bumped per sub-mesh inside this function so the caller doesn't
+// need to know about subsets. Returns the per-prim count for the
+// caller's local diagnostics.
+std::size_t EmitMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCache,
+                     const MaterialHandleByPath& materialsByPath,
+                     const StageContext& stageCtx, GpuScene& scene,
+                     IngestStats& stats) noexcept {
   auto& log = Logging::Get();
   const pxr::UsdGeomMesh meshPrim(prim);
   if (!meshPrim.GetPrim().IsValid())
-    return false;
+    return 0;
 
   pxr::VtArray<pxr::GfVec3f> usdPoints;
   pxr::VtArray<int> usdCounts;
@@ -635,91 +979,275 @@ bool EmitMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCache,
   meshPrim.GetFaceVertexIndicesAttr().Get(&usdIndices);
 
   if (usdPoints.empty() || usdCounts.empty() || usdIndices.empty())
-    return false;
+    return 0;
 
-  // Convert positions into the §18.4 contiguous layout.
+  // Convert positions into the §18.4 contiguous layout. Shared
+  // across every sub-mesh emitted from this prim.
   std::vector<hlslpp::float3> positions;
   positions.reserve(usdPoints.size());
   for (const pxr::GfVec3f& point : usdPoints)
     positions.emplace_back(point[0], point[1], point[2]);
 
-  // Fan-triangulate. Reserve assumes ~triangles+quads (3*indices is
-  // an upper bound for all-triangle input; quad-dominant scenes
-  // produce ~2x triangles per face, ngons more). One pass over the
-  // counts/indices stream emits 3 indices per output triangle.
-  std::vector<uint32_t> indices;
-  indices.reserve(usdIndices.size() * 3u / 2u);
-  std::size_t faceOffset = 0;
-  for (const int faceCount : usdCounts)
+  // Per-face start offset into usdIndices — used by both the UV
+  // extractor (faceVarying needs face-local fv-index lookup) and the
+  // subset path (slice the fv-stream by face id).
+  std::vector<std::size_t> faceStartOffsets(usdCounts.size() + 1u, 0u);
   {
-    if (faceCount < 3)
+    std::size_t running = 0;
+    for (std::size_t faceIdx = 0; faceIdx < usdCounts.size(); ++faceIdx)
     {
-      // Degenerate face (point or edge). Skip and advance.
-      faceOffset += static_cast<std::size_t>(faceCount);
+      faceStartOffsets[faceIdx] = running;
+      running += static_cast<std::size_t>(usdCounts[faceIdx] > 0 ? usdCounts[faceIdx] : 0);
+    }
+    faceStartOffsets.back() = running;
+    if (running != usdIndices.size())
+    {
+      log.Warn(log::APP, "StageWalker: " + prim.GetPath().GetString()
+                             + " faceVertexCounts/Indices length mismatch (sum "
+                             + std::to_string(running) + " vs indices "
+                             + std::to_string(usdIndices.size())
+                             + "); dropping mesh.");
+      return 0;
+    }
+  }
+
+  // ---- §M8a face-subset collection ---------------------------------
+  // GeomSubsets with elementType=face partition the mesh into named
+  // face groups, each carrying its own material:binding. Walk them
+  // here, build a per-subset emit plan, and fall any unassigned faces
+  // back to the prim-level material binding.
+  struct SubsetEmitInfo {
+    pxr::VtIntArray faceIndices;  // empty = "use every face" (no-subset path)
+    MaterialHandle  material = MaterialHandle::Invalid;
+    std::string     debugSuffix;  // appended to prim path; empty for whole-mesh
+  };
+  std::vector<SubsetEmitInfo> subsetInfos;
+
+  const std::vector<pxr::UsdGeomSubset> faceSubsets =
+      pxr::UsdGeomSubset::GetGeomSubsets(meshPrim, pxr::UsdGeomTokens->face);
+  if (faceSubsets.empty())
+  {
+    SubsetEmitInfo info;
+    info.material = ResolveBoundMaterial(prim, materialsByPath);
+    subsetInfos.push_back(std::move(info));
+  }
+  else
+  {
+    std::vector<bool> faceAssigned(usdCounts.size(), false);
+    for (const pxr::UsdGeomSubset& subset : faceSubsets)
+    {
+      pxr::VtIntArray subsetIndices;
+      subset.GetIndicesAttr().Get(&subsetIndices);
+      if (subsetIndices.empty())
+        continue;
+      SubsetEmitInfo info;
+      info.material = ResolveBoundMaterial(subset.GetPrim(), materialsByPath);
+      info.debugSuffix = "/" + subset.GetPrim().GetName().GetString();
+      info.faceIndices.reserve(subsetIndices.size());
+      for (const int faceIdx : subsetIndices)
+      {
+        if (faceIdx >= 0 && static_cast<std::size_t>(faceIdx) < usdCounts.size())
+        {
+          info.faceIndices.push_back(faceIdx);
+          faceAssigned[static_cast<std::size_t>(faceIdx)] = true;
+        }
+      }
+      if (!info.faceIndices.empty())
+        subsetInfos.push_back(std::move(info));
+    }
+    // Faces not claimed by any subset fall back to the prim-level
+    // material — UsdGeomSubset::familyName=partition would forbid this
+    // configuration but the more permissive nonOverlapping family
+    // (USD default) allows uncovered faces. Emit them as one extra
+    // sub-mesh so the surface is fully drawn.
+    SubsetEmitInfo unassigned;
+    for (std::size_t faceIdx = 0; faceIdx < usdCounts.size(); ++faceIdx)
+    {
+      if (!faceAssigned[faceIdx])
+        unassigned.faceIndices.push_back(static_cast<int>(faceIdx));
+    }
+    if (!unassigned.faceIndices.empty())
+    {
+      unassigned.material = ResolveBoundMaterial(prim, materialsByPath);
+      unassigned.debugSuffix = "/_unassigned";
+      subsetInfos.push_back(std::move(unassigned));
+    }
+  }
+
+  // ---- UV source data (read once; sliced per subset below) ----------
+  // primvars:st for the WHOLE mesh. The per-subset UV emit below
+  // walks either the full face stream (no-subset case) or the
+  // subset's face indices (subset case) into the size-matched
+  // vertexUvs buffer per sub-mesh.
+  pxr::VtArray<pxr::GfVec2f> stUvs;
+  pxr::TfToken               stInterpolation;
+  bool                       stHasValue = false;
+  {
+    const pxr::UsdGeomPrimvarsAPI primvarsApi(prim);
+    const pxr::UsdGeomPrimvar     stPrimvar = primvarsApi.GetPrimvar(pxr::TfToken("st"));
+    if (stPrimvar.HasValue())
+    {
+      // ComputeFlattened (NOT plain Get) so indexed primvars expand
+      // through their `primvars:st:indices` side-table. Production
+      // USD (Omniverse, Animal Logic, Disney) authors UV islands as
+      // `values=[N unique uvs] + indices=[per-faceVertex int]` to
+      // dedupe, and Get() would return just the N unique values —
+      // tripping our `size == fvCount` length check below and
+      // silently dropping every mesh's UVs.
+      stPrimvar.ComputeFlattened(&stUvs);
+      stInterpolation = stPrimvar.GetInterpolation();
+      stHasValue = true;
+    }
+  }
+
+  // ---- Per-subset emit loop ----------------------------------------
+  std::size_t emittedCount = 0;
+  const hlslpp::float4x4 worldFromLocal =
+      ComposeWorldFromLocal(prim, xformCache, stageCtx);
+  const std::string primPath = prim.GetPath().GetString();
+
+  for (const SubsetEmitInfo& subset : subsetInfos)
+  {
+    // Triangulate. For the no-subset path (faceIndices empty) we walk
+    // every face; for subsets we walk only the listed face ids,
+    // pulling each face's fv-range via faceStartOffsets.
+    std::vector<uint32_t> indices;
+    {
+      const std::size_t inputFvCount =
+          subset.faceIndices.empty() ? usdIndices.size()
+                                     : subset.faceIndices.size() * 4u;  // upper-bound guess
+      indices.reserve(inputFvCount * 3u / 2u);
+    }
+    auto emitTrianglesForFace = [&](std::size_t faceIdx) {
+      const int faceCount = usdCounts[faceIdx];
+      if (faceCount < 3)
+        return;
+      const std::size_t fvBase = faceStartOffsets[faceIdx];
+      for (int triIdx = 0; triIdx < faceCount - 2; ++triIdx)
+      {
+        indices.push_back(static_cast<uint32_t>(usdIndices[fvBase + 0]));
+        indices.push_back(static_cast<uint32_t>(usdIndices[fvBase + triIdx + 1]));
+        indices.push_back(static_cast<uint32_t>(usdIndices[fvBase + triIdx + 2]));
+      }
+    };
+    if (subset.faceIndices.empty())
+    {
+      for (std::size_t faceIdx = 0; faceIdx < usdCounts.size(); ++faceIdx)
+        emitTrianglesForFace(faceIdx);
+    }
+    else
+    {
+      for (const int faceIdx : subset.faceIndices)
+        emitTrianglesForFace(static_cast<std::size_t>(faceIdx));
+    }
+    if (indices.empty())
+    {
+      log.Warn(log::APP, "StageWalker: " + primPath + subset.debugSuffix
+                             + " has no valid faces after triangulation; skipping.");
       continue;
     }
-    if (faceOffset + static_cast<std::size_t>(faceCount) > usdIndices.size())
+
+    // Per-vertex UV buffer sized to positions.size() and zero-init
+    // unconditionally — even for meshes that author no `primvars:st`
+    // or whose UVs we fail to extract. GpuScene's flat-UV upload
+    // path indexes via `gMeshUvs[gMeshUvOffsets[meshSlot] + v_i]`;
+    // a short / missing UV array would let the closesthit's index
+    // spill into a neighbouring mesh's UV range and pull unrelated
+    // texels. Size-matched zero buffer keeps the worst case "sample
+    // (0,0) of the bound texture", which is at least mesh-local.
+    std::vector<hlslpp::float2> vertexUvs(usdPoints.size(), hlslpp::float2{0.0f, 0.0f});
+    if (stHasValue)
     {
-      // Malformed — counts disagree with indices length. Drop the
-      // entire mesh; partial fan would mismatch positions.
-      log.Warn(log::APP, "StageWalker: " + prim.GetPath().GetString()
-                             + " faceVertexCounts/Indices length mismatch; "
-                             + "dropping mesh.");
-      return false;
+      if (stInterpolation == pxr::UsdGeomTokens->vertex
+          && stUvs.size() == usdPoints.size())
+      {
+        for (std::size_t i = 0; i < stUvs.size(); ++i)
+          vertexUvs[i] = hlslpp::float2{stUvs[i][0], stUvs[i][1]};
+      }
+      else if (stInterpolation == pxr::UsdGeomTokens->faceVarying
+               && stUvs.size() == usdIndices.size())
+      {
+        // Walk face-vertex stream — full or subset — taking the
+        // FIRST UV per vertex. Subsets reuse the parent mesh's
+        // positions array, so each subset re-collapses faceVarying
+        // into the same vertex slots; identical content across
+        // subsets shares the §15 mesh-content dedup.
+        std::vector<bool> uvAssigned(usdPoints.size(), false);
+        auto walkFace = [&](std::size_t faceIdx) {
+          const int faceCount = usdCounts[faceIdx];
+          const std::size_t fvBase = faceStartOffsets[faceIdx];
+          for (int faceVertex = 0; faceVertex < faceCount; ++faceVertex)
+          {
+            const std::size_t fvIdx = fvBase + static_cast<std::size_t>(faceVertex);
+            const auto vertexIdx = static_cast<std::size_t>(usdIndices[fvIdx]);
+            if (vertexIdx < uvAssigned.size() && !uvAssigned[vertexIdx])
+            {
+              vertexUvs[vertexIdx] = hlslpp::float2{stUvs[fvIdx][0], stUvs[fvIdx][1]};
+              uvAssigned[vertexIdx] = true;
+            }
+          }
+        };
+        if (subset.faceIndices.empty())
+        {
+          for (std::size_t faceIdx = 0; faceIdx < usdCounts.size(); ++faceIdx)
+            walkFace(faceIdx);
+        }
+        else
+        {
+          for (const int faceIdx : subset.faceIndices)
+            walkFace(static_cast<std::size_t>(faceIdx));
+        }
+      }
+      else if ((stInterpolation == pxr::UsdGeomTokens->constant
+                || stInterpolation == pxr::UsdGeomTokens->uniform)
+               && !stUvs.empty())
+      {
+        const hlslpp::float2 single{stUvs[0][0], stUvs[0][1]};
+        std::fill(vertexUvs.begin(), vertexUvs.end(), single);
+      }
+      // Unknown / mismatched interpolation: leave vertexUvs at the
+      // zero-init the declaration above gave us.
     }
-    for (int triIdx = 0; triIdx < faceCount - 2; ++triIdx)
+
+    const std::string subDebugName = primPath + subset.debugSuffix;
+    MeshDesc meshDesc;
+    meshDesc.positions = positions;
+    meshDesc.indices = indices;
+    meshDesc.uv0 = vertexUvs;
+    meshDesc.debugName = subDebugName;
+    const auto meshHandle = scene.CreateMesh(meshDesc);
+    if (!meshHandle.has_value())
     {
-      indices.push_back(static_cast<uint32_t>(usdIndices[faceOffset + 0]));
-      indices.push_back(static_cast<uint32_t>(usdIndices[faceOffset + triIdx + 1]));
-      indices.push_back(static_cast<uint32_t>(usdIndices[faceOffset + triIdx + 2]));
+      log.Error(log::APP, "StageWalker: CreateMesh failed for "
+                              + subDebugName + ": "
+                              + std::string{meshHandle.error().message.View()});
+      continue;
     }
-    faceOffset += static_cast<std::size_t>(faceCount);
-  }
+    ++stats.meshesEmitted;
 
-  if (indices.empty())
-  {
-    log.Warn(log::APP, "StageWalker: " + prim.GetPath().GetString()
-                           + " has no valid faces after triangulation; skipping.");
-    return false;
+    // World transform → instance. Material binding came from the
+    // subset (or the prim-level fallback) — see SubsetEmitInfo above.
+    // ComposeWorldFromLocal bakes metersPerUnit + Z->Y if the stage
+    // metadata says so, so the BLAS keeps stage-unit local-space
+    // geometry while the per-instance transform places it in
+    // Pyxis-world (metres + Y-up).
+    InstanceDesc instanceDesc;
+    instanceDesc.mesh = *meshHandle;
+    instanceDesc.worldFromLocal = worldFromLocal;
+    instanceDesc.material = subset.material;
+    instanceDesc.debugName = subDebugName;
+    const auto instanceHandle = scene.AppendInstance(instanceDesc);
+    if (!instanceHandle.has_value())
+    {
+      log.Error(log::APP, "StageWalker: AppendInstance failed for "
+                              + subDebugName + ": "
+                              + std::string{instanceHandle.error().message.View()});
+      continue;
+    }
+    ++stats.instancesEmitted;
+    ++emittedCount;
   }
-
-  const std::string debugName = prim.GetPath().GetString();
-  MeshDesc meshDesc;
-  meshDesc.positions = positions;
-  meshDesc.indices = indices;
-  meshDesc.debugName = debugName;
-  const auto meshHandle = scene.CreateMesh(meshDesc);
-  if (!meshHandle.has_value())
-  {
-    log.Error(log::APP, "StageWalker: CreateMesh failed for "
-                            + prim.GetPath().GetString() + ": "
-                            + std::string{meshHandle.error().message.View()});
-    return false;
-  }
-
-  // World transform → instance. Material binding (if any) is
-  // resolved via UsdShadeMaterialBindingAPI and stamped into
-  // InstanceDesc::material so the closesthit can read
-  // materials[InstanceID()] (where InstanceID is the material slot
-  // — see GpuScene::CommitResources's TLAS instance pack).
-  // ComposeWorldFromLocal bakes metersPerUnit + Z->Y if the stage
-  // metadata says so, so the BLAS keeps its stage-unit local-space
-  // geometry but the per-instance transform places it correctly in
-  // Pyxis-world (metres + Y-up).
-  InstanceDesc instanceDesc;
-  instanceDesc.mesh = *meshHandle;
-  instanceDesc.worldFromLocal = ComposeWorldFromLocal(prim, xformCache, stageCtx);
-  instanceDesc.material = ResolveBoundMaterial(prim, materialsByPath);
-  instanceDesc.debugName = debugName;
-  const auto instanceHandle = scene.AppendInstance(instanceDesc);
-  if (!instanceHandle.has_value())
-  {
-    log.Error(log::APP, "StageWalker: AppendInstance failed for "
-                            + prim.GetPath().GetString() + ": "
-                            + std::string{instanceHandle.error().message.View()});
-    return false;
-  }
-  return true;
+  return emittedCount;
 }
 
 // Emit a UsdGeomCamera as the active camera. The plan §29.4.a default
@@ -770,7 +1298,7 @@ std::optional<CameraDesc> BuildCameraDesc(const pxr::UsdPrim& prim,
 
 }  // namespace
 
-IngestStats StageWalker::WalkFile(std::string_view usdPath, GpuScene& scene) {
+IngestResult StageWalker::WalkFile(std::string_view usdPath, GpuScene& scene) {
   auto& log = Logging::Get();
   const std::string pathString{usdPath};
 
@@ -781,19 +1309,26 @@ IngestStats StageWalker::WalkFile(std::string_view usdPath, GpuScene& scene) {
   if (!stage)
   {
     log.Error(log::APP, std::string{"StageWalker: failed to open "} + pathString);
-    IngestStats failed{};
-    failed.stageOpenMs =
+    IngestResult failed;
+    failed.GetImpl().stats.timings.stageOpenMs =
         std::chrono::duration<float, std::milli>(stageOpenEnd - walkStart).count();
-    failed.totalMs = failed.stageOpenMs;
+    failed.GetImpl().stats.timings.totalMs = failed.GetImpl().stats.timings.stageOpenMs;
     return failed;
   }
-  IngestStats stats = WalkStage(stage, scene);
+  IngestResult result = WalkStage(stage, scene);
   const auto walkEnd = Clock::now();
   // stageOpenMs is local to WalkFile (WalkStage didn't open the
   // stage); fold it in + recompute totalMs to include it.
-  stats.stageOpenMs =
+  IngestStats& stats = result.GetImpl().stats;
+  stats.timings.stageOpenMs =
       std::chrono::duration<float, std::milli>(stageOpenEnd - walkStart).count();
-  stats.totalMs = std::chrono::duration<float, std::milli>(walkEnd - walkStart).count();
+  stats.timings.totalMs =
+      std::chrono::duration<float, std::milli>(walkEnd - walkStart).count();
+  auto fmtMs = [](float milliseconds) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%.0fms", milliseconds);
+    return std::string{buf};
+  };
   log.Info(log::APP,
            "StageWalker: " + pathString + " walked — "
                + std::to_string(stats.meshesEmitted) + " meshes, "
@@ -803,14 +1338,24 @@ IngestStats StageWalker::WalkFile(std::string_view usdPath, GpuScene& scene) {
                + std::to_string(stats.lightsEmitted) + " lights, "
                + std::to_string(stats.camerasEmitted) + " cameras, "
                + std::to_string(stats.skipped) + " skipped.");
-  return stats;
+  log.Info(log::APP,
+           "StageWalker timing: stageOpen=" + fmtMs(stats.timings.stageOpenMs)
+               + " traverseSort=" + fmtMs(stats.timings.traverseSortMs)
+               + " prewarm=" + fmtMs(stats.timings.prewarmPassMs)
+               + " materialPass=" + fmtMs(stats.timings.materialPassMs)
+               + " instancerPass=" + fmtMs(stats.timings.instancerPassMs)
+               + " meshLightCamera=" + fmtMs(stats.timings.meshLightCameraMs)
+               + " total=" + fmtMs(stats.timings.totalMs));
+  return result;
 }
 
-IngestStats StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
-                                   GpuScene& scene) {
-  IngestStats stats{};
+IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
+                                    GpuScene& scene) {
+  IngestResult result;
   if (!stage)
-    return stats;
+    return result;
+  IngestStats& stats = result.GetImpl().stats;
+  auto& cameras = result.GetImpl().cameras;
 
   using Clock = std::chrono::steady_clock;
   const auto walkStart = Clock::now();
@@ -826,8 +1371,18 @@ IngestStats StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
                      return lhs.GetPath() < rhs.GetPath();
                    });
   const auto traverseEnd = Clock::now();
-  stats.traverseSortMs =
+  stats.timings.traverseSortMs =
       std::chrono::duration<float, std::milli>(traverseEnd - walkStart).count();
+
+  // Parallel attribute pre-warm was tried + dropped — the temporary
+  // VtArrays go out of scope before pass 3 re-reads the same attrs,
+  // and USD's per-layer crate cache evicts decoded values without an
+  // owned reference holding them. Both mesh- and material-targeted
+  // variants ended up net-negative (1.4–2.2s overhead, < 0.15s
+  // saved). The `prewarmPassMs` timing field remains in IngestStats
+  // as a hook for a future "actual parallel-into-intermediates"
+  // pipeline that captures the decoded values into long-lived PODs.
+  stats.timings.prewarmPassMs = 0.0f;
 
   pxr::UsdGeomXformCache xformCache;
   const StageContext stageCtx = BuildStageContext(stage);
@@ -861,17 +1416,19 @@ IngestStats StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
   // so any difference in material translation breaks the §25.O.3
   // byte-equal invariant.
   MaterialHandleByPath materialsByPath;
-  // Texture-acquisition callback for the translator. Wraps
-  // GpuScene::AcquireTexture so the translator stays renderer-
-  // agnostic. The role passes through unchanged — the renderer's
-  // §13 texture cache uses it to pick the colorspace EOTF on decode
-  // (sRGB for BaseColor + Emission; linear for everything else).
-  const auto acquireTexture =
-      [&scene](std::string_view resolvedPath, TextureKey::Role role) -> TextureHandle {
+  // Texture-acquisition callback for the translator — stateless
+  // function pointer + opaque scene-pointer userData. The translator
+  // stays renderer-agnostic; the role passes through unchanged so
+  // the renderer's §13 texture cache picks the colorspace EOTF on
+  // decode (sRGB for BaseColor + Emission; linear for everything
+  // else).
+  static constexpr auto ACQUIRE_TEXTURE =
+      [](std::string_view resolvedPath, TextureKey::Role role,
+         void* userData) -> TextureHandle {
         TextureKey key;
         key.resolvedPath = resolvedPath;
         key.role = role;
-        return scene.AcquireTexture(key);
+        return static_cast<GpuScene*>(userData)->AcquireTexture(key);
       };
   const auto materialPassStart = Clock::now();
   for (const pxr::UsdPrim& prim : prims)
@@ -881,14 +1438,14 @@ IngestStats StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
     const pxr::UsdShadeMaterial materialPrim(prim);
     const std::string primPath = prim.GetPath().GetString();
     OpenPBRMaterialDesc materialDesc =
-        material_translation::FromUsdShade(materialPrim, acquireTexture);
+        material_translation::FromUsdShade(materialPrim, ACQUIRE_TEXTURE, &scene);
     materialDesc.sourcePrim = primPath;
     const MaterialHandle handle = scene.AcquireMaterial(materialDesc);
     materialsByPath.emplace(primPath, handle);
     ++stats.materialsEmitted;
   }
   const auto materialPassEnd = Clock::now();
-  stats.materialPassMs =
+  stats.timings.materialPassMs =
       std::chrono::duration<float, std::milli>(materialPassEnd - materialPassStart).count();
 
   // Pass 2 — UsdGeomPointInstancer (M6). Walked BEFORE the standalone
@@ -907,7 +1464,7 @@ IngestStats StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
                        consumedPrototypes);
   }
   const auto instancerPassEnd = Clock::now();
-  stats.instancerPassMs =
+  stats.timings.instancerPassMs =
       std::chrono::duration<float, std::milli>(instancerPassEnd - instancerPassStart).count();
 
   // Pass 3 — meshes / camera / lights, with material handles resolved
@@ -920,11 +1477,12 @@ IngestStats StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
     {
       if (consumedPrototypes.contains(prim.GetPath().GetString()))
         continue;
-      if (EmitMesh(prim, xformCache, materialsByPath, stageCtx, scene))
-      {
-        ++stats.meshesEmitted;
-        ++stats.instancesEmitted;
-      }
+      // EmitMesh internally bumps stats.meshesEmitted /
+      // stats.instancesEmitted per emitted sub-mesh (one prim with N
+      // GeomSubsets emits N meshes + N instances). The return value is
+      // available for per-prim diagnostics; the running counters drive
+      // the post-pass log line below.
+      EmitMesh(prim, xformCache, materialsByPath, stageCtx, scene, stats);
     }
     else if (prim.IsA<pxr::UsdGeomCamera>())
     {
@@ -934,16 +1492,17 @@ IngestStats StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
       // root-layer's `boundCamera` hint regardless of SdfPath order.
       if (auto descOpt = BuildCameraDesc(prim, xformCache, stageCtx); descOpt)
       {
-        NamedCamera entry;
+        IngestResult::Impl::Entry entry;
         entry.name = prim.GetPath().GetString();
         entry.desc = *descOpt;
-        stats.cameras.push_back(std::move(entry));
+        cameras.push_back(std::move(entry));
         ++stats.camerasEmitted;
       }
     }
-    else if (prim.IsA<pxr::UsdLuxDistantLight>() || prim.IsA<pxr::UsdLuxDomeLight>()
-             || prim.IsA<pxr::UsdLuxRectLight>()   || prim.IsA<pxr::UsdLuxDiskLight>()
-             || prim.IsA<pxr::UsdLuxSphereLight>())
+    else if (prim.IsA<pxr::UsdLuxDistantLight>()  || prim.IsA<pxr::UsdLuxDomeLight>()
+             || prim.IsA<pxr::UsdLuxRectLight>()    || prim.IsA<pxr::UsdLuxDiskLight>()
+             || prim.IsA<pxr::UsdLuxSphereLight>()  || prim.IsA<pxr::UsdLuxCylinderLight>()
+             || prim.IsA<pxr::UsdLuxGeometryLight>()|| prim.IsA<pxr::UsdLuxPortalLight>())
     {
       // M7-simple: translate + push into GpuScene. The closesthit's
       // simple shading model (NdotL Lambert for Distant + Rect,
@@ -971,14 +1530,14 @@ IngestStats StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
   // first-in-SdfPath-order — preserves the M4 "first camera wins"
   // contract for fixtures that don't author a hint. activeCameraIndex
   // stays -1 only when the scene authored zero cameras.
-  if (!stats.cameras.empty())
+  if (!cameras.empty())
   {
     int activeIdx = 0;  // first-in-SdfPath-order fallback
     if (!boundCameraHintPath.empty())
     {
-      for (std::size_t i = 0; i < stats.cameras.size(); ++i)
+      for (std::size_t i = 0; i < cameras.size(); ++i)
       {
-        if (stats.cameras[i].name == boundCameraHintPath)
+        if (cameras[i].name == boundCameraHintPath)
         {
           activeIdx = static_cast<int>(i);
           break;
@@ -986,19 +1545,18 @@ IngestStats StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
       }
     }
     stats.activeCameraIndex = activeIdx;
-    scene.SetCamera(stats.cameras[static_cast<std::size_t>(activeIdx)].desc);
+    scene.SetCamera(cameras[static_cast<std::size_t>(activeIdx)].desc);
   }
 
   const auto meshPassEnd = Clock::now();
-  stats.meshLightCameraMs =
+  stats.timings.meshLightCameraMs =
       std::chrono::duration<float, std::milli>(meshPassEnd - meshPassStart).count();
-  // totalMs covers WalkStage end-to-end (sum of stages + harness
-  // overhead). WalkFile recomputes totalMs to also include the
-  // pxr::UsdStage::Open above WalkStage.
-  stats.totalMs =
+  // totalMs covers WalkStage end-to-end. WalkFile recomputes it to
+  // also include the pxr::UsdStage::Open above WalkStage.
+  stats.timings.totalMs =
       std::chrono::duration<float, std::milli>(meshPassEnd - walkStart).count();
 
-  return stats;
+  return result;
 }
 
 }  // namespace pyxis::usd_ingest

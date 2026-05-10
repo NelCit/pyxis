@@ -237,6 +237,23 @@ public:
   // bounds-safe by construction.
   [[nodiscard]] nvrhi::IBuffer*          GetMeshFaceOffsetsBuffer() const noexcept;
 
+  // M8a UV pipeline: per-mesh UVs concatenated into one flat
+  // float2 buffer + per-mesh-slot start offsets. Closesthit reads:
+  //   uv0..2 = gMeshUvs[gMeshUvOffsets[meshSlot] + vertexIdx]
+  // Vertex indices come from the per-mesh index buffer below.
+  [[nodiscard]] nvrhi::IBuffer*          GetMeshUvsBuffer() const noexcept;
+  [[nodiscard]] nvrhi::IBuffer*          GetMeshUvOffsetsBuffer() const noexcept;
+
+  // M8a UV pipeline: per-mesh triangle indices concatenated into one
+  // flat uint buffer + per-mesh-slot start offsets. Closesthit reads:
+  //   v_i = gMeshIndices[gMeshIndexOffsets[meshSlot] + PrimitiveIndex()*3 + i]
+  // Same data as the per-mesh BLAS index buffer; duplicated here
+  // because BLAS index buffers are bound for AS-build, not as
+  // structured buffers for shader read. Acceptable given the tiny
+  // overhead (one uint per mesh triangle, ~1-3 MB at Bistro scale).
+  [[nodiscard]] nvrhi::IBuffer*          GetMeshIndicesBuffer() const noexcept;
+  [[nodiscard]] nvrhi::IBuffer*          GetMeshIndexOffsetsBuffer() const noexcept;
+
   // M7-IBL: env-map texture of the FIRST live UsdLuxDomeLight, or
   // nullptr if no dome with a resolved envMap exists. Miss shader
   // samples this at the ray direction's lat-long uv to draw the
@@ -249,6 +266,22 @@ public:
   // env-map). Per-role samplers (anisotropic for tangent maps, etc.)
   // are an M9 polish item.
   [[nodiscard]] nvrhi::ISampler*         GetBindlessSampler() const noexcept;
+
+  // M8a bindless textures: 4×4 magenta fallback bound at bindless
+  // slot 0 so any material whose resolved texture failed to decode
+  // (or whose desc never authored one) renders visibly-broken. Lives
+  // for the scene's lifetime once the first CommitResources runs;
+  // nullptr before that.
+  [[nodiscard]] nvrhi::ITexture*         GetMissingTexture() const noexcept;
+
+  // M8a bindless textures: walk the texture table for PathTracePass's
+  // descriptor-array binding. `Count` is the SLOT-SPACE size (sparse;
+  // includes dead / un-uploaded slots). `At(slot)` returns the
+  // ITexture* for that bindless slot, or nullptr for sentinel /
+  // dead / not-yet-decoded entries — caller binds the missingTexture
+  // (slot 0 fallback) for each null.
+  [[nodiscard]] uint32_t                 GetBindlessTextureCount() const noexcept;
+  [[nodiscard]] nvrhi::ITexture*         GetBindlessTextureAt(uint32_t bindlessSlot) const noexcept;
 
 private:
   // PIMPL: NVRHI handles, entry-table vectors, per-frame ring slots

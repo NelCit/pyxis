@@ -51,17 +51,31 @@
 //                       (closesthit — added at M7 NdotL)
 //   set=0, binding=9  : Texture2D<float4> dome HDRI env-map
 //                       (miss — added at M7 IBL)
-//   set=0, binding=10 : SamplerState dome HDRI sampler
-//                       (miss — added at M7 IBL)
+//   set=0, binding=10 : SamplerState dome HDRI sampler — also reused
+//                       here for material bindless texture sampling
+//                       (closesthit — added at M8a)
+//   set=0, binding=24 : StructuredBuffer<float2> per-mesh UVs
+//                       (closesthit — added at M8a UV pipeline)
+//   set=0, binding=25 : StructuredBuffer<uint>   per-mesh UV offsets
+//   set=0, binding=26 : StructuredBuffer<uint>   per-mesh triangle indices
+//   set=0, binding=27 : StructuredBuffer<uint>   per-mesh index offsets
+//   set=0, binding=28 : Texture2D[BINDLESS_TEXTURES_CAP] bindless materials
+//                       (closesthit — added at M8a; indexed by mat.baseColorTex)
 
 #include "ShaderInterop.slang"
 
-[[vk::binding(3, 0)]] StructuredBuffer<OpenPBRMaterialGPU> gMaterials;
-[[vk::binding(4, 0)]] StructuredBuffer<uint>               gInstanceMaterial;
-[[vk::binding(5, 0)]] StructuredBuffer<LightGpu>           gLights;
-[[vk::binding(6, 0)]] StructuredBuffer<uint>               gInstanceMesh;
-[[vk::binding(7, 0)]] StructuredBuffer<float4>             gMeshFaceNormals;
-[[vk::binding(8, 0)]] StructuredBuffer<uint>               gMeshFaceOffsets;
+[[vk::binding(3, 0)]]  StructuredBuffer<OpenPBRMaterialGPU> gMaterials;
+[[vk::binding(4, 0)]]  StructuredBuffer<uint>               gInstanceMaterial;
+[[vk::binding(5, 0)]]  StructuredBuffer<LightGpu>           gLights;
+[[vk::binding(6, 0)]]  StructuredBuffer<uint>               gInstanceMesh;
+[[vk::binding(7, 0)]]  StructuredBuffer<float4>             gMeshFaceNormals;
+[[vk::binding(8, 0)]]  StructuredBuffer<uint>               gMeshFaceOffsets;
+[[vk::binding(10, 0)]] SamplerState                         gBindlessSampler;
+[[vk::binding(24, 0)]] StructuredBuffer<float2>             gMeshUvs;
+[[vk::binding(25, 0)]] StructuredBuffer<uint>               gMeshUvOffsets;
+[[vk::binding(26, 0)]] StructuredBuffer<uint>               gMeshIndices;
+[[vk::binding(27, 0)]] StructuredBuffer<uint>               gMeshIndexOffsets;
+[[vk::binding(28, 0)]] Texture2D                            gBindlessTextures[BINDLESS_TEXTURES_CAP];
 
 // Slang emits the SPIR-V `OpEntryPoint` name as `"main"` regardless
 // of the source-side function name; the C++ side passes `"main"` to
@@ -74,7 +88,46 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
     const uint instanceId = InstanceID();
     const uint materialId = gInstanceMaterial[instanceId];
     const OpenPBRMaterialGPU mat = gMaterials[materialId];
-    const float3 baseColor = float3(mat.baseColorR, mat.baseColorG, mat.baseColorB);
+
+    // M8a UV pipeline: interpolate per-vertex UV via barycentrics,
+    // then bindless-sample the baseColor texture (when authored) so
+    // textured materials actually pick up their texels instead of
+    // collapsing to the scalar fallback.
+    //
+    //   ofs = gMeshIndexOffsets[meshSlot]
+    //   v0/1/2 = gMeshIndices[ofs + PrimitiveIndex()*3 + {0,1,2}]
+    //   uv0/1/2 = gMeshUvs[gMeshUvOffsets[meshSlot] + v_i]
+    //   uv = uv0*(1-bary.x-bary.y) + uv1*bary.x + uv2*bary.y
+    // attribs.barycentrics is the (u,v) pair the closesthit input
+    // attribute carries; w0 = 1 - u - v is the third weight.
+    const uint meshSlot = gInstanceMesh[instanceId];
+    const uint indexBase = gMeshIndexOffsets[meshSlot] + PrimitiveIndex() * 3u;
+    const uint v0 = gMeshIndices[indexBase + 0u];
+    const uint v1 = gMeshIndices[indexBase + 1u];
+    const uint v2 = gMeshIndices[indexBase + 2u];
+    const uint uvBase = gMeshUvOffsets[meshSlot];
+    const float2 uv0 = gMeshUvs[uvBase + v0];
+    const float2 uv1 = gMeshUvs[uvBase + v1];
+    const float2 uv2 = gMeshUvs[uvBase + v2];
+    const float2 bary = attribs.barycentrics;
+    const float  w0   = 1.0 - bary.x - bary.y;
+    const float2 uv   = uv0 * w0 + uv1 * bary.x + uv2 * bary.y;
+
+    // Bindless baseColor sample, gated on the §11.6 HasBaseColorMap
+    // flag the C++ side sets when the material's resolved
+    // baseColorTex slot is valid. Without the flag check, INVALID_
+    // BINDLESS_TEXTURE (=~0u) would index out of bounds → driver UB
+    // (or magenta missingTexture if slot 0 hits via PartiallyBound).
+    // Linear-clamp `gBindlessSampler` (binding 10) is shared with the
+    // dome — the renderer owns one sampler in v1; per-role samplers
+    // are an M9 polish item.
+    float3 baseColor = float3(mat.baseColorR, mat.baseColorG, mat.baseColorB);
+    if ((mat.flags & MATERIAL_FLAG_HAS_BASE_COLOR_MAP) != 0u
+        && mat.baseColorTex < BINDLESS_TEXTURES_CAP) {
+        const float4 sampled = gBindlessTextures[mat.baseColorTex].SampleLevel(
+            gBindlessSampler, uv, 0);
+        baseColor = sampled.rgb;
+    }
 
     // M7 NdotL: resolve the hit-triangle's object-space face normal
     // via the M7 NdotL side-tables, then transform to world space
@@ -85,7 +138,6 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
     // rotation transform (the M7 fixture cases) this is correct as-
     // is. Non-uniform scale would need the inverse-transpose of the
     // upper 3x3 (M9 polish).
-    const uint meshSlot = gInstanceMesh[instanceId];
     const uint faceOffset = gMeshFaceOffsets[meshSlot];
     const float3 nLocal = gMeshFaceNormals[faceOffset + PrimitiveIndex()].xyz;
     const float3x4 objectToWorld = ObjectToWorld3x4();
@@ -101,13 +153,33 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
     // intensity=0 sentinel) leaves `directSum` zero → falls through
     // to baseColor-only emission, preserving M5/M6 byte-equal.
     //
-    // - Distant: lightDir = -L.direction (the world-space direction
-    //   the light's photons travel; NdotL uses the negated form
-    //   pointing FROM surface TO light source).
-    // - Rect: lightDir = normalize(L.position - hitWorld), treating
-    //   the rect as a point at its center (no area sampling).
+    // M8a — physical light/exposure pairing (Omniverse RTX convention,
+    // shared by RenderMan / Karma / Storm / Cycles). USD authors
+    // intensities in physical units (60000 nits for a bright DiskLight;
+    // 12000 for a sky dome) and pairs them with heavily negative
+    // UsdGeomCamera::exposure stops (e.g. -10 = 1/1024×) to compress
+    // back to display range. Two pieces are needed for that pairing
+    // to read correctly:
+    //   1. Distance attenuation (1/r²) on every non-Distant, non-Dome
+    //      light. Without it a 60000-intensity light at 30m reads as
+    //      bright as the same light at 1m, blowing out the whole scene
+    //      no matter what camera exposure compensates with.
+    //   2. The camera's 2^exposure factor applied at raygen, which we
+    //      already do (CameraUniforms.exposure × ACES tonemap).
+    //
+    // - Distant: NO falloff (parallel rays, infinitely far). lightDir
+    //   = -L.direction (the world-space direction the light's photons
+    //   travel; NdotL uses the negated form pointing FROM surface TO
+    //   light source).
+    // - Rect / Disk / Sphere / Cylinder: 1/r² falloff from the light's
+    //   centre. lightDir = normalize(L.position - hitWorld). The
+    //   distance² is clamped to 0.01 m² (= 10cm minimum apparent
+    //   distance) to avoid the singularity for surfaces directly on a
+    //   light. Treating area lights as a point at centre is M7-simple;
+    //   real area sampling lands in M7-full's NEE pass.
     // - Dome: uniform ambient (no NdotL — hemispheric integration
     //   is what the user fills in at M7-full alongside the full BSDF).
+    //   No distance falloff — dome is at infinity.
     uint lightCount;
     uint _stride;
     gLights.GetDimensions(lightCount, _stride);
@@ -137,16 +209,28 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
             continue;
         }
         float3 lightDir;
+        float falloff = 1.0;  // Distant defaults to no attenuation
         if (L.kind == LIGHT_KIND_RECT) {
-            const float3 toRect = float3(L.posX, L.posY, L.posZ) - hitWorld;
-            lightDir = normalize(toRect);
+            const float3 toLight = float3(L.posX, L.posY, L.posZ) - hitWorld;
+            const float  distSq  = dot(toLight, toLight);
+            // Soft minimum on r² avoids the 1/0 singularity for
+            // surfaces touching a light. 0.01 m² ≈ 10cm — closer than
+            // that, the falloff caps at 100×.
+            falloff  = 1.0 / max(distSq, 0.01);
+            lightDir = toLight * rsqrt(max(distSq, 1e-12));
         } else {
-            // Distant
+            // Distant: no falloff
             lightDir = -float3(L.dirX, L.dirY, L.dirZ);
         }
         const float NdotL = max(0.0, dot(nWorld, lightDir));
-        directSum += Lcol * NdotL;
-        totalContribution += L.intensity;  // pre-NdotL — used only as the no-lights fallthrough sentinel
+        directSum += Lcol * NdotL * falloff;
+        // pre-NdotL, pre-falloff totalContribution drives only the
+        // "any-lights / fall through to emissive baseColor" sentinel
+        // below. Adding the raw intensity (rather than the attenuated
+        // value) keeps that test stable regardless of distance —
+        // otherwise a far-away scene with no nearby lights would
+        // collapse to baseColor-only emission and lose dome/ambient.
+        totalContribution += L.intensity;
     }
 
     payload.color = (totalContribution > 0.0) ? (baseColor * (directSum + ambientSum)) : baseColor;

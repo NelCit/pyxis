@@ -63,6 +63,17 @@ void GpuScene::Impl::Clear() noexcept
   textureKeyHashToHandle.clear();
   meshDescHashToHandle.clear();
 
+  // Clear the slot-recycle free lists symmetrically with their
+  // entry vectors. Without this, slot indices from the prior scene
+  // would survive Clear() and the next Acquire/Append would pop a
+  // slot that's now out of range for the cleared entry vector →
+  // out-of-bounds `entries[slot]` → UB.
+  freeMeshSlots.clear();
+  freeInstanceSlots.clear();
+  freeMaterialSlots.clear();
+  freeTextureSlots.clear();
+  freeLightSlots.clear();
+
   // GPU buffers: drop refs. CommitResources will lazily re-allocate
   // on the first AcquireMaterial / AppendInstance / AddLight after
   // Clear (the same lazy path used at scene-construction time).
@@ -74,6 +85,12 @@ void GpuScene::Impl::Clear() noexcept
   meshFaceNormalsBuffer = nullptr;
   meshFaceOffsetsBuffer = nullptr;
   meshFaceNormalsNeedUpload = false;
+  meshUvsBuffer = nullptr;
+  meshUvOffsetsBuffer = nullptr;
+  meshIndicesBuffer = nullptr;
+  meshIndexOffsetsBuffer = nullptr;
+  meshUvsNeedUpload = false;
+  meshIndicesNeedUpload = false;
   instanceMeshBuffer = nullptr;
 
   // Sampler + missingTexture are scene-lifetime singletons that the
@@ -145,6 +162,8 @@ Expected<void> GpuScene::Impl::CommitResources(nvrhi::ICommandList* commandList)
   PYXIS_TRY(RebuildTlasIfDirty(commandList));
   PYXIS_TRY(UploadInstanceSideTables(commandList));
   PYXIS_TRY(UploadMeshFaceNormals(commandList));
+  PYXIS_TRY(UploadMeshUvs(commandList));
+  PYXIS_TRY(UploadMeshIndices(commandList));
   return {};
 }
 
@@ -771,6 +790,110 @@ Expected<void> GpuScene::Impl::UploadMeshFaceNormals(nvrhi::ICommandList* comman
   commandList->writeBuffer(meshFaceOffsetsBuffer.Get(), perMeshOffsets.data(),
                            offsetsBytes);
   meshFaceNormalsNeedUpload = false;
+  return {};
+}
+
+// ---- M8a UV pipeline -------------------------------------------------
+// Concatenates every live mesh's per-vertex UVs into one flat float2
+// buffer + a per-mesh-slot start-offset table. Closesthit reads:
+//   uvOffset = gMeshUvOffsets[meshSlot]
+//   uv0/1/2  = gMeshUvs[uvOffset + vertexIndex]
+// Vertex indices come from gMeshIndices (uploaded by the next phase).
+//
+// Meshes that authored no `primvars:st` (cube fixtures, tagged-empty
+// authoring) contribute zero UVs — their offset stays the same as
+// the previous mesh's, and the closesthit's HasBaseColorMap flag
+// will fall through to the scalar baseColor anyway. Empty buffer
+// gets a one-element fallback so the bindless layout is valid.
+Expected<void> GpuScene::Impl::UploadMeshUvs(nvrhi::ICommandList* commandList)
+{
+  if (!meshUvsNeedUpload || meshes.empty())
+    return {};
+
+  std::vector<hlslpp::float2> packedUvs;
+  std::vector<std::uint32_t>  perMeshOffsets(meshes.size(), 0u);
+  for (std::size_t meshSlot = 0; meshSlot < meshes.size(); ++meshSlot)
+  {
+    perMeshOffsets[meshSlot] = static_cast<std::uint32_t>(packedUvs.size());
+    const MeshEntry& mesh = meshes[meshSlot];
+    if (!mesh.live)
+      continue;
+    // Every mesh contributes EXACTLY vertexCount UV entries to the
+    // flat buffer, even if mesh.uv0 is short. The closesthit reads
+    // `gMeshUvs[gMeshUvOffsets[meshSlot] + v_i]` where v_i is a
+    // vertex index in [0, vertexCount). Padding short UV arrays
+    // with (0,0) keeps each mesh's UV slice aligned to its vertex
+    // range — without it, the next mesh's UV data would overlap and
+    // the closesthit would sample texels that don't belong to the
+    // hit mesh.
+    packedUvs.insert(packedUvs.end(), mesh.uv0.begin(), mesh.uv0.end());
+    if (mesh.uv0.size() < mesh.vertexCount)
+    {
+      const std::size_t padCount = mesh.vertexCount - mesh.uv0.size();
+      packedUvs.insert(packedUvs.end(), padCount, hlslpp::float2{0.0f, 0.0f});
+    }
+  }
+  if (packedUvs.empty())
+    packedUvs.emplace_back(0.0f, 0.0f);  // 1-element fallback
+
+  const std::size_t uvsBytes     = packedUvs.size() * sizeof(hlslpp::float2);
+  const std::size_t offsetsBytes = perMeshOffsets.size() * sizeof(std::uint32_t);
+
+  PYXIS_TRY(EnsureStructuredBuffer(device, meshUvsBuffer, uvsBytes,
+                                   sizeof(hlslpp::float2),
+                                   "GpuScene.meshUvsBuffer",
+                                   "meshUvsBuffer"));
+  PYXIS_TRY(EnsureStructuredBuffer(device, meshUvOffsetsBuffer, offsetsBytes,
+                                   sizeof(std::uint32_t),
+                                   "GpuScene.meshUvOffsetsBuffer",
+                                   "meshUvOffsetsBuffer"));
+  commandList->writeBuffer(meshUvsBuffer.Get(),        packedUvs.data(),       uvsBytes);
+  commandList->writeBuffer(meshUvOffsetsBuffer.Get(),  perMeshOffsets.data(),  offsetsBytes);
+  meshUvsNeedUpload = false;
+  return {};
+}
+
+// Concatenates every live mesh's triangle indices into one flat uint
+// buffer + per-mesh-slot start-offset table. The same data lives in
+// the per-mesh BLAS index buffer, but those are bound for AS-build
+// (not as structured buffers for shader read). The duplication cost
+// is one uint per triangle (~12 MB at Bistro scale, acceptable).
+//
+// Closesthit reads three indices per hit:
+//   ofs = gMeshIndexOffsets[meshSlot]
+//   v0/1/2 = gMeshIndices[ofs + PrimitiveIndex()*3 + 0/1/2]
+Expected<void> GpuScene::Impl::UploadMeshIndices(nvrhi::ICommandList* commandList)
+{
+  if (!meshIndicesNeedUpload || meshes.empty())
+    return {};
+
+  std::vector<std::uint32_t> packedIndices;
+  std::vector<std::uint32_t> perMeshOffsets(meshes.size(), 0u);
+  for (std::size_t meshSlot = 0; meshSlot < meshes.size(); ++meshSlot)
+  {
+    perMeshOffsets[meshSlot] = static_cast<std::uint32_t>(packedIndices.size());
+    const MeshEntry& mesh = meshes[meshSlot];
+    if (!mesh.live)
+      continue;
+    packedIndices.insert(packedIndices.end(), mesh.indices.begin(), mesh.indices.end());
+  }
+  if (packedIndices.empty())
+    packedIndices.push_back(0u);  // 1-element fallback
+
+  const std::size_t indicesBytes = packedIndices.size() * sizeof(std::uint32_t);
+  const std::size_t offsetsBytes = perMeshOffsets.size() * sizeof(std::uint32_t);
+
+  PYXIS_TRY(EnsureStructuredBuffer(device, meshIndicesBuffer, indicesBytes,
+                                   sizeof(std::uint32_t),
+                                   "GpuScene.meshIndicesBuffer",
+                                   "meshIndicesBuffer"));
+  PYXIS_TRY(EnsureStructuredBuffer(device, meshIndexOffsetsBuffer, offsetsBytes,
+                                   sizeof(std::uint32_t),
+                                   "GpuScene.meshIndexOffsetsBuffer",
+                                   "meshIndexOffsetsBuffer"));
+  commandList->writeBuffer(meshIndicesBuffer.Get(),       packedIndices.data(),  indicesBytes);
+  commandList->writeBuffer(meshIndexOffsetsBuffer.Get(),  perMeshOffsets.data(), offsetsBytes);
+  meshIndicesNeedUpload = false;
   return {};
 }
 

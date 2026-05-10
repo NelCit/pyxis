@@ -327,6 +327,31 @@ static const uint LIGHT_KIND_DISTANT = 0;
 static const uint LIGHT_KIND_DOME    = 1;
 static const uint LIGHT_KIND_RECT    = 2;
 
+// MaterialFlag bitmask mirror — sources/pyxis_renderer/Private/Materials/
+// MaterialFlag.h is the C++ source of truth; the closesthit reads
+// `mat.flags & MATERIAL_FLAG_*` to short-circuit lobe + texture lookups.
+// Keep these in lockstep with the C++ enum.
+static const uint MATERIAL_FLAG_DOUBLE_SIDED            = 1u << 0;
+static const uint MATERIAL_FLAG_HAS_BASE_COLOR_MAP      = 1u << 1;
+static const uint MATERIAL_FLAG_HAS_NORMAL_MAP          = 1u << 2;
+static const uint MATERIAL_FLAG_HAS_METALLIC_MAP        = 1u << 3;
+static const uint MATERIAL_FLAG_HAS_ROUGHNESS_MAP       = 1u << 4;
+static const uint MATERIAL_FLAG_HAS_EMISSION_MAP        = 1u << 5;
+static const uint MATERIAL_FLAG_HAS_OPACITY_MAP         = 1u << 6;
+static const uint MATERIAL_FLAG_HAS_TRANSMISSION_MAP    = 1u << 7;
+static const uint MATERIAL_FLAG_HAS_COAT_ROUGHNESS_MAP  = 1u << 8;
+static const uint MATERIAL_FLAG_ALPHA_TESTED            = 1u << 9;
+static const uint MATERIAL_FLAG_COAT_ENABLED            = 1u << 10;
+static const uint MATERIAL_FLAG_TRANSMISSION_ENABLED    = 1u << 11;
+static const uint MATERIAL_FLAG_EMISSIVE                = 1u << 12;
+
+// Bindless texture array capacity at PathTracePass binding 28.
+// Cap chosen to comfortably cover v1 production scenes (Lobby 169,
+// Bistro ~2K, Moana production sets ~50K is the post-v1 §5 target via
+// true createBindlessLayout). The closesthit indexes via
+// `mat.baseColorTex`, gated on MATERIAL_FLAG_HAS_BASE_COLOR_MAP.
+static const uint BINDLESS_TEXTURES_CAP = 4096u;
+
 #ifdef __cplusplus
     // HitInfo is shader-only (see the `#ifndef __cplusplus` guard
     // above), so its size assert lives shader-side only too. Below
