@@ -26,12 +26,18 @@
 #include <Pyxis/Renderer/Descs/RenderSettings.h>
 
 #include <array>
+#include <string>
 #include <string_view>
 
 namespace pyxis::app {
 
 struct AovEntry {
+  // CLI / file-suffix token. Stable string used by --save-aov + the
+  // editor's BuildAovOutputPath suffix. Lower-case, no spaces.
   std::string_view                        name;
+  // UI-friendly label shown in the editor's combo. PascalCase reads
+  // better than the lower-case CLI token in a dropdown.
+  std::string_view                        displayLabel;
   RenderSettings::DebugView               debugView;
   // Pointer-to-member into AovTextures. Resolved at call sites via
   // `(aovs.*entry.texturePtr).Get()` to fetch the raw nvrhi::ITexture*.
@@ -43,13 +49,13 @@ struct AovEntry {
 // AOV is one line here + matching DebugView entry + matching AovTextures
 // member + matching raygen UAV binding.
 inline constexpr std::array<AovEntry, 7> AOV_REGISTRY = {{
-    {"color",      RenderSettings::DebugView::Color,      &AovTextures::colorHdr  },
-    {"normal",     RenderSettings::DebugView::Normal,     &AovTextures::normal    },
-    {"depth",      RenderSettings::DebugView::Depth,      &AovTextures::depth     },
-    {"instanceId", RenderSettings::DebugView::InstanceId, &AovTextures::instanceId},
-    {"materialId", RenderSettings::DebugView::MaterialId, &AovTextures::materialId},
-    {"baseColor",  RenderSettings::DebugView::BaseColor,  &AovTextures::baseColor },
-    {"worldPos",   RenderSettings::DebugView::WorldPos,   &AovTextures::worldPos  },
+    {"color",      "Color",      RenderSettings::DebugView::Color,      &AovTextures::colorHdr  },
+    {"normal",     "Normal",     RenderSettings::DebugView::Normal,     &AovTextures::normal    },
+    {"depth",      "Depth",      RenderSettings::DebugView::Depth,      &AovTextures::depth     },
+    {"instanceId", "InstanceID", RenderSettings::DebugView::InstanceId, &AovTextures::instanceId},
+    {"materialId", "MaterialID", RenderSettings::DebugView::MaterialId, &AovTextures::materialId},
+    {"baseColor",  "BaseColor",  RenderSettings::DebugView::BaseColor,  &AovTextures::baseColor },
+    {"worldPos",   "WorldPos",   RenderSettings::DebugView::WorldPos,   &AovTextures::worldPos  },
 }};
 
 // Resolve a DebugView enum to its registry entry, or nullptr if the
@@ -76,6 +82,22 @@ inline constexpr std::array<AovEntry, 7> AOV_REGISTRY = {{
       return &entry;
   }
   return nullptr;
+}
+
+// Build the per-AOV output path used by both the editor's "Save
+// current AOV..." button and headless's --save-aov dispatch.
+// Convention: <prefix>_<name>.exr. Headless passes its --output path
+// stripped of `.exr`; the editor passes a constant suggestion stem
+// like "pyxis_aov".
+[[nodiscard]] inline std::string BuildAovOutputPath(std::string_view prefix,
+                                                    std::string_view aovName) noexcept {
+  std::string result;
+  result.reserve(prefix.size() + 1 + aovName.size() + 4);
+  result.assign(prefix.data(), prefix.size());
+  result.push_back('_');
+  result.append(aovName.data(), aovName.size());
+  result.append(".exr");
+  return result;
 }
 
 }  // namespace pyxis::app

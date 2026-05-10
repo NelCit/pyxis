@@ -341,7 +341,7 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
                                + "' is null; skipping");
         return;
       }
-      const std::string targetPath = aovPrefix + "_" + std::string{aovName} + ".exr";
+      const std::string targetPath = BuildAovOutputPath(aovPrefix, aovName);
       if (auto saveResult = SaveAovAsExr(device, commandList, sourceAov, aovName, targetPath);
           !saveResult)
       {

@@ -14,6 +14,10 @@ pyxis::usd_ingest::IngestStats IngestUsd(std::string_view adapter,
                                          GpuScene& scene) {
   auto& log = Logging::Get();
 
+  // Banner format: "IngestUsd[<adapter>]: loading <path>". Adapter
+  // tag in brackets so a future grep-for-the-class doesn't mislead
+  // a contributor (the HydraEngine + UsdDirectEngine wrapper classes
+  // were folded into this function in 1a2c920).
   if (adapter == "hydra")
   {
     // M4 stub — shares StageWalker with the usd_direct path so the
@@ -24,13 +28,13 @@ pyxis::usd_ingest::IngestStats IngestUsd(std::string_view adapter,
     // full UsdImagingStageSceneIndex -> HdRenderIndex -> HdEngine
     // flow when OpenPBR shading makes the dirty-bit dispatch
     // load-bearing.
-    log.Info(log::APP, "HydraEngine: loading " + std::string{usdPath}
-                           + " (M4 stub: shares StageWalker with UsdDirectEngine "
+    log.Info(log::APP, "IngestUsd[hydra]: loading " + std::string{usdPath}
+                           + " (M4 stub: shares StageWalker with the usd_direct path "
                              "for byte-equal parity; full HdEngine pipeline at M5+).");
   }
   else if (adapter == "usd_direct")
   {
-    log.Info(log::APP, "UsdDirectEngine: loading " + std::string{usdPath});
+    log.Info(log::APP, "IngestUsd[usd_direct]: loading " + std::string{usdPath});
   }
   else
   {

@@ -227,22 +227,30 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
     // of the currently-selected RAW AOV.
     if (ImGui::CollapsingHeader("AOV inspector"))
     {
-      static const char* const AOV_LABELS[] = {
-          "Color", "Normal", "Depth", "InstanceID",
-          "MaterialID", "BaseColor", "WorldPos"};
-      const int currentIdx = static_cast<int>(_editorDebugView);
-      const char* preview =
-          (currentIdx >= 0
-           && currentIdx < static_cast<int>(std::size(AOV_LABELS)))
-              ? AOV_LABELS[currentIdx]
-              : "?";
-      if (ImGui::BeginCombo("Display", preview))
+      // Combo iterates AOV_REGISTRY directly — single source of truth
+      // for (DebugView -> displayLabel + name + texture) shared with
+      // ViewerMode's Save AOV button + HeadlessMode's --save-aov
+      // dispatch. Pre-refactor a parallel AOV_LABELS[] sat here and
+      // had to stay in lockstep with the registry.
+      const AovEntry* currentEntry = FindAovByDebugView(_editorDebugView);
+      const std::string_view preview =
+          (currentEntry != nullptr) ? currentEntry->displayLabel : std::string_view{"?"};
+      // ImGui::BeginCombo wants null-terminated; copy into a small
+      // stack buffer (display labels are <= 16 chars by construction).
+      char previewCStr[32];
+      std::snprintf(previewCStr, sizeof(previewCStr), "%.*s",
+                    static_cast<int>(preview.size()), preview.data());
+      if (ImGui::BeginCombo("Display", previewCStr))
       {
-        for (int aovIdx = 0; aovIdx < static_cast<int>(std::size(AOV_LABELS)); ++aovIdx)
+        for (const AovEntry& entry : AOV_REGISTRY)
         {
-          const bool isSelected = (aovIdx == currentIdx);
-          if (ImGui::Selectable(AOV_LABELS[aovIdx], isSelected))
-            _editorDebugView = static_cast<RenderSettings::DebugView>(aovIdx);
+          const bool isSelected = (entry.debugView == _editorDebugView);
+          char itemLabel[32];
+          std::snprintf(itemLabel, sizeof(itemLabel), "%.*s",
+                        static_cast<int>(entry.displayLabel.size()),
+                        entry.displayLabel.data());
+          if (ImGui::Selectable(itemLabel, isSelected))
+            _editorDebugView = entry.debugView;
           if (isSelected)
             ImGui::SetItemDefaultFocus();
         }
@@ -338,14 +346,19 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
       ImGui::Separator();
       if (ImGui::Button("Save current AOV..."))
       {
-        std::wstring suggested = L"pyxis_aov_color.exr";
+        // Suggested filename: shared BuildAovOutputPath helper (used
+        // by HeadlessMode's --save-aov dispatch too) so editor
+        // suggestions stay in lockstep with the headless naming
+        // convention. ASCII-narrow -> wide for the Win COM dialog.
+        std::string suggestedName = "pyxis_aov_color.exr";
         if (const AovEntry* entry = FindAovByDebugView(_editorDebugView); entry != nullptr)
         {
-          suggested = L"pyxis_aov_";
-          for (const char ascii : entry->name)
-            suggested.push_back(static_cast<wchar_t>(ascii));
-          suggested += L".exr";
+          suggestedName = BuildAovOutputPath("pyxis_aov", entry->name);
         }
+        std::wstring suggested;
+        suggested.reserve(suggestedName.size());
+        for (const char ascii : suggestedName)
+          suggested.push_back(static_cast<wchar_t>(ascii));
         std::string picked = SaveFilePickerDialog(suggested);
         if (!picked.empty())
           _latches.saveAovPath = std::move(picked);

@@ -89,8 +89,15 @@ constexpr int GLFW_ESCAPE_KEY_CODE = 256;
 // block until it completes. Returns true on exit code 0. The editor's
 // reload-shaders path calls this BEFORE asking the renderer to re-read
 // .spv from disk so the click also picks up .slang source edits.
+//
 // Uses _spawnvp (Windows) to avoid the shell — std::system trips
 // clang-tidy's cert-env33-c rule and would shell-parse paths.
+// Pyxis-side `argv` doesn't go through cmd.exe so quoting / metachars
+// in the build-dir path don't matter to OUR child invocation. cmake
+// itself may shell out to its tooling (Ninja, MSVC) and inherit the
+// path string, so a build dir named with shell metacharacters could
+// still misbehave inside cmake's own scripts — out of our perimeter
+// but worth knowing if a developer parks the repo at a hostile path.
 [[nodiscard]] bool RebuildShaderTarget(const std::filesystem::path& buildDir) noexcept {
   if (buildDir.empty())
     return false;

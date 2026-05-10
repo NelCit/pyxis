@@ -109,6 +109,16 @@ hlslpp::float4x4 BuildViewMatrix() noexcept {
 // and an editor rebuild that used -focal flipped USD-loaded scenes.
 // One convention everywhere now.
 //
+// IMAGE NOTE for anyone re-baselining: the M2 byte-equal regression
+// test (m2_byte_equal.cmake) compares two re-runs against each other,
+// not against a stored baseline image — so this fix produces stable
+// output without breaking the test. If you're maintaining an external
+// PNG / EXR snapshot of the M3 cube outside the repo (RenderDoc grab,
+// docs hero shot, etc.), the new image WILL differ from any pre-0204b44
+// capture by a Y-flip, even though the cube's geometry is symmetric:
+// the lighting (Sun direction Y < 0 + Dome ambient) is direction-aware,
+// so the shading hits opposite faces.
+//
 // Right-handed view space, depth [0, 1] (Vulkan), `v_clip = P · v_view`:
 //   [ f/aspect  0      0                  0                   ]
 //   [ 0         f      0                  0                   ]

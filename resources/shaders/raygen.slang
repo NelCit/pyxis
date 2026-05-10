@@ -248,6 +248,13 @@ void main() {
         // any plane where worldPos.{x,y,z} = 0 (where the -0.0 / +0.0
         // boundary lands). The sin encoding is C-infinity smooth so
         // no discontinuities exist anywhere in world space.
+        //
+        // Display vs raw AOV: this branch writes a colour-mapped
+        // visualisation to gOutput (BGRA8). The raw worldPos values
+        // land in gOutWorldPos (RGBA32F) unmodified — opening that
+        // texture in RenderDoc shows the actual world coords, not
+        // the sin-encoded display. Picker readout reports the raw
+        // worldPos triple from the PickResult buffer.
         const float WORLD_POS_OMEGA = 0.62831853f;  // 2*pi / 10 (10-unit period)
         displayColor = (payload.hitT > 0.0f)
             ? (sin(payload.worldHit * WORLD_POS_OMEGA) * 0.5f + 0.5f)
