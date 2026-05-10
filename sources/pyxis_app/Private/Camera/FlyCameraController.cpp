@@ -151,6 +151,29 @@ void FlyCameraController::SnapToCamera(const CameraDesc& camera) noexcept {
   _seeded = true;
 }
 
+hlslpp::float4 FlyCameraController::OrientationQuat() const noexcept {
+  // Quaternion = qYaw(-yaw, world Y) * qPitch(pitch, local X). yaw>0 =
+  // look right (CW from above) so the rotation around +Y is by -yaw,
+  // matching BuildWorldFromCamera's convention. Half-angles per the
+  // standard quaternion construction. Composed in the order BWC
+  // applies to a vector: pitch first (acts on the post-yaw camera),
+  // then yaw — which means the quaternion product is qYaw * qPitch.
+  const float halfYaw   = -_yaw  * 0.5f;
+  const float halfPitch =  _pitch * 0.5f;
+  const float cosY = std::cos(halfYaw);
+  const float sinY = std::sin(halfYaw);
+  const float cosP = std::cos(halfPitch);
+  const float sinP = std::sin(halfPitch);
+  // qYaw   = (0,    sinY, 0,    cosY)   axis +Y
+  // qPitch = (sinP, 0,    0,    cosP)   axis +X
+  // q = qYaw * qPitch (Hamilton product, x/y/z imaginary, w real).
+  return hlslpp::float4{
+      cosY * sinP,           // x
+      sinY * cosP,           // y
+      -sinY * sinP,          // z
+      cosY * cosP};          // w
+}
+
 void FlyCameraController::Reset() noexcept {
   _position      = hlslpp::float3{0.0f, 0.0f, 0.0f};
   _yaw           = 0.0f;

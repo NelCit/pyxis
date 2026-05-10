@@ -245,6 +245,13 @@ class ImGuiHost {
   // visually correct on first render.
   float                                 _moveSpeed = 5.0f;
 
+  // Live FlyCam pose pushed by ViewerMode each frame. Read-only on
+  // the editor side — the readout in the Camera section displays
+  // these. Quaternion is (xyz = imaginary, w = real); identity is
+  // (0,0,0,1).
+  hlslpp::float3                        _cameraPosition{0.0f, 0.0f, 0.0f};
+  hlslpp::float4                        _cameraOrientationQuat{0.0f, 0.0f, 0.0f, 1.0f};
+
  public:
   // Called by ViewerMode each frame; returns true and clears the
   // latched request iff the editor's "Reload shaders" button was
@@ -354,6 +361,16 @@ class ImGuiHost {
   // FlyCameraController move-speed slider value. ViewerMode reads this
   // each frame and propagates via FlyCameraController::SetMoveSpeed.
   [[nodiscard]] float MoveSpeed() const noexcept { return _moveSpeed; }
+
+  // ViewerMode pushes the FlyCam's live world-space pose each frame
+  // so the editor can display "Position" + "Orientation (quat)" in
+  // the Camera section. Read-only display — the editor doesn't try
+  // to drive the FlyCam from these values.
+  void SetCameraPose(const hlslpp::float3& position,
+                     const hlslpp::float4& orientationQuat) noexcept {
+    _cameraPosition        = position;
+    _cameraOrientationQuat = orientationQuat;
+  }
 
   // Picker pin accessors. ViewerMode reads these each frame to decide
   // whether to push the cursor pixel or the pinned pixel into

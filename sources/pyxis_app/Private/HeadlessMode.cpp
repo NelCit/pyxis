@@ -443,6 +443,24 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
   profiler.EndFrame();
   device->runGarbageCollection();
 
+  // Post-commit GpuScene snapshot — surfaces what actually landed on
+  // the GPU after the first CommitResources retired. Useful to
+  // diagnose "is anything actually loading" questions on M8a-scale
+  // scenes (was a texture acquired? Did the BLAS build fire? Did
+  // the material table grow?). Cumulative counters; sourcePrim-side
+  // debug names are too verbose for a one-liner.
+  {
+    const FrameStats sceneStats = gpuScene.LastFrameStats();
+    log.Info(log::APP,
+             "headless: GpuScene committed — "
+                 + std::to_string(sceneStats.meshCount)     + " meshes, "
+                 + std::to_string(sceneStats.blasCount)     + " BLAS, "
+                 + std::to_string(sceneStats.instanceCount) + " instances, "
+                 + std::to_string(sceneStats.materialCount) + " materials, "
+                 + std::to_string(sceneStats.textureCount)  + " textures, "
+                 + std::to_string(sceneStats.lightCount)    + " lights.");
+  }
+
   // ---- Readback + EXR write ------------------------------------------
   if (!ReadbackAndWriteExr(device, commandList, renderTarget, config.output.image))
   {

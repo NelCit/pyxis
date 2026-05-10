@@ -748,6 +748,16 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
       }
 
       cameraController.Update(dtSeconds, gpuScene);
+
+      // Push the FlyCam's post-Update pose into the editor's readout.
+      // Cheap (one float3 + float4 copy); the editor's TextDisabled
+      // rows update each frame so the user sees the live pose as
+      // they fly around.
+      if (imguiHost.IsReady())
+      {
+        imguiHost.SetCameraPose(cameraController.Position(),
+                                cameraController.OrientationQuat());
+      }
     }
     {
       const Profiler::CpuScope tick(profiler, "app.scene.tick");

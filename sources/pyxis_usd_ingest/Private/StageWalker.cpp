@@ -40,9 +40,13 @@
 #include <pxr/usd/usdGeom/pointInstancer.h>
 #include <pxr/usd/usdGeom/tokens.h>
 #include <pxr/usd/usdGeom/xformCache.h>
+#include <Pyxis/Platform/FileSystem/AssetLocator.h>
+
+#include <pxr/usd/usdLux/diskLight.h>
 #include <pxr/usd/usdLux/distantLight.h>
 #include <pxr/usd/usdLux/domeLight.h>
 #include <pxr/usd/usdLux/rectLight.h>
+#include <pxr/usd/usdLux/sphereLight.h>
 #include <pxr/usd/usdShade/material.h>
 #include <pxr/usd/usdShade/materialBindingAPI.h>
 #include <pxr/usd/sdf/path.h>
@@ -315,17 +319,45 @@ void EmitLight(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCache,
         mul(worldFromLocal, hlslpp::float4{0.0f, 0.0f, -1.0f, 0.0f});
     desc.direction = hlslpp::float3{dirWorld.x, dirWorld.y, dirWorld.z};
   }
-  else if (prim.IsA<pxr::UsdLuxRectLight>())
+  else if (prim.IsA<pxr::UsdLuxRectLight>()
+        || prim.IsA<pxr::UsdLuxDiskLight>()
+        || prim.IsA<pxr::UsdLuxSphereLight>())
   {
+    // Three area-light shapes folded into Kind::Rect for the M7-simple
+    // closesthit: it treats Rect as a point-at-center with axisU/V
+    // packed for the M7-full pass to do real area sampling.
+    //   * RectLight:   inputs:width / inputs:height define the local-
+    //                  X / -Y extents centred at origin.
+    //   * DiskLight:   inputs:radius defines a circle on local XY,
+    //                  facing -Z. Approximated as a (2r × 2r) square.
+    //   * SphereLight: inputs:radius defines an omnidirectional ball.
+    //                  Approximated as a (2r × 2r) facing-camera-ish
+    //                  square; M7-simple ignores the axes anyway.
     desc.kind = LightDesc::Kind::Rect;
     const hlslpp::float4 originWorld =
         mul(worldFromLocal, hlslpp::float4{0.0f, 0.0f, 0.0f, 1.0f});
     desc.position = hlslpp::float3{originWorld.x, originWorld.y, originWorld.z};
+    // Per-shape scale for the local-space axisU/V extents. Rect uses
+    // half-width/half-height (so axisU/V land on the rect edges from
+    // centre); Disk + Sphere use full radius.
+    float halfU = 1.0f;
+    float halfV = 1.0f;
+    if (prim.IsA<pxr::UsdLuxRectLight>())
+    {
+      halfU = readFloat("width",  2.0f) * 0.5f;
+      halfV = readFloat("height", 2.0f) * 0.5f;
+    }
+    else
+    {
+      const float radius = readFloat("radius", 0.5f);
+      halfU = radius;
+      halfV = radius;
+    }
     const hlslpp::float4 uWorld =
-        mul(worldFromLocal, hlslpp::float4{1.0f, 0.0f, 0.0f, 0.0f});
+        mul(worldFromLocal, hlslpp::float4{halfU, 0.0f, 0.0f, 0.0f});
     desc.axisU = hlslpp::float3{uWorld.x, uWorld.y, uWorld.z};
     const hlslpp::float4 vWorld =
-        mul(worldFromLocal, hlslpp::float4{0.0f, 1.0f, 0.0f, 0.0f});
+        mul(worldFromLocal, hlslpp::float4{0.0f, halfV, 0.0f, 0.0f});
     desc.axisV = hlslpp::float3{vWorld.x, vWorld.y, vWorld.z};
   }
   else if (prim.IsA<pxr::UsdLuxDomeLight>())
@@ -338,6 +370,7 @@ void EmitLight(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCache,
     // GpuScene::CommitResources resolves it to a bindless slot at
     // pack time, and PathTracePass reads the first live dome's
     // texture for the miss shader's lat-long sample.
+    std::string resolvedPath;
     const pxr::UsdAttribute textureAttr =
         prim.GetAttribute(pxr::TfToken("inputs:texture:file"));
     if (textureAttr)
@@ -349,17 +382,30 @@ void EmitLight(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCache,
         // raw asset string if the resolver couldn't find the file
         // (rare for relative siblings; the M7 path-trace then
         // logs an EXR-decode failure at CommitResources time).
-        std::string resolvedPath = assetPath.GetResolvedPath();
+        resolvedPath = assetPath.GetResolvedPath();
         if (resolvedPath.empty())
           resolvedPath = assetPath.GetAssetPath();
-        if (!resolvedPath.empty())
-        {
-          TextureKey key;
-          key.resolvedPath = resolvedPath;
-          key.role = TextureKey::Role::Emission;  // HDR env-map: linear, no sRGB EOTF
-          desc.envMap = scene.AcquireTexture(key);
-        }
       }
+    }
+    // Fallback: when the scene authors a DomeLight without an
+    // env-map (Omniverse Lobby, default cube fixtures, etc.), bind
+    // the bundled `Resources/scenes/default_sky.exr` so the miss
+    // shader has a real lat-long texture to sample. Without this
+    // the dome falls back to flat color × intensity which gives
+    // either a pitch-black or fully-saturated background.
+    if (resolvedPath.empty())
+    {
+      const Path bundled =
+          AssetLocator{}.LocateResource("scenes/default_sky.exr");
+      if (!bundled.View().empty())
+        resolvedPath.assign(bundled.View());
+    }
+    if (!resolvedPath.empty())
+    {
+      TextureKey key;
+      key.resolvedPath = resolvedPath;
+      key.role = TextureKey::Role::Emission;  // HDR env-map: linear, no sRGB EOTF
+      desc.envMap = scene.AcquireTexture(key);
     }
   }
   else
@@ -753,6 +799,7 @@ IngestStats StageWalker::WalkFile(std::string_view usdPath, GpuScene& scene) {
                + std::to_string(stats.meshesEmitted) + " meshes, "
                + std::to_string(stats.instancesEmitted) + " instances ("
                + std::to_string(stats.instancersEmitted) + " instancers), "
+               + std::to_string(stats.materialsEmitted) + " materials, "
                + std::to_string(stats.lightsEmitted) + " lights, "
                + std::to_string(stats.camerasEmitted) + " cameras, "
                + std::to_string(stats.skipped) + " skipped.");
@@ -814,6 +861,18 @@ IngestStats StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
   // so any difference in material translation breaks the §25.O.3
   // byte-equal invariant.
   MaterialHandleByPath materialsByPath;
+  // Texture-acquisition callback for the translator. Wraps
+  // GpuScene::AcquireTexture so the translator stays renderer-
+  // agnostic. The role passes through unchanged — the renderer's
+  // §13 texture cache uses it to pick the colorspace EOTF on decode
+  // (sRGB for BaseColor + Emission; linear for everything else).
+  const auto acquireTexture =
+      [&scene](std::string_view resolvedPath, TextureKey::Role role) -> TextureHandle {
+        TextureKey key;
+        key.resolvedPath = resolvedPath;
+        key.role = role;
+        return scene.AcquireTexture(key);
+      };
   const auto materialPassStart = Clock::now();
   for (const pxr::UsdPrim& prim : prims)
   {
@@ -822,7 +881,7 @@ IngestStats StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
     const pxr::UsdShadeMaterial materialPrim(prim);
     const std::string primPath = prim.GetPath().GetString();
     OpenPBRMaterialDesc materialDesc =
-        material_translation::FromUsdShade(materialPrim);
+        material_translation::FromUsdShade(materialPrim, acquireTexture);
     materialDesc.sourcePrim = primPath;
     const MaterialHandle handle = scene.AcquireMaterial(materialDesc);
     materialsByPath.emplace(primPath, handle);
@@ -883,7 +942,8 @@ IngestStats StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
       }
     }
     else if (prim.IsA<pxr::UsdLuxDistantLight>() || prim.IsA<pxr::UsdLuxDomeLight>()
-             || prim.IsA<pxr::UsdLuxRectLight>())
+             || prim.IsA<pxr::UsdLuxRectLight>()   || prim.IsA<pxr::UsdLuxDiskLight>()
+             || prim.IsA<pxr::UsdLuxSphereLight>())
     {
       // M7-simple: translate + push into GpuScene. The closesthit's
       // simple shading model (NdotL Lambert for Distant + Rect,

@@ -511,6 +511,22 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
         ImGui::SliderFloat("Move speed (m/s)", &_moveSpeed, 0.05f, 200.0f, "%.2f",
                            ImGuiSliderFlags_Logarithmic);
         ImGui::PopItemWidth();
+
+        // Live pose readout. Position in world-space metres (after
+        // the StageWalker's stage→world correction); orientation as a
+        // unit quaternion (xyz, w). Read-only — derived from the
+        // FlyCam each frame, not user-editable through this readout.
+        ImGui::TextDisabled(
+            "Position    %.3f, %.3f, %.3f m",
+            static_cast<double>(_cameraPosition.x),
+            static_cast<double>(_cameraPosition.y),
+            static_cast<double>(_cameraPosition.z));
+        ImGui::TextDisabled(
+            "Orientation %.4f, %.4f, %.4f, %.4f (xyzw)",
+            static_cast<double>(_cameraOrientationQuat.x),
+            static_cast<double>(_cameraOrientationQuat.y),
+            static_cast<double>(_cameraOrientationQuat.z),
+            static_cast<double>(_cameraOrientationQuat.w));
         ImGui::Separator();
 
         CameraDesc cameraDesc = scene.GetCamera();

@@ -7,12 +7,17 @@
 #include "Pyxis/MaterialTranslation/UsdShadeToOpenPBR.h"
 
 #include <pxr/usd/usd/prim.h>
+#include <pxr/usd/sdf/assetPath.h>
+#include <pxr/usd/usdShade/connectableAPI.h>
+#include <pxr/usd/usdShade/input.h>
 #include <pxr/usd/usdShade/material.h>
 #include <pxr/usd/usdShade/shader.h>
 #include <pxr/usd/usdShade/tokens.h>
 #include <pxr/base/gf/vec3f.h>
 #include <pxr/base/tf/token.h>
 #include <pxr/base/vt/value.h>
+
+#include <string>
 
 namespace pyxis::material_translation {
 
@@ -84,20 +89,59 @@ hlslpp::float3 ReadColor(const pxr::UsdShadeShader& shader, const pxr::TfToken& 
   return hlslpp::float3{rgb[0], rgb[1], rgb[2]};
 }
 
-// True iff `input` has a connected source — caller treats this as a
-// signal that a texture (or other shader) drives the value at
-// runtime. The texture itself is resolved by the §13 TextureCache at
-// M5+; M4 just records "yes there's a texture here".
-bool HasConnection(const pxr::UsdShadeShader& shader, const pxr::TfToken& name) noexcept {
-  const pxr::UsdShadeInput input = shader.GetInput(name);
+// Walk a UsdPreviewSurface input back to its connected
+// UsdUVTexture (the standard pattern: `inputs:diffuseColor.connect =
+// </path/to/UsdUVTexture.outputs:rgb>`). Returns the resolved
+// asset-path string if the connection lands on a UsdUVTexture node
+// with a non-empty `inputs:file`. Empty string for any other shape
+// (scalar-only authored, connected-but-not-UsdUVTexture, missing
+// file attribute, etc.) — caller falls back to the scalar value.
+std::string ResolveUVTexturePath(const pxr::UsdShadeShader& shader,
+                                 const pxr::TfToken& inputName) noexcept
+{
+  static const pxr::TfToken usdUVTextureToken("UsdUVTexture");  // NOLINT(readability-identifier-naming)
+  static const pxr::TfToken fileToken("file");                  // NOLINT(readability-identifier-naming)
+
+  const pxr::UsdShadeInput input = shader.GetInput(inputName);
   if (!input)
-    return false;
-  return input.HasConnectedSource();
+    return {};
+  pxr::UsdShadeConnectableAPI source;
+  pxr::TfToken                sourceOutputName;
+  pxr::UsdShadeAttributeType  sourceType;
+  if (!input.GetConnectedSource(&source, &sourceOutputName, &sourceType))
+    return {};
+  // Treat the connectable as a shader and check info:id == UsdUVTexture.
+  // If it's a UsdShadeNodeGraph wrapper or a non-shader connectable
+  // we just give up — M5 only handles the direct UsdUVTexture pattern.
+  const pxr::UsdShadeShader textureShader{source.GetPrim()};
+  if (!textureShader.GetPrim().IsValid())
+    return {};
+  pxr::TfToken shaderId;
+  if (!textureShader.GetShaderId(&shaderId) || shaderId != usdUVTextureToken)
+    return {};
+  // Read the file asset path. SdfAssetPath::GetResolvedPath runs
+  // USD's ArResolver against the layer the attr was authored in
+  // (handles relative `@../../tex.png@` style refs); fall back to
+  // the unresolved string if resolution failed (rare for sibling
+  // assets — the AcquireTexture call will surface the missing file
+  // via the magenta fallback at decode time).
+  const pxr::UsdShadeInput fileInput = textureShader.GetInput(fileToken);
+  if (!fileInput)
+    return {};
+  pxr::VtValue value;
+  if (!fileInput.Get(&value) || !value.IsHolding<pxr::SdfAssetPath>())
+    return {};
+  const pxr::SdfAssetPath asset = value.UncheckedGet<pxr::SdfAssetPath>();
+  std::string resolved = asset.GetResolvedPath();
+  if (resolved.empty())
+    resolved = asset.GetAssetPath();
+  return resolved;
 }
 
 }  // namespace
 
-OpenPBRMaterialDesc FromUsdShade(const pxr::UsdShadeMaterial& material) noexcept {
+OpenPBRMaterialDesc FromUsdShade(const pxr::UsdShadeMaterial& material,
+                                 const AcquireTextureFn& acquire) noexcept {
   OpenPBRMaterialDesc desc;
 
   if (!material.GetPrim().IsValid())
@@ -138,18 +182,40 @@ OpenPBRMaterialDesc FromUsdShade(const pxr::UsdShadeMaterial& material) noexcept
     desc.transmissionWeight = 1.0f - desc.opacity;
   }
 
-  // ---- Texture connections. M4 stub: just record that a connection
-  // exists; the actual TextureHandle is resolved by the §13
-  // TextureCache at M5+. The closesthit shader reads the flag bits
-  // (HasBaseColorMap etc., §11.6) to know whether to sample the
-  // texture or use the scalar above; until M5 wires the cache,
-  // every map handle stays Invalid and the scalar wins. -------------
-  (void)HasConnection(surface, pxr::TfToken("diffuseColor"));
-  (void)HasConnection(surface, pxr::TfToken("metallic"));
-  (void)HasConnection(surface, pxr::TfToken("roughness"));
-  (void)HasConnection(surface, pxr::TfToken("normal"));
-  (void)HasConnection(surface, pxr::TfToken("emissiveColor"));
-  (void)HasConnection(surface, pxr::TfToken("opacity"));
+  // ---- Texture connections (§M5). When the caller supplies an
+  // acquire callback we walk each UsdPreviewSurface input back to
+  // its UsdUVTexture node, pull the asset path, and stamp the
+  // returned TextureHandle into the matching slot. The closesthit's
+  // §11.6 flag bits (HasBaseColorMap etc.) get computed downstream
+  // by GpuScene's PackMaterialGpu — it sets each Has* bit iff the
+  // matching slot resolves to a valid bindless slot. So we don't
+  // need to set any flags here; just stamp handles.
+  //
+  // Without an acquire callback (legacy callers), we silently skip
+  // texture resolution — every map slot stays Invalid and the scalar
+  // wins, matching the original M4 stub behaviour.
+  if (acquire)
+  {
+    auto resolveSlot = [&](const char* inputName,
+                           TextureKey::Role role,
+                           TextureHandle& outSlot) {
+      const std::string path = ResolveUVTexturePath(surface, pxr::TfToken(inputName));
+      if (!path.empty())
+        outSlot = acquire(path, role);
+    };
+    // Role drives the §13 colorspace decision at decode time:
+    // BaseColor + Emission = sRGB→linear EOTF; everything else
+    // (NormalMap, RoughnessMetallic = the "linear data" role)
+    // stays linear. UsdPreviewSurface authors metallic / roughness /
+    // opacity as separate inputs; all three pull through the
+    // RoughnessMetallic role since they're linear data channels.
+    resolveSlot("diffuseColor",  TextureKey::Role::BaseColor,         desc.baseColorMap);
+    resolveSlot("metallic",      TextureKey::Role::RoughnessMetallic, desc.metallicMap);
+    resolveSlot("roughness",     TextureKey::Role::RoughnessMetallic, desc.roughnessMap);
+    resolveSlot("normal",        TextureKey::Role::NormalMap,         desc.normalMap);
+    resolveSlot("emissiveColor", TextureKey::Role::Emission,          desc.emissionMap);
+    resolveSlot("opacity",       TextureKey::Role::RoughnessMetallic, desc.opacityMap);
+  }
 
   desc.source = OpenPBRMaterialDesc::Source::UsdPreviewSurface;
   return desc;

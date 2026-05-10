@@ -74,6 +74,13 @@ class FlyCameraController final {
   // (the user's slider value carries across reloads).
   void Reset() noexcept;
 
+  // Read-only pose accessors for the editor's pose readout. Position
+  // is world-space (after the StageWalker's stage→world correction
+  // bakes metersPerUnit + Z->Y); orientation is returned as a unit
+  // quaternion (xyz = imaginary, w = real) derived from yaw + pitch.
+  [[nodiscard]] hlslpp::float3 Position() const noexcept { return _position; }
+  [[nodiscard]] hlslpp::float4 OrientationQuat() const noexcept;
+
  private:
   // Public so the .cpp's anonymous-namespace Bit() helper can name
   // it — it's still an implementation detail (only the .cpp uses it).
