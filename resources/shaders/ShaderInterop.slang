@@ -167,7 +167,8 @@ struct PickResult {
     float colorB;
     float depth;        // ray distance at hit; -1 on miss
 
-    // Row 1 — world-space normal (xyz) + instance id.
+    // Row 1 — world-space normal (xyz) + Hydra primId (per-instance
+    // slot from TLAS InstanceID() at hit; 0xFFFFFFFF on miss).
     float normalX;
     float normalY;
     float normalZ;
@@ -191,6 +192,21 @@ struct PickResult {
     uint  pixelY;
     uint  _pickPad1;
     uint  _pickPad2;
+
+    // Row 5 — eye-space normal (Hydra Neye) + Hydra elementId
+    // (PrimitiveIndex(), per-face id within the BLAS, ~0u on miss).
+    float normalEyeX;
+    float normalEyeY;
+    float normalEyeZ;
+    uint  elementId;
+
+    // Row 6 — eye-space hit position (Hydra Peye) + alpha
+    // (1.0 hit / 0.0 miss; binary today, future-proofed for
+    // transmission / coverage).
+    float worldPosEyeX;
+    float worldPosEyeY;
+    float worldPosEyeZ;
+    float alpha;
 };
 
 // OpenPBRMaterialGPU — the bytewise layout the closesthit reads via
@@ -319,9 +335,10 @@ static const uint LIGHT_KIND_RECT    = 2;
                   "display selector + per-AOV knobs).");
     static_assert(sizeof(FrameUiUniforms) % 16 == 0,
                   "FrameUiUniforms must be 16-byte aligned (cbuffer std140 rule).");
-    static_assert(sizeof(PickResult) == 80,
-                  "PickResult must be 80 bytes (5 rows of 16) — see "
-                  "resources/shaders/ShaderInterop.slang.");
+    static_assert(sizeof(PickResult) == 112,
+                  "PickResult must be 112 bytes (7 rows of 16) — original 5 rows + "
+                  "Tier 1 Hydra Neye/elementId on row 5, Peye/alpha on row 6. "
+                  "See resources/shaders/ShaderInterop.slang.");
     static_assert(sizeof(PickResult) % 16 == 0,
                   "PickResult must be 16-byte aligned (structured-buffer rule).");
     static_assert(sizeof(OpenPBRMaterialGPU) == 80,

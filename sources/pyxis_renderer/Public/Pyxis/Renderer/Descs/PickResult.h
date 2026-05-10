@@ -8,7 +8,7 @@
 // app reads at frame N reflects the cursor position from frame N-1).
 //
 // Layout mirrors `pyxis::shaderinterop::PickResult` byte-for-byte
-// (80 bytes, 5 rows of 16). Asserted at the bottom of this header.
+// (112 bytes, 7 rows of 16). Asserted at the bottom of this header.
 
 #pragma once
 
@@ -23,6 +23,7 @@ namespace pyxis {
 // them named makes intent explicit at every read site.
 inline constexpr uint32_t INSTANCE_ID_NONE = 0xFFFFFFFFu;  // ray missed / picker disabled
 inline constexpr uint32_t MATERIAL_ID_NONE = 0xFFFFFFFFu;  // ray missed / material unbound
+inline constexpr uint32_t ELEMENT_ID_NONE  = 0xFFFFFFFFu;  // ray missed / no face id
 inline constexpr uint32_t PICK_PIXEL_NONE  = 0xFFFFFFFFu;  // cursor outside viewport / no hover
 
 struct PickResult {
@@ -62,10 +63,27 @@ struct PickResult {
   uint32_t pixelY    = PICK_PIXEL_NONE;
   // NOLINTNEXTLINE(readability-identifier-naming)
   uint32_t _pickPad1[2] = {0u, 0u};
+
+  // Row 5 — eye-space normal (Hydra HdAovTokens->Neye) + Hydra
+  // elementId (PrimitiveIndex(), per-face id within the BLAS).
+  // The world-space normal is on row 1; this is its eye-space
+  // counterpart so the editor readout can show both.
+  float    normalEyeX = 0.0f;
+  float    normalEyeY = 0.0f;
+  float    normalEyeZ = 0.0f;
+  uint32_t elementId  = ELEMENT_ID_NONE;
+
+  // Row 6 — eye-space hit position (Hydra HdAovTokens->Peye) + alpha
+  // (1.0 hit / 0.0 miss; binary today, future-proofed for
+  // transmission / coverage).
+  float    worldPosEyeX = 0.0f;
+  float    worldPosEyeY = 0.0f;
+  float    worldPosEyeZ = 0.0f;
+  float    alpha        = 0.0f;
 };
 
-static_assert(sizeof(PickResult) == 80,
-              "pyxis::PickResult must be 80 bytes — must match "
+static_assert(sizeof(PickResult) == 112,
+              "pyxis::PickResult must be 112 bytes — must match "
               "shaderinterop::PickResult byte-for-byte.");
 
 }  // namespace pyxis

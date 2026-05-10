@@ -341,26 +341,41 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
         // Units: depth + worldPos are in scene units (typically
         // metres — USD's stage metersPerUnit defaults to 1). Suffix
         // makes the magnitude unambiguous when the user compares
-        // against the viewport / RenderDoc.
-        ImGui::Text("  color      %.3f, %.3f, %.3f",
+        // against the viewport / RenderDoc. Order mirrors AOV_REGISTRY
+        // so the readout sits in the same vertical sequence as the
+        // Display combo above (color / normal / depth / primId /
+        // materialId / baseColor / worldPos / alpha / elementId /
+        // normalEye / worldPosEye).
+        ImGui::Text("  color        %.3f, %.3f, %.3f",
                     static_cast<double>(pick.colorR),
                     static_cast<double>(pick.colorG),
                     static_cast<double>(pick.colorB));
-        ImGui::Text("  normal     %.3f, %.3f, %.3f",
+        ImGui::Text("  normal       %.3f, %.3f, %.3f",
                     static_cast<double>(pick.normalX),
                     static_cast<double>(pick.normalY),
                     static_cast<double>(pick.normalZ));
-        ImGui::Text("  depth      %.3f m", static_cast<double>(pick.depth));
-        ImGui::Text("  instance   %u", static_cast<unsigned int>(pick.instanceId));
-        ImGui::Text("  material   %u", static_cast<unsigned int>(pick.materialId));
-        ImGui::Text("  baseColor  %.3f, %.3f, %.3f",
+        ImGui::Text("  depth        %.3f m", static_cast<double>(pick.depth));
+        ImGui::Text("  primId       %u", static_cast<unsigned int>(pick.instanceId));
+        ImGui::Text("  materialId   %u", static_cast<unsigned int>(pick.materialId));
+        ImGui::Text("  baseColor    %.3f, %.3f, %.3f",
                     static_cast<double>(pick.baseColorR),
                     static_cast<double>(pick.baseColorG),
                     static_cast<double>(pick.baseColorB));
-        ImGui::Text("  worldPos   %.3f, %.3f, %.3f m",
+        ImGui::Text("  worldPos     %.3f, %.3f, %.3f m",
                     static_cast<double>(pick.worldHitX),
                     static_cast<double>(pick.worldHitY),
                     static_cast<double>(pick.worldHitZ));
+        // Tier 1 Hydra-canonical readouts.
+        ImGui::Text("  alpha        %.3f", static_cast<double>(pick.alpha));
+        ImGui::Text("  elementId    %u", static_cast<unsigned int>(pick.elementId));
+        ImGui::Text("  normalEye    %.3f, %.3f, %.3f",
+                    static_cast<double>(pick.normalEyeX),
+                    static_cast<double>(pick.normalEyeY),
+                    static_cast<double>(pick.normalEyeZ));
+        ImGui::Text("  worldPosEye  %.3f, %.3f, %.3f m",
+                    static_cast<double>(pick.worldPosEyeX),
+                    static_cast<double>(pick.worldPosEyeY),
+                    static_cast<double>(pick.worldPosEyeZ));
       }
       else
       {

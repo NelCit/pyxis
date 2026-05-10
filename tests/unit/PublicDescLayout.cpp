@@ -165,31 +165,41 @@ TEST(PublicDescLayout, FrameStatsDefaultsToZeros) {
 // the test instead of just shipping garbage values to the editor.
 // -----------------------------------------------------------------------------
 TEST(PublicDescLayout, PickResultLayoutMatchesShaderInterop) {
-  EXPECT_EQ(sizeof(PickResult), 80u);
+  EXPECT_EQ(sizeof(PickResult), 112u);
   EXPECT_EQ(alignof(PickResult), 4u);
 
   // Row 0 — color + depth.
-  EXPECT_EQ(offsetof(PickResult, colorR),       0u);
-  EXPECT_EQ(offsetof(PickResult, colorG),       4u);
-  EXPECT_EQ(offsetof(PickResult, colorB),       8u);
-  EXPECT_EQ(offsetof(PickResult, depth),       12u);
-  // Row 1 — normal + instance id.
-  EXPECT_EQ(offsetof(PickResult, normalX),     16u);
-  EXPECT_EQ(offsetof(PickResult, normalY),     20u);
-  EXPECT_EQ(offsetof(PickResult, normalZ),     24u);
-  EXPECT_EQ(offsetof(PickResult, instanceId),  28u);
+  EXPECT_EQ(offsetof(PickResult, colorR),         0u);
+  EXPECT_EQ(offsetof(PickResult, colorG),         4u);
+  EXPECT_EQ(offsetof(PickResult, colorB),         8u);
+  EXPECT_EQ(offsetof(PickResult, depth),         12u);
+  // Row 1 — normal + instance id (Hydra primId).
+  EXPECT_EQ(offsetof(PickResult, normalX),       16u);
+  EXPECT_EQ(offsetof(PickResult, normalY),       20u);
+  EXPECT_EQ(offsetof(PickResult, normalZ),       24u);
+  EXPECT_EQ(offsetof(PickResult, instanceId),    28u);
   // Row 2 — baseColor + material id.
-  EXPECT_EQ(offsetof(PickResult, baseColorR),  32u);
-  EXPECT_EQ(offsetof(PickResult, baseColorG),  36u);
-  EXPECT_EQ(offsetof(PickResult, baseColorB),  40u);
-  EXPECT_EQ(offsetof(PickResult, materialId),  44u);
+  EXPECT_EQ(offsetof(PickResult, baseColorR),    32u);
+  EXPECT_EQ(offsetof(PickResult, baseColorG),    36u);
+  EXPECT_EQ(offsetof(PickResult, baseColorB),    40u);
+  EXPECT_EQ(offsetof(PickResult, materialId),    44u);
   // Row 3 — world hit position + pad.
-  EXPECT_EQ(offsetof(PickResult, worldHitX),   48u);
-  EXPECT_EQ(offsetof(PickResult, worldHitY),   52u);
-  EXPECT_EQ(offsetof(PickResult, worldHitZ),   56u);
+  EXPECT_EQ(offsetof(PickResult, worldHitX),     48u);
+  EXPECT_EQ(offsetof(PickResult, worldHitY),     52u);
+  EXPECT_EQ(offsetof(PickResult, worldHitZ),     56u);
   // Row 4 — pixel coords + pad.
-  EXPECT_EQ(offsetof(PickResult, pixelX),      64u);
-  EXPECT_EQ(offsetof(PickResult, pixelY),      68u);
+  EXPECT_EQ(offsetof(PickResult, pixelX),        64u);
+  EXPECT_EQ(offsetof(PickResult, pixelY),        68u);
+  // Row 5 — eye-space normal (Hydra Neye) + Hydra elementId.
+  EXPECT_EQ(offsetof(PickResult, normalEyeX),    80u);
+  EXPECT_EQ(offsetof(PickResult, normalEyeY),    84u);
+  EXPECT_EQ(offsetof(PickResult, normalEyeZ),    88u);
+  EXPECT_EQ(offsetof(PickResult, elementId),     92u);
+  // Row 6 — eye-space hit position (Hydra Peye) + alpha.
+  EXPECT_EQ(offsetof(PickResult, worldPosEyeX),  96u);
+  EXPECT_EQ(offsetof(PickResult, worldPosEyeY), 100u);
+  EXPECT_EQ(offsetof(PickResult, worldPosEyeZ), 104u);
+  EXPECT_EQ(offsetof(PickResult, alpha),        108u);
 }
 
 TEST(PublicDescLayout, PickResultDefaultsToNoHitSentinels) {

@@ -188,26 +188,37 @@ void main() {
     if (launchIndex.x == gFrameUi.mousePixelX && launchIndex.y == gFrameUi.mousePixelY)
     {
         PickResult p;
-        p.colorR     = payload.color.x;
-        p.colorG     = payload.color.y;
-        p.colorB     = payload.color.z;
-        p.depth      = payload.hitT;
-        p.normalX    = payload.normalWorld.x;
-        p.normalY    = payload.normalWorld.y;
-        p.normalZ    = payload.normalWorld.z;
-        p.instanceId = payload.instanceId;
-        p.baseColorR = payload.baseColor.x;
-        p.baseColorG = payload.baseColor.y;
-        p.baseColorB = payload.baseColor.z;
-        p.materialId = payload.materialId;
-        p.worldHitX  = payload.worldHit.x;
-        p.worldHitY  = payload.worldHit.y;
-        p.worldHitZ  = payload.worldHit.z;
-        p._pickPad0  = 0u;
-        p.pixelX     = launchIndex.x;
-        p.pixelY     = launchIndex.y;
-        p._pickPad1  = 0u;
-        p._pickPad2  = 0u;
+        p.colorR       = payload.color.x;
+        p.colorG       = payload.color.y;
+        p.colorB       = payload.color.z;
+        p.depth        = payload.hitT;
+        p.normalX      = payload.normalWorld.x;
+        p.normalY      = payload.normalWorld.y;
+        p.normalZ      = payload.normalWorld.z;
+        p.instanceId   = payload.instanceId;
+        p.baseColorR   = payload.baseColor.x;
+        p.baseColorG   = payload.baseColor.y;
+        p.baseColorB   = payload.baseColor.z;
+        p.materialId   = payload.materialId;
+        p.worldHitX    = payload.worldHit.x;
+        p.worldHitY    = payload.worldHit.y;
+        p.worldHitZ    = payload.worldHit.z;
+        p._pickPad0    = 0u;
+        p.pixelX       = launchIndex.x;
+        p.pixelY       = launchIndex.y;
+        p._pickPad1    = 0u;
+        p._pickPad2    = 0u;
+        // Tier 1 Hydra-canonical channels — same eye-space transforms +
+        // alpha gate the AOV writes above used, just packed into the
+        // pick-buffer rows for the editor's hover readout.
+        p.normalEyeX   = nEye.x;
+        p.normalEyeY   = nEye.y;
+        p.normalEyeZ   = nEye.z;
+        p.elementId    = payload.elementId;
+        p.worldPosEyeX = pEye.x;
+        p.worldPosEyeY = pEye.y;
+        p.worldPosEyeZ = pEye.z;
+        p.alpha        = didHit ? 1.0f : 0.0f;
         gPickResult[0] = p;
     }
 
