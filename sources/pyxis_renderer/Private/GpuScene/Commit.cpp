@@ -103,6 +103,7 @@ void GpuScene::Impl::Clear() noexcept
   // first CommitResources after Clear will re-create on demand. Drop
   // the refs so memory isn't held longer than needed across a reload.
   bindlessSampler = nullptr;
+  domeSampler = nullptr;
   missingTexture = nullptr;
 
   // TLAS + camera + dirty flags.
@@ -276,6 +277,10 @@ Expected<void> GpuScene::Impl::EnsureBindlessFallbacks(nvrhi::ICommandList* comm
   }
   if (!bindlessSampler)
   {
+    // Material textures (baseColor / normal / metallic / roughness /
+    // emission). Wrap-Wrap covers tiling architectural surfaces;
+    // mip-filter ON is what makes the M9-fidelity ray-cone LOD
+    // helper actually trilinear-blend instead of point-sampling.
     nvrhi::SamplerDesc samplerDesc;
     samplerDesc.minFilter = true;
     samplerDesc.magFilter = true;
@@ -284,6 +289,22 @@ Expected<void> GpuScene::Impl::EnsureBindlessFallbacks(nvrhi::ICommandList* comm
     samplerDesc.addressV = nvrhi::SamplerAddressMode::Wrap;
     samplerDesc.addressW = nvrhi::SamplerAddressMode::Wrap;
     bindlessSampler = device->createSampler(samplerDesc);
+  }
+  if (!domeSampler)
+  {
+    // M9-fidelity per-role samplers. HDRI dome lat-long mapping
+    // wants Wrap-U (azimuth wraps) + Clamp-V (elevation poles must
+    // not bleed into the opposite hemisphere — a Wrap-V would
+    // mirror +Y onto -Y at the seam). Otherwise identical to
+    // bindlessSampler.
+    nvrhi::SamplerDesc domeDesc;
+    domeDesc.minFilter = true;
+    domeDesc.magFilter = true;
+    domeDesc.mipFilter = true;
+    domeDesc.addressU = nvrhi::SamplerAddressMode::Wrap;
+    domeDesc.addressV = nvrhi::SamplerAddressMode::Clamp;
+    domeDesc.addressW = nvrhi::SamplerAddressMode::Wrap;
+    domeSampler = device->createSampler(domeDesc);
   }
   return {};
 }

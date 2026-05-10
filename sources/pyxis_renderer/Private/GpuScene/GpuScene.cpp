@@ -243,6 +243,10 @@ nvrhi::ISampler* GpuScene::GetBindlessSampler() const noexcept {
   return _impl->bindlessSampler.Get();
 }
 
+nvrhi::ISampler* GpuScene::GetDomeSampler() const noexcept {
+  return _impl->domeSampler.Get();
+}
+
 nvrhi::IBuffer* GpuScene::GetInstanceMeshBuffer() const noexcept {
   return _impl->instanceMeshBuffer.Get();
 }

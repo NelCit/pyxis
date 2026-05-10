@@ -279,11 +279,18 @@ public:
   // (production-renderer convention; multi-dome is post-v1 §43).
   [[nodiscard]] nvrhi::ITexture*         GetDomeEnvMapTexture() const noexcept;
 
-  // M5/M7: shared linear-clamp sampler used for every bindless
-  // texture lookup (materials' baseColor/normal/etc. + the dome
-  // env-map). Per-role samplers (anisotropic for tangent maps, etc.)
-  // are an M9 polish item.
+  // M5/M7: shared linear sampler for material bindless textures
+  // (baseColor / normal / metallic / roughness / emission). Wrap-
+  // Wrap-Wrap addressing covers the tiling architectural materials
+  // common in v1; per-role anisotropic samplers are M11+ polish.
   [[nodiscard]] nvrhi::ISampler*         GetBindlessSampler() const noexcept;
+
+  // M9-fidelity: dedicated sampler for the HDRI dome lat-long
+  // mapping. Wrap-U / Clamp-V — the V-axis clamp prevents the
+  // elevation seam at the poles from mirroring +Y onto -Y, an
+  // artefact visible at glancing-angle hits with the original
+  // shared bindlessSampler.
+  [[nodiscard]] nvrhi::ISampler*         GetDomeSampler() const noexcept;
 
   // M8a bindless textures: 4×4 magenta fallback bound at bindless
   // slot 0 so any material whose resolved texture failed to decode

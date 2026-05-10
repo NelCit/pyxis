@@ -64,6 +64,7 @@
 
 #include "ShaderInterop.slang"
 
+[[vk::binding(0, 0)]]  ConstantBuffer<CameraUniforms>      gCamera;
 [[vk::binding(3, 0)]]  StructuredBuffer<OpenPBRMaterialGPU> gMaterials;
 [[vk::binding(4, 0)]]  StructuredBuffer<uint>               gInstanceMaterial;
 [[vk::binding(5, 0)]]  StructuredBuffer<LightGpu>           gLights;
@@ -80,6 +81,31 @@
 [[vk::binding(30, 0)]] StructuredBuffer<uint>               gMeshVertexNormalOffsets;
 [[vk::binding(31, 0)]] StructuredBuffer<float4>             gMeshTangents;
 [[vk::binding(32, 0)]] StructuredBuffer<uint>               gMeshTangentOffsets;
+
+// Per-texture LOD-aware sample. Picks a mip level from the ray-cone
+// footprint (radius at the hit, in world units) × the texture's own
+// dimensions: log2(coneRadius × textureSize) approximates the per-
+// pixel texel-space stride. Clamped to >= 0 so near hits sample
+// mip 0. Single-channel `coneRadius` argument is shared across all
+// per-hit Sample calls; per-texture variation comes from the
+// per-texture GetDimensions query.
+float3 SampleByCone(uint texIdx, float2 uv, float coneRadius) {
+    float texW;
+    float texH;
+    gBindlessTextures[texIdx].GetDimensions(texW, texH);
+    const float texSize = sqrt(texW * texH);
+    const float lod = max(0.0, log2(max(coneRadius * texSize, 1.0)));
+    return gBindlessTextures[texIdx].SampleLevel(gBindlessSampler, uv, lod).rgb;
+}
+
+float4 SampleByConeRGBA(uint texIdx, float2 uv, float coneRadius) {
+    float texW;
+    float texH;
+    gBindlessTextures[texIdx].GetDimensions(texW, texH);
+    const float texSize = sqrt(texW * texH);
+    const float lod = max(0.0, log2(max(coneRadius * texSize, 1.0)));
+    return gBindlessTextures[texIdx].SampleLevel(gBindlessSampler, uv, lod);
+}
 
 // Slang emits the SPIR-V `OpEntryPoint` name as `"main"` regardless
 // of the source-side function name; the C++ side passes `"main"` to
@@ -117,20 +143,26 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
     const float  w0   = 1.0 - bary.x - bary.y;
     const float2 uv   = uv0 * w0 + uv1 * bary.x + uv2 * bary.y;
 
+    // M9-fidelity ray-cone LOD. Per-pixel angular spread × ray
+    // distance gives the cone radius at the hit; combined with the
+    // texture's own dimensions (queried per Sample) it picks the
+    // right mip level without ray differentials. Distance is the
+    // dominant aliasing cause; we skip the |cos(view, normal)|
+    // grazing-angle correction (would need the not-yet-computed
+    // smooth normal upstream of the baseColor sample). Ref:
+    // Akenine-Möller, Ray Tracing Gems Ch 20.
+    const float coneRadius = gCamera.pixelSpreadRadians * RayTCurrent();
+
     // Bindless baseColor sample, gated on the §11.6 HasBaseColorMap
     // flag the C++ side sets when the material's resolved
-    // baseColorTex slot is valid. Without the flag check, INVALID_
-    // BINDLESS_TEXTURE (=~0u) would index out of bounds → driver UB
-    // (or magenta missingTexture if slot 0 hits via PartiallyBound).
-    // Linear-clamp `gBindlessSampler` (binding 10) is shared with the
-    // dome — the renderer owns one sampler in v1; per-role samplers
-    // are an M9 polish item.
+    // baseColorTex slot is valid. LOD computed via SampleByCone
+    // (M9-fidelity ray-cone footprint) so distant surfaces use mip
+    // levels instead of mip 0 (LOD-0-pinned aliasing was the dominant
+    // texture artefact pre-M9-fidelity).
     float3 baseColor = float3(mat.baseColorR, mat.baseColorG, mat.baseColorB);
     if ((mat.flags & MATERIAL_FLAG_HAS_BASE_COLOR_MAP) != 0u
         && mat.baseColorTex < BINDLESS_TEXTURES_CAP) {
-        const float4 sampled = gBindlessTextures[mat.baseColorTex].SampleLevel(
-            gBindlessSampler, uv, 0);
-        baseColor = sampled.rgb;
+        baseColor = SampleByCone(mat.baseColorTex, uv, coneRadius);
     }
 
     // M9 smooth shading: try the per-vertex normal path first. The
@@ -209,8 +241,7 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
             // texture stores [0,1]-encoded tangent-space normals;
             // unpack to [-1,1] before transforming.
             const float3 nTangent =
-                gBindlessTextures[mat.normalTex].SampleLevel(gBindlessSampler, uv, 0).rgb
-                * 2.0 - 1.0;
+                SampleByCone(mat.normalTex, uv, coneRadius) * 2.0 - 1.0;
 
             // Transform tangent-space normal to world space.
             nWorld = normalize(nTangent.x * tangentWorld
@@ -318,8 +349,8 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
                    * mat.emissionLuminance;
         if ((mat.flags & MATERIAL_FLAG_HAS_EMISSION_MAP) != 0u
             && mat.emissionTex < BINDLESS_TEXTURES_CAP) {
-            const float3 sampledEmission = gBindlessTextures[mat.emissionTex].SampleLevel(
-                gBindlessSampler, uv, 0).rgb;
+            const float3 sampledEmission =
+                SampleByCone(mat.emissionTex, uv, coneRadius);
             emission *= sampledEmission;
         }
     }

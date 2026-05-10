@@ -22,7 +22,9 @@
 
 [[vk::binding(5, 0)]]  StructuredBuffer<LightGpu> gLights;
 [[vk::binding(9, 0)]]  Texture2D<float4>          gDomeEnvMap;
-[[vk::binding(10, 0)]] SamplerState               gDomeSampler;
+// M9-fidelity per-role samplers: dome moved to binding 33 (Wrap-Clamp-Wrap).
+// Binding 10 is now the material sampler (Wrap-Wrap-Wrap), used by closesthit.
+[[vk::binding(33, 0)]] SamplerState               gDomeSampler;
 
 static const float PYXIS_PI         = 3.14159265358979323846;
 static const float PYXIS_TWO_PI     = 6.28318530717958647692;

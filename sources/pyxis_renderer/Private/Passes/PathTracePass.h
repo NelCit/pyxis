@@ -183,6 +183,7 @@ class PathTracePass final : public IRenderPass {
     MeshVertexNormalOffsets,
     MeshTangents,
     MeshTangentOffsets,
+    DomeSampler,
     ColorHdrAov,
     NormalAov,
     DepthAov,

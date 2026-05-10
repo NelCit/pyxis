@@ -485,6 +485,12 @@ struct GpuScene::Impl
   bool                 materialsNeedGpuUpload = false;
   nvrhi::BufferHandle  instanceMaterialBuffer;
   nvrhi::SamplerHandle bindlessSampler;
+  // M9-fidelity per-role samplers. `bindlessSampler` (above) is
+  // Wrap-Wrap-Wrap for tiling material textures; `domeSampler` is
+  // Wrap-Clamp-Wrap for the HDRI dome's lat-long mapping (V-axis
+  // clamp prevents the elevation seam at the poles from mirroring
+  // +Y onto -Y).
+  nvrhi::SamplerHandle domeSampler;
 
   // M7: structured buffer of LightGpu entries the closesthit reads
   // via the simple per-light contribution loop at binding 5. Sized

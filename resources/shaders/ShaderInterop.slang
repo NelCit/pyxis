@@ -109,9 +109,16 @@ struct CameraUniforms {
     // CameraDesc::exposure / UsdGeomCamera::exposure. Three pad
     // floats keep the cbuffer 16-byte aligned (std140 rule).
     float exposure;
+    // M9-fidelity: pixel angular spread (radians per pixel along the
+    // vertical axis). Drives ray-cone-footprint LOD selection in the
+    // closesthit so distant surfaces sample mip levels instead of
+    // mip 0 (the SampleLevel(s, uv, 0)-pinned path in M5–M9 aliased
+    // hard at distance). Computed by the C++ side as
+    //   pixelSpreadRadians = 2 × atan(0.5 / focalLengthInPixels)
+    // ≈ 2 × tan(fovY / 2) / imageHeight for a standard pinhole.
+    float pixelSpreadRadians;
     float _camPad0;
     float _camPad1;
-    float _camPad2;
 };
 
 // FrameUiUniforms — per-frame viewer-only state the raygen reads

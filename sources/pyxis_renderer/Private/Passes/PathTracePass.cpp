@@ -172,6 +172,9 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
       // M9 normal mapping — per-vertex tangents (float4: xyz tangent + w sign).
       nvrhi::BindingLayoutItem::StructuredBuffer_SRV(31),    // binding 31 mesh tangents
       nvrhi::BindingLayoutItem::StructuredBuffer_SRV(32),    // binding 32 mesh tangent offsets
+      // M9-fidelity per-role samplers — dome (Wrap-Clamp-Wrap) at 33;
+      // bindlessSampler at 10 stays as material sampler (Wrap-Wrap-Wrap).
+      nvrhi::BindingLayoutItem::Sampler(33),                 // binding 33 dome HDRI sampler
   };
   _bindingLayout = _device->createBindingLayout(layoutDesc);
   if (!_bindingLayout)
@@ -681,6 +684,7 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(RenderTargets const
   current[slot(BindingSlot::MeshVertexNormalOffsets)]= _scene->GetMeshVertexNormalOffsetsBuffer();
   current[slot(BindingSlot::MeshTangents)]           = _scene->GetMeshTangentsBuffer();
   current[slot(BindingSlot::MeshTangentOffsets)]     = _scene->GetMeshTangentOffsetsBuffer();
+  current[slot(BindingSlot::DomeSampler)]            = _scene->GetDomeSampler();
   current[slot(BindingSlot::ColorHdrAov)]      = targets.colorHdr;
   current[slot(BindingSlot::NormalAov)]        = targets.normalAov;
   current[slot(BindingSlot::DepthAov)]         = targets.depthAov;
@@ -786,17 +790,24 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(RenderTargets const
   nvrhi::IBuffer* meshTangentOffsetsBuffer = _scene->GetMeshTangentOffsetsBuffer();
   if (meshTangentOffsetsBuffer == nullptr)
     meshTangentOffsetsBuffer = _fallbackMeshTangentOffsetsBuffer.Get();
-  // M7-IBL: dome HDRI texture + sampler. Scene's first live dome
-  // wins; falls back to the 1×1 black texture + the local linear-
-  // clamp sampler when no dome with a resolved env-map exists. The
-  // miss shader handles the all-black case via the M7-simple
-  // "use authored color" branch.
+  // M9-fidelity per-role samplers — dome sampler at binding 33.
+  // Falls back to the material sampler when GpuScene hasn't created
+  // the dome sampler yet (truly empty scene); identical filter
+  // settings, just different addressing modes.
+  nvrhi::ISampler* domeSampler = _scene->GetDomeSampler();
+  if (domeSampler == nullptr)
+    domeSampler = _fallbackDomeSampler.Get();
+  // M7-IBL: dome HDRI texture + the M9-fidelity material sampler at
+  // binding 10 (now used for material textures only; dome sampler
+  // moved to binding 33 above). Scene's first live dome wins; the
+  // 1×1 black fallback texture handles "no dome" — miss shader's
+  // "use authored color" branch fires when sampling that all-black.
   nvrhi::ITexture* domeTexture = _scene->GetDomeEnvMapTexture();
   if (domeTexture == nullptr)
     domeTexture = _fallbackDomeTexture.Get();
-  nvrhi::ISampler* domeSampler = _scene->GetBindlessSampler();
-  if (domeSampler == nullptr)
-    domeSampler = _fallbackDomeSampler.Get();
+  nvrhi::ISampler* materialSampler = _scene->GetBindlessSampler();
+  if (materialSampler == nullptr)
+    materialSampler = _fallbackDomeSampler.Get();
 
   // M7 follow-up — caller-owned raw AOVs + pick buffer. Each falls
   // back to the 1×1 / 1-element scratch resource when the caller
@@ -840,7 +851,7 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(RenderTargets const
       nvrhi::BindingSetItem::StructuredBuffer_SRV(7, meshFaceNormalsBuffer),
       nvrhi::BindingSetItem::StructuredBuffer_SRV(8, meshFaceOffsetsBuffer),
       nvrhi::BindingSetItem::Texture_SRV(9, domeTexture),
-      nvrhi::BindingSetItem::Sampler(10, domeSampler),
+      nvrhi::BindingSetItem::Sampler(10, materialSampler),
       nvrhi::BindingSetItem::Texture_UAV(11, colorHdrAov),
       nvrhi::BindingSetItem::Texture_UAV(12, normalAov),
       nvrhi::BindingSetItem::Texture_UAV(13, depthAov),
@@ -864,6 +875,8 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(RenderTargets const
       // M9 normal mapping.
       nvrhi::BindingSetItem::StructuredBuffer_SRV(31, meshTangentsBuffer),
       nvrhi::BindingSetItem::StructuredBuffer_SRV(32, meshTangentOffsetsBuffer),
+      // M9-fidelity per-role samplers — dome at binding 33.
+      nvrhi::BindingSetItem::Sampler(33, domeSampler),
   };
 
   // ---- Bindless texture array (binding 28) -----------------------------
@@ -988,9 +1001,25 @@ void PathTracePass::Execute(nvrhi::ICommandList* commandList, const PassContext&
   // radiance by 2^exposure before the ACES tonemap fires. Pads stay
   // zero — the cbuffer's size assert pins their presence.
   cameraUniforms.exposure  = camera.exposure;
+  // M9-fidelity: per-pixel angular spread for ray-cone-footprint LOD
+  // selection in the closesthit. Standard pinhole derivation:
+  //   pixelSpread = 2 × tan(fovY/2) / imageHeight
+  // We extract fovY from the projection matrix's [1][1] entry
+  // (= 1/tan(fovY/2) for a column-vector / row-major projection
+  // matrix). imageHeight comes from the bound output texture.
+  const auto outputHeight = static_cast<float>(output->getDesc().height);
+  // hlslpp::float4x4 stores rows as float[4]; row-1 column-1 is
+  // the canonical cot(fovY/2) entry of a column-vector / row-major
+  // perspective projection matrix.
+  float projRow1[16];
+  hlslpp::store(projRow1, camera.projFromView);
+  const float projYY = projRow1[5];  // row 1, col 1 in row-major float[16]
+  const float tanHalfFov = (projYY > 1e-6f) ? (1.0f / projYY) : 0.0f;
+  cameraUniforms.pixelSpreadRadians = (outputHeight > 0.0f && tanHalfFov > 0.0f)
+                                          ? (2.0f * tanHalfFov / outputHeight)
+                                          : 0.0f;
   cameraUniforms._camPad0  = 0.0f;
   cameraUniforms._camPad1  = 0.0f;
-  cameraUniforms._camPad2  = 0.0f;
   commandList->writeBuffer(_cameraUniformsBuffer.Get(), &cameraUniforms, sizeof(cameraUniforms));
 
   // ---- Upload viewer-only per-frame UI state -------------------------
