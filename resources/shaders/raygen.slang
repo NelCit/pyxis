@@ -47,6 +47,10 @@
 [[vk::binding(16, 0)]] RWTexture2D<uint>              gOutMaterialId;      // R32U  material slot
 [[vk::binding(17, 0)]] RWTexture2D<float4>            gOutBaseColor;       // RGBA16F OpenPBR baseColor
 [[vk::binding(18, 0)]] RWTexture2D<float4>            gOutWorldPos;        // RGBA32F world hit pos
+// M7 follow-up batch 3 — viewer-only per-frame state. Lives in its
+// own cbuffer (rather than tail-on-CameraUniforms) so future per-frame
+// camera uniforms can grow without touching UI bindings.
+[[vk::binding(19, 0)]] ConstantBuffer<FrameUiUniforms> gFrameUi;
 
 // Narkowicz ACES Filmic — pulled out of main() so the display branch
 // for DEBUG_VIEW_COLOR can call it cleanly. Same constants as before;
@@ -160,7 +164,7 @@ void main() {
     // Write the raw values into the 1-element pick buffer when this
     // dispatched pixel matches the cursor. The viewer kicks a copy
     // into a staging buffer per frame and reads back next frame.
-    if (launchIndex.x == gCamera.mousePixelX && launchIndex.y == gCamera.mousePixelY)
+    if (launchIndex.x == gFrameUi.mousePixelX && launchIndex.y == gFrameUi.mousePixelY)
     {
         PickResult p;
         p.colorR     = payload.color.x;
@@ -192,11 +196,11 @@ void main() {
     // M7 inline ACES is preserved on the Color branch only — see
     // the standing M9 TODO ("ToneMapPass takeover") above.
     float3 displayColor = float3(0.0, 0.0, 0.0);
-    if (gCamera.debugViewMode == DEBUG_VIEW_COLOR)
+    if (gFrameUi.debugViewMode == DEBUG_VIEW_COLOR)
     {
         displayColor = acesFilmic(payload.color);
     }
-    else if (gCamera.debugViewMode == DEBUG_VIEW_NORMAL)
+    else if (gFrameUi.debugViewMode == DEBUG_VIEW_NORMAL)
     {
         // Miss is (0,0,0) in the Normal AOV; display as middle grey
         // so the background isn't visually identical to a Z-aligned
@@ -205,7 +209,7 @@ void main() {
             ? (payload.normalWorld * 0.5f + 0.5f)
             : float3(0.5f, 0.5f, 0.5f);
     }
-    else if (gCamera.debugViewMode == DEBUG_VIEW_DEPTH)
+    else if (gFrameUi.debugViewMode == DEBUG_VIEW_DEPTH)
     {
         // Inverse-depth grayscale: surfaces closer to the camera
         // appear brighter, miss (= 0 sentinel) renders black.
@@ -216,25 +220,25 @@ void main() {
         const float intensity = (d > 0.0f) ? (1.0f / (1.0f + d * 0.1f)) : 0.0f;
         displayColor = float3(intensity, intensity, intensity);
     }
-    else if (gCamera.debugViewMode == DEBUG_VIEW_INSTANCE_ID)
+    else if (gFrameUi.debugViewMode == DEBUG_VIEW_INSTANCE_ID)
     {
         displayColor = hashInstanceColor(payload.instanceId);
     }
-    else if (gCamera.debugViewMode == DEBUG_VIEW_MATERIAL_ID)
+    else if (gFrameUi.debugViewMode == DEBUG_VIEW_MATERIAL_ID)
     {
         // Same hash function as InstanceID — different identifier
         // domains so the colour palette is independent. Reuses
         // hashInstanceColor since the math is identity (uint -> hue).
         displayColor = hashInstanceColor(payload.materialId);
     }
-    else if (gCamera.debugViewMode == DEBUG_VIEW_BASE_COLOR)
+    else if (gFrameUi.debugViewMode == DEBUG_VIEW_BASE_COLOR)
     {
         // Raw OpenPBR baseColor straight off the material table —
         // pre-shading albedo. saturate() clamps in case a (post-v1)
         // emissive material's baseColor exceeds [0,1].
         displayColor = saturate(payload.baseColor);
     }
-    else if (gCamera.debugViewMode == DEBUG_VIEW_WORLD_POS)
+    else if (gFrameUi.debugViewMode == DEBUG_VIEW_WORLD_POS)
     {
         // Visualise world-space hit position via a 10-unit-period
         // fract pattern. Lets users verify camera<->scene alignment

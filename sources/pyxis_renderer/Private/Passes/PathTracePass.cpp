@@ -36,9 +36,12 @@ namespace {
 // size on the C++ allocator below, the build fails here rather than
 // at runtime via a confusing validation error.
 using shaderinterop::CameraUniforms;
-static_assert(sizeof(CameraUniforms) == 144,
-              "CameraUniforms is two float4x4s + 16-byte UI tail (mousePixel + "
-              "debugViewMode + pad). See resources/shaders/ShaderInterop.slang.");
+static_assert(sizeof(CameraUniforms) == 128,
+              "CameraUniforms is two float4x4s = 128 bytes "
+              "(see resources/shaders/ShaderInterop.slang).");
+static_assert(sizeof(shaderinterop::FrameUiUniforms) == 16,
+              "FrameUiUniforms must be one cbuffer row (16 bytes); the M7 "
+              "follow-up split keeps UI state out of CameraUniforms.");
 
 std::vector<char> ReadBinaryFile(std::string_view path) noexcept {
   std::ifstream stream(std::string{path}, std::ios::binary | std::ios::ate);
@@ -139,6 +142,7 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
       nvrhi::BindingLayoutItem::Texture_UAV(16),             // binding 16 materialId AOV
       nvrhi::BindingLayoutItem::Texture_UAV(17),             // binding 17 baseColor AOV
       nvrhi::BindingLayoutItem::Texture_UAV(18),             // binding 18 worldPos AOV
+      nvrhi::BindingLayoutItem::ConstantBuffer(19),          // binding 19 FrameUiUniforms
   };
   _bindingLayout = _device->createBindingLayout(layoutDesc);
   if (!_bindingLayout)
@@ -196,6 +200,22 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
   if (!_cameraUniformsBuffer)
   {
     Logging::Get().Error(log::RENDER, "PathTracePass: createBuffer(CameraUniforms) failed");
+    return;
+  }
+
+  // M7 follow-up — viewer-only per-frame UI cbuffer at binding 19.
+  // Same shape / lifetime as CameraUniforms, just smaller (16 bytes).
+  // See ShaderInterop.slang's FrameUiUniforms for the field layout.
+  nvrhi::BufferDesc uiCbDesc;
+  uiCbDesc.byteSize = sizeof(shaderinterop::FrameUiUniforms);
+  uiCbDesc.debugName = "PathTrace.FrameUiUniforms";
+  uiCbDesc.isConstantBuffer = true;
+  uiCbDesc.initialState = nvrhi::ResourceStates::ConstantBuffer;
+  uiCbDesc.keepInitialState = true;
+  _frameUiBuffer = _device->createBuffer(uiCbDesc);
+  if (!_frameUiBuffer)
+  {
+    Logging::Get().Error(log::RENDER, "PathTracePass: createBuffer(FrameUiUniforms) failed");
     return;
   }
 
@@ -633,6 +653,7 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(RenderTargets const
       nvrhi::BindingSetItem::Texture_UAV(16, materialAov),
       nvrhi::BindingSetItem::Texture_UAV(17, baseColorAov),
       nvrhi::BindingSetItem::Texture_UAV(18, worldPosAov),
+      nvrhi::BindingSetItem::ConstantBuffer(19, _frameUiBuffer),
   };
   nvrhi::BindingSetHandle set = _device->createBindingSet(setDesc, _bindingLayout);
   _bindingSetCache[output] = set;
@@ -685,24 +706,28 @@ void PathTracePass::Execute(nvrhi::ICommandList* commandList, const PassContext&
   // convention correctly because it's a pure linear-algebra
   // operation that doesn't care about row-vector vs column-vector
   // semantics.
-  // M7 follow-up: also pack the per-frame UI tail (mouse pixel +
-  // debug-view mode) into the same cbuffer so the AOV inspector
-  // doesn't need a second binding for one struct's worth of data.
   const CameraDesc& camera = _scene->GetCamera();
   CameraUniforms cameraUniforms{};
   cameraUniforms.worldFromView = hlslpp::inverse(camera.viewFromWorld);
   cameraUniforms.viewFromClip = hlslpp::inverse(camera.projFromView);
-  cameraUniforms.mousePixelX = (context.settings != nullptr)
-                                   ? context.settings->mousePixelX
-                                   : RenderSettings::MOUSE_PIXEL_NONE;
-  cameraUniforms.mousePixelY = (context.settings != nullptr)
-                                   ? context.settings->mousePixelY
-                                   : RenderSettings::MOUSE_PIXEL_NONE;
-  cameraUniforms.debugViewMode = (context.settings != nullptr)
-                                     ? static_cast<uint32_t>(context.settings->debugView)
-                                     : 0u;
-  cameraUniforms._reservedDbg0 = 0u;
   commandList->writeBuffer(_cameraUniformsBuffer.Get(), &cameraUniforms, sizeof(cameraUniforms));
+
+  // ---- Upload viewer-only per-frame UI state -------------------------
+  // M7 follow-up — split out of CameraUniforms after the audit. Mouse
+  // pixel + AOV-inspector debug-view mode live at binding 19 so future
+  // CameraUniforms growth doesn't collide with editor-driven UI knobs.
+  shaderinterop::FrameUiUniforms frameUi{};
+  frameUi.mousePixelX = (context.settings != nullptr)
+                            ? context.settings->mousePixelX
+                            : RenderSettings::MOUSE_PIXEL_NONE;
+  frameUi.mousePixelY = (context.settings != nullptr)
+                            ? context.settings->mousePixelY
+                            : RenderSettings::MOUSE_PIXEL_NONE;
+  frameUi.debugViewMode = (context.settings != nullptr)
+                              ? static_cast<uint32_t>(context.settings->debugView)
+                              : 0u;
+  frameUi._reservedUi0 = 0u;
+  commandList->writeBuffer(_frameUiBuffer.Get(), &frameUi, sizeof(frameUi));
 
   // M5: write the fallback material if the scene has no materials of
   // its own. Only matters for the M3-cube path — scenes that

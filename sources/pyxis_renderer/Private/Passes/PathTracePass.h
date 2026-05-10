@@ -81,6 +81,12 @@ class PathTracePass final : public IRenderPass {
   // Per-frame constant buffer carrying CameraUniforms (worldFromView
   // + viewFromClip inverses).
   nvrhi::BufferHandle _cameraUniformsBuffer;
+  // M7 follow-up — per-frame viewer-only UI state (cursor pixel +
+  // AOV-inspector mode). Lives in its own cbuffer at binding 19 so
+  // the §10 camera contract stays clean even as the AOV inspector
+  // grows new knobs. 16 bytes; written every Execute when the editor
+  // changes the picked AOV or the cursor moves.
+  nvrhi::BufferHandle _frameUiBuffer;
 
   // M5: 1-element fallback material buffer (the closesthit reads
   // `materials[instanceMaterial[InstanceID()]]` so binding 3 must

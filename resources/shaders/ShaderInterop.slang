@@ -94,18 +94,24 @@ struct HitInfo {
 struct CameraUniforms {
     float4x4 worldFromView;     // inverse of CameraDesc::viewFromWorld
     float4x4 viewFromClip;      // inverse of CameraDesc::projFromView
-    // Per-frame UI state — hitches a ride on this cbuffer to avoid a
-    // second binding for one struct's worth of viewer-only data.
-    // mousePixel is in pixel coords (top-left origin, matching
-    // DispatchRaysIndex); 0xFFFFFFFF means "mouse not over the
-    // viewport — skip the pick write". debugViewMode picks which
-    // raw AOV the raygen remaps into the display output (DEBUG_VIEW_*
-    // constants below). Three uint pads bring the struct to a
-    // 16-byte multiple.
-    uint mousePixelX;           // top-left origin pixel coord, or 0xFFFFFFFF if no hover
+};
+
+// FrameUiUniforms — per-frame viewer-only state the raygen reads
+// (cursor pixel + AOV-inspector mode). Lives in its own cbuffer at
+// binding 19 so future per-frame camera knobs (samplesPerPixel,
+// jitter offset, accumulation generation, ...) added to CameraUniforms
+// can grow without colliding with UI state. M7 follow-up: split out
+// of CameraUniforms after the audit flagged the conceptual conflict
+// (UI state hitching a ride on the camera matrices).
+//
+// Pre-fix this lived as a 16-byte tail on CameraUniforms. Restored
+// CameraUniforms to its original 128-byte two-matrix shape; the four
+// uint slots below carry the viewer state at a dedicated binding.
+struct FrameUiUniforms {
+    uint mousePixelX;           // top-left origin pixel coord, or PICK_PIXEL_NONE if no hover
     uint mousePixelY;
-    uint debugViewMode;         // DEBUG_VIEW_COLOR / NORMAL / DEPTH / INSTANCE_ID
-    uint _reservedDbg0;
+    uint debugViewMode;         // DEBUG_VIEW_COLOR / NORMAL / DEPTH / INSTANCE_ID / ...
+    uint _reservedUi0;
 };
 
 // Debug-view selector mirrored on both sides. The combo in ImGuiHost's
@@ -278,11 +284,15 @@ static const uint LIGHT_KIND_RECT    = 2;
     // we lock the layout of the structs that *do* cross the C++ /
     // SPIR-V boundary as memory blobs (CameraUniforms via cbuffer,
     // OpenPBRMaterialGPU via structured buffer).
-    static_assert(sizeof(CameraUniforms) == 144,
-                  "CameraUniforms must be 144 bytes — two 64-byte float4x4s + "
-                  "16-byte UI tail (see resources/shaders/ShaderInterop.slang).");
+    static_assert(sizeof(CameraUniforms) == 128,
+                  "CameraUniforms must be 128 bytes — two 64-byte float4x4s "
+                  "(see resources/shaders/ShaderInterop.slang).");
     static_assert(sizeof(CameraUniforms) % 16 == 0,
                   "CameraUniforms must be 16-byte aligned (cbuffer std140 rule).");
+    static_assert(sizeof(FrameUiUniforms) == 16,
+                  "FrameUiUniforms must be 16 bytes (one cbuffer row).");
+    static_assert(sizeof(FrameUiUniforms) % 16 == 0,
+                  "FrameUiUniforms must be 16-byte aligned (cbuffer std140 rule).");
     static_assert(sizeof(PickResult) == 80,
                   "PickResult must be 80 bytes (5 rows of 16) — see "
                   "resources/shaders/ShaderInterop.slang.");
