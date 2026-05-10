@@ -2170,23 +2170,17 @@ FrameStats GpuScene::LastFrameStats() const {
     if (!entry.live)
       continue;
     ++liveTextureCount;
-    // Bytes per pixel by format. RGBA8 / SRGBA8 = 4; RGBA32_FLOAT = 16
-    // (HDR env-maps). Other formats fall through to 0 — add cases
-    // here when M8 introduces compressed / RGBA16F texture paths.
-    uint64_t bytesPerPixel = 0;
-    switch (entry.format)
-    {
-      case nvrhi::Format::RGBA8_UNORM:
-      case nvrhi::Format::SRGBA8_UNORM:
-        bytesPerPixel = 4;
-        break;
-      case nvrhi::Format::RGBA32_FLOAT:
-        bytesPerPixel = 16;
-        break;
-      default:
-        bytesPerPixel = 0;
-        break;
-    }
+    // Bytes per pixel via NVRHI's format introspection — covers every
+    // uncompressed format the texture pool can hold. Pre-fix the
+    // switch only knew about RGBA8 / SRGBA8 / RGBA32F and silently
+    // counted everything else (RGBA16F, R32F, R32_UINT, ...) as 0,
+    // making the Stats panel's "Total" row visibly inconsistent
+    // with the per-row sum the user could compute by hand. The
+    // bytesPerBlock convention is "bytes per pixel" for uncompressed
+    // formats; compressed formats (BC1..BC7) report bytes per 4×4
+    // block but Pyxis doesn't authorize compressed textures yet
+    // (M8 follow-up) so this path is exact today.
+    const uint64_t bytesPerPixel = nvrhi::getFormatInfo(entry.format).bytesPerBlock;
     textureBytes += static_cast<uint64_t>(entry.width) * entry.height * bytesPerPixel;
   }
   stats.meshCount = liveMeshCount;

@@ -761,7 +761,13 @@ void ImGuiHost::BuildScenePanel(const FrameStats& sceneStats) noexcept {
                                 + sceneStats.textureBytes + sceneStats.blasBytes
                                 + sceneStats.tlasBytes;
     formatBytes(totalBytes, bytesBuf, sizeof(bytesBuf));
-    ImGui::Text("Total       : %s", bytesBuf);
+    // Scene-only — does NOT include AOV textures, the swapchain
+    // images, ImGui's descriptor pool, the path-tracer's shader
+    // tables, or any other allocator outside GpuScene. The System
+    // panel's VRAM row is the right number for "what's this process
+    // actually consuming on the GPU"; this row is "what GpuScene's
+    // tables added up to".
+    ImGui::Text("Scene total : %s  (excl. AOVs / pipelines)", bytesBuf);
 
     ImGui::Spacing();
     ImGui::Text("This frame");
