@@ -62,11 +62,12 @@ constexpr uint8_t HandleGeneration(uint32_t handleValue) noexcept
 // §19.7: generation 255 quarantines the slot — never reused.
 constexpr uint8_t HANDLE_GENERATION_QUARANTINE = 255;
 
-// TLAS capacity. M3 single-cube ships one instance; the cap of 256
-// is enough for the M3.5 default-scene composition (3 spheres +
-// ground = ~5 instances). M6+ scales this up alongside the
-// 16M-instance shard threshold (§16.5).
-constexpr std::size_t TLAS_MAX_INSTANCES = 256u;
+// TLAS capacity. M3 stub used 256 (default scene has ~5 instances).
+// M8a bumps to 64K to accommodate Omniverse-Collected production
+// scenes (World Lobby has 850 instances; ALAB hero set ~5K; Bistro
+// ~50K). Cost is ~8 MB TLAS scratch (each instance is ~128 B of
+// metadata + a BLAS pointer). §16.5 sharding kicks in past 16M.
+constexpr std::size_t TLAS_MAX_INSTANCES = 65536u;
 
 // §16 split rule threshold: BLAS for meshes ≥ 64k tris adds
 // AllowCompaction to the build flags.

@@ -470,9 +470,15 @@ void EmitPointInstancer(const pxr::UsdPrim& instancerPrim,
 }
 
 // Emit a single UsdGeomMesh into `scene`. Returns true iff the mesh
-// was emitted (false skips the matching instance increment). M4
-// constraint: all faceVertexCounts must equal 3 (triangle list); ngons
-// are dropped with a single Warn log per prim.
+// was emitted (false skips the matching instance increment).
+//
+// Triangulation: GpuScene::CreateMesh expects a triangle list, but USD
+// authors arbitrary faceVertexCounts (most production / Omniverse
+// scenes are quad-dominant). Each face with N vertices fan-
+// triangulates to N-2 triangles `(v0, v_{i+1}, v_{i+2})`. Convex-
+// polygon assumption — concave faces produce visually-wrong (but
+// non-crashing) triangles. Subdivision is §42-deferred so authoring
+// concave ngons that need ear-clipping is post-v1.
 bool EmitMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCache,
               const MaterialHandleByPath& materialsByPath, GpuScene& scene) noexcept {
   auto& log = Logging::Get();
@@ -490,29 +496,51 @@ bool EmitMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCache,
   if (usdPoints.empty() || usdCounts.empty() || usdIndices.empty())
     return false;
 
-  // M4 stub triangulation: every face must already be a triangle.
-  for (const int faceCount : usdCounts)
-  {
-    if (faceCount != 3)
-    {
-      log.Warn(log::APP,
-               "StageWalker: skipping non-triangle mesh " + prim.GetPath().GetString()
-                   + " (face has " + std::to_string(faceCount)
-                   + " vertices; M4 supports triangle-list only).");
-      return false;
-    }
-  }
-
-  // Convert positions + indices into the §18.4 contiguous layout.
+  // Convert positions into the §18.4 contiguous layout.
   std::vector<hlslpp::float3> positions;
   positions.reserve(usdPoints.size());
   for (const pxr::GfVec3f& point : usdPoints)
     positions.emplace_back(point[0], point[1], point[2]);
 
+  // Fan-triangulate. Reserve assumes ~triangles+quads (3*indices is
+  // an upper bound for all-triangle input; quad-dominant scenes
+  // produce ~2x triangles per face, ngons more). One pass over the
+  // counts/indices stream emits 3 indices per output triangle.
   std::vector<uint32_t> indices;
-  indices.reserve(usdIndices.size());
-  for (const int idx : usdIndices)
-    indices.push_back(static_cast<uint32_t>(idx));
+  indices.reserve(usdIndices.size() * 3u / 2u);
+  std::size_t faceOffset = 0;
+  for (const int faceCount : usdCounts)
+  {
+    if (faceCount < 3)
+    {
+      // Degenerate face (point or edge). Skip and advance.
+      faceOffset += static_cast<std::size_t>(faceCount);
+      continue;
+    }
+    if (faceOffset + static_cast<std::size_t>(faceCount) > usdIndices.size())
+    {
+      // Malformed — counts disagree with indices length. Drop the
+      // entire mesh; partial fan would mismatch positions.
+      log.Warn(log::APP, "StageWalker: " + prim.GetPath().GetString()
+                             + " faceVertexCounts/Indices length mismatch; "
+                             + "dropping mesh.");
+      return false;
+    }
+    for (int triIdx = 0; triIdx < faceCount - 2; ++triIdx)
+    {
+      indices.push_back(static_cast<uint32_t>(usdIndices[faceOffset + 0]));
+      indices.push_back(static_cast<uint32_t>(usdIndices[faceOffset + triIdx + 1]));
+      indices.push_back(static_cast<uint32_t>(usdIndices[faceOffset + triIdx + 2]));
+    }
+    faceOffset += static_cast<std::size_t>(faceCount);
+  }
+
+  if (indices.empty())
+  {
+    log.Warn(log::APP, "StageWalker: " + prim.GetPath().GetString()
+                           + " has no valid faces after triangulation; skipping.");
+    return false;
+  }
 
   const std::string debugName = prim.GetPath().GetString();
   MeshDesc meshDesc;
