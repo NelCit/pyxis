@@ -35,10 +35,8 @@ target_sources(pyxis PRIVATE
     Private/Render/HardcodedCubeScene.cpp
     Private/Scene/SceneResolver.h
     Private/Scene/SceneResolver.cpp
-    Private/UsdDirectEngine/UsdDirectEngine.h
-    Private/UsdDirectEngine/UsdDirectEngine.cpp
-    Private/HydraEngine/HydraEngine.h
-    Private/HydraEngine/HydraEngine.cpp
+    Private/IngestUsd.h
+    Private/IngestUsd.cpp
     Private/HeadlessMode.h
     Private/HeadlessMode.cpp
     Private/ViewerMode.h
@@ -150,7 +148,7 @@ pyxis_thirdparty_require_imgui()
 target_link_libraries(pyxis PRIVATE
     Pyxis::Platform
     Pyxis::Renderer
-    Pyxis::UsdIngest                 # M4 — UsdDirectEngine + HydraEngine (M4 stub) wrap StageWalker.
+    Pyxis::UsdIngest                 # M4 — IngestUsd() unified entry point shares StageWalker across both adapters.
     Pyxis::Hydra                     # M4 — pyxis_hydra plugInfo.json + Sync impls register at process load.
     pyxis_imgui
     Vulkan::Vulkan        # vkCmdBeginRendering / vkCmdEndRendering / descriptor-pool calls

@@ -8,10 +8,9 @@
 #include "Output/TextureReadback.h"
 #include "Render/AovRegistry.h"
 #include "Render/AovTextures.h"
-#include "HydraEngine/HydraEngine.h"
+#include "IngestUsd.h"
 #include "Render/HardcodedCubeScene.h"
 #include "Scene/SceneResolver.h"
-#include "UsdDirectEngine/UsdDirectEngine.h"
 #include "ViewerMode.h"
 
 #include <Pyxis/Platform/Device/DeviceCreationParams.h>
@@ -170,26 +169,16 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
   gpuSceneDesc.framesInFlight = HEADLESS_FRAMES_IN_FLIGHT;
   GpuScene gpuScene{device, profiler, gpuSceneDesc};
 
-  // M4 ingest dispatch on `app.ingest`. UsdDirectEngine wires
-  // through pyxis_usd_ingest's StageWalker; HydraEngine wires
-  // through pyxis_hydra (P5d/P5e). Either engine failing or
-  // returning "nothing emitted" falls back to the M3 hardcoded
+  // M4 ingest. Both adapters share the unified IngestUsd entry point
+  // (StageWalker covers both today, satisfying §25.O.3 byte-equal).
+  // Empty path or "nothing emitted" falls back to the M3 hardcoded
   // cube so pyxis.exe always produces a renderable image (the
   // §29.4.a "must produce a renderable image" contract).
   bool sceneLoaded = false;
   if (!resolvedScene.path.empty())
   {
-    pyxis::usd_ingest::IngestStats stats{};
-    if (config.app.ingest == "usd_direct")
-    {
-      UsdDirectEngine engine;
-      stats = engine.Load(resolvedScene.path, gpuScene);
-    }
-    else if (config.app.ingest == "hydra")
-    {
-      HydraEngine engine;
-      stats = engine.Load(resolvedScene.path, gpuScene);
-    }
+    const pyxis::usd_ingest::IngestStats stats =
+        IngestUsd(config.app.ingest, resolvedScene.path, gpuScene);
     sceneLoaded = stats.meshesEmitted > 0 || stats.camerasEmitted > 0;
   }
   if (!sceneLoaded)

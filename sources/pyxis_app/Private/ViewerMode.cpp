@@ -11,10 +11,9 @@
 #include "Output/TextureReadback.h"
 #include "Render/AovRegistry.h"
 #include "Render/AovTextures.h"
-#include "HydraEngine/HydraEngine.h"
+#include "IngestUsd.h"
 #include "Render/HardcodedCubeScene.h"
 #include "Scene/SceneResolver.h"
-#include "UsdDirectEngine/UsdDirectEngine.h"
 
 #include <Pyxis/Platform/Device/DeviceCreationParams.h>
 #include <Pyxis/Platform/Device/IDeviceManager.h>
@@ -299,35 +298,20 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
   Profiler profiler{device};
   GpuScene gpuScene{device, profiler, GpuSceneCreateDesc{}};
 
-  // M3 hardcoded cube + camera + distant light, identical to the
-  // headless fixture. M3.5 + M4 replace this with the USD-loaded
-  // scene chain.
-  // M4 ingest dispatch on `app.ingest`. UsdDirectEngine wires
-  // through pyxis_usd_ingest's StageWalker; HydraEngine lands at
-  // M4 P5e. Either failing or returning "nothing emitted" falls
-  // back to the M3 hardcoded cube so pyxis.exe always renders.
-  //
+  // M4 ingest. Both adapters share the unified IngestUsd entry
+  // point today (StageWalker covers both, satisfying §25.O.3 byte-
+  // equal). Either branch failing or returning "nothing emitted"
+  // falls back to the M3 hardcoded cube so pyxis.exe always renders.
   // Local lambda so the editor's "Open scene..." path below can reuse
-  // the same dispatch. The IngestStats from StageWalker carries both
-  // counts and per-stage timings (UsdStage::Open / pass1 materials /
-  // pass2 instancers / pass3 meshes-lights-camera) — we copy the
-  // five timing fields into ImGuiHost::IngestProfile to feed the
-  // Loading panel breakdown. Returns true if any meshes / cameras
-  // landed (matches the prior bool semantics).
+  // the same dispatch. Copies the five timing fields out of IngestStats
+  // into ImGuiHost::IngestProfile for the Loading-panel breakdown;
+  // returns true iff any meshes / cameras landed (matches the prior
+  // bool semantics).
   auto loadScene = [&](std::string_view             path,
                        std::string_view             adapterLabel,
                        ImGuiHost::IngestProfile&    outProfile) -> bool {
-    pyxis::usd_ingest::IngestStats stats{};
-    if (adapterLabel == "usd_direct")
-    {
-      UsdDirectEngine engine;
-      stats = engine.Load(std::string{path}, gpuScene);
-    }
-    else if (adapterLabel == "hydra")
-    {
-      HydraEngine engine;
-      stats = engine.Load(std::string{path}, gpuScene);
-    }
+    const pyxis::usd_ingest::IngestStats stats =
+        IngestUsd(adapterLabel, path, gpuScene);
     outProfile.totalMs           = stats.totalMs;
     outProfile.stageOpenMs       = stats.stageOpenMs;
     outProfile.traverseSortMs    = stats.traverseSortMs;
