@@ -391,19 +391,34 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
     fbDesc.keepInitialState = true;
     return _device->createTexture(fbDesc);
   };
-  _fallbackColorHdrAov  = makeAovFallback(nvrhi::Format::RGBA16_FLOAT, "PathTrace.FbColorHdrAov");
-  _fallbackNormalAov    = makeAovFallback(nvrhi::Format::RGBA16_FLOAT, "PathTrace.FbNormalAov");
-  _fallbackDepthAov     = makeAovFallback(nvrhi::Format::R32_FLOAT,    "PathTrace.FbDepthAov");
-  _fallbackInstanceAov  = makeAovFallback(nvrhi::Format::R32_UINT,     "PathTrace.FbInstanceAov");
-  _fallbackMaterialAov  = makeAovFallback(nvrhi::Format::R32_UINT,     "PathTrace.FbMaterialAov");
-  _fallbackBaseColorAov = makeAovFallback(nvrhi::Format::RGBA16_FLOAT, "PathTrace.FbBaseColorAov");
-  _fallbackWorldPosAov  = makeAovFallback(nvrhi::Format::RGBA32_FLOAT, "PathTrace.FbWorldPosAov");
-  if (!_fallbackColorHdrAov || !_fallbackNormalAov
-      || !_fallbackDepthAov || !_fallbackInstanceAov
-      || !_fallbackMaterialAov || !_fallbackBaseColorAov || !_fallbackWorldPosAov)
+  // Iterate over a static fallback-spec table — adding a new AOV is
+  // one row in this table + matching member in PathTracePass.h. Pre-
+  // refactor the seven createTexture calls were spelled out verbatim
+  // and the existence check at the bottom was easy to miss when adding
+  // a new format.
+  struct FallbackSpec {
+    nvrhi::TextureHandle PathTracePass::* member;
+    nvrhi::Format format;
+    const char* debugName;
+  };
+  const std::array<FallbackSpec, 7> aovFallbacks{{
+      {&PathTracePass::_fallbackColorHdrAov,  nvrhi::Format::RGBA16_FLOAT, "PathTrace.FbColorHdrAov" },
+      {&PathTracePass::_fallbackNormalAov,    nvrhi::Format::RGBA16_FLOAT, "PathTrace.FbNormalAov"   },
+      {&PathTracePass::_fallbackDepthAov,     nvrhi::Format::R32_FLOAT,    "PathTrace.FbDepthAov"    },
+      {&PathTracePass::_fallbackInstanceAov,  nvrhi::Format::R32_UINT,     "PathTrace.FbInstanceAov" },
+      {&PathTracePass::_fallbackMaterialAov,  nvrhi::Format::R32_UINT,     "PathTrace.FbMaterialAov" },
+      {&PathTracePass::_fallbackBaseColorAov, nvrhi::Format::RGBA16_FLOAT, "PathTrace.FbBaseColorAov"},
+      {&PathTracePass::_fallbackWorldPosAov,  nvrhi::Format::RGBA32_FLOAT, "PathTrace.FbWorldPosAov" },
+  }};
+  for (const FallbackSpec& spec : aovFallbacks)
   {
-    Logging::Get().Error(log::RENDER, "PathTracePass: AOV fallback texture create failed");
-    return;
+    this->*spec.member = makeAovFallback(spec.format, spec.debugName);
+    if (!(this->*spec.member))
+    {
+      Logging::Get().Error(log::RENDER, std::string{"PathTracePass: AOV fallback create failed: "}
+                                            + spec.debugName);
+      return;
+    }
   }
 
   // Pick-result fallback — 1-element RWStructuredBuffer, never read
@@ -506,55 +521,36 @@ bool PathTracePass::ReloadShaders() noexcept {
 
 nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(RenderTargets const& targets) {
   nvrhi::ITexture* output = targets.color;
-  // M5/M6/M7: invalidate cache when ANY of the scene's lazy buffers
-  // flips. Each is lazy-allocated by GpuScene on the first relevant
-  // verb, so a scene that started empty but gained its first
-  // material / instance / light / mesh between frames needs the
-  // cached binding sets thrown out.
-  // M7 follow-up: same for the caller-owned raw AOV textures + pick
-  // buffer — a resize swaps them out from under us.
-  nvrhi::IBuffer* sceneMaterials = _scene->GetMaterialBuffer();
-  nvrhi::IBuffer* sceneInstanceMaterial = _scene->GetInstanceMaterialBuffer();
-  nvrhi::IBuffer* sceneLights = _scene->GetLightBuffer();
-  nvrhi::IBuffer* sceneInstanceMesh = _scene->GetInstanceMeshBuffer();
-  nvrhi::IBuffer* sceneMeshFaceNormals = _scene->GetMeshFaceNormalsBuffer();
-  nvrhi::IBuffer* sceneMeshFaceOffsets = _scene->GetMeshFaceOffsetsBuffer();
-  nvrhi::ITexture* sceneDomeTexture = _scene->GetDomeEnvMapTexture();
-  nvrhi::ISampler* sceneBindlessSampler = _scene->GetBindlessSampler();
-  if (sceneMaterials != _lastSeenMaterialBuffer
-      || sceneInstanceMaterial != _lastSeenInstanceMaterialBuffer
-      || sceneLights != _lastSeenLightBuffer
-      || sceneInstanceMesh != _lastSeenInstanceMeshBuffer
-      || sceneMeshFaceNormals != _lastSeenMeshFaceNormalsBuffer
-      || sceneMeshFaceOffsets != _lastSeenMeshFaceOffsetsBuffer
-      || sceneDomeTexture != _lastSeenDomeTexture
-      || sceneBindlessSampler != _lastSeenBindlessSampler
-      || targets.colorHdr      != _lastSeenColorHdrAov
-      || targets.normalAov     != _lastSeenNormalAov
-      || targets.depthAov      != _lastSeenDepthAov
-      || targets.instanceIdAov != _lastSeenInstanceAov
-      || targets.pickResult    != _lastSeenPickResult
-      || targets.materialIdAov != _lastSeenMaterialAov
-      || targets.baseColorAov  != _lastSeenBaseColorAov
-      || targets.worldPosAov   != _lastSeenWorldPosAov)
+  // Capture every borrowed-pointer that participates in a binding into
+  // one snapshot, then compare against last frame's. A mismatch on
+  // ANY field invalidates the cached binding sets — covers the
+  // scene-side lazy-allocation flips (GpuScene's first AcquireMaterial
+  // / AppendInstance / AddLight that creates a real buffer where a
+  // 1×1 fallback used to live), the caller-side AOV swaps on resize,
+  // and the dome-texture flip when a USD dome's env-map resolves.
+  // C++23 defaulted operator== gives the structural compare for free.
+  const BindingsSnapshot current{
+      .materials              = _scene->GetMaterialBuffer(),
+      .instanceMaterial       = _scene->GetInstanceMaterialBuffer(),
+      .lights                 = _scene->GetLightBuffer(),
+      .instanceMesh           = _scene->GetInstanceMeshBuffer(),
+      .meshFaceNormals        = _scene->GetMeshFaceNormalsBuffer(),
+      .meshFaceOffsets        = _scene->GetMeshFaceOffsetsBuffer(),
+      .domeTexture            = _scene->GetDomeEnvMapTexture(),
+      .bindlessSampler        = _scene->GetBindlessSampler(),
+      .colorHdrAov            = targets.colorHdr,
+      .normalAov              = targets.normalAov,
+      .depthAov               = targets.depthAov,
+      .instanceAov            = targets.instanceIdAov,
+      .materialAov            = targets.materialIdAov,
+      .baseColorAov           = targets.baseColorAov,
+      .worldPosAov            = targets.worldPosAov,
+      .pickResult             = targets.pickResult,
+  };
+  if (!(current == _lastBindings))
   {
     _bindingSetCache.clear();
-    _lastSeenMaterialBuffer = sceneMaterials;
-    _lastSeenInstanceMaterialBuffer = sceneInstanceMaterial;
-    _lastSeenLightBuffer = sceneLights;
-    _lastSeenInstanceMeshBuffer = sceneInstanceMesh;
-    _lastSeenMeshFaceNormalsBuffer = sceneMeshFaceNormals;
-    _lastSeenMeshFaceOffsetsBuffer = sceneMeshFaceOffsets;
-    _lastSeenDomeTexture = sceneDomeTexture;
-    _lastSeenBindlessSampler = sceneBindlessSampler;
-    _lastSeenColorHdrAov = targets.colorHdr;
-    _lastSeenNormalAov = targets.normalAov;
-    _lastSeenDepthAov = targets.depthAov;
-    _lastSeenInstanceAov = targets.instanceIdAov;
-    _lastSeenPickResult = targets.pickResult;
-    _lastSeenMaterialAov = targets.materialIdAov;
-    _lastSeenBaseColorAov = targets.baseColorAov;
-    _lastSeenWorldPosAov = targets.worldPosAov;
+    _lastBindings = current;
   }
 
   if (auto cached = _bindingSetCache.find(output); cached != _bindingSetCache.end())

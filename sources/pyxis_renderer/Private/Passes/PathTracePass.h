@@ -135,49 +135,38 @@ class PathTracePass final : public IRenderPass {
   // accumulating across re-init.
   std::unordered_map<nvrhi::ITexture*, nvrhi::BindingSetHandle> _bindingSetCache;
 
-  // M5: tracks the last-seen scene material-buffer pointer so the
-  // cache invalidates if the scene's lazy-allocated buffer flips
-  // from null (fallback) to non-null (real material table) between
-  // frames. Without this, the cached binding set would keep the
-  // stale fallback after the first AcquireMaterial.
-  nvrhi::IBuffer* _lastSeenMaterialBuffer = nullptr;
-
-  // M6: same invalidation handle for the instance→material side-
-  // table at binding 4. GpuScene allocates this on the first TLAS
-  // build, so an empty scene that gains its first instance between
-  // frames needs the cached binding sets thrown out.
-  nvrhi::IBuffer* _lastSeenInstanceMaterialBuffer = nullptr;
-
-  // M7: same invalidation handle for the lights buffer at binding 5.
-  nvrhi::IBuffer* _lastSeenLightBuffer = nullptr;
-
-  // M7 NdotL: invalidation handles for bindings 6/7/8.
-  nvrhi::IBuffer* _lastSeenInstanceMeshBuffer = nullptr;
-  nvrhi::IBuffer* _lastSeenMeshFaceNormalsBuffer = nullptr;
-  nvrhi::IBuffer* _lastSeenMeshFaceOffsetsBuffer = nullptr;
-
-  // M7-IBL: invalidation handles for bindings 9 (dome texture) +
-  // 10 (sampler). The texture pointer flips when GpuScene resolves
-  // its first dome's env-map; the sampler is shared across the
-  // material + dome path and rarely changes, but we track it so a
-  // future per-role-sampler change invalidates correctly.
-  nvrhi::ITexture* _lastSeenDomeTexture = nullptr;
-  nvrhi::ISampler* _lastSeenBindlessSampler = nullptr;
+  // BindingsSnapshot — every borrowed-pointer that participates in a
+  // binding-set, captured per Execute. A C++23 defaulted operator==
+  // gives memberwise compare for free, so the cache invalidation
+  // logic collapses from 16 separate pointer comparisons + 16
+  // assignments to one struct compare + one struct assign on a miss.
+  // Pre-refactor each of these tracker fields was its own member
+  // with a multi-line comment about which binding it watches.
+  struct BindingsSnapshot {
+    // Scene-side (lazy-allocated by GpuScene; flips from fallback
+    // to real on the first AcquireMaterial / AppendInstance / AddLight).
+    nvrhi::IBuffer*  materials              = nullptr;
+    nvrhi::IBuffer*  instanceMaterial       = nullptr;
+    nvrhi::IBuffer*  lights                 = nullptr;
+    nvrhi::IBuffer*  instanceMesh           = nullptr;
+    nvrhi::IBuffer*  meshFaceNormals        = nullptr;
+    nvrhi::IBuffer*  meshFaceOffsets        = nullptr;
+    nvrhi::ITexture* domeTexture            = nullptr;
+    nvrhi::ISampler* bindlessSampler        = nullptr;
+    // Caller-side raw AOV outputs + pick buffer (M7 follow-up).
+    nvrhi::ITexture* colorHdrAov            = nullptr;
+    nvrhi::ITexture* normalAov              = nullptr;
+    nvrhi::ITexture* depthAov               = nullptr;
+    nvrhi::ITexture* instanceAov            = nullptr;
+    nvrhi::ITexture* materialAov            = nullptr;
+    nvrhi::ITexture* baseColorAov           = nullptr;
+    nvrhi::ITexture* worldPosAov            = nullptr;
+    nvrhi::IBuffer*  pickResult             = nullptr;
+    bool operator==(const BindingsSnapshot&) const = default;
+  };
+  BindingsSnapshot _lastBindings{};
 
   bool _shadersOk = false;  // true if ctor loaded all three shaders + built pipeline.
-
-  // M7 follow-up — AOV inspector + picker.
-  // Cache the raw-AOV / pick pointers from the last RenderTargets we
-  // saw; mismatch => binding-set cache invalidation (same pattern as
-  // the M5/M6/M7 scene-buffer trackers above).
-  nvrhi::ITexture* _lastSeenColorHdrAov  = nullptr;
-  nvrhi::ITexture* _lastSeenNormalAov    = nullptr;
-  nvrhi::ITexture* _lastSeenDepthAov     = nullptr;
-  nvrhi::ITexture* _lastSeenInstanceAov  = nullptr;
-  nvrhi::IBuffer*  _lastSeenPickResult   = nullptr;
-  nvrhi::ITexture* _lastSeenMaterialAov  = nullptr;
-  nvrhi::ITexture* _lastSeenBaseColorAov = nullptr;
-  nvrhi::ITexture* _lastSeenWorldPosAov  = nullptr;
   // Tiny no-UAV fallback textures for each raw AOV format. Bound when
   // the caller doesn't supply that AOV (headless mode + the M2-era
   // color-only paths). Same lifetime as the existing fallbacks above.
