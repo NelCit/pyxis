@@ -387,6 +387,11 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
   RendererCreateDesc rendererDesc{};
   rendererDesc.initialWidth = winDesc.width;
   rendererDesc.initialHeight = winDesc.height;
+  // Thread the device-manager's active FIF so the renderer's
+  // PassContext carries it through to passes that care (today only
+  // PathTracePass's picker readback). Viewer pins FIF=1 today via
+  // its device-creation params.
+  rendererDesc.framesInFlight = deviceManager->GetFramesInFlight();
   PyxisRenderer renderer{device, gpuScene, profiler, rendererDesc};
 
   // ---- Single command list --------------------------------------------

@@ -698,32 +698,27 @@ void PathTracePass::Execute(nvrhi::ICommandList* commandList, const PassContext&
   //     last-known-good value" (a one-extra-frame stale picker).
   // Skipped on the very first Execute too (no copy was issued yet,
   // staging holds default-init garbage).
+  // Picker readback contract — load-bearing, read PyxisRenderer's
+  // RendererCreateDesc::framesInFlight comment before changing FIF:
+  // the mapBuffer-without-fence path here only holds at FIF == 1
+  // because deviceManager->BeginFrame waits the prior submit's fence
+  // before the next Execute reaches this map. At FIF > 1 (e.g. the
+  // headless path, which raises FIF to 3 for §33.7 byte-equal EXR)
+  // the drain silently no-ops — the editor sees the last-known
+  // _lastPickResult value, which is exactly what callers without a
+  // live picker want. A future RFC bumping the viewer's FIF needs an
+  // nvrhi::EventQuery between the submit and the map; that's the
+  // only way to make this safe past FIF=1.
   if (_pickStagingHasFrame
-      && context.targets->pickResultStaging != nullptr)
+      && context.targets->pickResultStaging != nullptr
+      && context.framesInFlight == 1)
   {
-    if (context.framesInFlight > 1)
+    const void* mapped = _device->mapBuffer(context.targets->pickResultStaging,
+                                            nvrhi::CpuAccessMode::Read);
+    if (mapped != nullptr)
     {
-      // Future-proof: the contract only holds at FIF=1. Skip the map
-      // rather than read a possibly-uninitialised staging buffer; the
-      // editor will see the prior _lastPickResult value.
-      static bool warnedOnce = false;
-      if (!warnedOnce)
-      {
-        Logging::Get().Warn(log::RENDER,
-                            "PathTracePass: picker readback skipped — framesInFlight > 1 "
-                            "needs an EventQuery to be safe; falling back to last-known value.");
-        warnedOnce = true;
-      }
-    }
-    else
-    {
-      const void* mapped = _device->mapBuffer(context.targets->pickResultStaging,
-                                              nvrhi::CpuAccessMode::Read);
-      if (mapped != nullptr)
-      {
-        std::memcpy(&_lastPickResult, mapped, sizeof(_lastPickResult));
-        _device->unmapBuffer(context.targets->pickResultStaging);
-      }
+      std::memcpy(&_lastPickResult, mapped, sizeof(_lastPickResult));
+      _device->unmapBuffer(context.targets->pickResultStaging);
     }
   }
 

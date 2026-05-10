@@ -196,6 +196,11 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
   RendererCreateDesc rendererDesc{};
   rendererDesc.initialWidth = config.render.width;
   rendererDesc.initialHeight = config.render.height;
+  // Headless raises FIF to MAX_FRAMES_IN_FLIGHT (= 3) for §33.7
+  // byte-equal EXR — propagate so the renderer's PassContext sees
+  // the real value. Picker isn't driven in headless so the FIF=1
+  // assert in PathTracePass doesn't fire.
+  rendererDesc.framesInFlight = deviceManager->GetFramesInFlight();
   PyxisRenderer renderer{device, gpuScene, profiler, rendererDesc};
 
   const nvrhi::CommandListHandle commandListHandle = device->createCommandList();

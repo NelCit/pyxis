@@ -90,6 +90,11 @@ class PYXIS_RENDERER_API PyxisRenderer final {
   // demand.
   class IRenderPass* _pathTracePass = nullptr;
   uint64_t _frameIndex = 0;
+  // Active frames-in-flight count from RendererCreateDesc. Threaded
+  // into every PassContext so passes can size per-FIF rings.
+  // Today only PathTracePass's picker readback consumes it (asserts
+  // FIF == 1; bumping requires EventQuery support).
+  uint32_t _framesInFlight = 1;
 };
 
 }  // namespace pyxis

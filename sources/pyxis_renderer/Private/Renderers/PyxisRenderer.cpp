@@ -20,8 +20,10 @@
 namespace pyxis {
 
 PyxisRenderer::PyxisRenderer(nvrhi::IDevice* device, GpuScene& scene, Profiler& profiler,
-                             const RendererCreateDesc& /*desc*/)
-    : _profiler(&profiler), _graph(std::make_unique<RenderGraph>(device, &profiler)) {
+                             const RendererCreateDesc& desc)
+    : _profiler(&profiler),
+      _graph(std::make_unique<RenderGraph>(device, &profiler)),
+      _framesInFlight(desc.framesInFlight) {
   // PathTracePass runs only when the supplied scene has a TLAS +
   // camera; before that (e.g. an empty scene), the pass early-outs
   // and the output buffer is left untouched.
@@ -46,10 +48,13 @@ void PyxisRenderer::RenderFrame(nvrhi::ICommandList* commandList, const RenderSe
   context.settings = &settings;
   context.targets = &targets;
   context.frameIndex = _frameIndex++;
-  // Active runtime: 1 frame in flight (cap = MAX_FRAMES_IN_FLIGHT = 3).
-  // Headless raises this to 3 for §33.7 byte-equal EXR; the viewer
-  // stays at 1 until the pacing knobs land at M11.
-  context.framesInFlight = 1;
+  // Active FIF comes from RendererCreateDesc (default 1) — caller
+  // typically passes IDeviceManager::GetFramesInFlight(). Headless
+  // raises this to 3 for §33.7 byte-equal EXR; viewer stays at 1
+  // until the pacing knobs land at M11. PathTracePass's picker
+  // readback asserts == 1 since the mapBuffer-without-fence path
+  // would race past that.
+  context.framesInFlight = _framesInFlight;
 
   const Profiler::CpuScope frameScope(*_profiler, "render.frame.cpu");
   _graph->Execute(commandList, context);
