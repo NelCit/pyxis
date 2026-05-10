@@ -372,6 +372,27 @@ using ConsumedPrototypePaths = std::unordered_set<std::string>;
 // before invoking genTangSpaceDefault.
 using MaterialsNeedingTangents = std::unordered_set<MaterialHandle>;
 
+// Result of mesh-data extraction — the heavy CPU work (USD attr
+// reads, hard-edge dedup, MikkTSpace) lifted out of the GpuScene
+// mutation calls so it can run on worker threads in parallel. The
+// main / render thread later walks PreparedMesh.subMeshes serially
+// and feeds them to scene.CreateMesh / scene.AppendInstance — those
+// stay single-writer per §30.11.
+struct PreparedSubMesh {
+  std::vector<hlslpp::float3>  positions;
+  std::vector<std::uint32_t>   indices;
+  std::vector<hlslpp::float3>  normals;
+  std::vector<hlslpp::float4>  tangents;
+  std::vector<hlslpp::float2>  uv0;
+  MaterialHandle               material  = MaterialHandle::Invalid;
+  std::string                  debugName;
+};
+
+struct PreparedMesh {
+  std::vector<PreparedSubMesh> subMeshes;       // size 0 when prep failed / mesh dropped
+  hlslpp::float4x4             worldFromLocal;  // populated when subMeshes non-empty
+};
+
 // Build a Pyxis MeshDesc from a UsdGeomMesh prim. Returns
 // std::nullopt for ngon-only / empty / invalid meshes — the M5
 // triangle-list constraint is shared with EmitMesh's main path.
@@ -1120,15 +1141,20 @@ void EmitPointInstancer(const pxr::UsdPrim& instancerPrim,
 // are bumped per sub-mesh inside this function so the caller doesn't
 // need to know about subsets. Returns the per-prim count for the
 // caller's local diagnostics.
-std::size_t EmitMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCache,
-                     const MaterialHandleByPath& materialsByPath,
-                     const MaterialsNeedingTangents& materialsNeedingTangents,
-                     const StageContext& stageCtx, GpuScene& scene,
-                     IngestStats& stats) noexcept {
+// Prepare mesh data from a USD prim — pure CPU work, NO GpuScene
+// mutation. Safe to call concurrently from multiple worker threads
+// PROVIDED each thread passes its own xformCache (UsdGeomXformCache
+// is not thread-safe per pxr docs) and materialsByPath /
+// materialsNeedingTangents stay const-shared.
+PreparedMesh PrepareMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCache,
+                         const MaterialHandleByPath& materialsByPath,
+                         const MaterialsNeedingTangents& materialsNeedingTangents,
+                         const StageContext& stageCtx) noexcept {
   auto& log = Logging::Get();
+  PreparedMesh prepared;
   const pxr::UsdGeomMesh meshPrim(prim);
   if (!meshPrim.GetPrim().IsValid())
-    return 0;
+    return prepared;
 
   pxr::VtArray<pxr::GfVec3f> usdPoints;
   pxr::VtArray<int> usdCounts;
@@ -1138,7 +1164,7 @@ std::size_t EmitMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCach
   meshPrim.GetFaceVertexIndicesAttr().Get(&usdIndices);
 
   if (usdPoints.empty() || usdCounts.empty() || usdIndices.empty())
-    return 0;
+    return prepared;
 
   // Convert positions into the §18.4 contiguous layout. Shared
   // across every sub-mesh emitted from this prim.
@@ -1166,7 +1192,7 @@ std::size_t EmitMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCach
                              + std::to_string(running) + " vs indices "
                              + std::to_string(usdIndices.size())
                              + "); dropping mesh.");
-      return 0;
+      return prepared;
     }
   }
 
@@ -1298,10 +1324,10 @@ std::size_t EmitMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCach
     }
   }
 
-  // ---- Per-subset emit loop ----------------------------------------
-  std::size_t emittedCount = 0;
-  const hlslpp::float4x4 worldFromLocal =
-      ComposeWorldFromLocal(prim, xformCache, stageCtx);
+  // ---- Per-subset accumulation loop --------------------------------
+  // Builds prepared.subMeshes; the GpuScene mutation calls live in
+  // EmitPreparedMesh below.
+  prepared.worldFromLocal = ComposeWorldFromLocal(prim, xformCache, stageCtx);
   const std::string primPath = prim.GetPath().GetString();
 
   // Cached interpolation-mode flags — read once, branched per face-
@@ -1535,40 +1561,64 @@ std::size_t EmitMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCach
       }
     }
 
-    const std::string subDebugName = primPath + subset.debugSuffix;
+    PreparedSubMesh subMesh;
+    subMesh.positions = std::move(outPositions);
+    subMesh.indices   = std::move(indices);
+    subMesh.normals   = std::move(outNormals);
+    subMesh.tangents  = std::move(vertexTangents);
+    subMesh.uv0       = std::move(outUvs);
+    subMesh.material  = subset.material;
+    subMesh.debugName = primPath + subset.debugSuffix;
+    prepared.subMeshes.push_back(std::move(subMesh));
+  }
+  return prepared;
+}
+
+// EmitPreparedMesh pushes a PreparedMesh into GpuScene — the
+// single-writer half of the split. Must run on the render / main
+// thread per §30.11. Bumps stats.meshesEmitted /
+// stats.instancesEmitted per sub-mesh; returns the count actually
+// emitted (0 when prep failed or every CreateMesh / AppendInstance
+// failed).
+std::size_t EmitPreparedMesh(const PreparedMesh& prepared, GpuScene& scene,
+                             IngestStats& stats) noexcept {
+  auto& log = Logging::Get();
+  std::size_t emittedCount = 0;
+  for (const PreparedSubMesh& subMesh : prepared.subMeshes)
+  {
     MeshDesc meshDesc;
-    meshDesc.positions = outPositions;
-    meshDesc.indices = indices;
-    meshDesc.uv0 = outUvs;
-    meshDesc.normals = outNormals;
-    meshDesc.tangents = vertexTangents;
-    meshDesc.debugName = subDebugName;
+    meshDesc.positions = subMesh.positions;
+    meshDesc.indices   = subMesh.indices;
+    meshDesc.uv0       = subMesh.uv0;
+    meshDesc.normals   = subMesh.normals;
+    meshDesc.tangents  = subMesh.tangents;
+    meshDesc.debugName = subMesh.debugName;
     const auto meshHandle = scene.CreateMesh(meshDesc);
     if (!meshHandle.has_value())
     {
       log.Error(log::APP, "StageWalker: CreateMesh failed for "
-                              + subDebugName + ": "
+                              + subMesh.debugName + ": "
                               + std::string{meshHandle.error().message.View()});
       continue;
     }
     ++stats.meshesEmitted;
 
     // World transform → instance. Material binding came from the
-    // subset (or the prim-level fallback) — see SubsetEmitInfo above.
+    // subset (or the prim-level fallback) at PrepareMesh time.
     // ComposeWorldFromLocal bakes metersPerUnit + Z->Y if the stage
     // metadata says so, so the BLAS keeps stage-unit local-space
     // geometry while the per-instance transform places it in
     // Pyxis-world (metres + Y-up).
     InstanceDesc instanceDesc;
-    instanceDesc.mesh = *meshHandle;
-    instanceDesc.worldFromLocal = worldFromLocal;
-    instanceDesc.material = subset.material;
-    instanceDesc.debugName = subDebugName;
+    instanceDesc.mesh           = *meshHandle;
+    instanceDesc.worldFromLocal = prepared.worldFromLocal;
+    instanceDesc.material       = subMesh.material;
+    instanceDesc.debugName      = subMesh.debugName;
     const auto instanceHandle = scene.AppendInstance(instanceDesc);
     if (!instanceHandle.has_value())
     {
       log.Error(log::APP, "StageWalker: AppendInstance failed for "
-                              + subDebugName + ": "
+                              + subMesh.debugName + ": "
                               + std::string{instanceHandle.error().message.View()});
       continue;
     }
@@ -1817,8 +1867,9 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
       // GeomSubsets emits N meshes + N instances). The return value is
       // available for per-prim diagnostics; the running counters drive
       // the post-pass log line below.
-      EmitMesh(prim, xformCache, materialsByPath, materialsNeedingTangents,
-               stageCtx, scene, stats);
+      const PreparedMesh prepared = PrepareMesh(prim, xformCache, materialsByPath,
+                                                materialsNeedingTangents, stageCtx);
+      EmitPreparedMesh(prepared, scene, stats);
     }
     else if (prim.IsA<pxr::UsdGeomCamera>())
     {
