@@ -38,9 +38,16 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>
+
+// _spawnvp for the shader-rebuild path (Windows). Avoids std::system
+// (cert-env33-c) by passing argv directly without a shell.
+#if defined(_WIN32)
+    #include <process.h>
+#endif
 
 namespace pyxis::app {
 
@@ -54,6 +61,55 @@ constexpr int EXIT_DEVICE_INIT_FAIL = 2;
 // value has been 256 since GLFW 3.0 and matches USB HID Escape — stable
 // enough for "Escape closes the viewer" UX.
 constexpr int GLFW_ESCAPE_KEY_CODE = 256;
+
+// Walk up from `start` looking for a CMakeCache.txt file. Returns the
+// directory containing it, or an empty path if none found within 8
+// levels (covers `build/dev/bin/Release/pyxis.exe` -> `build/dev`).
+// Used by the editor's "Reload shaders" path to spawn
+// `cmake --build <buildDir> --target pyxis_renderer_shaders` so the
+// click recompiles the .slang sources before the renderer re-reads
+// the .spv from disk.
+[[nodiscard]] std::filesystem::path FindCMakeBuildDir(
+    const std::filesystem::path& start) noexcept {
+  std::filesystem::path candidate = start;
+  for (int depth = 0; depth < 8; ++depth)
+  {
+    std::error_code errorCode;
+    const std::filesystem::path cacheFile = candidate / "CMakeCache.txt";
+    if (std::filesystem::exists(cacheFile, errorCode))
+      return candidate;
+    if (!candidate.has_parent_path() || candidate.parent_path() == candidate)
+      break;
+    candidate = candidate.parent_path();
+  }
+  return {};
+}
+
+// Spawn `cmake --build <buildDir> --target pyxis_renderer_shaders` and
+// block until it completes. Returns true on exit code 0. The editor's
+// reload-shaders path calls this BEFORE asking the renderer to re-read
+// .spv from disk so the click also picks up .slang source edits.
+// Uses _spawnvp (Windows) to avoid the shell — std::system trips
+// clang-tidy's cert-env33-c rule and would shell-parse paths.
+[[nodiscard]] bool RebuildShaderTarget(const std::filesystem::path& buildDir) noexcept {
+  if (buildDir.empty())
+    return false;
+#if defined(_WIN32)
+  const std::string buildDirStr = buildDir.generic_string();
+  const char* const argv[] = {
+      "cmake", "--build", buildDirStr.c_str(),
+      "--target", "pyxis_renderer_shaders",
+      nullptr,
+  };
+  // _spawnvp searches PATH for cmake.exe; _P_WAIT blocks until exit.
+  const intptr_t spawnResult = _spawnvp(_P_WAIT, "cmake",
+                                        const_cast<char* const*>(argv));
+  return spawnResult == 0;
+#else
+  (void)buildDir;
+  return false;
+#endif
+}
 
 }  // namespace
 
@@ -445,6 +501,30 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
       // log line is the user-visible feedback.
       if (imguiHost.TakeShaderReloadRequest())
       {
+        // Two-step reload: (a) spawn `cmake --build <buildDir>
+        // --target pyxis_renderer_shaders` to recompile .slang ->
+        // .spv, then (b) wait the GPU idle and ask the renderer to
+        // re-read the freshly-built .spv. Without (a) the click only
+        // picks up .slang edits if the user separately re-ran cmake;
+        // the audit asked for the click to close that loop.
+        const std::filesystem::path buildDir =
+            FindCMakeBuildDir(std::filesystem::current_path());
+        if (buildDir.empty())
+        {
+          log.Warn(log::APP,
+                   "ViewerMode: shader reload — no CMakeCache.txt found near cwd; "
+                   "skipping ShaderMake rebuild and re-loading the existing .spv.");
+        }
+        else if (RebuildShaderTarget(buildDir))
+        {
+          log.Info(log::APP, "ViewerMode: shader rebuild OK ("
+                                 + buildDir.generic_string() + ")");
+        }
+        else
+        {
+          log.Warn(log::APP, "ViewerMode: shader rebuild FAILED — re-loading the "
+                             "existing .spv anyway (any edits won't be picked up).");
+        }
         device->waitForIdle();
         const bool reloadOk = renderer.ReloadShaders();
         log.Info(log::APP, std::string{"ViewerMode: shader reload "}
