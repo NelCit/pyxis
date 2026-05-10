@@ -7,6 +7,12 @@
 // Commit.cpp is the only verb file that pulls in stb_image +
 // tinyexr — pixel decode happens lazily inside CommitResources, not
 // at AcquireTexture time, so Texture.cpp stays decode-free.
+//
+// CommitResources is an orchestrator: it zeros per-frame counters,
+// validates inputs, and then forwards through the per-resource-type
+// member functions below in order. Each one services exactly one
+// upload / build phase; PYXIS_TRY propagates GPU-creation failures
+// up the chain unchanged.
 
 #include "GpuScene/Internal.h"
 
@@ -22,6 +28,10 @@
 namespace pyxis {
 
 using namespace gpuscene_detail;
+
+// ============================================================================
+// Clear
+// ============================================================================
 
 void GpuScene::Impl::Clear() noexcept
 {
@@ -87,6 +97,10 @@ void GpuScene::Impl::Clear() noexcept
   lastFrameStats = FrameStats{};
 }
 
+// ============================================================================
+// CommitResources orchestrator
+// ============================================================================
+
 Expected<void> GpuScene::Impl::CommitResources(nvrhi::ICommandList* commandList)
 {
   // Zero the per-frame counters at the start of every commit so the
@@ -115,7 +129,31 @@ Expected<void> GpuScene::Impl::CommitResources(nvrhi::ICommandList* commandList)
 
   const Profiler::CpuScope commitScope(*profiler, "render.commitResources");
 
-  // ---- Upload pending meshes ----------------------------------------
+  // Order matters: meshes upload first (BLAS build needs the buffers
+  // to exist), bindless fallbacks before texture decode (texture
+  // entries fall back to slot 0), texture decode before material pack
+  // (material-flag bits depend on resolved bindless slots), TLAS
+  // rebuild before instance side-tables (the side-tables mirror the
+  // instance vector shape, not strictly TLAS-dependent, but keeping
+  // them adjacent makes the dirty-flag dependency obvious).
+  PYXIS_TRY(UploadPendingMeshes(commandList));
+  PYXIS_TRY(EnsureBindlessFallbacks(commandList));
+  PYXIS_TRY(UploadPendingTextures(commandList));
+  PYXIS_TRY(UploadMaterialBuffer(commandList));
+  PYXIS_TRY(UploadLightBuffer(commandList));
+  PYXIS_TRY(BuildPendingBlas(commandList));
+  PYXIS_TRY(RebuildTlasIfDirty(commandList));
+  PYXIS_TRY(UploadInstanceSideTables(commandList));
+  PYXIS_TRY(UploadMeshFaceNormals(commandList));
+  return {};
+}
+
+// ============================================================================
+// Per-resource-type uploaders
+// ============================================================================
+
+Expected<void> GpuScene::Impl::UploadPendingMeshes(nvrhi::ICommandList* commandList)
+{
   for (MeshEntry& entry : meshes)
   {
     if (!entry.live || !entry.needsGpuUpload)
@@ -167,8 +205,11 @@ Expected<void> GpuScene::Impl::CommitResources(nvrhi::ICommandList* commandList)
     commandList->writeBuffer(entry.indexBuffer.Get(), entry.indices.data(), indexBytes);
     entry.needsGpuUpload = false;
   }
+  return {};
+}
 
-  // ---- M5: lazy-init missing-texture + bindless sampler -------------
+Expected<void> GpuScene::Impl::EnsureBindlessFallbacks(nvrhi::ICommandList* commandList)
+{
   // The magenta 4×4 fallback lives in slot 0 of the bindless texture
   // table; every material whose resolved path failed to decode
   // points at it via INVALID_BINDLESS_TEXTURE → fallback gating in
@@ -217,8 +258,11 @@ Expected<void> GpuScene::Impl::CommitResources(nvrhi::ICommandList* commandList)
     samplerDesc.addressW = nvrhi::SamplerAddressMode::Wrap;
     bindlessSampler = device->createSampler(samplerDesc);
   }
+  return {};
+}
 
-  // ---- M5/M7: decode + upload pending textures ----------------------
+Expected<void> GpuScene::Impl::UploadPendingTextures(nvrhi::ICommandList* commandList)
+{
   // Synchronous decode on the render thread (§31 async I/O pool
   // wires at M8). LDR (.png/.jpg) goes through stb_image as RGBA8;
   // HDR (.exr — added at M7 for the dome environment map) goes
@@ -329,124 +373,130 @@ Expected<void> GpuScene::Impl::CommitResources(nvrhi::ICommandList* commandList)
     entry.pixelData.shrink_to_fit();
     entry.needsGpuUpload = false;
   }
+  return {};
+}
 
-  // ---- M5: pack + upload material GPU buffer ------------------------
+Expected<void> GpuScene::Impl::UploadMaterialBuffer(nvrhi::ICommandList* commandList)
+{
   // Re-uploaded whenever any material was added or updated this
   // frame (or when the materials vector grew). Small enough at v1
   // (~80 bytes per material × hundreds-of-thousands materials cap
   // = a few MiB worst case) that we always re-upload the whole
   // table rather than tracking dirty ranges.
-  if (materialsNeedGpuUpload && materials.size() > 1)
+  if (!materialsNeedGpuUpload || materials.size() <= 1)
+    return {};
+
+  std::vector<shaderinterop::OpenPBRMaterialGPU> packed;
+  packed.resize(materials.size());
+  for (std::uint32_t slot = 0; slot < materials.size(); ++slot)
   {
-    std::vector<shaderinterop::OpenPBRMaterialGPU> packed;
-    packed.resize(materials.size());
-    for (std::uint32_t slot = 0; slot < materials.size(); ++slot)
+    const MaterialEntry& entry = materials[slot];
+    if (slot == 0 || !entry.live)
     {
-      const MaterialEntry& entry = materials[slot];
-      if (slot == 0 || !entry.live)
-      {
-        // Sentinel slot 0 + dead materials → magenta-fallback
-        // material so the closesthit reads valid bytes regardless.
-        packed[slot] = PackMaterialGpu(
-            OpenPBRMaterialDesc{},
-            static_cast<std::uint32_t>(MaterialFlag::None),
-            shaderinterop::INVALID_BINDLESS_TEXTURE,
-            shaderinterop::INVALID_BINDLESS_TEXTURE,
-            shaderinterop::INVALID_BINDLESS_TEXTURE,
-            shaderinterop::INVALID_BINDLESS_TEXTURE,
-            shaderinterop::INVALID_BINDLESS_TEXTURE,
-            shaderinterop::INVALID_BINDLESS_TEXTURE,
-            shaderinterop::INVALID_BINDLESS_TEXTURE,
-            shaderinterop::INVALID_BINDLESS_TEXTURE);
-        continue;
-      }
-      // Compute MaterialFlag bits from the desc + the texture
-      // handles. The closesthit reads `flags` to short-circuit the
-      // bindless lookup so a missing texture renders the scalar
-      // fallback rather than the magenta missingTexture.
-      std::uint32_t flags = 0;
-      if (entry.descCopy.opacity < 1.0f) flags |= MaterialFlag::AlphaTested;
-      if (entry.descCopy.coatWeight > 0.0f) flags |= MaterialFlag::CoatEnabled;
-      if (entry.descCopy.transmissionWeight > 0.0f)
-        flags |= MaterialFlag::TransmissionEnabled;
-      if (entry.descCopy.emissionLuminance > 0.0f) flags |= MaterialFlag::Emissive;
-
-      const std::uint32_t baseColorSlot =
-          ResolveTextureBindlessSlot(entry.descCopy.baseColorMap);
-      const std::uint32_t normalSlot =
-          ResolveTextureBindlessSlot(entry.descCopy.normalMap);
-      const std::uint32_t metallicSlot =
-          ResolveTextureBindlessSlot(entry.descCopy.metallicMap);
-      const std::uint32_t roughnessSlot =
-          ResolveTextureBindlessSlot(entry.descCopy.roughnessMap);
-      const std::uint32_t emissionSlot =
-          ResolveTextureBindlessSlot(entry.descCopy.emissionMap);
-      const std::uint32_t opacitySlot =
-          ResolveTextureBindlessSlot(entry.descCopy.opacityMap);
-      const std::uint32_t transmissionSlot =
-          ResolveTextureBindlessSlot(entry.descCopy.transmissionMap);
-      const std::uint32_t coatRoughnessSlot =
-          ResolveTextureBindlessSlot(entry.descCopy.coatRoughnessMap);
-
-      if (baseColorSlot != shaderinterop::INVALID_BINDLESS_TEXTURE)
-        flags |= MaterialFlag::HasBaseColorMap;
-      if (normalSlot != shaderinterop::INVALID_BINDLESS_TEXTURE)
-        flags |= MaterialFlag::HasNormalMap;
-      if (metallicSlot != shaderinterop::INVALID_BINDLESS_TEXTURE)
-        flags |= MaterialFlag::HasMetallicMap;
-      if (roughnessSlot != shaderinterop::INVALID_BINDLESS_TEXTURE)
-        flags |= MaterialFlag::HasRoughnessMap;
-      if (emissionSlot != shaderinterop::INVALID_BINDLESS_TEXTURE)
-        flags |= MaterialFlag::HasEmissionMap;
-      if (opacitySlot != shaderinterop::INVALID_BINDLESS_TEXTURE)
-        flags |= MaterialFlag::HasOpacityMap;
-      if (transmissionSlot != shaderinterop::INVALID_BINDLESS_TEXTURE)
-        flags |= MaterialFlag::HasTransmissionMap;
-      if (coatRoughnessSlot != shaderinterop::INVALID_BINDLESS_TEXTURE)
-        flags |= MaterialFlag::HasCoatRoughnessMap;
-
+      // Sentinel slot 0 + dead materials → magenta-fallback
+      // material so the closesthit reads valid bytes regardless.
       packed[slot] = PackMaterialGpu(
-          entry.descCopy, flags,
-          baseColorSlot, normalSlot, metallicSlot, roughnessSlot,
-          emissionSlot, opacitySlot, transmissionSlot, coatRoughnessSlot);
+          OpenPBRMaterialDesc{},
+          static_cast<std::uint32_t>(MaterialFlag::None),
+          shaderinterop::INVALID_BINDLESS_TEXTURE,
+          shaderinterop::INVALID_BINDLESS_TEXTURE,
+          shaderinterop::INVALID_BINDLESS_TEXTURE,
+          shaderinterop::INVALID_BINDLESS_TEXTURE,
+          shaderinterop::INVALID_BINDLESS_TEXTURE,
+          shaderinterop::INVALID_BINDLESS_TEXTURE,
+          shaderinterop::INVALID_BINDLESS_TEXTURE,
+          shaderinterop::INVALID_BINDLESS_TEXTURE);
+      continue;
     }
+    // Compute MaterialFlag bits from the desc + the texture
+    // handles. The closesthit reads `flags` to short-circuit the
+    // bindless lookup so a missing texture renders the scalar
+    // fallback rather than the magenta missingTexture.
+    std::uint32_t flags = 0;
+    if (entry.descCopy.opacity < 1.0f) flags |= MaterialFlag::AlphaTested;
+    if (entry.descCopy.coatWeight > 0.0f) flags |= MaterialFlag::CoatEnabled;
+    if (entry.descCopy.transmissionWeight > 0.0f)
+      flags |= MaterialFlag::TransmissionEnabled;
+    if (entry.descCopy.emissionLuminance > 0.0f) flags |= MaterialFlag::Emissive;
 
-    const std::size_t bufferBytes = packed.size() * sizeof(shaderinterop::OpenPBRMaterialGPU);
-    // (Re)create the GPU buffer if it doesn't exist or grew. M5 stub
-    // grows monotonically — DestroyMaterial leaves a hole rather
-    // than reclaiming the slot index. M8 perf sweep adds compaction.
-    if (!materialGpuBuffer
-        || materialGpuBuffer->getDesc().byteSize < bufferBytes)
-    {
-      nvrhi::BufferDesc bufDesc;
-      bufDesc.byteSize = bufferBytes;
-      bufDesc.structStride = sizeof(shaderinterop::OpenPBRMaterialGPU);
-      bufDesc.canHaveRawViews = false;
-      bufDesc.canHaveTypedViews = false;
-      bufDesc.format = nvrhi::Format::UNKNOWN;
-      bufDesc.debugName = "scene.materials";
-      bufDesc.initialState = nvrhi::ResourceStates::ShaderResource;
-      bufDesc.keepInitialState = true;
-      materialGpuBuffer = device->createBuffer(bufDesc);
-      if (!materialGpuBuffer)
-      {
-        return std::unexpected{
-            PYXIS_ERROR(ErrorKind::OutOfMemoryGpu,
-                        "CommitResources: createBuffer(materials, %zu bytes) failed",
-                        bufferBytes)};
-      }
-    }
-    commandList->writeBuffer(materialGpuBuffer.Get(), packed.data(), bufferBytes);
-    // Per-entry needsGpuUpload flags are advisory only since we
-    // always re-upload the whole table; clearing them keeps the
-    // bookkeeping consistent so a future incremental-upload path
-    // (M8+) can drop into place without semantic changes.
-    for (MaterialEntry& entry : materials)
-      entry.needsGpuUpload = false;
-    materialsNeedGpuUpload = false;
+    const std::uint32_t baseColorSlot =
+        ResolveTextureBindlessSlot(entry.descCopy.baseColorMap);
+    const std::uint32_t normalSlot =
+        ResolveTextureBindlessSlot(entry.descCopy.normalMap);
+    const std::uint32_t metallicSlot =
+        ResolveTextureBindlessSlot(entry.descCopy.metallicMap);
+    const std::uint32_t roughnessSlot =
+        ResolveTextureBindlessSlot(entry.descCopy.roughnessMap);
+    const std::uint32_t emissionSlot =
+        ResolveTextureBindlessSlot(entry.descCopy.emissionMap);
+    const std::uint32_t opacitySlot =
+        ResolveTextureBindlessSlot(entry.descCopy.opacityMap);
+    const std::uint32_t transmissionSlot =
+        ResolveTextureBindlessSlot(entry.descCopy.transmissionMap);
+    const std::uint32_t coatRoughnessSlot =
+        ResolveTextureBindlessSlot(entry.descCopy.coatRoughnessMap);
+
+    if (baseColorSlot != shaderinterop::INVALID_BINDLESS_TEXTURE)
+      flags |= MaterialFlag::HasBaseColorMap;
+    if (normalSlot != shaderinterop::INVALID_BINDLESS_TEXTURE)
+      flags |= MaterialFlag::HasNormalMap;
+    if (metallicSlot != shaderinterop::INVALID_BINDLESS_TEXTURE)
+      flags |= MaterialFlag::HasMetallicMap;
+    if (roughnessSlot != shaderinterop::INVALID_BINDLESS_TEXTURE)
+      flags |= MaterialFlag::HasRoughnessMap;
+    if (emissionSlot != shaderinterop::INVALID_BINDLESS_TEXTURE)
+      flags |= MaterialFlag::HasEmissionMap;
+    if (opacitySlot != shaderinterop::INVALID_BINDLESS_TEXTURE)
+      flags |= MaterialFlag::HasOpacityMap;
+    if (transmissionSlot != shaderinterop::INVALID_BINDLESS_TEXTURE)
+      flags |= MaterialFlag::HasTransmissionMap;
+    if (coatRoughnessSlot != shaderinterop::INVALID_BINDLESS_TEXTURE)
+      flags |= MaterialFlag::HasCoatRoughnessMap;
+
+    packed[slot] = PackMaterialGpu(
+        entry.descCopy, flags,
+        baseColorSlot, normalSlot, metallicSlot, roughnessSlot,
+        emissionSlot, opacitySlot, transmissionSlot, coatRoughnessSlot);
   }
 
-  // ---- Pack + upload light table (M7) -------------------------------
+  const std::size_t bufferBytes = packed.size() * sizeof(shaderinterop::OpenPBRMaterialGPU);
+  // (Re)create the GPU buffer if it doesn't exist or grew. M5 stub
+  // grows monotonically — DestroyMaterial leaves a hole rather
+  // than reclaiming the slot index. M8 perf sweep adds compaction.
+  if (!materialGpuBuffer
+      || materialGpuBuffer->getDesc().byteSize < bufferBytes)
+  {
+    nvrhi::BufferDesc bufDesc;
+    bufDesc.byteSize = bufferBytes;
+    bufDesc.structStride = sizeof(shaderinterop::OpenPBRMaterialGPU);
+    bufDesc.canHaveRawViews = false;
+    bufDesc.canHaveTypedViews = false;
+    bufDesc.format = nvrhi::Format::UNKNOWN;
+    bufDesc.debugName = "scene.materials";
+    bufDesc.initialState = nvrhi::ResourceStates::ShaderResource;
+    bufDesc.keepInitialState = true;
+    materialGpuBuffer = device->createBuffer(bufDesc);
+    if (!materialGpuBuffer)
+    {
+      return std::unexpected{
+          PYXIS_ERROR(ErrorKind::OutOfMemoryGpu,
+                      "CommitResources: createBuffer(materials, %zu bytes) failed",
+                      bufferBytes)};
+    }
+  }
+  commandList->writeBuffer(materialGpuBuffer.Get(), packed.data(), bufferBytes);
+  // Per-entry needsGpuUpload flags are advisory only since we
+  // always re-upload the whole table; clearing them keeps the
+  // bookkeeping consistent so a future incremental-upload path
+  // (M8+) can drop into place without semantic changes.
+  for (MaterialEntry& entry : materials)
+    entry.needsGpuUpload = false;
+  materialsNeedGpuUpload = false;
+  return {};
+}
+
+Expected<void> GpuScene::Impl::UploadLightBuffer(nvrhi::ICommandList* commandList)
+{
   // Packs every LIVE LightEntry into a tightly-packed LightGpu buffer
   // bound at PathTracePass binding 5. Sparse / dead slots are
   // omitted — the closesthit iterates the buffer's full length, so
@@ -454,50 +504,53 @@ Expected<void> GpuScene::Impl::CommitResources(nvrhi::ICommandList* commandList)
   // simple shading model in closesthit.slang ignores `intensity ==
   // 0` so a fallback 1-element zero buffer (used by PathTracePass
   // when the scene has no lights) contributes nothing.
-  if (lightsNeedGpuUpload)
-  {
-    std::vector<shaderinterop::LightGpu> packedLights;
-    packedLights.reserve(lights.size());
-    for (const LightEntry& entry : lights)
-    {
-      if (!entry.live)
-        continue;
-      const std::uint32_t envMapSlot =
-          ResolveTextureBindlessSlot(entry.descCopy.envMap);
-      packedLights.push_back(PackLightGpu(entry.descCopy, envMapSlot));
-    }
-    if (!packedLights.empty())
-    {
-      const std::size_t lightBytes =
-          packedLights.size() * sizeof(shaderinterop::LightGpu);
-      if (!lightsGpuBuffer
-          || lightsGpuBuffer->getDesc().byteSize < lightBytes)
-      {
-        nvrhi::BufferDesc bufDesc;
-        bufDesc.byteSize = lightBytes;
-        bufDesc.structStride = sizeof(shaderinterop::LightGpu);
-        bufDesc.canHaveRawViews = false;
-        bufDesc.canHaveTypedViews = false;
-        bufDesc.format = nvrhi::Format::UNKNOWN;
-        bufDesc.debugName = "scene.lights";
-        bufDesc.initialState = nvrhi::ResourceStates::ShaderResource;
-        bufDesc.keepInitialState = true;
-        lightsGpuBuffer = device->createBuffer(bufDesc);
-        if (!lightsGpuBuffer)
-        {
-          return std::unexpected{
-              PYXIS_ERROR(ErrorKind::OutOfMemoryGpu,
-                          "CommitResources: createBuffer(lights, %zu bytes) failed",
-                          lightBytes)};
-        }
-      }
-      commandList->writeBuffer(lightsGpuBuffer.Get(), packedLights.data(),
-                               lightBytes);
-    }
-    lightsNeedGpuUpload = false;
-  }
+  if (!lightsNeedGpuUpload)
+    return {};
 
-  // ---- Build pending BLAS -------------------------------------------
+  std::vector<shaderinterop::LightGpu> packedLights;
+  packedLights.reserve(lights.size());
+  for (const LightEntry& entry : lights)
+  {
+    if (!entry.live)
+      continue;
+    const std::uint32_t envMapSlot =
+        ResolveTextureBindlessSlot(entry.descCopy.envMap);
+    packedLights.push_back(PackLightGpu(entry.descCopy, envMapSlot));
+  }
+  if (!packedLights.empty())
+  {
+    const std::size_t lightBytes =
+        packedLights.size() * sizeof(shaderinterop::LightGpu);
+    if (!lightsGpuBuffer
+        || lightsGpuBuffer->getDesc().byteSize < lightBytes)
+    {
+      nvrhi::BufferDesc bufDesc;
+      bufDesc.byteSize = lightBytes;
+      bufDesc.structStride = sizeof(shaderinterop::LightGpu);
+      bufDesc.canHaveRawViews = false;
+      bufDesc.canHaveTypedViews = false;
+      bufDesc.format = nvrhi::Format::UNKNOWN;
+      bufDesc.debugName = "scene.lights";
+      bufDesc.initialState = nvrhi::ResourceStates::ShaderResource;
+      bufDesc.keepInitialState = true;
+      lightsGpuBuffer = device->createBuffer(bufDesc);
+      if (!lightsGpuBuffer)
+      {
+        return std::unexpected{
+            PYXIS_ERROR(ErrorKind::OutOfMemoryGpu,
+                        "CommitResources: createBuffer(lights, %zu bytes) failed",
+                        lightBytes)};
+      }
+    }
+    commandList->writeBuffer(lightsGpuBuffer.Get(), packedLights.data(),
+                             lightBytes);
+  }
+  lightsNeedGpuUpload = false;
+  return {};
+}
+
+Expected<void> GpuScene::Impl::BuildPendingBlas(nvrhi::ICommandList* commandList)
+{
   // §16 split rule: PreferFastTrace always, AllowCompaction for ≥
   // 64k tris. AllowUpdate is never set in v1 — animation is post-v1
   // (§42).
@@ -562,89 +615,96 @@ Expected<void> GpuScene::Impl::CommitResources(nvrhi::ICommandList* commandList)
                                              buildFlags);
     entry.needsBlasBuild = false;
   }
+  return {};
+}
 
-  // ---- Rebuild TLAS if instances changed ----------------------------
+Expected<void> GpuScene::Impl::RebuildTlasIfDirty(nvrhi::ICommandList* commandList)
+{
   // Lazy-allocate the TLAS on first need; size it to a fixed
   // M3-friendly capacity (TLAS_MAX_INSTANCES). M6+ grows this with
   // the scene budget.
-  if (tlasNeedsRebuild)
+  if (!tlasNeedsRebuild)
+    return {};
+
+  if (!tlas)
   {
+    nvrhi::rt::AccelStructDesc tlasDesc;
+    tlasDesc.isTopLevel = true;
+    tlasDesc.topLevelMaxInstances = TLAS_MAX_INSTANCES;
+    tlasDesc.buildFlags = nvrhi::rt::AccelStructBuildFlags::PreferFastTrace;
+    tlasDesc.debugName = "scene.tlas";
+    tlas = device->createAccelStruct(tlasDesc);
     if (!tlas)
     {
-      nvrhi::rt::AccelStructDesc tlasDesc;
-      tlasDesc.isTopLevel = true;
-      tlasDesc.topLevelMaxInstances = TLAS_MAX_INSTANCES;
-      tlasDesc.buildFlags = nvrhi::rt::AccelStructBuildFlags::PreferFastTrace;
-      tlasDesc.debugName = "scene.tlas";
-      tlas = device->createAccelStruct(tlasDesc);
-      if (!tlas)
-      {
-        return std::unexpected{
-            PYXIS_ERROR(ErrorKind::AccelStructBuildFailed,
-                        "CommitResources: createAccelStruct(TLAS, max=%zu) failed",
-                        TLAS_MAX_INSTANCES)};
-      }
-    }
-
-    // Gather one nvrhi::rt::InstanceDesc per live + visible instance
-    // whose mesh has a live BLAS. Skipping instances whose BLAS
-    // isn't ready yet is the right behaviour during partial
-    // mid-frame ingest — they'll join on the next CommitResources
-    // tick.
-    std::vector<nvrhi::rt::InstanceDesc> instanceDescs;
-    instanceDescs.reserve(instances.size());
-    for (uint32_t slot = 1; slot < instances.size(); ++slot)
-    {
-      const InstanceEntry& inst = instances[slot];
-      if (!inst.live || !inst.visible)
-        continue;
-      const auto meshValue = static_cast<uint32_t>(inst.mesh);
-      const uint32_t meshSlot = HandleSlot(meshValue);
-      if (meshSlot == 0 || meshSlot >= meshes.size())
-        continue;
-      const MeshEntry& mesh = meshes[meshSlot];
-      if (!mesh.live || !mesh.blas)
-        continue;
-
-      nvrhi::rt::InstanceDesc desc;
-      // §10 row-major + column-vector float4x4 → NVRHI's 3x4 affine
-      // layout. NVRHI's AffineTransform is `float[12]` storing 3
-      // rows of 4 columns in row-major order — Pyxis's
-      // worldFromLocal rows 0..2 (drop row 3, the [0,0,0,1]
-      // homogeneous padding) are byte-equivalent. hlslpp::store
-      // writes 16 floats row-major; we keep the first 12.
-      float worldRowMajor[16];
-      hlslpp::store(worldRowMajor, inst.worldFromLocal);
-      std::memcpy(&desc.transform, worldRowMajor, sizeof(nvrhi::rt::AffineTransform));
-      desc.instanceMask = 0xFF;
-      // Plan §15 — instanceCustomIndex carries the INSTANCE slot
-      // (24-bit cap matches §19.7's HANDLE_SLOT_BITS). The
-      // closesthit reads `instanceMaterial[InstanceID()]` to
-      // resolve the material slot, then `materials[that]` to read
-      // the OpenPBR fields. The indirection costs one extra buffer
-      // load per closest-hit and frees the custom index for the
-      // §41 M6 instanceId AOV + future picking (§19.4).
-      desc.instanceID = slot;
-      desc.instanceContributionToHitGroupIndex = 0;
-      desc.flags = nvrhi::rt::InstanceFlags::None;
-      desc.bottomLevelAS = mesh.blas.Get();
-      instanceDescs.push_back(desc);
-    }
-
-    if (instanceDescs.size() > TLAS_MAX_INSTANCES)
-    {
       return std::unexpected{
-          PYXIS_ERROR(ErrorKind::TlasInstanceLimitExceeded,
-                      "CommitResources: TLAS rebuild needs %zu instances, cap is %zu",
-                      instanceDescs.size(), TLAS_MAX_INSTANCES)};
+          PYXIS_ERROR(ErrorKind::AccelStructBuildFailed,
+                      "CommitResources: createAccelStruct(TLAS, max=%zu) failed",
+                      TLAS_MAX_INSTANCES)};
     }
-
-    commandList->buildTopLevelAccelStruct(tlas.Get(), instanceDescs.data(),
-                                          instanceDescs.size(),
-                                          nvrhi::rt::AccelStructBuildFlags::PreferFastTrace);
-    tlasNeedsRebuild = false;
   }
 
+  // Gather one nvrhi::rt::InstanceDesc per live + visible instance
+  // whose mesh has a live BLAS. Skipping instances whose BLAS
+  // isn't ready yet is the right behaviour during partial
+  // mid-frame ingest — they'll join on the next CommitResources
+  // tick.
+  std::vector<nvrhi::rt::InstanceDesc> instanceDescs;
+  instanceDescs.reserve(instances.size());
+  for (uint32_t slot = 1; slot < instances.size(); ++slot)
+  {
+    const InstanceEntry& inst = instances[slot];
+    if (!inst.live || !inst.visible)
+      continue;
+    const auto meshValue = static_cast<uint32_t>(inst.mesh);
+    const uint32_t meshSlot = HandleSlot(meshValue);
+    if (meshSlot == 0 || meshSlot >= meshes.size())
+      continue;
+    const MeshEntry& mesh = meshes[meshSlot];
+    if (!mesh.live || !mesh.blas)
+      continue;
+
+    nvrhi::rt::InstanceDesc desc;
+    // §10 row-major + column-vector float4x4 → NVRHI's 3x4 affine
+    // layout. NVRHI's AffineTransform is `float[12]` storing 3
+    // rows of 4 columns in row-major order — Pyxis's
+    // worldFromLocal rows 0..2 (drop row 3, the [0,0,0,1]
+    // homogeneous padding) are byte-equivalent. hlslpp::store
+    // writes 16 floats row-major; we keep the first 12.
+    float worldRowMajor[16];
+    hlslpp::store(worldRowMajor, inst.worldFromLocal);
+    std::memcpy(&desc.transform, worldRowMajor, sizeof(nvrhi::rt::AffineTransform));
+    desc.instanceMask = 0xFF;
+    // Plan §15 — instanceCustomIndex carries the INSTANCE slot
+    // (24-bit cap matches §19.7's HANDLE_SLOT_BITS). The
+    // closesthit reads `instanceMaterial[InstanceID()]` to
+    // resolve the material slot, then `materials[that]` to read
+    // the OpenPBR fields. The indirection costs one extra buffer
+    // load per closest-hit and frees the custom index for the
+    // §41 M6 instanceId AOV + future picking (§19.4).
+    desc.instanceID = slot;
+    desc.instanceContributionToHitGroupIndex = 0;
+    desc.flags = nvrhi::rt::InstanceFlags::None;
+    desc.bottomLevelAS = mesh.blas.Get();
+    instanceDescs.push_back(desc);
+  }
+
+  if (instanceDescs.size() > TLAS_MAX_INSTANCES)
+  {
+    return std::unexpected{
+        PYXIS_ERROR(ErrorKind::TlasInstanceLimitExceeded,
+                    "CommitResources: TLAS rebuild needs %zu instances, cap is %zu",
+                    instanceDescs.size(), TLAS_MAX_INSTANCES)};
+  }
+
+  commandList->buildTopLevelAccelStruct(tlas.Get(), instanceDescs.data(),
+                                        instanceDescs.size(),
+                                        nvrhi::rt::AccelStructBuildFlags::PreferFastTrace);
+  tlasNeedsRebuild = false;
+  return {};
+}
+
+Expected<void> GpuScene::Impl::UploadInstanceSideTables(nvrhi::ICommandList* commandList)
+{
   // Plan §15 / M6 P0 — upload the instance→material side-table.
   // Indexed by instance slot (so dead/sparse slots are present but
   // unread; they're never visited because the TLAS only contains
@@ -653,86 +713,89 @@ Expected<void> GpuScene::Impl::CommitResources(nvrhi::ICommandList* commandList)
   // GpuScene sentinel grey material). Re-uploaded whenever the
   // dedicated dirty flag fires — independent of TLAS rebuild so
   // UpdateInstanceMaterial doesn't pointlessly rebuild the TLAS.
-  if (instanceMaterialNeedsUpload && !instances.empty())
+  if (!instanceMaterialNeedsUpload || instances.empty())
+    return {};
+
+  const std::size_t instanceTableEntries = instances.size();
+  std::vector<std::uint32_t> instanceMaterialTable(instanceTableEntries, 0u);
+  for (std::size_t entrySlot = 1; entrySlot < instanceTableEntries; ++entrySlot)
   {
-    const std::size_t instanceTableEntries = instances.size();
-    std::vector<std::uint32_t> instanceMaterialTable(instanceTableEntries, 0u);
-    for (std::size_t entrySlot = 1; entrySlot < instanceTableEntries; ++entrySlot)
-    {
-      const InstanceEntry& inst = instances[entrySlot];
-      if (!inst.live)
-        continue;
-      const auto materialValue = static_cast<std::uint32_t>(inst.material);
-      instanceMaterialTable[entrySlot] =
-          (materialValue == 0) ? 0u : HandleSlot(materialValue);
-    }
-    const std::size_t instanceTableBytes =
-        instanceMaterialTable.size() * sizeof(std::uint32_t);
-    if (!instanceMaterialBuffer
-        || instanceMaterialBuffer->getDesc().byteSize < instanceTableBytes)
-    {
-      nvrhi::BufferDesc bufDesc;
-      bufDesc.byteSize = instanceTableBytes;
-      bufDesc.structStride = sizeof(std::uint32_t);
-      bufDesc.canHaveRawViews = false;
-      bufDesc.canHaveTypedViews = false;
-      bufDesc.format = nvrhi::Format::UNKNOWN;
-      bufDesc.debugName = "GpuScene.instanceMaterialBuffer";
-      bufDesc.initialState = nvrhi::ResourceStates::ShaderResource;
-      bufDesc.keepInitialState = true;
-      instanceMaterialBuffer = device->createBuffer(bufDesc);
-      if (!instanceMaterialBuffer)
-      {
-        return std::unexpected{
-            PYXIS_ERROR(ErrorKind::OutOfMemoryGpu,
-                        "CommitResources: createBuffer(instanceMaterialBuffer) failed")};
-      }
-    }
-    commandList->writeBuffer(instanceMaterialBuffer.Get(),
-                             instanceMaterialTable.data(), instanceTableBytes);
-
-    // M7 NdotL — instance→mesh side-table. Same shape + lifecycle
-    // as instanceMaterialBuffer; piggy-backs on the same dirty flag
-    // because instance ↔ mesh changes only happen when the TLAS
-    // shape changes (AppendInstance / DestroyInstance / visibility
-    // flip — UpdateInstanceMaterial doesn't touch instance.mesh).
-    std::vector<std::uint32_t> instanceMeshTable(instanceTableEntries, 0u);
-    for (std::size_t entrySlot = 1; entrySlot < instanceTableEntries; ++entrySlot)
-    {
-      const InstanceEntry& inst = instances[entrySlot];
-      if (!inst.live)
-        continue;
-      const auto meshValue = static_cast<std::uint32_t>(inst.mesh);
-      instanceMeshTable[entrySlot] =
-          (meshValue == 0) ? 0u : HandleSlot(meshValue);
-    }
-    if (!instanceMeshBuffer
-        || instanceMeshBuffer->getDesc().byteSize < instanceTableBytes)
-    {
-      nvrhi::BufferDesc bufDesc;
-      bufDesc.byteSize = instanceTableBytes;
-      bufDesc.structStride = sizeof(std::uint32_t);
-      bufDesc.canHaveRawViews = false;
-      bufDesc.canHaveTypedViews = false;
-      bufDesc.format = nvrhi::Format::UNKNOWN;
-      bufDesc.debugName = "GpuScene.instanceMeshBuffer";
-      bufDesc.initialState = nvrhi::ResourceStates::ShaderResource;
-      bufDesc.keepInitialState = true;
-      instanceMeshBuffer = device->createBuffer(bufDesc);
-      if (!instanceMeshBuffer)
-      {
-        return std::unexpected{
-            PYXIS_ERROR(ErrorKind::OutOfMemoryGpu,
-                        "CommitResources: createBuffer(instanceMeshBuffer) failed")};
-      }
-    }
-    commandList->writeBuffer(instanceMeshBuffer.Get(),
-                             instanceMeshTable.data(), instanceTableBytes);
-
-    instanceMaterialNeedsUpload = false;
+    const InstanceEntry& inst = instances[entrySlot];
+    if (!inst.live)
+      continue;
+    const auto materialValue = static_cast<std::uint32_t>(inst.material);
+    instanceMaterialTable[entrySlot] =
+        (materialValue == 0) ? 0u : HandleSlot(materialValue);
   }
+  const std::size_t instanceTableBytes =
+      instanceMaterialTable.size() * sizeof(std::uint32_t);
+  if (!instanceMaterialBuffer
+      || instanceMaterialBuffer->getDesc().byteSize < instanceTableBytes)
+  {
+    nvrhi::BufferDesc bufDesc;
+    bufDesc.byteSize = instanceTableBytes;
+    bufDesc.structStride = sizeof(std::uint32_t);
+    bufDesc.canHaveRawViews = false;
+    bufDesc.canHaveTypedViews = false;
+    bufDesc.format = nvrhi::Format::UNKNOWN;
+    bufDesc.debugName = "GpuScene.instanceMaterialBuffer";
+    bufDesc.initialState = nvrhi::ResourceStates::ShaderResource;
+    bufDesc.keepInitialState = true;
+    instanceMaterialBuffer = device->createBuffer(bufDesc);
+    if (!instanceMaterialBuffer)
+    {
+      return std::unexpected{
+          PYXIS_ERROR(ErrorKind::OutOfMemoryGpu,
+                      "CommitResources: createBuffer(instanceMaterialBuffer) failed")};
+    }
+  }
+  commandList->writeBuffer(instanceMaterialBuffer.Get(),
+                           instanceMaterialTable.data(), instanceTableBytes);
 
-  // ---- Pack + upload mesh face normals (M7 NdotL) -------------------
+  // M7 NdotL — instance→mesh side-table. Same shape + lifecycle
+  // as instanceMaterialBuffer; piggy-backs on the same dirty flag
+  // because instance ↔ mesh changes only happen when the TLAS
+  // shape changes (AppendInstance / DestroyInstance / visibility
+  // flip — UpdateInstanceMaterial doesn't touch instance.mesh).
+  std::vector<std::uint32_t> instanceMeshTable(instanceTableEntries, 0u);
+  for (std::size_t entrySlot = 1; entrySlot < instanceTableEntries; ++entrySlot)
+  {
+    const InstanceEntry& inst = instances[entrySlot];
+    if (!inst.live)
+      continue;
+    const auto meshValue = static_cast<std::uint32_t>(inst.mesh);
+    instanceMeshTable[entrySlot] =
+        (meshValue == 0) ? 0u : HandleSlot(meshValue);
+  }
+  if (!instanceMeshBuffer
+      || instanceMeshBuffer->getDesc().byteSize < instanceTableBytes)
+  {
+    nvrhi::BufferDesc bufDesc;
+    bufDesc.byteSize = instanceTableBytes;
+    bufDesc.structStride = sizeof(std::uint32_t);
+    bufDesc.canHaveRawViews = false;
+    bufDesc.canHaveTypedViews = false;
+    bufDesc.format = nvrhi::Format::UNKNOWN;
+    bufDesc.debugName = "GpuScene.instanceMeshBuffer";
+    bufDesc.initialState = nvrhi::ResourceStates::ShaderResource;
+    bufDesc.keepInitialState = true;
+    instanceMeshBuffer = device->createBuffer(bufDesc);
+    if (!instanceMeshBuffer)
+    {
+      return std::unexpected{
+          PYXIS_ERROR(ErrorKind::OutOfMemoryGpu,
+                      "CommitResources: createBuffer(instanceMeshBuffer) failed")};
+    }
+  }
+  commandList->writeBuffer(instanceMeshBuffer.Get(),
+                           instanceMeshTable.data(), instanceTableBytes);
+
+  instanceMaterialNeedsUpload = false;
+  return {};
+}
+
+Expected<void> GpuScene::Impl::UploadMeshFaceNormals(nvrhi::ICommandList* commandList)
+{
   // Concatenates every live mesh's per-triangle face normals into one
   // flat float4 buffer + a per-mesh-slot start-offset table. The
   // closesthit's NdotL Lambert pass reads:
@@ -741,75 +804,74 @@ Expected<void> GpuScene::Impl::CommitResources(nvrhi::ICommandList* commandList)
   // The +1 in the offsets sizing reserves slot 0 (the §19.7
   // sentinel mesh handle) so the closesthit's "no mesh assigned"
   // path resolves to offset 0 with a black/zero normal entry.
-  if (meshFaceNormalsNeedUpload && !meshes.empty())
+  if (!meshFaceNormalsNeedUpload || meshes.empty())
+    return {};
+
+  std::vector<hlslpp::float4> packedNormals;
+  std::vector<std::uint32_t>  perMeshOffsets(meshes.size(), 0u);
+  for (std::size_t meshSlot = 0; meshSlot < meshes.size(); ++meshSlot)
   {
-    std::vector<hlslpp::float4> packedNormals;
-    std::vector<std::uint32_t>  perMeshOffsets(meshes.size(), 0u);
-    for (std::size_t meshSlot = 0; meshSlot < meshes.size(); ++meshSlot)
-    {
-      perMeshOffsets[meshSlot] = static_cast<std::uint32_t>(packedNormals.size());
-      const MeshEntry& mesh = meshes[meshSlot];
-      if (!mesh.live)
-        continue;
-      packedNormals.insert(packedNormals.end(), mesh.faceNormals.begin(),
-                           mesh.faceNormals.end());
-    }
-    if (packedNormals.empty())
-    {
-      // Empty scene with no meshes registered yet — nothing to
-      // upload. The PathTracePass fallback handles this.
-      packedNormals.emplace_back(0.0f, 0.0f, 0.0f, 0.0f);
-    }
-    const std::size_t normalsBytes = packedNormals.size() * sizeof(hlslpp::float4);
-    const std::size_t offsetsBytes = perMeshOffsets.size() * sizeof(std::uint32_t);
-
-    if (!meshFaceNormalsBuffer
-        || meshFaceNormalsBuffer->getDesc().byteSize < normalsBytes)
-    {
-      nvrhi::BufferDesc bufDesc;
-      bufDesc.byteSize = normalsBytes;
-      bufDesc.structStride = sizeof(hlslpp::float4);
-      bufDesc.canHaveRawViews = false;
-      bufDesc.canHaveTypedViews = false;
-      bufDesc.format = nvrhi::Format::UNKNOWN;
-      bufDesc.debugName = "GpuScene.meshFaceNormalsBuffer";
-      bufDesc.initialState = nvrhi::ResourceStates::ShaderResource;
-      bufDesc.keepInitialState = true;
-      meshFaceNormalsBuffer = device->createBuffer(bufDesc);
-      if (!meshFaceNormalsBuffer)
-      {
-        return std::unexpected{
-            PYXIS_ERROR(ErrorKind::OutOfMemoryGpu,
-                        "CommitResources: createBuffer(meshFaceNormalsBuffer) failed")};
-      }
-    }
-    if (!meshFaceOffsetsBuffer
-        || meshFaceOffsetsBuffer->getDesc().byteSize < offsetsBytes)
-    {
-      nvrhi::BufferDesc bufDesc;
-      bufDesc.byteSize = offsetsBytes;
-      bufDesc.structStride = sizeof(std::uint32_t);
-      bufDesc.canHaveRawViews = false;
-      bufDesc.canHaveTypedViews = false;
-      bufDesc.format = nvrhi::Format::UNKNOWN;
-      bufDesc.debugName = "GpuScene.meshFaceOffsetsBuffer";
-      bufDesc.initialState = nvrhi::ResourceStates::ShaderResource;
-      bufDesc.keepInitialState = true;
-      meshFaceOffsetsBuffer = device->createBuffer(bufDesc);
-      if (!meshFaceOffsetsBuffer)
-      {
-        return std::unexpected{
-            PYXIS_ERROR(ErrorKind::OutOfMemoryGpu,
-                        "CommitResources: createBuffer(meshFaceOffsetsBuffer) failed")};
-      }
-    }
-    commandList->writeBuffer(meshFaceNormalsBuffer.Get(), packedNormals.data(),
-                             normalsBytes);
-    commandList->writeBuffer(meshFaceOffsetsBuffer.Get(), perMeshOffsets.data(),
-                             offsetsBytes);
-    meshFaceNormalsNeedUpload = false;
+    perMeshOffsets[meshSlot] = static_cast<std::uint32_t>(packedNormals.size());
+    const MeshEntry& mesh = meshes[meshSlot];
+    if (!mesh.live)
+      continue;
+    packedNormals.insert(packedNormals.end(), mesh.faceNormals.begin(),
+                         mesh.faceNormals.end());
   }
+  if (packedNormals.empty())
+  {
+    // Empty scene with no meshes registered yet — nothing to
+    // upload. The PathTracePass fallback handles this.
+    packedNormals.emplace_back(0.0f, 0.0f, 0.0f, 0.0f);
+  }
+  const std::size_t normalsBytes = packedNormals.size() * sizeof(hlslpp::float4);
+  const std::size_t offsetsBytes = perMeshOffsets.size() * sizeof(std::uint32_t);
 
+  if (!meshFaceNormalsBuffer
+      || meshFaceNormalsBuffer->getDesc().byteSize < normalsBytes)
+  {
+    nvrhi::BufferDesc bufDesc;
+    bufDesc.byteSize = normalsBytes;
+    bufDesc.structStride = sizeof(hlslpp::float4);
+    bufDesc.canHaveRawViews = false;
+    bufDesc.canHaveTypedViews = false;
+    bufDesc.format = nvrhi::Format::UNKNOWN;
+    bufDesc.debugName = "GpuScene.meshFaceNormalsBuffer";
+    bufDesc.initialState = nvrhi::ResourceStates::ShaderResource;
+    bufDesc.keepInitialState = true;
+    meshFaceNormalsBuffer = device->createBuffer(bufDesc);
+    if (!meshFaceNormalsBuffer)
+    {
+      return std::unexpected{
+          PYXIS_ERROR(ErrorKind::OutOfMemoryGpu,
+                      "CommitResources: createBuffer(meshFaceNormalsBuffer) failed")};
+    }
+  }
+  if (!meshFaceOffsetsBuffer
+      || meshFaceOffsetsBuffer->getDesc().byteSize < offsetsBytes)
+  {
+    nvrhi::BufferDesc bufDesc;
+    bufDesc.byteSize = offsetsBytes;
+    bufDesc.structStride = sizeof(std::uint32_t);
+    bufDesc.canHaveRawViews = false;
+    bufDesc.canHaveTypedViews = false;
+    bufDesc.format = nvrhi::Format::UNKNOWN;
+    bufDesc.debugName = "GpuScene.meshFaceOffsetsBuffer";
+    bufDesc.initialState = nvrhi::ResourceStates::ShaderResource;
+    bufDesc.keepInitialState = true;
+    meshFaceOffsetsBuffer = device->createBuffer(bufDesc);
+    if (!meshFaceOffsetsBuffer)
+    {
+      return std::unexpected{
+          PYXIS_ERROR(ErrorKind::OutOfMemoryGpu,
+                      "CommitResources: createBuffer(meshFaceOffsetsBuffer) failed")};
+    }
+  }
+  commandList->writeBuffer(meshFaceNormalsBuffer.Get(), packedNormals.data(),
+                           normalsBytes);
+  commandList->writeBuffer(meshFaceOffsetsBuffer.Get(), perMeshOffsets.data(),
+                           offsetsBytes);
+  meshFaceNormalsNeedUpload = false;
   return {};
 }
 

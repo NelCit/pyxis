@@ -569,9 +569,22 @@ struct GpuScene::Impl
   void                 UpdateLight(LightHandle lightHandle, const LightDesc& lightDesc);
   void                 RemoveLight(LightHandle lightHandle);
 
-  // Commit.cpp (Clear + CommitResources — both touch every table)
+  // Commit.cpp (Clear + CommitResources — both touch every table).
+  // CommitResources is an orchestrator over the per-resource-type
+  // member functions below; each one services one upload/build phase
+  // and propagates GPU-creation failures up through PYXIS_TRY.
   void                 Clear() noexcept;
-  Expected<void>       CommitResources(nvrhi::ICommandList* commandList);
+  [[nodiscard]] Expected<void> CommitResources(nvrhi::ICommandList* commandList);
+
+  [[nodiscard]] Expected<void> UploadPendingMeshes(nvrhi::ICommandList* commandList);
+  [[nodiscard]] Expected<void> EnsureBindlessFallbacks(nvrhi::ICommandList* commandList);
+  [[nodiscard]] Expected<void> UploadPendingTextures(nvrhi::ICommandList* commandList);
+  [[nodiscard]] Expected<void> UploadMaterialBuffer(nvrhi::ICommandList* commandList);
+  [[nodiscard]] Expected<void> UploadLightBuffer(nvrhi::ICommandList* commandList);
+  [[nodiscard]] Expected<void> BuildPendingBlas(nvrhi::ICommandList* commandList);
+  [[nodiscard]] Expected<void> RebuildTlasIfDirty(nvrhi::ICommandList* commandList);
+  [[nodiscard]] Expected<void> UploadInstanceSideTables(nvrhi::ICommandList* commandList);
+  [[nodiscard]] Expected<void> UploadMeshFaceNormals(nvrhi::ICommandList* commandList);
 };
 
 }  // namespace pyxis
