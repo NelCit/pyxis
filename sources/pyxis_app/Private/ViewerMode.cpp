@@ -625,6 +625,7 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
       if (imguiHost.IsReady())
       {
         settings.debugView = imguiHost.GetDebugView();
+        settings.worldPosPeriod = imguiHost.GetWorldPosPeriod();
       }
       // Picker pin: when the editor has pinned the picker, the
       // raygen keeps sampling the locked pixel regardless of cursor

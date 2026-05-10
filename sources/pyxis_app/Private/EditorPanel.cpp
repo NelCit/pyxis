@@ -257,6 +257,19 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
         ImGui::EndCombo();
       }
 
+      // Per-AOV display knob: WorldPos period slider. Only useful
+      // (and only visible) when WorldPos is the picked display.
+      // Range: 0.1 m for unit-scale fixtures up to 200 m for
+      // Bistro / outdoor environments. ViewerMode pushes the value
+      // into RenderSettings::worldPosPeriod each frame.
+      if (_editorDebugView == RenderSettings::DebugView::WorldPos)
+      {
+        ImGui::PushItemWidth(180.0f);
+        ImGui::SliderFloat("WorldPos period (m)", &_editorWorldPosPeriod,
+                           0.1f, 200.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+        ImGui::PopItemWidth();
+      }
+
       // Pixel picker — readout from the prior frame's PickResult.
       // Shows EVERY AOV channel the inspector exposes (mirrors the
       // PickResult struct that raygen filled), plus the pixel coords
@@ -312,6 +325,10 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
       const bool didHit = (pick.depth > 0.0f);
       if (didHit)
       {
+        // Units: depth + worldPos are in scene units (typically
+        // metres — USD's stage metersPerUnit defaults to 1). Suffix
+        // makes the magnitude unambiguous when the user compares
+        // against the viewport / RenderDoc.
         ImGui::Text("  color      %.3f, %.3f, %.3f",
                     static_cast<double>(pick.colorR),
                     static_cast<double>(pick.colorG),
@@ -320,14 +337,14 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
                     static_cast<double>(pick.normalX),
                     static_cast<double>(pick.normalY),
                     static_cast<double>(pick.normalZ));
-        ImGui::Text("  depth      %.3f", static_cast<double>(pick.depth));
+        ImGui::Text("  depth      %.3f m", static_cast<double>(pick.depth));
         ImGui::Text("  instance   %u", static_cast<unsigned int>(pick.instanceId));
         ImGui::Text("  material   %u", static_cast<unsigned int>(pick.materialId));
         ImGui::Text("  baseColor  %.3f, %.3f, %.3f",
                     static_cast<double>(pick.baseColorR),
                     static_cast<double>(pick.baseColorG),
                     static_cast<double>(pick.baseColorB));
-        ImGui::Text("  worldPos   %.3f, %.3f, %.3f",
+        ImGui::Text("  worldPos   %.3f, %.3f, %.3f m",
                     static_cast<double>(pick.worldHitX),
                     static_cast<double>(pick.worldHitY),
                     static_cast<double>(pick.worldHitZ));

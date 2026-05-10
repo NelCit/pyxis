@@ -168,6 +168,11 @@ class ImGuiHost {
   // like the M7 baseline until the user picks a different AOV.
   RenderSettings::DebugView             _editorDebugView =
       RenderSettings::DebugView::Color;
+  // WorldPos AOV display period (scene units). Editor exposes a
+  // slider when the WorldPos display mode is selected; ViewerMode
+  // pushes this into RenderSettings::worldPosPeriod each frame.
+  // Default 10 m matches the pre-slider hardcoded behaviour.
+  float                                 _editorWorldPosPeriod = 10.0f;
   // Latest pick readback the viewer pushed from PyxisRenderer's
   // LastPickResult(); displayed in the Editor panel as a hover
   // readout (color, normal, depth, instance id).
@@ -246,6 +251,9 @@ class ImGuiHost {
   [[nodiscard]] RenderSettings::DebugView GetDebugView() const noexcept {
     return _editorDebugView;
   }
+  // Editor's WorldPos period slider value (scene units). ViewerMode
+  // pushes this into RenderSettings::worldPosPeriod each frame.
+  [[nodiscard]] float GetWorldPosPeriod() const noexcept { return _editorWorldPosPeriod; }
 
   // ViewerMode pushes the renderer's LastPickResult() into the panel
   // each frame; the Editor displays the hover-pixel values.

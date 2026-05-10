@@ -108,10 +108,20 @@ struct CameraUniforms {
 // CameraUniforms to its original 128-byte two-matrix shape; the four
 // uint slots below carry the viewer state at a dedicated binding.
 struct FrameUiUniforms {
-    uint mousePixelX;           // top-left origin pixel coord, or PICK_PIXEL_NONE if no hover
-    uint mousePixelY;
-    uint debugViewMode;         // DEBUG_VIEW_COLOR / NORMAL / DEPTH / INSTANCE_ID / ...
-    uint _reservedUi0;
+    // Row 0 — picker + display selector.
+    uint  mousePixelX;          // top-left origin pixel coord, or PICK_PIXEL_NONE if no hover
+    uint  mousePixelY;
+    uint  debugViewMode;        // DEBUG_VIEW_COLOR / NORMAL / DEPTH / INSTANCE_ID / ...
+    uint  _reservedUi0;
+    // Row 1 — AOV-specific knobs the editor surfaces as sliders.
+    // worldPosPeriod: scene-units period of the WorldPos AOV's sin
+    // encoding (10 m default for human-scale scenes; bump to ~50 m
+    // for Bistro). Other fields reserved for future per-AOV display
+    // knobs.
+    float worldPosPeriod;
+    uint  _reservedUi1;
+    uint  _reservedUi2;
+    uint  _reservedUi3;
 };
 
 // Debug-view selector mirrored on both sides. The combo in ImGuiHost's
@@ -289,8 +299,9 @@ static const uint LIGHT_KIND_RECT    = 2;
                   "(see resources/shaders/ShaderInterop.slang).");
     static_assert(sizeof(CameraUniforms) % 16 == 0,
                   "CameraUniforms must be 16-byte aligned (cbuffer std140 rule).");
-    static_assert(sizeof(FrameUiUniforms) == 16,
-                  "FrameUiUniforms must be 16 bytes (one cbuffer row).");
+    static_assert(sizeof(FrameUiUniforms) == 32,
+                  "FrameUiUniforms must be 32 bytes (2 cbuffer rows: picker / "
+                  "display selector + per-AOV knobs).");
     static_assert(sizeof(FrameUiUniforms) % 16 == 0,
                   "FrameUiUniforms must be 16-byte aligned (cbuffer std140 rule).");
     static_assert(sizeof(PickResult) == 80,

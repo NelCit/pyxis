@@ -52,6 +52,14 @@ struct RenderSettings {
   static constexpr uint32_t MOUSE_PIXEL_NONE = 0xFFFFFFFFu;
   uint32_t mousePixelX = MOUSE_PIXEL_NONE;
   uint32_t mousePixelY = MOUSE_PIXEL_NONE;
+
+  // WorldPos AOV display period (scene units, typically meters).
+  // The display branch in raygen.slang encodes worldPos via
+  // sin(p * 2pi / worldPosPeriod) so a smaller value gives finer
+  // bands. 10 m is a sensible default for human-scale scenes;
+  // crank to ~50 m for Bistro-scale (or down to ~0.1 m for a unit
+  // cube). 0 falls through to PathTracePass's default of 10.
+  float worldPosPeriod = 10.0f;
 };
 
 }  // namespace pyxis

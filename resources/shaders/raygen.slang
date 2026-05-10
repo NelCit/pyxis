@@ -241,7 +241,7 @@ void main() {
     else if (gFrameUi.debugViewMode == DEBUG_VIEW_WORLD_POS)
     {
         // Visualise world-space hit position via a SMOOTH periodic
-        // encoding — sin remap to [0,1] with a 10-unit period.
+        // encoding — sin remap to [0,1] with a configurable period.
         // Pre-fix this used `frac(worldHit * 0.1)` which has a sharp
         // 0->1 discontinuity at every integer multiple of the period,
         // producing visible bright/dark bands at floors / walls /
@@ -255,9 +255,15 @@ void main() {
         // texture in RenderDoc shows the actual world coords, not
         // the sin-encoded display. Picker readout reports the raw
         // worldPos triple from the PickResult buffer.
-        const float WORLD_POS_OMEGA = 0.62831853f;  // 2*pi / 10 (10-unit period)
+        //
+        // Period comes from the editor's WorldPos period slider via
+        // FrameUiUniforms; defaults to 10 m for human-scale scenes.
+        // Guard against 0 (would divide by zero).
+        const float period = max(gFrameUi.worldPosPeriod, 1e-3);
+        const float WORLD_POS_TAU = 6.28318530717958647692;
+        const float omega = WORLD_POS_TAU / period;
         displayColor = (payload.hitT > 0.0f)
-            ? (sin(payload.worldHit * WORLD_POS_OMEGA) * 0.5f + 0.5f)
+            ? (sin(payload.worldHit * omega) * 0.5f + 0.5f)
             : float3(0.0, 0.0, 0.0);
     }
     gOutput[launchIndex] = float4(displayColor, 1.0f);

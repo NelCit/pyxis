@@ -39,9 +39,9 @@ using shaderinterop::CameraUniforms;
 static_assert(sizeof(CameraUniforms) == 128,
               "CameraUniforms is two float4x4s = 128 bytes "
               "(see resources/shaders/ShaderInterop.slang).");
-static_assert(sizeof(shaderinterop::FrameUiUniforms) == 16,
-              "FrameUiUniforms must be one cbuffer row (16 bytes); the M7 "
-              "follow-up split keeps UI state out of CameraUniforms.");
+static_assert(sizeof(shaderinterop::FrameUiUniforms) == 32,
+              "FrameUiUniforms is 32 bytes (2 cbuffer rows): picker + display "
+              "selector on row 0, per-AOV knobs (worldPosPeriod + reserved) on row 1.");
 
 std::vector<char> ReadBinaryFile(std::string_view path) noexcept {
   std::ifstream stream(std::string{path}, std::ios::binary | std::ios::ate);
@@ -756,6 +756,16 @@ void PathTracePass::Execute(nvrhi::ICommandList* commandList, const PassContext&
                               ? static_cast<uint32_t>(context.settings->debugView)
                               : 0u;
   frameUi._reservedUi0 = 0u;
+  // Per-AOV knobs (row 1). worldPosPeriod default of 10 m matches the
+  // pre-slider behaviour; the editor's WorldPos display can crank
+  // this up for Bistro-scale scenes (~50 m) without touching shader.
+  frameUi.worldPosPeriod = (context.settings != nullptr
+                            && context.settings->worldPosPeriod > 0.0f)
+                               ? context.settings->worldPosPeriod
+                               : 10.0f;
+  frameUi._reservedUi1 = 0u;
+  frameUi._reservedUi2 = 0u;
+  frameUi._reservedUi3 = 0u;
   commandList->writeBuffer(_frameUiBuffer.Get(), &frameUi, sizeof(frameUi));
 
   // M5: write the fallback material if the scene has no materials of
