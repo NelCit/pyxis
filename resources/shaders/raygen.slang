@@ -230,7 +230,13 @@ void main() {
     float3 displayColor = float3(0.0, 0.0, 0.0);
     if (gFrameUi.debugViewMode == DEBUG_VIEW_COLOR)
     {
-        displayColor = acesFilmic(payload.color);
+        // Photographic exposure: scale scene radiance by 2^exposure
+        // before tonemapping. Mirrors UsdGeomCamera.exposure semantics
+        // (negative darkens, positive brightens). World Lobby et al.
+        // calibrate light intensities for a strongly-negative camera
+        // exposure (~-10 stops); without this scale the dome blows out.
+        const float exposureGain = exp2(gCamera.exposure);
+        displayColor = acesFilmic(payload.color * exposureGain);
     }
     else if (gFrameUi.debugViewMode == DEBUG_VIEW_NORMAL)
     {

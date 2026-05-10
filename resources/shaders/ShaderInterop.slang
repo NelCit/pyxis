@@ -103,6 +103,15 @@ struct CameraUniforms {
     float4x4 worldFromView;     // inverse of CameraDesc::viewFromWorld
     float4x4 viewFromClip;      // inverse of CameraDesc::projFromView
     float4x4 viewFromWorld;     // forward — for Neye / Peye AOVs
+    // Row 12 — photographic exposure adjustment in stops. Raygen
+    // multiplies post-shading radiance by 2^exposure before the
+    // ACES tonemap. 0 = ×1 = no adjustment. Mirrors
+    // CameraDesc::exposure / UsdGeomCamera::exposure. Three pad
+    // floats keep the cbuffer 16-byte aligned (std140 rule).
+    float exposure;
+    float _camPad0;
+    float _camPad1;
+    float _camPad2;
 };
 
 // FrameUiUniforms — per-frame viewer-only state the raygen reads
@@ -324,10 +333,11 @@ static const uint LIGHT_KIND_RECT    = 2;
     // we lock the layout of the structs that *do* cross the C++ /
     // SPIR-V boundary as memory blobs (CameraUniforms via cbuffer,
     // OpenPBRMaterialGPU via structured buffer).
-    static_assert(sizeof(CameraUniforms) == 192,
-                  "CameraUniforms must be 192 bytes — three 64-byte float4x4s "
-                  "(worldFromView + viewFromClip inverses + viewFromWorld forward, "
-                  "see resources/shaders/ShaderInterop.slang).");
+    static_assert(sizeof(CameraUniforms) == 208,
+                  "CameraUniforms must be 208 bytes — three 64-byte float4x4s "
+                  "(worldFromView + viewFromClip + viewFromWorld) plus a 16-byte "
+                  "row carrying exposure (in stops) + 3 pad floats (std140 16-byte "
+                  "alignment). See resources/shaders/ShaderInterop.slang.");
     static_assert(sizeof(CameraUniforms) % 16 == 0,
                   "CameraUniforms must be 16-byte aligned (cbuffer std140 rule).");
     static_assert(sizeof(FrameUiUniforms) == 32,

@@ -708,6 +708,17 @@ std::optional<CameraDesc> BuildCameraDesc(const pxr::UsdPrim& prim,
   const pxr::GfRange1f clipRange = gfCamera.GetClippingRange();
   desc.nearClip = clipRange.GetMin();
   desc.farClip  = clipRange.GetMax();
+  // UsdGeomCamera::exposure (in stops). Defaults to 0 = no adjustment.
+  // Omniverse + DCC content commonly authors a strongly negative
+  // value (e.g. -10) to compensate for radiometric light intensities
+  // that are calibrated for a physically-based exposure response;
+  // without consuming this attribute the scene blows out to white.
+  if (const pxr::UsdAttribute exposureAttr = cameraPrim.GetExposureAttr())
+  {
+    float exposure = 0.0f;
+    if (exposureAttr.Get(&exposure))
+      desc.exposure = exposure;
+  }
   return desc;
 }
 

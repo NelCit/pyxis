@@ -553,6 +553,14 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
           cameraEdited = true;
           projectionEdited = true;
         }
+        // Photographic exposure (stops). Multiplies post-shading
+        // radiance by 2^exposure before ACES tonemap. Linear range
+        // -20..+5 covers the Omniverse-style "intensity 12000 + exposure
+        // -10" calibration plus normal-content room (-3..+3 stops).
+        // Doesn't touch projFromView so projectionEdited stays false.
+        if (ImGui::SliderFloat("Exposure (stops)", &cameraDesc.exposure, -20.0f, 5.0f,
+                               "%.2f"))
+          cameraEdited = true;
         ImGui::PopItemWidth();
 
         if (projectionEdited)

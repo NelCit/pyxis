@@ -36,9 +36,9 @@ namespace {
 // size on the C++ allocator below, the build fails here rather than
 // at runtime via a confusing validation error.
 using shaderinterop::CameraUniforms;
-static_assert(sizeof(CameraUniforms) == 192,
-              "CameraUniforms is three float4x4s = 192 bytes "
-              "(worldFromView / viewFromClip inverses + viewFromWorld forward, "
+static_assert(sizeof(CameraUniforms) == 208,
+              "CameraUniforms is three float4x4s + 16-byte exposure row = 208 bytes "
+              "(worldFromView / viewFromClip / viewFromWorld + exposure stops, "
               "see resources/shaders/ShaderInterop.slang).");
 static_assert(sizeof(shaderinterop::FrameUiUniforms) == 32,
               "FrameUiUniforms is 32 bytes (2 cbuffer rows): picker + display "
@@ -769,6 +769,13 @@ void PathTracePass::Execute(nvrhi::ICommandList* commandList, const PassContext&
   // needed; raygen uses it to transform world-space hit position +
   // normal into eye space for the Hydra-canonical Neye / Peye AOVs.
   cameraUniforms.viewFromWorld = camera.viewFromWorld;
+  // Photographic exposure (stops). Raygen multiplies post-shading
+  // radiance by 2^exposure before the ACES tonemap fires. Pads stay
+  // zero — the cbuffer's size assert pins their presence.
+  cameraUniforms.exposure  = camera.exposure;
+  cameraUniforms._camPad0  = 0.0f;
+  cameraUniforms._camPad1  = 0.0f;
+  cameraUniforms._camPad2  = 0.0f;
   commandList->writeBuffer(_cameraUniformsBuffer.Get(), &cameraUniforms, sizeof(cameraUniforms));
 
   // ---- Upload viewer-only per-frame UI state -------------------------
