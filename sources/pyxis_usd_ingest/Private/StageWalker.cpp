@@ -781,6 +781,29 @@ void EmitLight(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCache,
       key.role = TextureKey::Role::Emission;  // HDR env-map: linear, no sRGB EOTF
       desc.envMap = scene.AcquireTexture(key);
     }
+    // M9-fidelity per-prim dome rotation. Read xformOp:rotateY (or
+    // the Y component of xformOp:rotateXYZ) directly from the prim
+    // — NOT from the composed worldFromLocal matrix, which already
+    // bakes in the stage Z→Y correction. UsdLuxDomeLight's typical
+    // authoring is a horizontal HDRI spin around world-Y; X / Z
+    // axes on a dome are uncommon and deferred. Convert degrees →
+    // radians for the miss-shader trig.
+    {
+      double rotateY = 0.0;
+      if (const pxr::UsdAttribute rotYAttr =
+              prim.GetAttribute(pxr::TfToken("xformOp:rotateY")))
+      {
+        rotYAttr.Get(&rotateY);
+      }
+      else if (const pxr::UsdAttribute rotXYZAttr =
+                   prim.GetAttribute(pxr::TfToken("xformOp:rotateXYZ")))
+      {
+        pxr::GfVec3d rotXYZ(0.0, 0.0, 0.0);
+        rotXYZAttr.Get(&rotXYZ);
+        rotateY = rotXYZ[1];
+      }
+      desc.domeRotationY = static_cast<float>(rotateY * (PI_F / 180.0f));
+    }
     // Dome's "area" is a full sphere of solid angle; the closesthit
     // already integrates over the sphere when sampling the env-map,
     // so leave areaForNormalize at 1 and let the dome's intensity

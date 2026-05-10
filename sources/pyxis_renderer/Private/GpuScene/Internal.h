@@ -33,6 +33,8 @@
 
 #include <nvrhi/nvrhi.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
@@ -264,7 +266,33 @@ inline shaderinterop::LightGpu PackLightGpu(const LightDesc& desc,
   gpu.axisVx = static_cast<float>(desc.axisV.x);
   gpu.axisVy = static_cast<float>(desc.axisV.y);
   gpu.axisVz = static_cast<float>(desc.axisV.z);
-  gpu._reserved0 = 0;
+  // M9-fidelity dome Y-rotation. Only meaningful for Kind::Dome but
+  // packed unconditionally — the miss shader gates on kind itself.
+  gpu.domeRotationYRadians = static_cast<float>(desc.domeRotationY);
+  // M9-fidelity UsdLuxShapingAPI cone. Stored as cos(half-angle) for
+  // cheap dot-product comparison in closesthit. shapingConeAngle is
+  // in DEGREES on LightDesc per the UsdLuxShapingAPI convention; 90°
+  // (the default) means "no cone" — clamp cosOuter to 0.0 in that
+  // case so the closesthit path skips the falloff. Softness is a
+  // 0..1 fraction of the half-angle defining the smooth-step
+  // interior edge.
+  const float coneHalfAngleDeg = static_cast<float>(desc.shapingConeAngle);
+  if (coneHalfAngleDeg < 90.0f - 1e-4f)
+  {
+    constexpr float DEG_TO_RAD = 3.14159265358979323846f / 180.0f;
+    const float coneHalfAngleRad = coneHalfAngleDeg * DEG_TO_RAD;
+    const float softness = std::clamp(static_cast<float>(desc.shapingConeSoftness),
+                                      0.0f, 1.0f);
+    gpu.shapingConeCosOuter = std::cos(coneHalfAngleRad);
+    gpu.shapingConeCosInner = std::cos(coneHalfAngleRad * (1.0f - softness));
+  }
+  else
+  {
+    gpu.shapingConeCosOuter = 0.0f;  // sentinel: no cone
+    gpu.shapingConeCosInner = 0.0f;
+  }
+  gpu._reserved1 = 0.0f;
+  gpu._reserved2 = 0.0f;
   return gpu;
 }
 

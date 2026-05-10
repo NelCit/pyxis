@@ -47,9 +47,10 @@ void main(inout HitInfo payload) {
     // Find the first authored Dome light — its color × intensity
     // tints / scales the HDRI sample. The fallback (no dome found)
     // keeps the M3-era soft sky-blue.
-    float3 domeTint     = float3(0.55, 0.65, 0.85);
-    float  domeScale    = 1.0;
-    bool   domeFound    = false;
+    float3 domeTint        = float3(0.55, 0.65, 0.85);
+    float  domeScale       = 1.0;
+    float  domeRotationY   = 0.0;
+    bool   domeFound       = false;
 
     uint lightCount;
     uint _stride;
@@ -58,20 +59,33 @@ void main(inout HitInfo payload) {
         const LightGpu L = gLights[i];
         if (L.intensity <= 0.0) continue;
         if (L.kind != LIGHT_KIND_DOME) continue;
-        domeTint  = float3(L.colorR, L.colorG, L.colorB);
-        domeScale = L.intensity;
-        domeFound = true;
+        domeTint      = float3(L.colorR, L.colorG, L.colorB);
+        domeScale     = L.intensity;
+        domeRotationY = L.domeRotationYRadians;
+        domeFound     = true;
         break;
     }
 
-    // Sample the HDRI at the primary ray's miss direction. The
+    // M9-fidelity per-prim dome rotation. Apply the inverse of the
+    // dome's authored Y rotation to the sample direction so a
+    // positive xformOp:rotateY = 30° spins the HDRI horizon 30° to
+    // the right (matches usdview / Storm convention). Single-axis
+    // rotation matrix: rotates around world-Y, leaves Y unchanged.
+    const float3 dirRaw = normalize(WorldRayDirection());
+    float3 dir = dirRaw;
+    if (domeFound && abs(domeRotationY) > 1e-4) {
+        const float cosR = cos(-domeRotationY);
+        const float sinR = sin(-domeRotationY);
+        dir = float3(cosR * dirRaw.x + sinR * dirRaw.z,
+                     dirRaw.y,
+                    -sinR * dirRaw.x + cosR * dirRaw.z);
+    }
+
+    // Sample the HDRI at the (possibly-rotated) miss direction.
     // PathTracePass's 1×1 WHITE fallback covers the no-HDRI case
     // (color-only dome OR failed EXR decode) — sample returns
     // (1,1,1) so `hdri × tint × scale` collapses to `tint × scale`,
-    // i.e. the dome's authored colour. With a real HDRI bound, the
-    // hdri value carries the radiance distribution; tint × scale
-    // lets the .usd modulate it without re-baking the EXR.
-    const float3 dir = normalize(WorldRayDirection());
+    // i.e. the dome's authored colour.
     const float2 uv  = latLongUv(dir);
     const float3 hdri = gDomeEnvMap.SampleLevel(gDomeSampler, uv, 0).rgb;
 

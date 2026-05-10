@@ -326,7 +326,38 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
             lightDir = -float3(L.dirX, L.dirY, L.dirZ);
         }
         const float NdotL = max(0.0, dot(nWorld, lightDir));
-        directSum += Lcol * NdotL * falloff;
+
+        // M9-fidelity UsdLuxShapingAPI cone. cosOuter == 0 → no cone,
+        // skip. Cone axis derives per-kind: Distant lights point along
+        // L.dir (the photons-travel direction = AWAY from the
+        // illuminated surface), so the spotlight axis FROM light TO
+        // surface is +L.dir. Rect/Disk/Sphere "face" the rect normal
+        // = normalize(cross(axisU, axisV)); the spotlight axis from
+        // light TO surface is -that-normal (the rect emits toward its
+        // -Z, away from the front face).
+        float coneAttenuation = 1.0;
+        if (L.shapingConeCosOuter > 1e-4) {
+            float3 coneAxis;
+            if (L.kind == LIGHT_KIND_RECT) {
+                const float3 axisU = float3(L.axisUx, L.axisUy, L.axisUz);
+                const float3 axisV = float3(L.axisVx, L.axisVy, L.axisVz);
+                coneAxis = normalize(cross(axisU, axisV));
+            } else {
+                coneAxis = float3(L.dirX, L.dirY, L.dirZ);
+            }
+            // Vector FROM light TO surface (Distant has implicit
+            // direction = +L.dir; Rect uses -toLight). Compare to
+            // cone axis via cosine.
+            const float3 lightToSurface = (L.kind == LIGHT_KIND_RECT)
+                                              ? -lightDir
+                                              : float3(L.dirX, L.dirY, L.dirZ);
+            const float cosAngle = dot(normalize(lightToSurface), coneAxis);
+            coneAttenuation = smoothstep(L.shapingConeCosOuter,
+                                         L.shapingConeCosInner,
+                                         cosAngle);
+        }
+
+        directSum += Lcol * NdotL * falloff * coneAttenuation;
         // pre-NdotL, pre-falloff totalContribution drives only the
         // "any-lights / fall through to emissive baseColor" sentinel
         // below. Adding the raw intensity (rather than the attenuated

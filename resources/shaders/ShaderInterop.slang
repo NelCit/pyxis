@@ -332,11 +332,29 @@ struct LightGpu {
     float axisUz;
     uint  doubleSided;      // 0 = single-sided, 1 = double-sided (Rect)
 
-    // Row 4 — Rect axisV.
+    // Row 4 — Rect axisV + Dome rotation slot.
     float axisVx;
     float axisVy;
     float axisVz;
-    uint  _reserved0;
+    // M9-fidelity: per-prim dome rotation around world-Y in radians.
+    // Authored on the DomeLight's xformOpOrder. Miss shader rotates
+    // the lat-long sample direction by -domeRotationYRadians.
+    // Ignored for non-Dome kinds.
+    float domeRotationYRadians;
+
+    // Row 5 — UsdLuxShapingAPI cone (M9-fidelity). Spotlight
+    // half-angle stored as cos(angle) for cheap dot-product
+    // comparison in closesthit. cosOuter == 0.0 means "no cone"
+    // (cos 90°) and the closesthit path skips the falloff. Inner
+    // edge derives from softness: a 0..1 fraction of the half-
+    // angle that defines the smooth-step interior. Cone axis is
+    // derived per-kind in closesthit (Distant: -L.dir; Rect/Disk/
+    // Sphere: normalize(cross(axisU, axisV))) so we don't carry
+    // extra data here.
+    float shapingConeCosOuter;       // cos(coneHalfAngle)
+    float shapingConeCosInner;       // cos(coneHalfAngle × (1 - softness))
+    float _reserved1;
+    float _reserved2;
 };
 
 // Light kind enum mirroring pyxis::LightDesc::Kind. Closesthit
