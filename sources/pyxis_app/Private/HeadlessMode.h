@@ -16,10 +16,10 @@ struct ResolvedScene;
 
 // Returns the process exit code (§41: 0 ok, 2 device init fail).
 // Drives the offscreen render-target path + EXR writer. `scene` is
-// the §29.4.a chain result; the mode dispatches on
-// `config.app.ingest` to pick the matching engine (HydraEngine /
-// UsdDirectEngine), or falls back to the M3 hardcoded cube if the
-// resolved path is unloadable.
+// the §29.4.a chain result; the mode forwards it through IngestUsd()
+// (which dispatches by `config.app.ingest` to the hydra / usd_direct
+// adapter), or falls back to the M3 hardcoded cube if the resolved
+// path is unloadable.
 //
 // `saveAovList` (M7 follow-up): comma-separated names of raw AOVs to
 // dump alongside the regular BGRA8 EXR. See CliArgs::saveAov for the

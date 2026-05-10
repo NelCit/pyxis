@@ -417,10 +417,10 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
   nvrhi::ICommandList* const commandList = commandListHandle.Get();
 
   // ---- One render frame ----------------------------------------------
-  // Single render. M3's PathTracePass is one-sample-per-frame with
-  // no accumulation, so iterating buys nothing yet —
-  // samplesPerFrame > 1 wires in at M5+ when the accumulation
-  // buffer lands.
+  // Single render. PathTracePass is one-sample-per-frame with no
+  // accumulation today, so iterating buys nothing —
+  // `samplesPerFrame * accumulationFrameLimit` wires in once the
+  // accumulation buffer lands (post-M7).
   scene.Tick();
   profiler.BeginFrame();
   deviceManager->BeginFrame();
