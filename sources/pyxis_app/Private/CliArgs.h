@@ -49,6 +49,18 @@ struct CliArgs {
   std::string_view outputPath;   // --output <path>  (overrides output.image)
   std::string_view profilePath;  // --profile <path>  (M11+ wires)
 
+  // ---- M7 follow-up: AOV save -----------------------------------------
+  // --save-aov <list>  Comma-separated list of raw AOVs to dump
+  // alongside the regular `--output` BGRA8 EXR. The path stem of
+  // `--output` becomes the prefix; per-AOV files are written as
+  // `<prefix>_<aov>.exr` (RGBA32F). Headless-only — viewer mode has
+  // its own per-frame Save button. Recognised names:
+  //   color, normal, depth, instanceId, materialId, baseColor,
+  //   worldPos, all
+  // The "all" alias expands to every AOV in one shot.
+  // Empty = no AOV save (current behaviour).
+  std::string_view saveAov;
+
   // ---- M1 viewer extras ----------------------------------------------
   // --screenshot <path>: run the viewer for a few warmup frames, copy
   // the backbuffer to PNG at the given path, then exit. Plan §35

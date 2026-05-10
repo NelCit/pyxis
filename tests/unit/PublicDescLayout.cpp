@@ -13,7 +13,11 @@
 #include <Pyxis/Renderer/Descs/LightDesc.h>
 #include <Pyxis/Renderer/Descs/MeshDesc.h>
 #include <Pyxis/Renderer/Descs/OpenPBRMaterialDesc.h>
+#include <Pyxis/Renderer/Descs/PickResult.h>
 #include <Pyxis/Renderer/Descs/TextureKey.h>
+
+#include <cstddef>
+#include <cstring>
 #include <Pyxis/Renderer/Forward.h>
 
 #include <gtest/gtest.h>
@@ -151,4 +155,87 @@ TEST(PublicDescLayout, FrameStatsDefaultsToZeros) {
   EXPECT_EQ(stats.instanceCount, 0u);
   EXPECT_EQ(stats.staleHandleDrops, 0u);
   EXPECT_FALSE(stats.degraded);
+}
+
+// -----------------------------------------------------------------------------
+// PickResult — byte-stable layout. The shader-side
+// `pyxis::shaderinterop::PickResult` has matching static_asserts on
+// total size; here we pin the C++-side field offsets so a future
+// reorder (which would silently corrupt the picker readback) fails
+// the test instead of just shipping garbage values to the editor.
+// -----------------------------------------------------------------------------
+TEST(PublicDescLayout, PickResultLayoutMatchesShaderInterop) {
+  EXPECT_EQ(sizeof(PickResult), 80u);
+  EXPECT_EQ(alignof(PickResult), 4u);
+
+  // Row 0 — color + depth.
+  EXPECT_EQ(offsetof(PickResult, colorR),       0u);
+  EXPECT_EQ(offsetof(PickResult, colorG),       4u);
+  EXPECT_EQ(offsetof(PickResult, colorB),       8u);
+  EXPECT_EQ(offsetof(PickResult, depth),       12u);
+  // Row 1 — normal + instance id.
+  EXPECT_EQ(offsetof(PickResult, normalX),     16u);
+  EXPECT_EQ(offsetof(PickResult, normalY),     20u);
+  EXPECT_EQ(offsetof(PickResult, normalZ),     24u);
+  EXPECT_EQ(offsetof(PickResult, instanceId),  28u);
+  // Row 2 — baseColor + material id.
+  EXPECT_EQ(offsetof(PickResult, baseColorR),  32u);
+  EXPECT_EQ(offsetof(PickResult, baseColorG),  36u);
+  EXPECT_EQ(offsetof(PickResult, baseColorB),  40u);
+  EXPECT_EQ(offsetof(PickResult, materialId),  44u);
+  // Row 3 — world hit position + pad.
+  EXPECT_EQ(offsetof(PickResult, worldHitX),   48u);
+  EXPECT_EQ(offsetof(PickResult, worldHitY),   52u);
+  EXPECT_EQ(offsetof(PickResult, worldHitZ),   56u);
+  // Row 4 — pixel coords + pad.
+  EXPECT_EQ(offsetof(PickResult, pixelX),      64u);
+  EXPECT_EQ(offsetof(PickResult, pixelY),      68u);
+}
+
+TEST(PublicDescLayout, PickResultDefaultsToNoHitSentinels) {
+  const PickResult pick;
+  EXPECT_FLOAT_EQ(pick.colorR, 0.0f);
+  EXPECT_FLOAT_EQ(pick.colorG, 0.0f);
+  EXPECT_FLOAT_EQ(pick.colorB, 0.0f);
+  EXPECT_FLOAT_EQ(pick.depth,  -1.0f);
+  EXPECT_EQ(pick.instanceId,   0xFFFFFFFFu);
+  EXPECT_EQ(pick.materialId,   0xFFFFFFFFu);
+  EXPECT_EQ(pick.pixelX,       0xFFFFFFFFu);
+  EXPECT_EQ(pick.pixelY,       0xFFFFFFFFu);
+}
+
+// Round-trip a known byte pattern through the struct to verify the
+// shader-side write order matches the C++ read order. If the shader
+// emits row-major and C++ reads field-by-field, the bytes have to land
+// in the documented field. Catches the class of bug where a future
+// shader edit reorders the struct without bumping the C++ POD.
+TEST(PublicDescLayout, PickResultByteRoundTripMatchesFields) {
+  alignas(PickResult) unsigned char buffer[80] = {};
+  // Row 0: colorR=1.0, colorG=2.0, colorB=3.0, depth=4.0
+  const float row0[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+  std::memcpy(buffer + 0, row0, sizeof(row0));
+  // Row 1: normal + instance.
+  const float row1Floats[3] = {0.5f, 0.6f, 0.7f};
+  std::memcpy(buffer + 16, row1Floats, sizeof(row1Floats));
+  const uint32_t instanceVal = 0xDEADBEEFu;
+  std::memcpy(buffer + 28, &instanceVal, sizeof(instanceVal));
+  // Row 4: pixel coords.
+  const uint32_t pixelXVal = 1234u;
+  const uint32_t pixelYVal = 5678u;
+  std::memcpy(buffer + 64, &pixelXVal, sizeof(pixelXVal));
+  std::memcpy(buffer + 68, &pixelYVal, sizeof(pixelYVal));
+
+  PickResult pick;
+  std::memcpy(&pick, buffer, sizeof(pick));
+
+  EXPECT_FLOAT_EQ(pick.colorR, 1.0f);
+  EXPECT_FLOAT_EQ(pick.colorG, 2.0f);
+  EXPECT_FLOAT_EQ(pick.colorB, 3.0f);
+  EXPECT_FLOAT_EQ(pick.depth,  4.0f);
+  EXPECT_FLOAT_EQ(pick.normalX, 0.5f);
+  EXPECT_FLOAT_EQ(pick.normalY, 0.6f);
+  EXPECT_FLOAT_EQ(pick.normalZ, 0.7f);
+  EXPECT_EQ(pick.instanceId, 0xDEADBEEFu);
+  EXPECT_EQ(pick.pixelX,     1234u);
+  EXPECT_EQ(pick.pixelY,     5678u);
 }

@@ -21,6 +21,8 @@ target_sources(pyxis PRIVATE
     Private/CliArgs.cpp
     Private/Config/Configuration.h
     Private/Config/Configuration.cpp
+    Private/Output/AovExrSaver.h
+    Private/Output/AovExrSaver.cpp
     Private/Output/ExrWriter.h
     Private/Output/ExrWriter.cpp
     Private/Output/TextureReadback.h

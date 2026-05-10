@@ -20,7 +20,15 @@ struct ResolvedScene;
 // `config.app.ingest` to pick the matching engine (HydraEngine /
 // UsdDirectEngine), or falls back to the M3 hardcoded cube if the
 // resolved path is unloadable.
-int RunHeadless(const Configuration& config, const ResolvedScene& scene) noexcept;
+//
+// `saveAovList` (M7 follow-up): comma-separated names of raw AOVs to
+// dump alongside the regular BGRA8 EXR. See CliArgs::saveAov for the
+// recognised names ("color,normal,depth,instanceId,materialId,
+// baseColor,worldPos" + the "all" alias). Each dump lands at
+// `<output-prefix>_<aov>.exr` where the prefix is the BGRA8 path
+// stripped of its `.exr` extension. Empty = no extra writes.
+int RunHeadless(const Configuration& config, const ResolvedScene& scene,
+                std::string_view saveAovList = {}) noexcept;
 
 // Viewer mode. screenshotPath is the M1 --screenshot debug capture
 // (non-empty -> render a few warmup frames, write a PNG, exit 0).

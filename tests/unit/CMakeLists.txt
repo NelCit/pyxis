@@ -20,6 +20,8 @@ target_sources(pyxis_unit_tests PRIVATE
     GpuSceneInstance.cpp
     GpuSceneLight.cpp
     GpuSceneCamera.cpp
+    GpuSceneClear.cpp
+    GpuSceneLookupInstanceMaterial.cpp
     SceneResolver.cpp
     UsdShadeToOpenPBR.cpp
 

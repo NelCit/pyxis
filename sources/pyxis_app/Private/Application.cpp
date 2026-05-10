@@ -149,7 +149,7 @@ int Run(int argc, char** argv) noexcept {
 
   if (cli.headless)
   {
-    return RunHeadless(config, scene);
+    return RunHeadless(config, scene, cli.saveAov);
   }
   return RunViewer(config, scene, cli.screenshotPath);
 }

@@ -103,3 +103,33 @@ set_tests_properties(M7.LightingMovesPixels PROPERTIES
     LABELS    "integration;m7"
     TIMEOUT   180  # Four USD-loading runs (lit ×2 + unlit + color-dome).
 )
+
+# §41 M7 follow-up — exercises the AOV inspector path end-to-end. One
+# headless run with --save-aov all dumps every raw AOV (color HDR,
+# normal, depth, instanceId, materialId, baseColor, worldPos) into
+# `<prefix>_<aov>.exr` files; the test asserts (a) every expected
+# file exists and is non-empty, (b) AOVs are byte-distinct from each
+# other (proves the writes are independent — a regression that wired
+# every UAV to the same texture would silently produce identical
+# files), and (c) a re-run of one AOV is byte-deterministic. The lit
+# fixture is the same M7 scene used by LightingMovesPixels so all
+# seven AOVs have non-trivial content (a hit triangle + sun + dome).
+add_test(
+    NAME    M7.AovInspectorWritesAllAovs
+    COMMAND ${CMAKE_COMMAND}
+            -DPYXIS_EXE=$<TARGET_FILE:pyxis>
+            -DFIXTURE_CONFIG=${CMAKE_SOURCE_DIR}/tests/fixtures/headless_triangle.json
+            # m6 fixture (100 instances of 1 prototype mesh, 1 material) gives
+            # the AOV inspector enough per-pixel variation that instanceId
+            # genuinely differs from materialId — m7_lit_scene.usd has 1:1
+            # entity counts and the two integer AOVs collapse to identical
+            # content there, defeating the pairwise byte-distinctness check.
+            -DAOV_SCENE=${CMAKE_SOURCE_DIR}/tests/fixtures/m6_instanced_grid.usd
+            -DOUTPUT_DIR=${CMAKE_BINARY_DIR}/tests/integration/m7_aov_inspector
+            -P ${CMAKE_SOURCE_DIR}/tests/integration/m7_aov_inspector.cmake
+)
+set_tests_properties(M7.AovInspectorWritesAllAovs PROPERTIES
+    LABELS    "integration;m7"
+    TIMEOUT   120  # Two USD-loading runs (one --save-aov all + one
+                   # determinism re-run).
+)

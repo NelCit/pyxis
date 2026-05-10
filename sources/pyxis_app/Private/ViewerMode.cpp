@@ -7,7 +7,7 @@
 #include "ImGuiHost.h"
 
 #include <imgui.h>
-#include "Output/ExrWriter.h"
+#include "Output/AovExrSaver.h"
 #include "Output/TextureReadback.h"
 #include "Render/AovTextures.h"
 #include "HydraEngine/HydraEngine.h"
@@ -57,110 +57,6 @@ constexpr int EXIT_DEVICE_INIT_FAIL = 2;
 // value has been 256 since GLFW 3.0 and matches USB HID Escape — stable
 // enough for "Escape closes the viewer" UX.
 constexpr int GLFW_ESCAPE_KEY_CODE = 256;
-
-// IEEE 754 binary16 -> binary32. Used by the AOV save path to unpack
-// the RGBA16_FLOAT staging texture into the float channels tinyexr
-// expects. Public-domain bit-fiddle: handles zero / subnormal / inf /
-// NaN correctly so an unexpected NaN sample doesn't poison the EXR.
-float HalfToFloat(uint16_t halfBits) noexcept {
-  const uint32_t sign     = (halfBits & 0x8000u) << 16;
-  const uint32_t exponent = (halfBits & 0x7C00u) >> 10;
-  const uint32_t mantissa = (halfBits & 0x03FFu);
-  uint32_t bits = sign;
-  if (exponent == 0)
-  {
-    if (mantissa != 0)
-    {
-      // Subnormal — normalise into a regular float.
-      uint32_t mant = mantissa;
-      uint32_t expo = 1;
-      while ((mant & 0x0400u) == 0)
-      {
-        mant <<= 1;
-        ++expo;
-      }
-      mant &= 0x03FFu;
-      bits |= ((127u - 15u - expo + 1u) << 23) | (mant << 13);
-    }
-  }
-  else if (exponent == 0x1Fu)
-  {
-    // Inf / NaN.
-    bits |= 0x7F800000u | (mantissa << 13);
-  }
-  else
-  {
-    bits |= ((exponent + (127u - 15u)) << 23) | (mantissa << 13);
-  }
-  float result;
-  std::memcpy(&result, &bits, sizeof(result));
-  return result;
-}
-
-// Convert one row of a freshly-readback staging texture into the
-// interleaved RGBA float32 layout WriteExrRgba32f wants. dispatches
-// on the texture's NVRHI format. Skips alpha-channel transforms —
-// alpha is always passed through (or set to 1.0 for single-channel
-// AOVs that had no alpha to begin with).
-void ConvertAovRowToRgba32f(nvrhi::Format format, const void* srcRow, uint32_t width,
-                            float* dstRgbaRow) noexcept {
-  switch (format)
-  {
-    case nvrhi::Format::RGBA16_FLOAT:
-    {
-      const auto* src = static_cast<const uint16_t*>(srcRow);
-      for (uint32_t col = 0; col < width; ++col)
-      {
-        dstRgbaRow[col * 4 + 0] = HalfToFloat(src[col * 4 + 0]);
-        dstRgbaRow[col * 4 + 1] = HalfToFloat(src[col * 4 + 1]);
-        dstRgbaRow[col * 4 + 2] = HalfToFloat(src[col * 4 + 2]);
-        dstRgbaRow[col * 4 + 3] = HalfToFloat(src[col * 4 + 3]);
-      }
-      break;
-    }
-    case nvrhi::Format::RGBA32_FLOAT:
-    {
-      // Already RGBA32F — bytewise memcpy is the cheap path.
-      std::memcpy(dstRgbaRow, srcRow, static_cast<std::size_t>(width) * 4u * sizeof(float));
-      break;
-    }
-    case nvrhi::Format::R32_FLOAT:
-    {
-      const auto* src = static_cast<const float*>(srcRow);
-      for (uint32_t col = 0; col < width; ++col)
-      {
-        const float depthVal = src[col];
-        dstRgbaRow[col * 4 + 0] = depthVal;
-        dstRgbaRow[col * 4 + 1] = depthVal;
-        dstRgbaRow[col * 4 + 2] = depthVal;
-        dstRgbaRow[col * 4 + 3] = 1.0f;
-      }
-      break;
-    }
-    case nvrhi::Format::R32_UINT:
-    {
-      const auto* src = static_cast<const uint32_t*>(srcRow);
-      for (uint32_t col = 0; col < width; ++col)
-      {
-        // EXR is float-only; cast the integer slot id to float.
-        // 0xFFFFFFFF (no-hit sentinel) saturates the float32 range
-        // but stays distinguishable from any real instance id (which
-        // are bounded by HANDLE_SLOT_BITS = 24-bit).
-        const float idAsFloat = static_cast<float>(src[col]);
-        dstRgbaRow[col * 4 + 0] = idAsFloat;
-        dstRgbaRow[col * 4 + 1] = idAsFloat;
-        dstRgbaRow[col * 4 + 2] = idAsFloat;
-        dstRgbaRow[col * 4 + 3] = 1.0f;
-      }
-      break;
-    }
-    default:
-      // Unsupported format — fill with zeros so the EXR still writes
-      // (caller logs the format mismatch).
-      std::memset(dstRgbaRow, 0, static_cast<std::size_t>(width) * 4u * sizeof(float));
-      break;
-  }
-}
 
 }  // namespace
 
@@ -905,59 +801,16 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
       {
         log.Error(log::APP, "ViewerMode: save AOV: source texture is null");
       }
+      else if (auto saveResult = SaveAovAsExr(device, commandListHandle.Get(), sourceAov,
+                                              aovLabel, saveAovPath);
+               !saveResult)
+      {
+        log.Error(log::APP, "ViewerMode: " + saveResult.error());
+      }
       else
       {
-        nvrhi::ICommandList* saveCmd = commandListHandle.Get();
-        saveCmd->open();
-        auto readbackResult =
-            TextureReadback::RecordCopy(device, saveCmd, sourceAov, aovLabel);
-        saveCmd->close();
-        device->executeCommandList(saveCmd);
-        device->waitForIdle();
-        if (!readbackResult)
-        {
-          log.Error(log::APP, "ViewerMode: save AOV: " + readbackResult.error());
-        }
-        else
-        {
-          TextureReadback readback = std::move(*readbackResult);
-          if (auto mapResult = readback.Map(); !mapResult)
-          {
-            log.Error(log::APP, "ViewerMode: save AOV map: " + mapResult.error());
-          }
-          else
-          {
-            // Repack into contiguous RGBA32F via the per-format
-            // helper and hand to tinyexr.
-            const uint32_t aovWidth  = readback.Width();
-            const uint32_t aovHeight = readback.Height();
-            const std::size_t srcRowPitch = readback.RowPitch();
-            std::vector<float> rgbaFloats(
-                static_cast<std::size_t>(aovWidth) * aovHeight * 4u);
-            const auto* srcBytes = static_cast<const uint8_t*>(readback.Data());
-            for (uint32_t row = 0; row < aovHeight; ++row)
-            {
-              const void* srcRow = srcBytes + (static_cast<std::size_t>(row) * srcRowPitch);
-              float* dstRow = rgbaFloats.data() +
-                              (static_cast<std::size_t>(row) * aovWidth * 4u);
-              ConvertAovRowToRgba32f(readback.Format(), srcRow, aovWidth, dstRow);
-            }
-            const std::size_t dstRowPitch =
-                static_cast<std::size_t>(aovWidth) * 4u * sizeof(float);
-            if (auto writeResult = WriteExrRgba32f(saveAovPath, aovWidth, aovHeight,
-                                                   rgbaFloats.data(), dstRowPitch);
-                !writeResult)
-            {
-              log.Error(log::APP,
-                        "ViewerMode: save AOV write: " + writeResult.error());
-            }
-            else
-            {
-              log.Info(log::APP, "ViewerMode: save AOV (" + std::string{aovLabel}
-                                     + ") -> " + saveAovPath);
-            }
-          }
-        }
+        log.Info(log::APP, "ViewerMode: save AOV (" + std::string{aovLabel}
+                               + ") -> " + saveAovPath);
       }
     }
 

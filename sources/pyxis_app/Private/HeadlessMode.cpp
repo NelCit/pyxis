@@ -3,6 +3,7 @@
 #include "HeadlessMode.h"
 
 #include "Config/Configuration.h"
+#include "Output/AovExrSaver.h"
 #include "Output/ExrWriter.h"
 #include "Output/TextureReadback.h"
 #include "Render/AovTextures.h"
@@ -41,9 +42,34 @@ constexpr int EXIT_CONFIG_FAIL = 3;       // ValidateForHeadless rejected the co
 constexpr int EXIT_RUNTIME_FAIL = 4;      // Render-time failure: scene init, staging,
                                           // mapping, or EXR write.
 
+// Strip a trailing ".exr" (case-insensitive) from `path` to produce
+// the per-AOV output prefix. The headless flow writes
+// `<prefix>_<aov>.exr` for each --save-aov entry; the prefix is the
+// `--output` path stripped of its extension so a user passing
+// `--output frame.exr --save-aov color,normal` gets `frame.exr` (the
+// existing BGRA8) plus `frame_color.exr` and `frame_normal.exr`. If
+// the path didn't end in `.exr`, return it unchanged so a path with
+// no extension still composes naturally.
+std::string DeriveAovPrefix(std::string_view outputPath) noexcept {
+  std::string result{outputPath};
+  if (result.size() >= 4)
+  {
+    const std::string tail = result.substr(result.size() - 4);
+    if ((tail[0] == '.')
+        && (tail[1] == 'e' || tail[1] == 'E')
+        && (tail[2] == 'x' || tail[2] == 'X')
+        && (tail[3] == 'r' || tail[3] == 'R'))
+    {
+      result.resize(result.size() - 4);
+    }
+  }
+  return result;
+}
+
 }  // namespace
 
-int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene) noexcept {
+int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
+                std::string_view saveAovList) noexcept {
   auto& log = Logging::Get();
   (void)resolvedScene;  // M4 P5d/P5e wire ingest engines; for now
                         // the hardcoded cube fallback covers both
@@ -216,6 +242,19 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene)
 
     RenderTargets targets{};
     targets.color = renderTarget;
+    // M7 follow-up — bind the raw AOV outputs so the user can dump
+    // them via --save-aov. Always bound (not just when --save-aov is
+    // set) because PathTracePass's UAV writes are unconditional;
+    // without these the writes go to the 1×1 fallbacks PathTracePass
+    // owns, which is fine but wastes the already-allocated AovTextures
+    // memory. Same RenderTargets shape ViewerMode wires.
+    targets.colorHdr      = aovs.colorHdr.Get();
+    targets.normalAov     = aovs.normal.Get();
+    targets.depthAov      = aovs.depth.Get();
+    targets.instanceIdAov = aovs.instanceId.Get();
+    targets.materialIdAov = aovs.materialId.Get();
+    targets.baseColorAov  = aovs.baseColor.Get();
+    targets.worldPosAov   = aovs.worldPos.Get();
     RenderSettings settings{};
     settings.width = renderTarget->getDesc().width;
     settings.height = renderTarget->getDesc().height;
@@ -296,6 +335,81 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene)
     log.Error(log::APP, "headless: " + writeResult.error());
     scene.Shutdown();
     return EXIT_RUNTIME_FAIL;
+  }
+
+  // ---- M7 follow-up: --save-aov dispatch -----------------------------
+  // Parse the comma-separated list and dispatch one SaveAovAsExr per
+  // entry. Output paths are `<prefix>_<aov>.exr` where `<prefix>` is
+  // `config.output.image` stripped of its `.exr` extension. The "all"
+  // alias expands to every recognised AOV. Unknown names log a
+  // warning but don't fail the run — keeps the per-AOV write
+  // independent so a typo doesn't drop legitimate outputs.
+  if (!saveAovList.empty())
+  {
+    const std::string aovPrefix = DeriveAovPrefix(config.output.image);
+    auto saveOne = [&](std::string_view aovName, nvrhi::ITexture* sourceAov) {
+      if (sourceAov == nullptr)
+      {
+        log.Warn(log::APP, "headless: --save-aov: source for '" + std::string{aovName}
+                               + "' is null; skipping");
+        return;
+      }
+      const std::string targetPath = aovPrefix + "_" + std::string{aovName} + ".exr";
+      if (auto saveResult = SaveAovAsExr(device, commandList, sourceAov, aovName, targetPath);
+          !saveResult)
+      {
+        log.Error(log::APP, "headless: " + saveResult.error());
+      }
+      else
+      {
+        log.Info(log::APP, "headless: --save-aov " + std::string{aovName}
+                               + " -> " + targetPath);
+      }
+    };
+    auto resolveAndSave = [&](std::string_view aovName) {
+      if (aovName == "color")           saveOne("color",      aovs.colorHdr.Get());
+      else if (aovName == "normal")     saveOne("normal",     aovs.normal.Get());
+      else if (aovName == "depth")      saveOne("depth",      aovs.depth.Get());
+      else if (aovName == "instanceId") saveOne("instanceId", aovs.instanceId.Get());
+      else if (aovName == "materialId") saveOne("materialId", aovs.materialId.Get());
+      else if (aovName == "baseColor")  saveOne("baseColor",  aovs.baseColor.Get());
+      else if (aovName == "worldPos")   saveOne("worldPos",   aovs.worldPos.Get());
+      else
+      {
+        log.Warn(log::APP, "headless: --save-aov: unknown AOV name '"
+                               + std::string{aovName}
+                               + "' (recognised: color,normal,depth,instanceId,"
+                                 "materialId,baseColor,worldPos,all)");
+      }
+    };
+
+    // Token-iterate the comma-list. Each name dispatches independently;
+    // an "all" token expands to every recognised AOV.
+    std::size_t cursor = 0;
+    while (cursor < saveAovList.size())
+    {
+      const std::size_t comma = saveAovList.find(',', cursor);
+      const std::string_view name = (comma == std::string_view::npos)
+                                        ? saveAovList.substr(cursor)
+                                        : saveAovList.substr(cursor, comma - cursor);
+      cursor = (comma == std::string_view::npos) ? saveAovList.size() : (comma + 1);
+      if (name.empty())
+        continue;
+      if (name == "all")
+      {
+        resolveAndSave("color");
+        resolveAndSave("normal");
+        resolveAndSave("depth");
+        resolveAndSave("instanceId");
+        resolveAndSave("materialId");
+        resolveAndSave("baseColor");
+        resolveAndSave("worldPos");
+      }
+      else
+      {
+        resolveAndSave(name);
+      }
+    }
   }
 
   // ---- Effective-config dump + teardown ------------------------------
