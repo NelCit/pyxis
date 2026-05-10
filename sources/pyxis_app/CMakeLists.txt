@@ -35,6 +35,7 @@ target_sources(pyxis PRIVATE
     Private/Render/HardcodedCubeScene.cpp
     Private/Scene/SceneResolver.h
     Private/Scene/SceneResolver.cpp
+    Private/EditorPanel.cpp
     Private/IngestUsd.h
     Private/IngestUsd.cpp
     Private/HeadlessMode.h
