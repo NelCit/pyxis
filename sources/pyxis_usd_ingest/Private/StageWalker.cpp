@@ -78,6 +78,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <execution>
+#include <numeric>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -1855,21 +1857,63 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
   // Pass 3 — meshes / camera / lights, with material handles resolved
   // from pass 1 and instancer prototypes skipped (pass 2 already
   // expanded them).
+  //
+  // Mesh prep runs in parallel across the asset I/O pool (§31). The
+  // heavy work (USD attr reads, hard-edge dedup, MikkTSpace tangents)
+  // is pure CPU and doesn't touch GpuScene, so it parallelises well.
+  // The actual GpuScene mutations (CreateMesh + AppendInstance) stay
+  // on this thread to honour §30.11's single-writer-Flecs constraint.
+  // SdfPath-sorted ordering is preserved by indexing preparedMeshes
+  // in iteration order.
   const auto meshPassStart = Clock::now();
+
+  // Pass 3a — collect mesh prim indices (skipping consumed prototypes)
+  // into a parallel-prep work list.
+  std::vector<std::size_t> meshPrimIndices;
+  meshPrimIndices.reserve(prims.size());
+  for (std::size_t i = 0; i < prims.size(); ++i)
+  {
+    if (!prims[i].IsA<pxr::UsdGeomMesh>())
+      continue;
+    if (consumedPrototypes.contains(prims[i].GetPath().GetString()))
+      continue;
+    meshPrimIndices.push_back(i);
+  }
+
+  // Pass 3b — parallel mesh prep. Each worker gets its own
+  // UsdGeomXformCache (pxr's cache isn't thread-safe). The
+  // materialsByPath / materialsNeedingTangents maps are const-shared.
+  // PrepareMesh writes only to its assigned slot in preparedMeshes
+  // and to the worker's local xformCache; no cross-worker state.
+  std::vector<PreparedMesh> preparedMeshes(meshPrimIndices.size());
+  std::vector<std::size_t>  meshOutputIndices(meshPrimIndices.size());
+  std::iota(meshOutputIndices.begin(), meshOutputIndices.end(), 0u);
+  std::for_each(std::execution::par, meshOutputIndices.begin(), meshOutputIndices.end(),
+      [&](std::size_t outIdx)
+      {
+        // Per-task xformCache — pxr::UsdGeomXformCache isn't thread-
+        // safe and `thread_local` on an exported DLL TU is rejected
+        // by clang-cl. We lose cross-sibling-mesh xform caching but
+        // each per-prim xform-chain walk is small (lobby's deepest
+        // chains are 5-6 levels) and the parallelism win dominates.
+        pxr::UsdGeomXformCache localXformCache;
+        const std::size_t primIdx = meshPrimIndices[outIdx];
+        preparedMeshes[outIdx] = PrepareMesh(prims[primIdx], localXformCache,
+                                             materialsByPath,
+                                             materialsNeedingTangents, stageCtx);
+      });
+
+  // Pass 3c — single-writer drain: walk prims in SdfPath order and
+  // emit prepared meshes / cameras / lights in lockstep.
+  std::size_t nextPreparedIdx = 0;
   for (const pxr::UsdPrim& prim : prims)
   {
     if (prim.IsA<pxr::UsdGeomMesh>())
     {
       if (consumedPrototypes.contains(prim.GetPath().GetString()))
         continue;
-      // EmitMesh internally bumps stats.meshesEmitted /
-      // stats.instancesEmitted per emitted sub-mesh (one prim with N
-      // GeomSubsets emits N meshes + N instances). The return value is
-      // available for per-prim diagnostics; the running counters drive
-      // the post-pass log line below.
-      const PreparedMesh prepared = PrepareMesh(prim, xformCache, materialsByPath,
-                                                materialsNeedingTangents, stageCtx);
-      EmitPreparedMesh(prepared, scene, stats);
+      EmitPreparedMesh(preparedMeshes[nextPreparedIdx], scene, stats);
+      ++nextPreparedIdx;
     }
     else if (prim.IsA<pxr::UsdGeomCamera>())
     {
