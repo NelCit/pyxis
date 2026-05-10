@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <Pyxis/Renderer/Descs/CameraDesc.h>
 #include <Pyxis/Renderer/Descs/FrameProfile.h>
 #include <Pyxis/Renderer/Descs/FrameStats.h>
 #include <Pyxis/Renderer/Descs/PickResult.h>
@@ -135,10 +136,15 @@ class ImGuiHost {
   // - clickInstanceSlot : LMB-click instance id -> BuildEditorPanel
   //                       drains internally (snaps Material combo)
   struct EditorLatches {
-    bool        reloadShaders     = false;
+    bool        reloadShaders          = false;
     std::string sceneReloadPath;
     std::string saveAovPath;
-    uint32_t    clickInstanceSlot = INSTANCE_ID_NONE;
+    uint32_t    clickInstanceSlot      = INSTANCE_ID_NONE;
+    // Scene-camera combo selection. -1 = no pending request; the
+    // editor sets this to the index into _sceneCameras when the user
+    // picks an entry; ViewerMode drains via TakeSnapToSceneCameraRequest
+    // and calls FlyCameraController::SnapToCamera with the matching desc.
+    int         snapToSceneCameraIndex = -1;
   };
   EditorLatches                         _latches;
 
@@ -216,6 +222,29 @@ class ImGuiHost {
   float                                 _pickerPinnedU = 0.0f;
   float                                 _pickerPinnedV = 0.0f;
 
+  // Scene cameras (M8a follow-up). Populated by ViewerMode after
+  // each scene load via SetSceneCameras() with the StageWalker's
+  // cameras list. The editor renders a combo of names; selecting an
+  // entry latches an index into EditorLatches.snapToSceneCameraIndex.
+  // The SceneCameraEntry struct is public (declared below alongside
+  // IngestProfile) so ViewerMode can name it when assembling the
+  // vector before handing it in.
+ public:
+  struct SceneCameraEntry {
+    std::string name;       // SdfPath
+    CameraDesc  desc;       // viewFromWorld + projFromView + intrinsics
+  };
+ private:
+  std::vector<SceneCameraEntry>         _sceneCameras;
+  int                                   _sceneCameraSelectedIndex = -1;
+
+  // FlyCameraController linear-translation speed (metres/sec). The
+  // editor's slider mutates this; ViewerMode reads it each frame and
+  // pushes via FlyCameraController::SetMoveSpeed. Default matches
+  // the controller's own initial value so the slider position is
+  // visually correct on first render.
+  float                                 _moveSpeed = 5.0f;
+
  public:
   // Called by ViewerMode each frame; returns true and clears the
   // latched request iff the editor's "Reload shaders" button was
@@ -292,6 +321,39 @@ class ImGuiHost {
   void SetClickedInstance(uint32_t instanceSlot) noexcept {
     _latches.clickInstanceSlot = instanceSlot;
   }
+
+  // ViewerMode pushes the scene's camera list (from IngestStats)
+  // after a successful scene load so the editor's Scene Camera combo
+  // can list them. Empty = no cameras (cube fixture etc.). The active
+  // index is informational — the FlyCam already snapped to it via
+  // the standard SeedFromScene path.
+  void SetSceneCameras(std::vector<SceneCameraEntry> cameras,
+                       int activeIndex) noexcept {
+    _sceneCameras = std::move(cameras);
+    _sceneCameraSelectedIndex = activeIndex;
+  }
+
+  // Drained per-frame by ViewerMode. Returns true + writes the chosen
+  // camera index iff the user picked an entry from the Scene Camera
+  // combo since the last call. Caller looks up the matching CameraDesc
+  // in the list ViewerMode supplied + calls FlyCameraController::SnapToCamera.
+  [[nodiscard]] bool TakeSnapToSceneCameraRequest(int& outIndex) noexcept {
+    if (_latches.snapToSceneCameraIndex < 0)
+      return false;
+    outIndex = _latches.snapToSceneCameraIndex;
+    _latches.snapToSceneCameraIndex = -1;
+    return true;
+  }
+
+  // Same list ViewerMode gave us. Reading it back so the camera-snap
+  // drain can resolve the index without a parallel app-side copy.
+  [[nodiscard]] const std::vector<SceneCameraEntry>& SceneCameras() const noexcept {
+    return _sceneCameras;
+  }
+
+  // FlyCameraController move-speed slider value. ViewerMode reads this
+  // each frame and propagates via FlyCameraController::SetMoveSpeed.
+  [[nodiscard]] float MoveSpeed() const noexcept { return _moveSpeed; }
 
   // Picker pin accessors. ViewerMode reads these each frame to decide
   // whether to push the cursor pixel or the pinned pixel into

@@ -129,12 +129,13 @@ void FlyCameraController::HandleEvent(const InputEvent& event) noexcept {
 void FlyCameraController::SeedFromScene(GpuScene& scene) noexcept {
   if (_seeded || !scene.HasCamera())
     return;
-  const CameraDesc& camera = scene.GetCamera();
+  SnapToCamera(scene.GetCamera());
+}
 
-  // viewFromWorld is the inverse of worldFromCamera. For
-  // pose-extraction purposes we want worldFromCamera; invert the
-  // authored viewFromWorld. hlslpp's float4x4 has an inverse() free
-  // function.
+void FlyCameraController::SnapToCamera(const CameraDesc& camera) noexcept {
+  // viewFromWorld is the inverse of worldFromCamera. For pose-
+  // extraction purposes we want worldFromCamera; invert the authored
+  // viewFromWorld. hlslpp's float4x4 has an inverse() free function.
   const hlslpp::float4x4 worldFromCamera = hlslpp::inverse(camera.viewFromWorld);
 
   ExtractYawPitch(worldFromCamera, _yaw, _pitch);
@@ -145,7 +146,32 @@ void FlyCameraController::SeedFromScene(GpuScene& scene) noexcept {
   hlslpp::store(storage, worldFromCamera);
   _position = hlslpp::float3{storage[0 * 4 + 3], storage[1 * 4 + 3], storage[2 * 4 + 3]};
 
+  // Mark seeded so subsequent SeedFromScene calls become no-ops —
+  // the snap IS the seed for downstream Update() ticks.
   _seeded = true;
+}
+
+void FlyCameraController::Reset() noexcept {
+  _position      = hlslpp::float3{0.0f, 0.0f, 0.0f};
+  _yaw           = 0.0f;
+  _pitch         = 0.0f;
+  _heldKeys      = 0;
+  _lookActive    = false;
+  _hasLastCursor = false;
+  _seeded        = false;
+  // _moveSpeed + _lookSensitivity intentionally preserved — those
+  // are user preferences that survive a scene swap.
+}
+
+void FlyCameraController::SetMoveSpeed(float metresPerSecond) noexcept {
+  // Clamp into a sane range. Below ~0.05 m/s keys feel unresponsive;
+  // above ~200 m/s the user overshoots scene bounds in one tap on
+  // most hardware-typical mouse-DPI ranges.
+  if (metresPerSecond < 0.05f)
+    metresPerSecond = 0.05f;
+  if (metresPerSecond > 200.0f)
+    metresPerSecond = 200.0f;
+  _moveSpeed = metresPerSecond;
 }
 
 hlslpp::float4x4 FlyCameraController::BuildWorldFromCamera() const noexcept {

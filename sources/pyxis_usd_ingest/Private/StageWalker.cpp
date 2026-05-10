@@ -36,7 +36,9 @@
 #include <pxr/usd/usd/relationship.h>
 #include <pxr/usd/usdGeom/mesh.h>
 #include <pxr/usd/usdGeom/camera.h>
+#include <pxr/usd/usdGeom/metrics.h>
 #include <pxr/usd/usdGeom/pointInstancer.h>
+#include <pxr/usd/usdGeom/tokens.h>
 #include <pxr/usd/usdGeom/xformCache.h>
 #include <pxr/usd/usdLux/distantLight.h>
 #include <pxr/usd/usdLux/domeLight.h>
@@ -45,6 +47,9 @@
 #include <pxr/usd/usdShade/materialBindingAPI.h>
 #include <pxr/usd/sdf/path.h>
 #include <pxr/base/gf/matrix4d.h>
+
+#include <cmath>
+#include <optional>
 #include <pxr/base/gf/camera.h>
 #include <pxr/base/gf/frustum.h>
 #include <pxr/base/gf/quath.h>
@@ -93,6 +98,81 @@ hlslpp::float4x4 ToPyxisMatrix(const pxr::GfMatrix4d& usdMatrix) noexcept {
                      static_cast<float>(usdMatrix[1][3]),
                      static_cast<float>(usdMatrix[2][3]),
                      static_cast<float>(usdMatrix[3][3])});
+}
+
+// StageContext — derived once per WalkStage from the stage's own
+// metadata, threaded through every Emit* path. Captures the
+// stage-to-world correction matrix that bakes:
+//   1. metersPerUnit scale (Pyxis works in metres; USD authors in
+//      whatever the asset shipped with — Omniverse "Collected"
+//      scenes are typically in centimetres, metersPerUnit = 0.01).
+//   2. up-axis remap if the scene authors Z-up (most Omniverse +
+//      DCC content); Pyxis convention is Y-up.
+// Composes onto every per-prim worldFromLocal so the renderer sees a
+// uniform Y-up + metres world regardless of how the asset shipped.
+struct StageContext
+{
+  hlslpp::float4x4 stageToWorld;  // R_zy(if Z-up) * Scale(metersPerUnit)
+  bool             zUp           = false;
+  float            metersPerUnit = 1.0f;
+};
+
+// Build the stage-to-world correction matrix from the stage metadata.
+// Pure function of stage-level tokens — doesn't touch any prim.
+StageContext BuildStageContext(const pxr::UsdStageRefPtr& stage) noexcept
+{
+  StageContext ctx;
+  if (!stage)
+  {
+    ctx.stageToWorld = hlslpp::float4x4::identity();
+    return ctx;
+  }
+  ctx.metersPerUnit = static_cast<float>(pxr::UsdGeomGetStageMetersPerUnit(stage));
+  if (ctx.metersPerUnit <= 0.0f)
+    ctx.metersPerUnit = 1.0f;  // defensive — corrupt metadata
+  const pxr::TfToken upAxis = pxr::UsdGeomGetStageUpAxis(stage);
+  ctx.zUp = (upAxis == pxr::UsdGeomTokens->z);
+
+  // Scale-by-metersPerUnit matrix (uniform diagonal).
+  const float scaleFactor = ctx.metersPerUnit;
+  const hlslpp::float4x4 scale(
+      hlslpp::float4{scaleFactor, 0.0f,        0.0f,        0.0f},
+      hlslpp::float4{0.0f,        scaleFactor, 0.0f,        0.0f},
+      hlslpp::float4{0.0f,        0.0f,        scaleFactor, 0.0f},
+      hlslpp::float4{0.0f,        0.0f,        0.0f,        1.0f});
+
+  if (ctx.zUp)
+  {
+    // Z-up → Y-up rotation. Maps stage basis vectors to Pyxis world:
+    //   stage +X → pyxis +X
+    //   stage +Y → pyxis -Z   (rotation around X by -90°)
+    //   stage +Z → pyxis +Y
+    // Column-vector form (Pyxis convention §10): matrix columns are
+    // where the basis vectors land.
+    const hlslpp::float4x4 rot(
+        hlslpp::float4{1.0f, 0.0f,  0.0f, 0.0f},
+        hlslpp::float4{0.0f, 0.0f,  1.0f, 0.0f},
+        hlslpp::float4{0.0f, -1.0f, 0.0f, 0.0f},
+        hlslpp::float4{0.0f, 0.0f,  0.0f, 1.0f});
+    ctx.stageToWorld = mul(rot, scale);
+  }
+  else
+  {
+    ctx.stageToWorld = scale;
+  }
+  return ctx;
+}
+
+// Compose a USD prim's localToWorld with the stage's correction. The
+// returned Pyxis matrix is ready to drop straight into
+// InstanceDesc::worldFromLocal / CameraDesc::viewFromWorld inverse /
+// LightDesc::position.
+hlslpp::float4x4 ComposeWorldFromLocal(const pxr::UsdPrim& prim,
+                                       pxr::UsdGeomXformCache& xformCache,
+                                       const StageContext& stageCtx) noexcept
+{
+  const pxr::GfMatrix4d usdLocalToWorld = xformCache.GetLocalToWorldTransform(prim);
+  return mul(stageCtx.stageToWorld, ToPyxisMatrix(usdLocalToWorld));
 }
 
 using MaterialHandleByPath = std::unordered_map<std::string, MaterialHandle>;
@@ -182,9 +262,14 @@ MaterialHandle ResolveBoundMaterial(const pxr::UsdPrim& meshPrim,
 // M9 polish picks it up alongside the rest of the UsdLux input
 // surface.
 void EmitLight(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCache,
-               GpuScene& scene) noexcept {
+               const StageContext& stageCtx, GpuScene& scene) noexcept {
   auto& log = Logging::Get();
-  const pxr::GfMatrix4d worldFromLocal = xformCache.GetLocalToWorldTransform(prim);
+  // Compose USD's local-to-world with the stage-to-world correction
+  // (metersPerUnit + Z->Y if needed) so light positions land in
+  // Pyxis-world (metres + Y-up). Direction extraction uses Pyxis
+  // matrix math throughout — `mul(worldFromLocal, localDir)` with
+  // localDir.w=0 drops the translation column automatically.
+  const hlslpp::float4x4 worldFromLocal = ComposeWorldFromLocal(prim, xformCache, stageCtx);
 
   // Helpers for USD light input attrs — they live on the prim under
   // `inputs:<name>` namespace. UsdLuxLightAPI exposes typed accessors
@@ -209,35 +294,39 @@ void EmitLight(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCache,
 
   LightDesc desc;
   desc.color = readColor("color", hlslpp::float3{1.0f, 1.0f, 1.0f});
-  desc.intensity = readFloat("intensity", 1.0f);
+  // UsdLuxLightAPI canonical scale: intensity * 2^exposure. Omniverse
+  // + DCC content typically authors a high `intensity` (e.g. 12000 for
+  // a sky dome) and zero exposure; some pipelines push the scale into
+  // exposure stops instead. Both together cover the common cases.
+  // Default exposure = 0 → 2^0 = 1 (no-op for fixtures that don't
+  // author it).
+  const float rawIntensity = readFloat("intensity", 1.0f);
+  const float exposureStops = readFloat("exposure", 0.0f);
+  desc.intensity = rawIntensity * std::exp2(exposureStops);
 
   if (prim.IsA<pxr::UsdLuxDistantLight>())
   {
     desc.kind = LightDesc::Kind::Distant;
-    // Local -Z transformed by worldFromLocal's rotation. USD row-
-    // vector convention: dir_world = (0,0,-1,0) * M.
-    const pxr::GfVec4d localDir(0.0, 0.0, -1.0, 0.0);
-    const pxr::GfVec4d worldDir = localDir * worldFromLocal;
-    desc.direction =
-        hlslpp::float3{static_cast<float>(worldDir[0]), static_cast<float>(worldDir[1]),
-                       static_cast<float>(worldDir[2])};
+    // Local -Z transformed by worldFromLocal's rotation block. Pyxis
+    // column-vector convention: dir_world = M * dir_local. w=0 keeps
+    // the translation column from contributing — pure rotation +
+    // optional uniform scale (Pack normalises before upload).
+    const hlslpp::float4 dirWorld =
+        mul(worldFromLocal, hlslpp::float4{0.0f, 0.0f, -1.0f, 0.0f});
+    desc.direction = hlslpp::float3{dirWorld.x, dirWorld.y, dirWorld.z};
   }
   else if (prim.IsA<pxr::UsdLuxRectLight>())
   {
     desc.kind = LightDesc::Kind::Rect;
-    const pxr::GfVec4d originLocal(0.0, 0.0, 0.0, 1.0);
-    const pxr::GfVec4d originWorld = originLocal * worldFromLocal;
-    desc.position =
-        hlslpp::float3{static_cast<float>(originWorld[0]), static_cast<float>(originWorld[1]),
-                       static_cast<float>(originWorld[2])};
-    const pxr::GfVec4d uLocal(1.0, 0.0, 0.0, 0.0);
-    const pxr::GfVec4d uWorld = uLocal * worldFromLocal;
-    desc.axisU = hlslpp::float3{static_cast<float>(uWorld[0]), static_cast<float>(uWorld[1]),
-                                static_cast<float>(uWorld[2])};
-    const pxr::GfVec4d vLocal(0.0, 1.0, 0.0, 0.0);
-    const pxr::GfVec4d vWorld = vLocal * worldFromLocal;
-    desc.axisV = hlslpp::float3{static_cast<float>(vWorld[0]), static_cast<float>(vWorld[1]),
-                                static_cast<float>(vWorld[2])};
+    const hlslpp::float4 originWorld =
+        mul(worldFromLocal, hlslpp::float4{0.0f, 0.0f, 0.0f, 1.0f});
+    desc.position = hlslpp::float3{originWorld.x, originWorld.y, originWorld.z};
+    const hlslpp::float4 uWorld =
+        mul(worldFromLocal, hlslpp::float4{1.0f, 0.0f, 0.0f, 0.0f});
+    desc.axisU = hlslpp::float3{uWorld.x, uWorld.y, uWorld.z};
+    const hlslpp::float4 vWorld =
+        mul(worldFromLocal, hlslpp::float4{0.0f, 1.0f, 0.0f, 0.0f});
+    desc.axisV = hlslpp::float3{vWorld.x, vWorld.y, vWorld.z};
   }
   else if (prim.IsA<pxr::UsdLuxDomeLight>())
   {
@@ -306,6 +395,7 @@ void EmitLight(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCache,
 void EmitPointInstancer(const pxr::UsdPrim& instancerPrim,
                         pxr::UsdGeomXformCache& xformCache,
                         const MaterialHandleByPath& materialsByPath,
+                        const StageContext& stageCtx,
                         GpuScene& scene, IngestStats& stats,
                         ConsumedPrototypePaths& consumedPrototypes) noexcept {
   auto& log = Logging::Get();
@@ -455,7 +545,11 @@ void EmitPointInstancer(const pxr::UsdPrim& instancerPrim,
     InstanceDesc instanceDesc;
     instanceDesc.mesh = protoMesh;
     instanceDesc.material = protoMaterials[proto];
-    instanceDesc.worldFromLocal = ToPyxisMatrix(worldFromLocal);
+    // Bake stage-to-world (metersPerUnit + Z->Y) onto every instance
+    // so the BLAS keeps its stage-unit local geometry but the per-
+    // instance transform places it correctly in Pyxis-world.
+    instanceDesc.worldFromLocal =
+        mul(stageCtx.stageToWorld, ToPyxisMatrix(worldFromLocal));
     instanceDesc.debugName = instancerPrim.GetPath().GetString();
     const auto instanceHandle = scene.AppendInstance(instanceDesc);
     if (!instanceHandle.has_value())
@@ -480,7 +574,8 @@ void EmitPointInstancer(const pxr::UsdPrim& instancerPrim,
 // non-crashing) triangles. Subdivision is §42-deferred so authoring
 // concave ngons that need ear-clipping is post-v1.
 bool EmitMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCache,
-              const MaterialHandleByPath& materialsByPath, GpuScene& scene) noexcept {
+              const MaterialHandleByPath& materialsByPath,
+              const StageContext& stageCtx, GpuScene& scene) noexcept {
   auto& log = Logging::Get();
   const pxr::UsdGeomMesh meshPrim(prim);
   if (!meshPrim.GetPrim().IsValid())
@@ -561,10 +656,13 @@ bool EmitMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCache,
   // InstanceDesc::material so the closesthit can read
   // materials[InstanceID()] (where InstanceID is the material slot
   // — see GpuScene::CommitResources's TLAS instance pack).
-  const pxr::GfMatrix4d worldFromLocal = xformCache.GetLocalToWorldTransform(prim);
+  // ComposeWorldFromLocal bakes metersPerUnit + Z->Y if the stage
+  // metadata says so, so the BLAS keeps its stage-unit local-space
+  // geometry but the per-instance transform places it correctly in
+  // Pyxis-world (metres + Y-up).
   InstanceDesc instanceDesc;
   instanceDesc.mesh = *meshHandle;
-  instanceDesc.worldFromLocal = ToPyxisMatrix(worldFromLocal);
+  instanceDesc.worldFromLocal = ComposeWorldFromLocal(prim, xformCache, stageCtx);
   instanceDesc.material = ResolveBoundMaterial(prim, materialsByPath);
   instanceDesc.debugName = debugName;
   const auto instanceHandle = scene.AppendInstance(instanceDesc);
@@ -581,34 +679,36 @@ bool EmitMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCache,
 // Emit a UsdGeomCamera as the active camera. The plan §29.4.a default
 // scene only has one camera; the M4 contract is "first camera in
 // SdfPath-sorted order wins" so both adapters pick the same one.
-void EmitCamera(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCache,
-                GpuScene& scene) noexcept {
+// Build a Pyxis CameraDesc from a UsdGeomCamera prim. Returns nullopt
+// for invalid prims. Does NOT push to GpuScene — caller decides
+// whether this is the active camera (e.g. matches the stage's
+// `customLayerData.cameraSettings.boundCamera` hint).
+//
+// Composes the stage-to-world correction onto the camera's world
+// transform so viewFromWorld lands in Pyxis-world coords (metres +
+// Y-up if the stage was Z-up). Projection matrix is intrinsic — no
+// scale correction needed.
+std::optional<CameraDesc> BuildCameraDesc(const pxr::UsdPrim& prim,
+                                          pxr::UsdGeomXformCache& xformCache,
+                                          const StageContext& stageCtx) noexcept
+{
   const pxr::UsdGeomCamera cameraPrim(prim);
   if (!cameraPrim.GetPrim().IsValid())
-    return;
+    return std::nullopt;
 
-  // GetCamera returns a GfCamera at the default time code.
   const pxr::GfCamera gfCamera = cameraPrim.GetCamera(pxr::UsdTimeCode::Default());
-  const pxr::GfMatrix4d worldFromLocal = xformCache.GetLocalToWorldTransform(prim);
+  const hlslpp::float4x4 worldFromCamera = ComposeWorldFromLocal(prim, xformCache, stageCtx);
 
-  CameraDesc cameraDesc;
-  // viewFromWorld = inverse(worldFromLocal). USD's GfMatrix4d.
-  // GetInverse() handles the inversion.
-  const pxr::GfMatrix4d viewFromWorld = worldFromLocal.GetInverse();
-  cameraDesc.viewFromWorld = ToPyxisMatrix(viewFromWorld);
-  // Projection: GfCamera::GetFrustum().ComputeProjectionMatrix() at
-  // M5+ when the perspective/ortho switch matters. M4 stub: ship a
-  // simple perspective projection from focalLength + aperture so
-  // both adapters compute identically.
-  cameraDesc.projFromView = ToPyxisMatrix(gfCamera.GetFrustum().ComputeProjectionMatrix());
-  cameraDesc.focalLengthMm = gfCamera.GetFocalLength();
-  cameraDesc.apertureFStop = gfCamera.GetFStop();
-  cameraDesc.focusDistance = gfCamera.GetFocusDistance();
+  CameraDesc desc;
+  desc.viewFromWorld = hlslpp::inverse(worldFromCamera);
+  desc.projFromView  = ToPyxisMatrix(gfCamera.GetFrustum().ComputeProjectionMatrix());
+  desc.focalLengthMm = gfCamera.GetFocalLength();
+  desc.apertureFStop = gfCamera.GetFStop();
+  desc.focusDistance = gfCamera.GetFocusDistance();
   const pxr::GfRange1f clipRange = gfCamera.GetClippingRange();
-  cameraDesc.nearClip = clipRange.GetMin();
-  cameraDesc.farClip = clipRange.GetMax();
-
-  scene.SetCamera(cameraDesc);
+  desc.nearClip = clipRange.GetMin();
+  desc.farClip  = clipRange.GetMax();
+  return desc;
 }
 
 }  // namespace
@@ -672,7 +772,28 @@ IngestStats StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
       std::chrono::duration<float, std::milli>(traverseEnd - walkStart).count();
 
   pxr::UsdGeomXformCache xformCache;
-  bool cameraSet = false;
+  const StageContext stageCtx = BuildStageContext(stage);
+
+  // Read the optional `boundCamera` hint from the root layer's
+  // customLayerData (Omniverse + DCC convention). Empty string =
+  // no hint; we'll fall back to first-camera-in-SdfPath-order.
+  std::string boundCameraHintPath;
+  if (stage->GetRootLayer())
+  {
+    const pxr::VtDictionary customData = stage->GetRootLayer()->GetCustomLayerData();
+    auto camSettingsIt = customData.find("cameraSettings");
+    if (camSettingsIt != customData.end()
+        && camSettingsIt->second.IsHolding<pxr::VtDictionary>())
+    {
+      const pxr::VtDictionary& camSettings =
+          camSettingsIt->second.Get<pxr::VtDictionary>();
+      auto boundIt = camSettings.find("boundCamera");
+      if (boundIt != camSettings.end() && boundIt->second.IsHolding<std::string>())
+      {
+        boundCameraHintPath = boundIt->second.Get<std::string>();
+      }
+    }
+  }
 
   // Pass 1 — materials. Translate every UsdShadeMaterial to an
   // OpenPBRMaterialDesc and AcquireMaterial it; record the resulting
@@ -712,7 +833,7 @@ IngestStats StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
   {
     if (!prim.IsA<pxr::UsdGeomPointInstancer>())
       continue;
-    EmitPointInstancer(prim, xformCache, materialsByPath, scene, stats,
+    EmitPointInstancer(prim, xformCache, materialsByPath, stageCtx, scene, stats,
                        consumedPrototypes);
   }
   const auto instancerPassEnd = Clock::now();
@@ -729,7 +850,7 @@ IngestStats StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
     {
       if (consumedPrototypes.contains(prim.GetPath().GetString()))
         continue;
-      if (EmitMesh(prim, xformCache, materialsByPath, scene))
+      if (EmitMesh(prim, xformCache, materialsByPath, stageCtx, scene))
       {
         ++stats.meshesEmitted;
         ++stats.instancesEmitted;
@@ -737,12 +858,18 @@ IngestStats StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
     }
     else if (prim.IsA<pxr::UsdGeomCamera>())
     {
-      if (!cameraSet)
+      // Build the desc + collect into the stats list — the editor
+      // will populate a Scene-Camera combo from these. Active-camera
+      // selection happens AFTER the loop so we can honour the
+      // root-layer's `boundCamera` hint regardless of SdfPath order.
+      if (auto descOpt = BuildCameraDesc(prim, xformCache, stageCtx); descOpt)
       {
-        EmitCamera(prim, xformCache, scene);
-        cameraSet = true;
+        NamedCamera entry;
+        entry.name = prim.GetPath().GetString();
+        entry.desc = *descOpt;
+        stats.cameras.push_back(std::move(entry));
+        ++stats.camerasEmitted;
       }
-      ++stats.camerasEmitted;
     }
     else if (prim.IsA<pxr::UsdLuxDistantLight>() || prim.IsA<pxr::UsdLuxDomeLight>()
              || prim.IsA<pxr::UsdLuxRectLight>())
@@ -751,7 +878,7 @@ IngestStats StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
       // simple shading model (NdotL Lambert for Distant + Rect,
       // uniform ambient for Dome) consumes them; user's M7-full
       // pass adds NEE + MIS + IBL importance sampling per §7.
-      EmitLight(prim, xformCache, scene);
+      EmitLight(prim, xformCache, stageCtx, scene);
       ++stats.lightsEmitted;
     }
     else if (prim.IsA<pxr::UsdShadeMaterial>())
@@ -767,6 +894,30 @@ IngestStats StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
       }
     }
   }
+  // Active-camera selection. Honour the root-layer's `boundCamera`
+  // hint if present (Omniverse + DCC convention: the camera the
+  // scene's authoring tool was last looking through). Fall back to
+  // first-in-SdfPath-order — preserves the M4 "first camera wins"
+  // contract for fixtures that don't author a hint. activeCameraIndex
+  // stays -1 only when the scene authored zero cameras.
+  if (!stats.cameras.empty())
+  {
+    int activeIdx = 0;  // first-in-SdfPath-order fallback
+    if (!boundCameraHintPath.empty())
+    {
+      for (std::size_t i = 0; i < stats.cameras.size(); ++i)
+      {
+        if (stats.cameras[i].name == boundCameraHintPath)
+        {
+          activeIdx = static_cast<int>(i);
+          break;
+        }
+      }
+    }
+    stats.activeCameraIndex = activeIdx;
+    scene.SetCamera(stats.cameras[static_cast<std::size_t>(activeIdx)].desc);
+  }
+
   const auto meshPassEnd = Clock::now();
   stats.meshLightCameraMs =
       std::chrono::duration<float, std::milli>(meshPassEnd - meshPassStart).count();

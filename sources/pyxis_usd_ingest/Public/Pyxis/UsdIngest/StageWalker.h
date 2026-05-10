@@ -13,18 +13,32 @@
 
 #pragma once
 
+#include <Pyxis/Renderer/Descs/CameraDesc.h>
 #include <Pyxis/UsdIngest/UsdIngestApi.h>
 
 #include <pxr/usd/usd/stage.h>
 
 #include <cstdint>
+#include <string>
 #include <string_view>
+#include <vector>
 
 namespace pyxis {
 class GpuScene;
 }  // namespace pyxis
 
 namespace pyxis::usd_ingest {
+
+// One USD camera the StageWalker picked up + translated. The full
+// list is returned via IngestStats::cameras so the viewer can
+// populate a "Scene Camera" combo and let the user snap the
+// FlyCamera to any of them. The single "active" one (chosen by
+// boundCamera hint, or first-in-SdfPath-order) is also pushed via
+// GpuScene::SetCamera so headless renders + first-frame viewer work.
+struct PYXIS_USD_INGEST_API NamedCamera {
+  std::string name;       // SdfPath of the camera prim
+  CameraDesc  desc;       // viewFromWorld + projFromView + intrinsics
+};
 
 struct PYXIS_USD_INGEST_API IngestStats {
   uint32_t meshesEmitted = 0;
@@ -34,6 +48,13 @@ struct PYXIS_USD_INGEST_API IngestStats {
   uint32_t materialsEmitted = 0;
   uint32_t camerasEmitted = 0;
   uint32_t skipped = 0;       // unsupported prim types (volume, points, etc.)
+
+  // All cameras the walker translated (in SdfPath-sorted order). The
+  // index of the one pushed via GpuScene::SetCamera lives in
+  // `activeCameraIndex` (-1 if no camera was pushed). Empty vector
+  // for scenes with no cameras (e.g. cube fixtures).
+  std::vector<NamedCamera> cameras;
+  int activeCameraIndex = -1;
 
   // Per-stage timings (milliseconds, std::chrono::steady_clock based).
   // Surfaced in the viewer's Performance / Loading panel so users can
