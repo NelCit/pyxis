@@ -1,0 +1,28 @@
+{
+  "$comment": "Pyxis M13 smoke fixture — analytic prims + curves + points. Loads tests/fixtures/m13_geom.usda via --scene; this JSON pins the headless render dims + seed for determinism. usd_direct ingest (Hydra adapter renders this same fixture identically via the M4 byte-equal contract).",
+
+  "render": {
+    "width":           512,
+    "height":          512,
+    "samplesPerFrame": 1,
+    "seed":            13
+  },
+
+  "output": {
+    "image":           "m13_geom.exr",
+    "effectiveConfig": "m13_geom.effective.json"
+  },
+
+  "diagnostics": {
+    "validationLayer": false,
+    "aftermath":       false
+  },
+
+  "limits": {
+    "framesInFlight":  3
+  },
+
+  "app": {
+    "ingest":          "usd_direct"
+  }
+}

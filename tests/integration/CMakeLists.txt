@@ -217,3 +217,23 @@ else()
         "Extract Collected_World_Lobby.zip into resources/scenes/world_lobby/ "
         "and reconfigure to enable.")
 endif()
+
+# §41 M13 / V2.A.3 — analytic prim + curves + points framework test.
+# Loads a self-contained .usda fixture (one of each prim type) headless;
+# proves StageWalker's geom-type dispatch + AnalyticGeom tessellators
+# round-trip into the existing MeshDesc / BLAS / TLAS pipeline. Fixture
+# ships in-tree (no external scene download), so unlike M8a.WorldLobby
+# this always registers.
+add_test(
+    NAME    M13.AnalyticGeomSmoke
+    COMMAND ${CMAKE_COMMAND}
+            -DPYXIS_EXE=$<TARGET_FILE:pyxis>
+            -DFIXTURE_CONFIG=${CMAKE_SOURCE_DIR}/tests/fixtures/m13_geom.json
+            -DSCENE_PATH=${CMAKE_SOURCE_DIR}/tests/fixtures/m13_geom.usda
+            -DOUTPUT_DIR=${CMAKE_BINARY_DIR}/tests/integration/m13_geom
+            -P ${CMAKE_SOURCE_DIR}/tests/integration/m13_geom_smoke.cmake
+)
+set_tests_properties(M13.AnalyticGeomSmoke PROPERTIES
+    LABELS    "integration;m13"
+    TIMEOUT   120  # In-tree fixture is ~7 prims; budget is generous.
+)
