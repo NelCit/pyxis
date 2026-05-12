@@ -2256,12 +2256,67 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
   std::uint32_t srcCountMaterialX = 0;
   std::uint32_t srcCountRenderMan = 0;
   std::uint32_t srcCountDefault = 0;
+
+  // M22 / V2.A.23 + V2.A.24 + V2.A.29 + V2.A.30 — material network
+  // coverage counters. Walked alongside the existing health pass so
+  // we get one log line that reports all gaps in one shot.
+  std::uint32_t mdlNetworkCount     = 0;  // shader info:id begins with "mdl::"
+  std::uint32_t displacementOutputs = 0;  // material has authored displacement output
+  std::uint32_t volumeOutputs       = 0;  // material has authored volume output
+  std::uint32_t ocioColorSpaces     = 0;  // texture authors a non-default sourceColorSpace
+  std::uint32_t nonDefaultWrapModes = 0;  // texture authors non-default wrap mode
+
   for (const pxr::UsdPrim& prim : prims)
   {
     if (!prim.IsA<pxr::UsdShadeMaterial>())
       continue;
     const pxr::UsdShadeMaterial materialPrim(prim);
     const std::string primPath = prim.GetPath().GetString();
+
+    // V2.A.30 — displacement / volume outputs on the material. Pyxis
+    // only reads `surface`; authoring an additional output means the
+    // operator's intent is at risk.
+    if (materialPrim.GetDisplacementOutput().HasConnectedSource())
+      ++displacementOutputs;
+    if (materialPrim.GetVolumeOutput().HasConnectedSource())
+      ++volumeOutputs;
+
+    // V2.A.23 + V2.A.24 + V2.A.29 — sweep all Shader children for
+    // MDL info:id + non-default UsdUVTexture wrap/colorspace inputs.
+    for (const pxr::UsdPrim& child : pxr::UsdPrimRange(prim))
+    {
+      const pxr::UsdShadeShader shader(child);
+      if (!shader)
+        continue;
+      pxr::TfToken shaderId;
+      if (shader.GetShaderId(&shaderId))
+      {
+        const std::string& idStr = shaderId.GetString();
+        if (idStr.size() >= 5 && idStr.starts_with("mdl::"))
+          ++mdlNetworkCount;
+      }
+      // Texture-side: wrap modes + colorspace coverage.
+      if (const pxr::UsdShadeInput wrapS = shader.GetInput(pxr::TfToken("wrapS")); wrapS)
+      {
+        pxr::VtValue value;
+        pxr::TfToken token;
+        if (wrapS.Get(&value) && value.IsHolding<pxr::TfToken>())
+          token = value.UncheckedGet<pxr::TfToken>();
+        if (!token.IsEmpty() && token != pxr::TfToken("useMetadata")
+            && token != pxr::TfToken("repeat"))
+          ++nonDefaultWrapModes;
+      }
+      if (const pxr::UsdShadeInput colorSpace = shader.GetInput(pxr::TfToken("sourceColorSpace"));
+          colorSpace)
+      {
+        pxr::VtValue value;
+        pxr::TfToken token;
+        if (colorSpace.Get(&value) && value.IsHolding<pxr::TfToken>())
+          token = value.UncheckedGet<pxr::TfToken>();
+        if (!token.IsEmpty() && token != pxr::TfToken("auto"))
+          ++ocioColorSpaces;
+      }
+    }
     OpenPBRMaterialDesc materialDesc =
         material_translation::FromUsdShade(materialPrim, ACQUIRE_TEXTURE, &scene);
     materialDesc.sourcePrim = primPath;
@@ -2302,6 +2357,16 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
                 "MaterialX / MDL / RenderMan network (V2.A.8 / V2.A.24 "
                 "follow-up).");
     }
+    // M22 / V2.A coverage sweep — log per-feature counters so operators
+    // see which v2 loading gaps the scene hits. Zero across the board
+    // is the goal; any non-zero count points at a follow-up milestone.
+    Logging::Get().Info(log::APP,
+        "StageWalker network coverage: mdl=" + std::to_string(mdlNetworkCount)
+        + " displacementOutputs=" + std::to_string(displacementOutputs)
+        + " volumeOutputs=" + std::to_string(volumeOutputs)
+        + " ocioColorSpaces=" + std::to_string(ocioColorSpaces)
+        + " nonDefaultWrapModes=" + std::to_string(nonDefaultWrapModes)
+        + " (non-zero counts point at V2.A.23 / V2.A.24 / V2.A.29 / V2.A.30 follow-ups).");
   }
 
   // Pass 2 — UsdGeomPointInstancer (M6). Walked BEFORE the standalone
@@ -2543,9 +2608,29 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
     }
     else
     {
-      if (!prim.GetTypeName().IsEmpty() && prim.GetTypeName().GetString() != "Xform"
-          && prim.GetTypeName().GetString() != "Scope")
+      // M22 / V2.A.32 — codeless schemas / unknown typed schemas.
+      // USD allows defining schemas in a layer (codeless) or via
+      // UsdProc (procedural prims) without a corresponding C++ class.
+      // Pyxis must be tolerant — log + skip + count, never crash.
+      // Distinct from the empty-typename / Xform / Scope organisational
+      // case which is silently ignored.
+      const pxr::TfToken typeNameToken = prim.GetTypeName();
+      if (!typeNameToken.IsEmpty()
+          && typeNameToken.GetString() != "Xform"
+          && typeNameToken.GetString() != "Scope")
       {
+        // Capped at the first 8 distinct typenames to avoid log flood
+        // on misclassified scenes.
+        static thread_local std::unordered_set<std::string> seenUnknownTypes;
+        if (seenUnknownTypes.size() < 8u
+            && seenUnknownTypes.insert(typeNameToken.GetString()).second)
+        {
+          Logging::Get().Info(log::APP,
+              "StageWalker: unknown prim type \""
+                  + typeNameToken.GetString()
+                  + "\" at " + prim.GetPath().GetString()
+                  + " (codeless schema / UsdProc / future USD type — V2.A.32).");
+        }
         ++stats.skipped;
       }
     }
