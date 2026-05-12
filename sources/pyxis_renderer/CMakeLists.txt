@@ -74,6 +74,8 @@ target_sources(pyxis_renderer PRIVATE
     Private/GpuScene/Instance.cpp
     Private/GpuScene/Light.cpp
     Private/GpuScene/Commit.cpp
+    Private/GpuScene/DdsParser.h
+    Private/GpuScene/DdsParser.cpp
 
     # M1 — RenderGraph + Passes + Profiler + Renderer.
     Private/Diagnostics/CommandListMarker.h
