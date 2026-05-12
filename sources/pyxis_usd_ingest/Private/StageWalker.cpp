@@ -20,6 +20,7 @@
 
 #include "Pyxis/UsdIngest/StageWalker.h"
 
+#include "AnalyticGeom.h"
 #include "SubdivRefine.h"
 
 #include <Pyxis/MaterialTranslation/UsdShadeToOpenPBR.h>
@@ -1806,6 +1807,117 @@ PreparedMesh PrepareMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xform
   return prepared;
 }
 
+// M13 / V2.A.3 + V2.A.21 — analytic prim + curves + points prep.
+// Tessellate the prim into a single triangle-list PreparedSubMesh,
+// pick up the bound material (no GeomSubsets on these prims by USD
+// spec), honour visibility + purpose. No tangents (no normal maps
+// in v2 first cut for analytic prims).
+[[nodiscard]] PreparedMesh PrepareAnalyticGeom(const pxr::UsdPrim& prim,
+                                                pxr::UsdGeomXformCache& xformCache,
+                                                const MaterialHandleByPath& materialsByPath,
+                                                const StageContext& stageCtx) noexcept
+{
+  PreparedMesh prepared;
+
+  // Visibility + purpose — same gate as PrepareMesh.
+  const pxr::UsdGeomImageable imageable(prim);
+  if (imageable
+      && imageable.ComputeVisibility(pxr::UsdTimeCode::Default())
+             == pxr::UsdGeomTokens->invisible)
+    return prepared;
+  if (imageable)
+  {
+    const pxr::TfToken purpose = imageable.ComputePurpose();
+    if (purpose == pxr::UsdGeomTokens->proxy || purpose == pxr::UsdGeomTokens->guide)
+      return prepared;
+  }
+
+  // Tessellate by type. The per-type helpers read all the USD-side
+  // attrs themselves; we only inject worldUp for curves/points which
+  // need an orientation reference at ingest.
+  AnalyticGeomResult result;
+  // Per §29.4, Pyxis-world is Y-up. Z->Y correction lives on
+  // `stageContextToWorld` not on the prim's local frame, so worldUp
+  // here is canonical Y.
+  const pxr::GfVec3f worldUp{0.0f, 1.0f, 0.0f};
+
+  if (prim.IsA<pxr::UsdGeomSphere>())
+    result = TessellateSphere(pxr::UsdGeomSphere(prim));
+  else if (prim.IsA<pxr::UsdGeomCube>())
+    result = TessellateCube(pxr::UsdGeomCube(prim));
+  else if (prim.IsA<pxr::UsdGeomCylinder>())
+    result = TessellateCylinder(pxr::UsdGeomCylinder(prim));
+  else if (prim.IsA<pxr::UsdGeomCone>())
+    result = TessellateCone(pxr::UsdGeomCone(prim));
+  else if (prim.IsA<pxr::UsdGeomCapsule>())
+    result = TessellateCapsule(pxr::UsdGeomCapsule(prim));
+  else if (prim.IsA<pxr::UsdGeomBasisCurves>())
+    result = TessellateBasisCurves(pxr::UsdGeomBasisCurves(prim), worldUp);
+  else if (prim.IsA<pxr::UsdGeomPoints>())
+    result = TessellatePoints(pxr::UsdGeomPoints(prim), worldUp);
+  else
+    return prepared;  // unrecognised — caller already filtered, defensive only
+
+  if (!result.success || result.points.empty() || result.faceIndices.empty())
+    return prepared;
+
+  // Material binding via the standard API.
+  const MaterialHandle material = ResolveBoundMaterial(prim, materialsByPath);
+
+  // Pack the result into the existing PreparedSubMesh shape. All
+  // arrays are vertex-interp at this point; index buffer is a plain
+  // triangle list so no further triangulation needed.
+  PreparedSubMesh subMesh;
+  subMesh.positions.reserve(result.points.size());
+  for (const pxr::GfVec3f& pos : result.points)
+    subMesh.positions.emplace_back(pos[0], pos[1], pos[2]);
+  subMesh.normals.reserve(result.normals.size());
+  for (const pxr::GfVec3f& nrm : result.normals)
+    subMesh.normals.emplace_back(nrm[0], nrm[1], nrm[2]);
+  subMesh.uv0.reserve(result.uvs.size());
+  for (const pxr::GfVec2f& uvVal : result.uvs)
+    subMesh.uv0.emplace_back(uvVal[0], uvVal[1]);
+  subMesh.indices.reserve(result.faceIndices.size());
+  for (const int idx : result.faceIndices)
+    subMesh.indices.push_back(static_cast<std::uint32_t>(idx));
+
+  subMesh.material  = material;
+  subMesh.debugName = prim.GetPath().GetString();
+
+  // displayColor fallback — same primvar-style fallback as PrepareMesh.
+  const pxr::UsdGeomPrimvarsAPI primvarsApi(prim);
+  const pxr::UsdGeomPrimvar dcPrimvar = primvarsApi.GetPrimvar(pxr::TfToken("displayColor"));
+  if (dcPrimvar.HasValue())
+  {
+    pxr::VtArray<pxr::GfVec3f> dcArr;
+    if (dcPrimvar.ComputeFlattened(&dcArr) && !dcArr.empty())
+    {
+      const pxr::GfVec3f& firstDc = dcArr[0];
+      subMesh.displayColor = hlslpp::float3{firstDc[0], firstDc[1], firstDc[2]};
+      subMesh.hasDisplayColor = true;
+    }
+  }
+
+  prepared.subMeshes.push_back(std::move(subMesh));
+  prepared.worldFromLocal = ComposeWorldFromLocal(prim, xformCache, stageCtx);
+  return prepared;
+}
+
+// Returns true when the prim is one of the geom types that pass3b
+// can tessellate to a PreparedMesh (UsdGeomMesh or one of the M13
+// analytic / curves / points types).
+[[nodiscard]] bool IsTessellatableGeom(const pxr::UsdPrim& prim) noexcept
+{
+  return prim.IsA<pxr::UsdGeomMesh>()
+      || prim.IsA<pxr::UsdGeomSphere>()
+      || prim.IsA<pxr::UsdGeomCube>()
+      || prim.IsA<pxr::UsdGeomCylinder>()
+      || prim.IsA<pxr::UsdGeomCone>()
+      || prim.IsA<pxr::UsdGeomCapsule>()
+      || prim.IsA<pxr::UsdGeomBasisCurves>()
+      || prim.IsA<pxr::UsdGeomPoints>();
+}
+
 // EmitPreparedMesh pushes a PreparedMesh into GpuScene — the
 // single-writer half of the split. Must run on the render / main
 // thread per §30.11. Bumps stats.meshesEmitted /
@@ -2119,13 +2231,15 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
   // in iteration order.
   const auto meshPassStart = Clock::now();
 
-  // Pass 3a — collect mesh prim indices (skipping consumed prototypes)
-  // into a parallel-prep work list.
+  // Pass 3a — collect geom prim indices (skipping consumed prototypes)
+  // into a parallel-prep work list. M13: UsdGeomMesh + analytic prims
+  // (Sphere/Cube/Cylinder/Cone/Capsule) + UsdGeomBasisCurves +
+  // UsdGeomPoints all share the same PreparedMesh-emit path.
   std::vector<std::size_t> meshPrimIndices;
   meshPrimIndices.reserve(prims.size());
   for (std::size_t i = 0; i < prims.size(); ++i)
   {
-    if (!prims[i].IsA<pxr::UsdGeomMesh>())
+    if (!IsTessellatableGeom(prims[i]))
       continue;
     if (consumedPrototypes.contains(prims[i].GetPath().GetString()))
       continue;
@@ -2153,9 +2267,20 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
     // per-prim xform-chain walk is small.
     pxr::UsdGeomXformCache localXformCache;
     const std::size_t primIdx = meshPrimIndices[static_cast<std::size_t>(outIdx)];
-    preparedMeshes[static_cast<std::size_t>(outIdx)] =
-        PrepareMesh(prims[primIdx], localXformCache, materialsByPath,
-                    materialsNeedingTangents, stageCtx);
+    const pxr::UsdPrim& geomPrim = prims[primIdx];
+    if (geomPrim.IsA<pxr::UsdGeomMesh>())
+    {
+      preparedMeshes[static_cast<std::size_t>(outIdx)] =
+          PrepareMesh(geomPrim, localXformCache, materialsByPath,
+                      materialsNeedingTangents, stageCtx);
+    }
+    else
+    {
+      // Analytic prim / curves / points — tessellated triangle-list
+      // mesh built from the prim's typed attributes.
+      preparedMeshes[static_cast<std::size_t>(outIdx)] =
+          PrepareAnalyticGeom(geomPrim, localXformCache, materialsByPath, stageCtx);
+    }
   }
   const auto pass3bEnd = Clock::now();
   const auto pass3bMs =
@@ -2169,7 +2294,7 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
   std::size_t nextPreparedIdx = 0;
   for (const pxr::UsdPrim& prim : prims)
   {
-    if (prim.IsA<pxr::UsdGeomMesh>())
+    if (IsTessellatableGeom(prim))
     {
       if (consumedPrototypes.contains(prim.GetPath().GetString()))
         continue;

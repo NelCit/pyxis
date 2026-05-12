@@ -27,6 +27,8 @@ target_sources(pyxis_usd_ingest PRIVATE
     Private/StageWalker.cpp
     Private/SubdivRefine.h
     Private/SubdivRefine.cpp
+    Private/AnalyticGeom.h
+    Private/AnalyticGeom.cpp
 )
 
 find_package(pxr CONFIG REQUIRED)
