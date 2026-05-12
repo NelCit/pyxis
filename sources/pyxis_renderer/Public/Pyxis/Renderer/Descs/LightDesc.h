@@ -23,6 +23,11 @@
 
 namespace pyxis {
 
+// NOLINTNEXTLINE(clang-analyzer-optin.performance.Padding) — field
+// order is part of the §18 public ABI contract per §22.3; reordering
+// to shrink padding would break compiled consumers. Empty padding
+// is intentional and reserved for trailing _reserved slots per
+// §22.3 MINOR-additive growth rules.
 struct LightDesc {
   enum class Kind : uint8_t {
     Distant,
