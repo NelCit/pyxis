@@ -147,6 +147,20 @@ int Run(int argc, char** argv) noexcept {
                     + std::string{SceneSourceLabel(scene.source)} + "  path = " + scene.path);
   Logging::Get().Info(log::APP, "app.ingest = " + config.app.ingest);
 
+  // M19 / V2.A.4 + V2.A.13 — --frame flag stub. The CLI parsing is in
+  // place so future plumbing has a target; the rest of the pipeline
+  // still evaluates at Default time. Log explicitly so users see that
+  // their --frame request was received but not yet acted on.
+  if (cli.frameNumber >= 0)
+  {
+    Logging::Get().Warn(
+        log::APP,
+        "--frame " + std::to_string(cli.frameNumber)
+            + " accepted but not yet evaluated; time-varying USD is a "
+              "follow-up milestone (V2.A.4 / V2.A.13). Rendering at "
+              "default time.");
+  }
+
   if (cli.headless)
   {
     return RunHeadless(config, scene, cli.saveAov, cli.benchFrames, cli.profilePath);

@@ -227,6 +227,16 @@ CliArgs Parse(int argc, char** argv) noexcept {
       }
       ++i;
     }
+    else if (Equals(arg, "--frame"))
+    {
+      if (i + 1 >= argc || !ParseInt32(argv[i + 1], out.frameNumber))
+      {
+        out.invalid = true;
+        out.invalidArg = arg;
+        return out;
+      }
+      ++i;
+    }
     else
     {
       out.invalid = true;
@@ -278,6 +288,9 @@ void PrintUsage() noexcept {
       "                          frames + N measurement frames; print a §34 KPI table\n"
       "                          (pass.PathTrace, frame.cpu.commitResources, p50/p99/max).\n"
       "                          0 = disabled (default).\n"
+      "  --frame <int>           Time-varying USD frame to evaluate. M19 stub: parsed\n"
+      "                          and logged; full UsdTimeCode propagation is a follow-up\n"
+      "                          milestone (V2.A.4 / V2.A.13). -1 = default time.\n"
       "\n"
       "Viewer extras:\n"
       "  --screenshot <path>     Run viewer briefly; write a PNG of the backbuffer.\n"
