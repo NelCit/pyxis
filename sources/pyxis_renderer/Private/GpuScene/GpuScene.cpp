@@ -129,6 +129,11 @@ bool GpuScene::HasTexture(TextureHandle textureHandle) const
   return _impl->HasTexture(textureHandle);
 }
 
+std::uint32_t GpuScene::EvictColdTextures(uint64_t targetBytes)
+{
+  return _impl->EvictColdTextures(targetBytes);
+}
+
 // ---- Instance --------------------------------------------------------------
 // Bodies in Instance.cpp.
 Expected<InstanceHandle> GpuScene::AppendInstance(const InstanceDesc& instanceDesc)

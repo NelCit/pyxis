@@ -740,6 +740,10 @@ struct GpuScene::Impl
   TextureHandle        AcquireTexture(const TextureKey& textureKey);
   void                 DestroyTexture(TextureHandle textureHandle);
   [[nodiscard]] bool   HasTexture(TextureHandle textureHandle) const;
+  // V2.A.12 — LRU eviction. Drops textures by ascending lastAccessTick
+  // until total decoded byte count is below `targetBytes`. Returns the
+  // count evicted. Safe to call between frames.
+  std::uint32_t        EvictColdTextures(std::uint64_t targetBytes) noexcept;
 
   // Instance.cpp
   Expected<InstanceHandle> AppendInstance(const InstanceDesc& instanceDesc);

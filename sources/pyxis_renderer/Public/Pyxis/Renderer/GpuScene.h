@@ -107,6 +107,16 @@ public:
   [[nodiscard]] TextureHandle AcquireTexture(const TextureKey& textureKey);
   void DestroyTexture(TextureHandle textureHandle);
   [[nodiscard]] bool HasTexture(TextureHandle textureHandle) const;
+  // V2.A.12 — LRU eviction. Drops live textures by ascending
+  // `lastAccessTick` until cumulative decoded byte count falls below
+  // `targetBytes`. Returns the count evicted. Safe to call between
+  // frames (single-writer rule per §30.11); the resulting destroyed
+  // handles route through the regular DestroyTexture cleanup, so the
+  // free-list / generation bump / quarantine semantics all kick in.
+  // Operators / streaming scaffolding call this from a budget
+  // watchdog when the texture cache exceeds the soft cap surfaced
+  // by `LastFrameStats().textureBytes`.
+  std::uint32_t EvictColdTextures(uint64_t targetBytes);
 
   // ---- Instance ------------------------------------------------------
   [[nodiscard]] Expected<InstanceHandle> AppendInstance(const InstanceDesc& instanceDesc);
