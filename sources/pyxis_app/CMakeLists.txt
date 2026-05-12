@@ -23,6 +23,8 @@ target_sources(pyxis PRIVATE
     Private/Config/Configuration.cpp
     Private/Output/AovExrSaver.h
     Private/Output/AovExrSaver.cpp
+    Private/Output/SaveFilePicker.h
+    Private/Output/SaveFilePicker.cpp
     Private/Output/BackbufferScreenshot.h
     Private/Output/BackbufferScreenshot.cpp
     Private/Output/ExrWriter.h

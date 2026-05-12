@@ -14,6 +14,7 @@
 
 #include "ImGuiHost.h"
 
+#include "Output/SaveFilePicker.h"
 #include "Render/AovRegistry.h"
 
 #include <Pyxis/Renderer/Descs/CameraDesc.h>
@@ -42,65 +43,11 @@ namespace pyxis::app {
 
 namespace {
 
+// (Save-file picker moved to Private/Output/SaveFilePicker.{h,cpp}
+// in M11; this file's old in-place implementation was the original
+// home, but BuildFpsPanel now reuses the same dialog for its
+// "Save profile JSON..." button so we extracted to a shared helper.)
 #if defined(_WIN32)
-// Modal Windows file-SAVE dialog. Returns the path the user picked (or
-// the typed-in path if they overrode the suggestion); empty on cancel.
-// Defaults to the supplied filename and EXR filter so the AOV save
-// flow always lands at <foo>.exr.
-std::string SaveFilePickerDialog(std::wstring_view defaultFileName) noexcept {
-  HRESULT comResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-  const bool weInitedCom = SUCCEEDED(comResult);
-
-  IFileSaveDialog* dialog = nullptr;
-  comResult = CoCreateInstance(CLSID_FileSaveDialog, nullptr, CLSCTX_ALL, IID_IFileSaveDialog,
-                               reinterpret_cast<void**>(&dialog));
-  if (FAILED(comResult) || !dialog)
-  {
-    if (weInitedCom)
-      CoUninitialize();
-    return {};
-  }
-
-  COMDLG_FILTERSPEC filterSpec[] = {
-      {L"OpenEXR (*.exr)", L"*.exr"},
-  };
-  dialog->SetFileTypes(static_cast<UINT>(std::size(filterSpec)), filterSpec);
-  dialog->SetTitle(L"Pyxis - Save AOV as EXR");
-  dialog->SetDefaultExtension(L"exr");
-  if (!defaultFileName.empty())
-  {
-    const std::wstring nameOwned{defaultFileName};
-    dialog->SetFileName(nameOwned.c_str());
-  }
-
-  comResult = dialog->Show(nullptr);
-  std::string result;
-  if (SUCCEEDED(comResult))
-  {
-    IShellItem* item = nullptr;
-    if (SUCCEEDED(dialog->GetResult(&item)) && item)
-    {
-      PWSTR widePath = nullptr;
-      if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &widePath)) && widePath)
-      {
-        const int byteCount =
-            WideCharToMultiByte(CP_UTF8, 0, widePath, -1, nullptr, 0, nullptr, nullptr);
-        if (byteCount > 1)
-        {
-          result.resize(static_cast<std::size_t>(byteCount - 1));
-          WideCharToMultiByte(CP_UTF8, 0, widePath, -1, result.data(), byteCount, nullptr,
-                              nullptr);
-        }
-        CoTaskMemFree(widePath);
-      }
-      item->Release();
-    }
-  }
-  dialog->Release();
-  if (weInitedCom)
-    CoUninitialize();
-  return result;
-}
 
 // Modal Windows file-open dialog (IFileOpenDialog COM interface).
 // Returns the selected path on OK; empty string on Cancel / error /
@@ -170,7 +117,6 @@ std::string OpenScenePickerDialog() noexcept {
   return result;
 }
 #else
-std::string SaveFilePickerDialog(std::wstring_view) noexcept { return {}; }
 std::string OpenScenePickerDialog() noexcept { return {}; }
 #endif
 
@@ -404,7 +350,13 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
         suggested.reserve(suggestedName.size());
         for (const char ascii : suggestedName)
           suggested.push_back(static_cast<wchar_t>(ascii));
-        std::string picked = SaveFilePickerDialog(suggested);
+        SaveFilePickerSpec aovSpec{};
+        aovSpec.title             = L"Pyxis - Save AOV as EXR";
+        aovSpec.filterLabel       = L"OpenEXR (*.exr)";
+        aovSpec.filterGlob        = L"*.exr";
+        aovSpec.defaultExtension  = L"exr";
+        aovSpec.suggestedFileName = suggested;
+        std::string picked = SaveFilePickerDialog(aovSpec);
         if (!picked.empty())
           _latches.saveAovPath = std::move(picked);
       }

@@ -13,8 +13,10 @@
 #include <Pyxis/Renderer/Descs/FrameStats.h>
 #include <Pyxis/Renderer/Descs/PickResult.h>
 #include <Pyxis/Renderer/Descs/RenderSettings.h>
+#include <Pyxis/Renderer/Profiler.h>  // Profiler::RollingStat (M11)
 
 #include <cstdint>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -59,7 +61,12 @@ class ImGuiHost {
   void BeginFrame() noexcept;
   // Builds the dockable Performance panel. Shows the totals + the
   // pre-order scope tree from the supplied FrameProfile snapshot.
-  void BuildFpsPanel(const FrameProfile& frameProfile) noexcept;
+  // `rollingStats` is the per-pass 240-frame p50 / p99 / max table
+  // captured by the Profiler (M11 — plan §34.2); an empty span is
+  // honoured (the Rolling section just shows "(warming up)" until
+  // samples arrive).
+  void BuildFpsPanel(const FrameProfile& frameProfile,
+                     std::span<const Profiler::RollingStat> rollingStats) noexcept;
 
   // Builds the dockable Scene panel — counts (meshes / materials /
   // textures / instances / lights / BLAS), GPU memory by category

@@ -76,6 +76,36 @@ public:
   // Read-only snapshot of the most recently resolved frame.
   [[nodiscard]] FrameProfile LastFrameProfile() const;
 
+  // ------------------------------------------------------------------
+  // M11 — rolling per-pass percentile API (plan §34.2 / §34.3).
+  //
+  // The profiler keeps a 240-frame ring per *named* scope; this method
+  // exposes the current p50 / p99 / max of that ring so consumers can
+  // build sparklines, KPI gates, and regression reports without
+  // touching internal state. Stats are recomputed from the latest
+  // drained slot every BeginFrame — readers see at most one frame of
+  // staleness.
+  //
+  // `stats` is filled with up to `capacity` entries; the actual count
+  // is returned. Passing `out=nullptr` queries the count of scopes
+  // currently in the ring (useful for sizing the destination buffer
+  // before a second call).
+  //
+  // Output entries are owned by the caller after copy-out — they
+  // hold `FrameProfile::ScopeName`'s inline 56-byte name buffer, not
+  // a borrowed pointer, so they outlive the next BeginFrame.
+  struct RollingStat {
+    FrameProfile::ScopeName name{};
+    FrameProfile::ScopeKind kind = FrameProfile::ScopeKind::Cpu;
+    double p50Ms       = 0.0;
+    double p99Ms       = 0.0;
+    double maxMs       = 0.0;
+    std::uint32_t sampleCount = 0;  // <= 240
+  };
+  static constexpr std::uint32_t ROLLING_WINDOW_FRAMES = 240;
+  [[nodiscard]] std::uint32_t GetRollingStats(RollingStat* out,
+                                              std::uint32_t capacity) const noexcept;
+
 private:
   // PIMPL: the per-frame ring slots, NVRHI timer-query pool, and
   // ScopeRecord storage live behind this pointer so consumers don't

@@ -31,6 +31,54 @@
 #include <utility>
 #include <vector>
 
+// Tracy CPU zones. Opt-in via -DPYXIS_TRACY=ON; when OFF the inline
+// helpers compile to nothing so there's zero runtime overhead (and
+// no Tracy include dependency). Plan §34.2 — Tracy is "optional, off
+// by default". The C API (TracyC.h) keeps pyxis_renderer's PIMPL
+// clean of C++ Tracy template instantiations.
+//
+// Profiler scopes bracket across ctor/dtor so a stack-local
+// `static const ___tracy_source_location_data` doesn't work — we'd
+// need to associate the static instance with a specific scope
+// instance, which the RAII pattern doesn't permit. Use Tracy's
+// dynamic-srcloc API instead: `___tracy_alloc_srcloc_name` heap-
+// allocs a srcloc id, `___tracy_emit_zone_begin_alloc` opens the
+// zone, `___tracy_emit_zone_end` closes it.
+#if defined(PYXIS_TRACY) && PYXIS_TRACY
+    #include <tracy/TracyC.h>
+#endif
+
+namespace pyxis::tracy_bridge {
+
+#if defined(PYXIS_TRACY) && PYXIS_TRACY
+using ZoneCtx = TracyCZoneCtx;
+
+[[nodiscard]] inline ZoneCtx CpuZoneBegin(std::string_view name, const char* file,
+                                          std::uint32_t line) noexcept {
+  // Tracy interns the srcloc id; subsequent emits with the same
+  // (file, line, name) reuse the entry. The function-name field is
+  // an empty literal — our scope names already carry the call-site
+  // identity, so the function context is noise.
+  const std::uint64_t srcLoc =
+      ___tracy_alloc_srcloc_name(line, file, std::strlen(file), "", 0, name.data(),
+                                 name.size(), 0);
+  return ___tracy_emit_zone_begin_alloc(srcLoc, 1);
+}
+
+inline void CpuZoneEnd(ZoneCtx ctx) noexcept { ___tracy_emit_zone_end(ctx); }
+inline void FrameMark() noexcept { ___tracy_emit_frame_mark(nullptr); }
+#else
+struct ZoneCtx {};
+[[nodiscard]] inline ZoneCtx CpuZoneBegin(std::string_view, const char*,
+                                          std::uint32_t) noexcept {
+  return {};
+}
+inline void CpuZoneEnd(ZoneCtx) noexcept {}
+inline void FrameMark() noexcept {}
+#endif
+
+}  // namespace pyxis::tracy_bridge
+
 namespace pyxis {
 
 namespace {
@@ -61,6 +109,11 @@ struct Profiler::Impl {
     std::uint32_t           depth = 0;
     double                  durationMs = 0.0;
     int                     queryIdx = -1;
+    // M11 — Tracy CPU-zone handle. Filled by CpuScope's ctor when
+    // PYXIS_TRACY is enabled; the matching dtor reads it back via
+    // _recordIndex and closes the zone. Empty-struct stub when
+    // Tracy is disabled (compiles to nothing, no per-scope cost).
+    tracy_bridge::ZoneCtx   tracyCtx{};
   };
 
   // SLOT_COUNT = MAX_FRAMES_IN_FLIGHT + 1 so by the time we rotate
@@ -94,6 +147,48 @@ struct Profiler::Impl {
   double                                lastCpuFrameMs = 0.0;
   double                                lastGpuFrameMs = 0.0;
   std::uint64_t                         lastFrameIndex = 0;
+
+  // ----- M11: 240-frame rolling history per named scope -----
+  // Keyed on the scope's inline-owning name (raw bytes from the
+  // FrameProfile::ScopeName buffer). 240 samples per pass × ~16
+  // unique passes today = ~30 KB total; well under any sane budget
+  // and bounded since the pass set is enumerated at startup.
+  struct RollingEntry {
+    FrameProfile::ScopeName name{};
+    FrameProfile::ScopeKind kind = FrameProfile::ScopeKind::Cpu;
+    // Fixed-size ring + size counter for O(1) push. When `count`
+    // reaches ROLLING_WINDOW, push advances `head` and clobbers the
+    // oldest sample — standard FIFO ring.
+    std::array<double, 240> samples{};
+    std::uint32_t           head  = 0;
+    std::uint32_t           count = 0;
+
+    void Push(double sampleMs) noexcept {
+      samples[head] = sampleMs;
+      head = (head + 1u) % static_cast<std::uint32_t>(samples.size());
+      if (count < samples.size())
+        ++count;
+    }
+  };
+  std::vector<RollingEntry> rolling;
+
+  // O(N) name lookup is fine here — N is ~16 unique passes; a hash
+  // map would add allocations to the hot path with no measurable
+  // benefit. Returns index into `rolling`, allocating a fresh slot
+  // on first sight of a new name.
+  std::size_t LookupOrAddRolling(const FrameProfile::ScopeName& name,
+                                 FrameProfile::ScopeKind        kind) noexcept {
+    const std::string_view nameView = name.View();
+    for (std::size_t i = 0; i < rolling.size(); ++i)
+    {
+      if (rolling[i].name.View() == nameView)
+        return i;
+    }
+    rolling.emplace_back();
+    rolling.back().name = name;
+    rolling.back().kind = kind;
+    return rolling.size() - 1;
+  }
 
   int AcquireQuery() noexcept {
     if (device == nullptr)
@@ -178,6 +273,19 @@ struct Profiler::Impl {
     lastGpuFrameMs = gpuSumMs;
     lastFrameIndex = slot.frameIndex;
 
+    // M11 — feed the rolling history. Skip unnamed records (length-0
+    // ScopeName) — those don't have a stable identity to aggregate
+    // against. The rolling entry is created lazily on first sight of
+    // each name so the set grows naturally as new render passes
+    // register.
+    for (const FrameProfile::PassTiming& timing : lastFrame)
+    {
+      if (timing.name.size == 0)
+        continue;
+      const std::size_t idx = LookupOrAddRolling(timing.name, timing.kind);
+      rolling[idx].Push(timing.durationMs);
+    }
+
     slot.records.clear();
     slot.cpuFrameMs = 0.0;
     slot.inFlight = false;
@@ -209,6 +317,10 @@ void Profiler::EndFrame() {
   slot.frameIndex = _impl->frameIndex;
   slot.inFlight = true;
   ++_impl->frameIndex;
+  // M11 — emit the Tracy "frame mark" so the per-frame waterfall in
+  // the Tracy server lines up with our render-loop boundaries. No-op
+  // when PYXIS_TRACY is OFF.
+  tracy_bridge::FrameMark();
 }
 
 FrameProfile Profiler::LastFrameProfile() const {
@@ -221,6 +333,53 @@ FrameProfile Profiler::LastFrameProfile() const {
   // drained its first slot.
   profile.frameIndex = _impl->lastFrameIndex;
   return profile;
+}
+
+std::uint32_t Profiler::GetRollingStats(RollingStat* out,
+                                        std::uint32_t capacity) const noexcept {
+  // Caller may pass (nullptr, 0) to query the count without copying.
+  if (out == nullptr)
+    return static_cast<std::uint32_t>(_impl->rolling.size());
+
+  // Percentile helper: copies the ring into a scratch buffer + sorts.
+  // Per-pass N ≤ 240 so O(N log N) per pass per call is trivial; this
+  // is a UI-cadence query (~30 Hz), not a hot path.
+  auto percentile = [](std::vector<double>& sorted, double pct) noexcept -> double {
+    if (sorted.empty())
+      return 0.0;
+    std::sort(sorted.begin(), sorted.end());
+    const auto idx = static_cast<std::size_t>(
+        (sorted.size() - 1) * std::clamp(pct, 0.0, 1.0));
+    return sorted[idx];
+  };
+
+  std::vector<double> scratch;
+  scratch.reserve(Impl::SLOT_COUNT > 0 ? 240u : 0u);  // bounded reserve
+
+  const std::uint32_t emitCount =
+      std::min(capacity, static_cast<std::uint32_t>(_impl->rolling.size()));
+  for (std::uint32_t i = 0; i < emitCount; ++i)
+  {
+    const Impl::RollingEntry& entry = _impl->rolling[i];
+    scratch.clear();
+    scratch.insert(scratch.end(), entry.samples.begin(),
+                   entry.samples.begin() + entry.count);
+    RollingStat& dst = out[i];
+    dst.name        = entry.name;
+    dst.kind        = entry.kind;
+    dst.sampleCount = entry.count;
+    if (entry.count == 0)
+    {
+      dst.p50Ms = 0.0;
+      dst.p99Ms = 0.0;
+      dst.maxMs = 0.0;
+      continue;
+    }
+    dst.p50Ms = percentile(scratch, 0.50);
+    dst.p99Ms = percentile(scratch, 0.99);
+    dst.maxMs = percentile(scratch, 1.00);
+  }
+  return emitCount;
 }
 
 // ---------------------------------------------------------------------------
@@ -237,6 +396,10 @@ Profiler::CpuScope::CpuScope(Profiler& profiler, std::string_view name)
   record.kind = FrameProfile::ScopeKind::Cpu;
   record.depth = _profiler->_impl->depth;
   record.queryIdx = -1;
+  // M11 — open the matching Tracy zone. The bridge helper compiles
+  // to a no-op when PYXIS_TRACY is OFF (the bridge's ZoneCtx is
+  // an empty struct), so this line has zero cost in default builds.
+  record.tracyCtx = tracy_bridge::CpuZoneBegin(name, __FILE__, __LINE__);
   _recordIndex = records.size();
   records.push_back(record);
   ++_profiler->_impl->depth;
@@ -254,6 +417,11 @@ Profiler::CpuScope::~CpuScope() {
   if (_recordIndex < records.size())
   {
     records[_recordIndex].durationMs = static_cast<double>(end - _startNs) / 1.0e6;
+    // M11 — close the Tracy zone we opened in the matching ctor.
+    // Reading the ctx via _recordIndex (not stored on CpuScope
+    // itself) keeps the public ABI's per-scope-instance size
+    // stable — the ctx lives on the private ScopeRecord.
+    tracy_bridge::CpuZoneEnd(records[_recordIndex].tracyCtx);
   }
 }
 

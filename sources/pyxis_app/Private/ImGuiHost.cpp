@@ -2,6 +2,8 @@
 
 #include "ImGuiHost.h"
 
+#include "Output/SaveFilePicker.h"  // M11: "Save profile JSON..." button
+
 #include <Pyxis/Platform/Device/IDeviceManager.h>
 #include <Pyxis/Platform/Device/VulkanContext.h>
 #include <Pyxis/Platform/Logging/Log.h>
@@ -16,10 +18,13 @@
 #include <nvrhi/nvrhi.h>
 #include <vulkan/vulkan.h>
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <imgui.h>
+#include <ios>
 
 // Windows process-memory query for the perf panel's RAM row.
 // Pyxis is Windows-only v1 (plan §3); this stays inside an #ifdef
@@ -180,6 +185,61 @@ void ApplyPyxisTheme() noexcept {
 
 // (File-save / file-open COM dialogs moved to EditorPanel.cpp where
 // the only call sites live — see the audit-driven split.)
+
+// M11 — Performance panel "Save profile JSON..." button. Writes a
+// snapshot of the current 240-frame rolling stats + frame index +
+// timestamp. Distinct from headless `--profile` (which carries
+// adapter / driver / config / bench metadata for perf_compare's
+// rolling median); this viewer-side dump is dev-triage-only and
+// stays format-compatible only at the `bench.passes` level so
+// perf_compare can ingest both. Hand-rolled JSON keeps the pyxis_app
+// `/EHs-c-` perimeter exception-free.
+void WriteViewerProfileJson(const std::string& path,
+                            std::uint64_t frameIndex,
+                            std::span<const Profiler::RollingStat> rollingStats) noexcept {
+  std::ofstream out(path, std::ios::binary | std::ios::trunc);
+  if (!out)
+  {
+    Logging::Get().Warn(log::APP,
+        "viewer: profile JSON write failed (could not open " + path + ")");
+    return;
+  }
+  const auto unixSec = std::chrono::duration_cast<std::chrono::seconds>(
+                           std::chrono::system_clock::now().time_since_epoch())
+                           .count();
+  out << "{\n";
+  out << "  \"source\": \"viewer\",\n";
+  out << "  \"timestamp_unix\": " << unixSec << ",\n";
+  out << "  \"frame_index\": " << frameIndex << ",\n";
+  out << "  \"bench\": {\n";
+  out << "    \"frames\": " << Profiler::ROLLING_WINDOW_FRAMES << ",\n";
+  out << "    \"passes\": [";
+  bool firstPass = true;
+  char numBuf[64];
+  for (const Profiler::RollingStat& stat : rollingStats)
+  {
+    if (stat.name.size == 0 || stat.sampleCount == 0)
+      continue;
+    const std::string_view nameView = stat.name.View();
+    out << (firstPass ? "\n      " : ",\n      ");
+    firstPass = false;
+    out << "{\"name\": \"";
+    out.write(nameView.data(), static_cast<std::streamsize>(nameView.size()));
+    out << "\", \"kind\": \""
+        << (stat.kind == FrameProfile::ScopeKind::Gpu ? "Gpu" : "Cpu") << "\", ";
+    std::snprintf(numBuf, sizeof(numBuf), "%.6f", stat.p50Ms);
+    out << "\"p50_ms\": " << numBuf << ", ";
+    std::snprintf(numBuf, sizeof(numBuf), "%.6f", stat.p99Ms);
+    out << "\"p99_ms\": " << numBuf << ", ";
+    std::snprintf(numBuf, sizeof(numBuf), "%.6f", stat.maxMs);
+    out << "\"max_ms\": " << numBuf << ", ";
+    out << "\"sample_count\": " << stat.sampleCount << "}";
+  }
+  out << (firstPass ? "]" : "\n    ]");
+  out << "\n  }\n";
+  out << "}\n";
+  Logging::Get().Info(log::APP, "viewer: profile JSON written to " + path);
+}
 
 }  // namespace
 
@@ -440,7 +500,8 @@ void DrawDualLineChart(const float* seriesA, const float* seriesB,
 
 }  // namespace
 
-void ImGuiHost::BuildFpsPanel(const FrameProfile& frameProfile) noexcept {
+void ImGuiHost::BuildFpsPanel(const FrameProfile& frameProfile,
+                              std::span<const Profiler::RollingStat> rollingStats) noexcept {
   if (!_ready)
     return;
 
@@ -597,6 +658,54 @@ void ImGuiHost::BuildFpsPanel(const FrameProfile& frameProfile) noexcept {
       {
         if (timing.kind == FrameProfile::ScopeKind::Gpu)
           drawPassRow(timing);
+      }
+    }
+
+    // ----- M11 — rolling p50 / p99 / max (240-frame window) -----------
+    // Plan §34.2 / §34.3 KPI surface. The Profiler maintains one ring
+    // per named scope; we drain the current percentiles into the
+    // panel without copying scope-name strings (RollingStat carries
+    // its own inline name buffer). Empty span = profiler hasn't seen
+    // a single drained frame yet — show a placeholder.
+    if (ImGui::CollapsingHeader("Rolling (240f)"))
+    {
+      if (rollingStats.empty())
+      {
+        ImGui::TextDisabled("(warming up — no drained samples yet)");
+      }
+      else
+      {
+        ImGui::Text("%-30s  %-3s  %7s  %7s  %7s  %s",
+                    "scope", "kind", "p50", "p99", "max", "n");
+        for (const Profiler::RollingStat& stat : rollingStats)
+        {
+          const std::string_view name = stat.name.View();
+          if (name.empty() || stat.sampleCount == 0)
+            continue;
+          ImGui::Text("%-30.*s  %-3s  %5.3fms  %5.3fms  %5.3fms  %u",
+                      static_cast<int>(name.size()), name.data(),
+                      stat.kind == FrameProfile::ScopeKind::Gpu ? "GPU" : "CPU",
+                      stat.p50Ms, stat.p99Ms, stat.maxMs, stat.sampleCount);
+        }
+
+        // Save-profile-JSON button. Synchronous: opens a save dialog,
+        // writes the JSON, returns. No latch / no ViewerMode drain
+        // since the write is allocation-only and doesn't touch the
+        // GPU or the scene. Format aligns with headless --profile's
+        // bench.passes array so perf_compare ingests both.
+        ImGui::Spacing();
+        if (ImGui::Button("Save profile JSON..."))
+        {
+          SaveFilePickerSpec profileSpec{};
+          profileSpec.title             = L"Pyxis - Save profile JSON";
+          profileSpec.filterLabel       = L"Profile JSON (*.json)";
+          profileSpec.filterGlob        = L"*.json";
+          profileSpec.defaultExtension  = L"json";
+          profileSpec.suggestedFileName = L"pyxis_profile.json";
+          const std::string picked = SaveFilePickerDialog(profileSpec);
+          if (!picked.empty())
+            WriteViewerProfileJson(picked, frameProfile.frameIndex, rollingStats);
+        }
       }
     }
 
