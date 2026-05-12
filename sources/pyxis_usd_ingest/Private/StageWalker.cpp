@@ -1048,6 +1048,18 @@ void EmitPointInstancer(const pxr::UsdPrim& instancerPrim,
   instancer.GetOrientationsAttr().Get(&orientations);
   instancer.GetScalesAttr().Get(&scales);
 
+  // M14b / V2.A.9 — invisibleIds masking. The PointInstancer can mark
+  // arbitrary instance IDs as invisible via `invisibleIds`; production
+  // scenes use this to hide instances at specific frames without
+  // re-authoring the full positions array. Resolve once into a sorted
+  // set + skip matching `instIdx` values in the loop below.
+  pxr::VtArray<std::int64_t> invisibleIdsArr;
+  instancer.GetInvisibleIdsAttr().Get(&invisibleIdsArr);
+  std::unordered_set<std::int64_t> invisibleIds;
+  invisibleIds.reserve(invisibleIdsArr.size());
+  for (const std::int64_t identifier : invisibleIdsArr)
+    invisibleIds.insert(identifier);
+
   if (protoIndices.empty())
   {
     log.Warn(log::APP, "StageWalker: PointInstancer "
@@ -1073,6 +1085,9 @@ void EmitPointInstancer(const pxr::UsdPrim& instancerPrim,
   ++stats.instancersEmitted;
   for (std::size_t instIdx = 0; instIdx < instanceCount; ++instIdx)
   {
+    if (!invisibleIds.empty()
+        && invisibleIds.contains(static_cast<std::int64_t>(instIdx)))
+      continue;
     const int proto = protoIndices[instIdx];
     if (proto < 0 || static_cast<std::size_t>(proto) >= protoMeshes.size())
       continue;

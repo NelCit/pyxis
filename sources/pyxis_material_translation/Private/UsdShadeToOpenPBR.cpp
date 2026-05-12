@@ -201,6 +201,19 @@ bool ResolveUVTextureBinding(const pxr::UsdShadeShader& shader,
     outFile = asset.GetAssetPath();
   if (outFile.empty())
     return false;
+
+  // M14b / V2.A.7 — UDIM graceful fallback. Real UDIM support needs
+  // a tile atlas + uv>1 sampler path in closesthit; v2 first cut
+  // detects `<UDIM>` in the asset path, substitutes tile 1001 (the
+  // bottom-left tile by USD spec), and logs once at the call site so
+  // the texture decode doesn't fail with a misleading "file not found"
+  // error. Multi-tile UDIM sampling is a M18 follow-up.
+  if (const auto udimPos = outFile.find("<UDIM>"); udimPos != std::string::npos)
+  {
+    constexpr std::size_t UDIM_TOKEN_LEN = 6u;  // length of literal "<UDIM>"
+    outFile.replace(udimPos, UDIM_TOKEN_LEN, "1001");
+  }
+
   outVarname = ResolveUVTextureVarname(textureShader);
   return true;
 }
