@@ -44,6 +44,11 @@ target_sources(pyxis_unit_tests PRIVATE
     MaterialXTranslation.cpp
     NurbsTessellation.cpp
     TextureLruEviction.cpp
+    DdsParserFixture.cpp
+
+    # V2.A.14 DDS parser lives in pyxis_renderer's Private. The unit
+    # test compiles it directly (same convention as RenderGraph + CliArgs).
+    ${CMAKE_SOURCE_DIR}/sources/pyxis_renderer/Private/GpuScene/DdsParser.cpp
 
     # The §9.2 RenderGraph + IRenderPass live in pyxis_renderer/Private
     # and don't cross the SHARED-DLL boundary. The unit-test harness is
