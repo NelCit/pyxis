@@ -1,0 +1,52 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis M21 / V2.A.27 fixture — UsdRenderSettings / Product / Var detection stub. Authors all three render-schema prims + a visible Cube. The smoke test asserts pyxis exits 0 and logs the render-schema detection."
+)
+
+def Xform "World"
+{
+    def Cube "VisibleCube"
+    {
+        double size = 1.0
+        color3f[] primvars:displayColor = [(0.5, 0.6, 0.7)]
+        double3 xformOp:translate = (0, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 1.5, 5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.0
+    }
+
+    def RenderSettings "RenderSettings"
+    {
+        int2 resolution = (256, 256)
+        custom rel camera = </World/Camera>
+    }
+
+    def RenderProduct "RenderProduct"
+    {
+        token productType = "raster"
+        token productName = "m21_out"
+    }
+
+    def RenderVar "RenderVar"
+    {
+        token sourceName = "color"
+        token sourceType = "raw"
+    }
+}

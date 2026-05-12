@@ -366,3 +366,18 @@ set_tests_properties(M20.NurbsSkelStubSmoke PROPERTIES
     LABELS    "integration;m20"
     TIMEOUT   120
 )
+
+# §41 M21 / V2.A.27 — UsdRender schema detection stub.
+add_test(
+    NAME    M21.UsdRenderStubSmoke
+    COMMAND ${CMAKE_COMMAND}
+            -DPYXIS_EXE=$<TARGET_FILE:pyxis>
+            -DFIXTURE_CONFIG=${CMAKE_SOURCE_DIR}/tests/fixtures/m21_usdrender.json
+            -DSCENE_PATH=${CMAKE_SOURCE_DIR}/tests/fixtures/m21_usdrender.usda
+            -DOUTPUT_DIR=${CMAKE_BINARY_DIR}/tests/integration/m21_usdrender
+            -P ${CMAKE_SOURCE_DIR}/tests/integration/m21_usdrender_smoke.cmake
+)
+set_tests_properties(M21.UsdRenderStubSmoke PROPERTIES
+    LABELS    "integration;m21"
+    TIMEOUT   120
+)

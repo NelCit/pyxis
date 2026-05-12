@@ -66,6 +66,9 @@
 #include <pxr/usd/usdShade/materialBindingAPI.h>
 #include <pxr/usd/usdGeom/nurbsCurves.h>
 #include <pxr/usd/usdGeom/nurbsPatch.h>
+#include <pxr/usd/usdRender/product.h>
+#include <pxr/usd/usdRender/settings.h>
+#include <pxr/usd/usdRender/var.h>
 #include <pxr/usd/usdSkel/root.h>
 #include <pxr/usd/usdSkel/skeleton.h>
 #include <pxr/usd/usdVol/volume.h>
@@ -2083,6 +2086,18 @@ IngestResult StageWalker::WalkFile(std::string_view usdPath, GpuScene& scene) {
   auto& log = Logging::Get();
   const std::string pathString{usdPath};
 
+  // M21 / V2.A.27 — USDZ detection. Usd::Stage::Open handles `.usdz`
+  // archives natively (zip container holding layers + textures);
+  // we just surface the format for log diagnostics + so users see
+  // that USDZ is recognised. Custom ArResolvers for streaming USDZ
+  // from S3 / Omniverse are a follow-up to V2.A.12.
+  if (pathString.size() >= 5
+      && (pathString.ends_with(".usdz") || pathString.ends_with(".USDZ")))
+  {
+    log.Info(log::APP, "StageWalker: opening .usdz archive — "
+                           "native USD zip support.");
+  }
+
   // M17 / V2.A.12 — ArResolver visibility. USD's `ArGetResolver()`
   // returns whatever resolver was registered at process start (the
   // default `ArDefaultResolver` for filesystem paths; plugin-supplied
@@ -2491,6 +2506,24 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
           "StageWalker: Skel prim " + prim.GetPath().GetString()
               + " (" + prim.GetTypeName().GetString()
               + ") detected but skinning is not yet supported. Skipping.");
+      ++stats.skipped;
+    }
+    else if (prim.IsA<pxr::UsdRenderSettings>()
+             || prim.IsA<pxr::UsdRenderProduct>()
+             || prim.IsA<pxr::UsdRenderVar>())
+    {
+      // M21 / V2.A.27 — UsdRender schema detection. These prims author
+      // render-pass settings (resolution, AOVs, motion blur sampling,
+      // active camera, etc.). Pyxis's headless mode currently picks
+      // these up from --config + CLI; honouring UsdRenderSettings as
+      // an alternative authoring source lands when the renderer's
+      // RenderSettings POD grows to mirror the schema (V2.A.27 full).
+      // For now we detect + count so users see scenes that author
+      // RenderSettings instead of expecting fixture JSON.
+      Logging::Get().Info(log::APP,
+          "StageWalker: UsdRender prim " + prim.GetPath().GetString()
+              + " (" + prim.GetTypeName().GetString()
+              + ") detected; v2 honours --config / CLI overrides instead.");
       ++stats.skipped;
     }
     else if (prim.IsA<pxr::UsdVolVolume>())
