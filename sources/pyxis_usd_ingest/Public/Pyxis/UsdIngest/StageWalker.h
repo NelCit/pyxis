@@ -113,13 +113,22 @@ class PYXIS_USD_INGEST_API StageWalker final {
   // Returns an IngestResult: counters + timings + opaque camera list.
   // Errors (file not found, bad layer, etc.) surface via spdlog and
   // produce a result with every counter zero + an empty camera list.
-  IngestResult WalkFile(std::string_view usdPath, GpuScene& scene);
+  //
+  // V2.A.13 — `frameNumber` selects the USD time code at which all
+  // attributes are evaluated. Negative = `UsdTimeCode::Default()`
+  // (no animation). xformOps, camera attrs, light attrs, mesh
+  // points, and primvars all read at that time. The closesthit
+  // shader is time-agnostic — animation drives the load-time state
+  // only in v2 (per-frame re-walk is the operator's responsibility).
+  IngestResult WalkFile(std::string_view usdPath, GpuScene& scene,
+                        double frameNumber = -1.0);
 
   // Variant taking an already-opened stage. Used by the cross-adapter
   // regression harness so both paths share a single stage open. The
   // pxr::UsdStageRefPtr argument is USD's reference-counted handle —
   // the renderer never persists it past `Walk` (§25.O.2 contract).
-  IngestResult WalkStage(const pxr::UsdStageRefPtr& stage, GpuScene& scene);
+  IngestResult WalkStage(const pxr::UsdStageRefPtr& stage, GpuScene& scene,
+                         double frameNumber = -1.0);
 };
 
 }  // namespace pyxis::usd_ingest

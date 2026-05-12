@@ -151,14 +151,15 @@ int Run(int argc, char** argv) noexcept {
   // place so future plumbing has a target; the rest of the pipeline
   // still evaluates at Default time. Log explicitly so users see that
   // their --frame request was received but not yet acted on.
+  // V2.A.13 — `--frame` now propagates through IngestUsd → StageWalker
+  // → UsdGeomXformCache::SetTime. Animated xforms + camera attrs read
+  // at the requested time-code.
   if (cli.frameNumber >= 0)
   {
-    Logging::Get().Warn(
+    Logging::Get().Info(
         log::APP,
         "--frame " + std::to_string(cli.frameNumber)
-            + " accepted but not yet evaluated; time-varying USD is a "
-              "follow-up milestone (V2.A.4 / V2.A.13). Rendering at "
-              "default time.");
+            + " honoured (V2.A.13). Stage will evaluate at this time-code.");
   }
 
   // V2.A.15 — composition load mode. --load-mode is still a follow-up
@@ -176,7 +177,10 @@ int Run(int argc, char** argv) noexcept {
   if (cli.headless)
   {
     return RunHeadless(config, scene, cli.saveAov, cli.benchFrames, cli.profilePath,
-                       cli.populationMask);
+                       cli.populationMask,
+                       (cli.frameNumber >= 0)
+                           ? static_cast<double>(cli.frameNumber)
+                           : -1.0);
   }
   return RunViewer(config, scene, cli.screenshotPath, cli.shaderRebuildDir);
 }

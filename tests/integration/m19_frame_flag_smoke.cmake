@@ -34,11 +34,15 @@ if(NOT _rc EQUAL 0)
     message(FATAL_ERROR "m19_frame_flag_smoke: pyxis rc=${_rc}\nSTDOUT:\n${_stdout}")
 endif()
 
-string(REGEX MATCH "--frame 42 accepted but not yet evaluated" _stub "${_stdout}")
-if(NOT _stub)
+# V2.A.13 made --frame fully honoured. The log line is now an
+# "honoured" / "evaluating at time-code" pair, not a stub warning.
+string(REGEX MATCH "--frame 42 honoured \\(V2.A.13\\)" _honoured "${_stdout}")
+string(REGEX MATCH "evaluating at time-code 42"        _eval "${_stdout}")
+if(NOT _honoured OR NOT _eval)
     message(FATAL_ERROR
-        "m19_frame_flag_smoke: expected the --frame stub warning.\nSTDOUT:\n${_stdout}")
+        "m19_frame_flag_smoke: expected --frame 42 honoured + time-code 42 log lines.\nSTDOUT:\n${_stdout}")
 endif()
 
 message(STATUS "m19_frame_flag_smoke: PASSED")
-message(STATUS "  ${_stub}")
+message(STATUS "  ${_honoured}")
+message(STATUS "  ${_eval}")
