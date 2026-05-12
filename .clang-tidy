@@ -3,6 +3,28 @@
 # WarningsAsErrors '*' makes any new diagnostic block a PR. Curated check set
 # matches §30 (coding rules), §30.11 (Flecs convention), and the explicit
 # §36.2 list.
+#
+# Two clang-analyzer checks are explicitly disabled because they're
+# fundamentally incompatible with Pyxis idioms / third-party deps:
+#
+#   * `optin.core.EnumCastOutOfRange` — Pyxis's strong-handle pattern
+#     (§19.7) is `enum class : uint32_t` with only `Invalid = 0` named.
+#     Every cast of a packed (slot, generation) uint to the enum is
+#     flagged "not in the valid range". The cast IS the protocol;
+#     suppressing the check is correct here. (NVRHI also trips it on
+#     `AccelStructBuildFlags` because bitset enums combine values.)
+#
+#   * `optin.cplusplus.UninitializedObject` — NVRHI's BindingSetItem
+#     default ctor leaves 8 fields uninitialized (they're set via
+#     factory functions like ::Texture_SRV / ::StructuredBuffer_UAV).
+#     Inter-procedural analysis from our call sites flags this every
+#     time we touch a BindingSetItem. Third-party API contract; not
+#     something Pyxis can fix.
+#
+# Both fire only in Release (CI) clang-tidy runs; the Debug local
+# build doesn't trigger inter-procedural analysis the same way, so
+# the local Debug build hides these false positives. The PR-blocking
+# CI build does.
 
 Checks: >
   bugprone-*,
@@ -24,7 +46,9 @@ Checks: >
   misc-const-correctness,
   misc-unused-parameters,
   readability-identifier-naming,
-  readability-identifier-length
+  readability-identifier-length,
+  -clang-analyzer-optin.core.EnumCastOutOfRange,
+  -clang-analyzer-optin.cplusplus.UninitializedObject
 
 WarningsAsErrors: '*'
 HeaderFilterRegex: 'sources/pyxis_.*'
