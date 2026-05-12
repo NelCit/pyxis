@@ -175,6 +175,42 @@ if(EXISTS "${M8_SCENE_PATH}")
                        # min ceiling tolerates a slow first build pass.
     )
     message(STATUS "M8a.WorldLobbySmoke registered (scene: ${M8_SCENE_PATH})")
+
+    # §41 M10 — Python image-regression harness.
+    #
+    # Distinct from M8a.WorldLobbySmoke (which only asserts "did not
+    # crash + non-black"). This one diffs the produced EXR against a
+    # checked-in baseline (tests/regression/m8_world_lobby/baseline.exr)
+    # and fails on RMSE / MAE / max-abs-delta drift past the per-
+    # fixture tolerances. The harness lives under _tools/ rather than
+    # a CMake script because it needs numpy + OpenEXR for the pixel-
+    # diff, plus jq-style JSON config parsing.
+    #
+    # Python interpreter discovered via find_package(Python3); a CI
+    # without Python3 + the _tools/requirements.txt installed will
+    # skip silently (Python3_FOUND = FALSE).
+    find_package(Python3 COMPONENTS Interpreter)
+    if(Python3_FOUND)
+        add_test(
+            NAME    M10.WorldLobbyRegression
+            COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_SOURCE_DIR}/_tools/run_regression.py
+                    --pyxis $<TARGET_FILE:pyxis>
+                    --fixture ${CMAKE_SOURCE_DIR}/tests/regression/m8_world_lobby
+                    --output-dir ${CMAKE_BINARY_DIR}/tests/regression/m8_world_lobby
+                    --repo-root ${CMAKE_SOURCE_DIR}
+        )
+        set_tests_properties(M10.WorldLobbyRegression PROPERTIES
+            LABELS    "regression;m10;requires_external_scene;requires_python"
+            TIMEOUT   600  # Same cold-cache budget as M8a.WorldLobbySmoke.
+        )
+        message(STATUS "M10.WorldLobbyRegression registered (baseline: "
+                "${CMAKE_SOURCE_DIR}/tests/regression/m8_world_lobby/baseline.exr)")
+    else()
+        message(STATUS
+            "M10.WorldLobbyRegression skipped — Python3 interpreter not found. "
+            "Install Python 3.10+ and `pip install -r _tools/requirements.txt`.")
+    endif()
 else()
     message(STATUS
         "M8a.WorldLobbySmoke skipped — no scene at ${M8_SCENE_PATH}. "
