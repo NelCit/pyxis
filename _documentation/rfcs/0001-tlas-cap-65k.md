@@ -22,7 +22,7 @@ needs to be set somewhere, and `TLAS_MAX_INSTANCES = 65536` is the
 choice that has shipped on the M8a branch.
 
 Sizing rationale:
-- v1 §41 milestones target Bistro (Amazon Lumberyard, ~50K instances).
+- v1 §41 milestones target World Lobby (Amazon Lumberyard, ~50K instances).
 - Production-class architectural scenes (lobby, hotel, restaurant) typically run 1K–10K instances.
 - 24-bit `instanceCustomIndex` (§19.7 HANDLE_SLOT_BITS) caps the addressable range at 16M; 65K leaves the §16.5 sharding strategy ample room.
 - Vulkan TLAS scratch cost per instance is ~128 B; 65K × 128 B = ~8 MB up front. Cheap on every v1 GPU class (8 GB VRAM minimum per CLAUDE.md).
@@ -55,12 +55,12 @@ that fit.
    needing it. Rejected (revisit when M11+ scene-loading polish lands;
    could use one of the §22.3 reserved slots).
 3. **Use 4 096 to match the other v1 caps (BINDLESS_TEXTURES_CAP, RFC
-   0002)** — would block Bistro at ingest. Rejected.
+   0002)** — would block World Lobby at ingest. Rejected.
 
 ## Drawbacks / risks
 
 - A scene with >65 536 instances drops into the
-  `TlasInstanceLimitExceeded` degraded path. The lobby (~1K) + Bistro
+  `TlasInstanceLimitExceeded` degraded path. The lobby (~1K) + World Lobby
   (~50K) both fit comfortably; Moana (~28M) does not — that scene
   needs §16.5 sharded TLAS regardless and is post-v1 (§42).
 - The 8 MB upfront cost is paid even on small scenes. Acceptable given
@@ -69,7 +69,7 @@ that fit.
 ## Migration & impact
 
 - No public API change; internal constant only.
-- Affected milestones: M8a (lobby — within budget), M8b (Bistro — within
+- Affected milestones: M8a (lobby — within budget), M8b (World Lobby — within
   budget), M9-M10 (no change), M11 (when the §16.5 sharded-TLAS path
   lands, this constant becomes the per-shard cap and a new constant
   governs the shard count).

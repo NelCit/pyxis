@@ -894,7 +894,7 @@ Expected<void> GpuScene::Impl::UploadMeshUvs(nvrhi::ICommandList* commandList)
 // buffer + per-mesh-slot start-offset table. The same data lives in
 // the per-mesh BLAS index buffer, but those are bound for AS-build
 // (not as structured buffers for shader read). The duplication cost
-// is one uint per triangle (~12 MB at Bistro scale, acceptable).
+// is one uint per triangle (~12 MB at World Lobby scale, acceptable).
 //
 // Closesthit reads three indices per hit:
 //   ofs = gMeshIndexOffsets[meshSlot]

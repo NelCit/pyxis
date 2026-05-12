@@ -3,7 +3,7 @@
 **Status: complete** (smooth shading + emission + normal mapping +
 translucent-as-invisible all landed; dome alignment audited)
 
-§41 M9 normatively targets Bistro; substituting the lobby (same pattern
+§41 M9 normatively targets World Lobby; substituting the lobby (same pattern
 as M8b — see `_documentation/m8b-lobby-perf.md`).
 
 ## What landed in this milestone
@@ -172,8 +172,8 @@ emission, and normal mapping each add < 0.05 ms per pixel.
 ### MaterialX coverage
 
 The lobby is pure UsdPreviewSurface so this is **not relevant for the
-lobby M9**. Strict §41 M9 calls out MaterialX gap-closure for Bistro
-which we'd address when Bistro lands.
+lobby M9**. Strict §41 M9 calls out MaterialX gap-closure for World Lobby
+which we'd address when World Lobby lands.
 
 ## How to reproduce
 

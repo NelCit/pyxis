@@ -294,7 +294,7 @@ TEST(GpuSceneInstance, LastFrameStatsTracksLiveInstanceCount) {
 //
 // Without this contract, a future refactor that accidentally
 // allocates a BLAS per AppendInstance instead of per MeshEntry
-// would blow GPU memory on Bistro-class scenes (10⁴ instances of the
+// would blow GPU memory on World Lobby-class scenes (10⁴ instances of the
 // same prototype mesh would mean 10⁴ duplicate BLAS).
 // -----------------------------------------------------------------------------
 TEST(GpuSceneInstance, ManyInstancesSharePrototypeMeshSlot) {

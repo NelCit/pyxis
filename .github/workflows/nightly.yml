@@ -12,12 +12,12 @@
 #   - manual via the Actions tab (workflow_dispatch)
 #
 # Scene-dataset gating:
-#   The full Bistro / Lobby / etc. scenes are heavy ZIPs (~3-10 GB
+#   The full World Lobby / Lobby / etc. scenes are heavy ZIPs (~3-10 GB
 #   each) that GitHub-hosted runners don't carry. The matrix loops
 #   through declared dataset_path env vars; if the scene .usd doesn't
 #   exist after the optional download step, the fixture is skipped
 #   with a STATUS-line message (no failure). This matches the
-#   PYXIS_BISTRO_DATASET_PATH convention from §35 / §41 M10.
+#   PYXIS_WORLD_LOBBY_DATASET_PATH convention from §35 / §41 M10.
 
 name: nightly
 
@@ -35,7 +35,7 @@ permissions:
   pull-requests: write # comment the perf-compare report on a triggering PR if/when wired
 
 jobs:
-  windows-bistro:
+  windows-world_lobby:
     name: nightly windows regression
     runs-on: windows-latest
     timeout-minutes: 90
@@ -44,11 +44,11 @@ jobs:
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\\vcpkg_cache
       VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
       PYXIS_PRESET: ci
-      # Bistro is bundled by Amazon Lumberyard; the GHA runner caches
+      # World Lobby is bundled by Amazon Lumberyard; the GHA runner caches
       # the tarball under a docs-public S3 URL when present. Empty =
-      # skip the Bistro fixture for this run (still runs lobby etc.
+      # skip the World Lobby fixture for this run (still runs lobby etc.
       # when their scenes happen to be packaged).
-      PYXIS_BISTRO_DATASET_URL: ""
+      PYXIS_WORLD_LOBBY_DATASET_URL: ""
 
     steps:
       - uses: actions/checkout@v4
@@ -104,17 +104,17 @@ jobs:
           restore-keys: |
             pyxis-kpi-history-${{ runner.os }}-py312-
 
-      # Optional Bistro download. URL is intentionally empty by default
+      # Optional World Lobby download. URL is intentionally empty by default
       # — only flips on when the project ships a stable download
       # mirror. The actual fixture-skip happens inside run_regression
       # when the scene .usd isn't found, so the whole job degrades
-      # gracefully to "lobby only" when Bistro isn't yet wired.
-      - name: Download Bistro (optional)
-        if: env.PYXIS_BISTRO_DATASET_URL != ''
+      # gracefully to "lobby only" when World Lobby isn't yet wired.
+      - name: Download World Lobby (optional)
+        if: env.PYXIS_WORLD_LOBBY_DATASET_URL != ''
         run: |
-          New-Item -ItemType Directory -Force -Path resources\scenes\bistro | Out-Null
-          curl -L -o bistro.zip $env:PYXIS_BISTRO_DATASET_URL
-          Expand-Archive -Path bistro.zip -DestinationPath resources\scenes\bistro
+          New-Item -ItemType Directory -Force -Path resources\scenes\world_lobby | Out-Null
+          curl -L -o world_lobby.zip $env:PYXIS_WORLD_LOBBY_DATASET_URL
+          Expand-Archive -Path world_lobby.zip -DestinationPath resources\scenes\world_lobby
 
       - name: Run regression matrix
         # Walk every fixture under tests/regression/ — each one is

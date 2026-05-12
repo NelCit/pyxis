@@ -32,7 +32,7 @@ struct ResolvedScene;
 // render + EXR write the harness records `benchFrames` warm-up frames
 // + `benchFrames` measurement frames, then prints a §34 KPI table to
 // stdout (per-pass GPU + CPU min/p50/p99/max ms). Used to gate KPI
-// compliance for the §41 perf milestones (M8b Bistro, lobby, ...).
+// compliance for the §41 perf milestones (M8b World Lobby, lobby, ...).
 //
 // `profilePath` (M10 — plan §35 / §36.6): when non-empty, after the
 // run completes (incl. any benchmark window), the headless harness

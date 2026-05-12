@@ -77,7 +77,7 @@ constexpr uint32_t BLAS_COMPACTION_TRIANGLE_THRESHOLD = 64u * 1024u;
 // FNV1a-64 hash. Plan §11 calls for XXH3_64bits long-term; this M5
 // stub uses FNV1a so the dedup table works without pulling xxhash
 // into the renderer for one milestone. The table doesn't outlive a
-// process so a swap to XXH3 at M8 (when Bistro-scale dedup quality
+// process so a swap to XXH3 at M8 (when World Lobby-scale dedup quality
 // matters) is mechanical — only the hash function changes.
 constexpr std::uint64_t FNV1A_64_OFFSET = 0xcbf29ce484222325ULL;
 constexpr std::uint64_t FNV1A_64_PRIME  = 0x100000001b3ULL;
@@ -487,7 +487,7 @@ struct GpuScene::Impl
   // hash their input desc / key, look up here, and return the
   // existing handle on a hit. The §11 OpenPBR architecture rule
   // ("hashed via XXH3_64bits, deduplicated") relies on these maps
-  // collapsing identical materials in a Bistro-scale scene where
+  // collapsing identical materials in a World Lobby-scale scene where
   // the same UsdShadeMaterial is bound to thousands of meshes.
   // M5 stub uses FNV1a-64 (10-line inline impl below); XXH3
   // upgrade is on the M8 perf-sweep checklist.

@@ -219,7 +219,7 @@ class PathTracePass final : public IRenderPass {
   // the count unchanged). Fingerprint = FNV1a-64 over (count, every
   // live ITexture*); recompute each Execute, invalidate on mismatch.
   // Cheap: one pointer-load + xor-multiply per live texture per
-  // frame, well under 1µs even at Bistro scale.
+  // frame, well under 1µs even at World Lobby scale.
   std::uint64_t _lastBindlessTextureFingerprint = 0;
 
   bool _shadersOk = false;  // true if ctor loaded all three shaders + built pipeline.

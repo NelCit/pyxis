@@ -806,7 +806,7 @@ void ImGuiHost::BuildScenePanel(const FrameStats& sceneStats) noexcept {
   // additive (the user can mentally check "Vertex + Index + Texture
   // + BLAS + TLAS == Scene total" without converting between B / KiB
   // / MiB / GiB by eye). 4 decimal places keeps tiny-fixture values
-  // readable down to ~100 B (~0.0001 MiB); Bistro-class scenes with
+  // readable down to ~100 B (~0.0001 MiB); World Lobby-class scenes with
   // hundreds of MiB still fit in the same column.
   // Pre-fix this auto-picked the unit per row; the audit flagged the
   // mixed-unit display as the underlying source of "Total doesn't

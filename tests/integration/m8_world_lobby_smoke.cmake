@@ -2,7 +2,7 @@
 #
 # This is the FRAMEWORK test for M8a — proves the renderer can ingest +
 # render the configured stress scene (World Lobby today; ALAB / Moana /
-# Bistro tomorrow) without crashing, and produces a non-trivially-empty
+# World Lobby tomorrow) without crashing, and produces a non-trivially-empty
 # EXR. Does NOT validate visual fidelity, KPIs, or determinism — those
 # are M8b / M9 / M10 concerns. Counts as M8a "did the framework
 # actually wire end-to-end" success.

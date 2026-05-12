@@ -216,7 +216,7 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
       // Per-AOV display knob: WorldPos period slider. Only useful
       // (and only visible) when a WorldPos display is picked.
       // Range: 0.1 m for unit-scale fixtures up to 200 m for
-      // Bistro / outdoor environments. ViewerMode pushes the value
+      // World Lobby / outdoor environments. ViewerMode pushes the value
       // into RenderSettings::worldPosPeriod each frame; the same
       // slider feeds both world-space + eye-space periodic encodes
       // (raygen branches both on `gFrameUi.worldPosPeriod`).
@@ -454,7 +454,7 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
           ImGui::PopItemWidth();
         }
 
-        // FlyCam linear move-speed slider. Logarithmic so a Bistro-
+        // FlyCam linear move-speed slider. Logarithmic so a World Lobby-
         // scale scene (10–50 m/s feels right) and a unit-cube fixture
         // (~0.5 m/s feels right) both have usable resolution. Angular
         // sensitivity is intentionally NOT exposed — mouse drag at
