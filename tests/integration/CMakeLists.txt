@@ -381,3 +381,33 @@ set_tests_properties(M21.UsdRenderStubSmoke PROPERTIES
     LABELS    "integration;m21"
     TIMEOUT   120
 )
+
+# §41 M28 / V2.A.28 — USD loading audit. Runs the pure-Python audit
+# tool against an in-tree fixture (one of each STUB type + standard
+# LOADED types); the tool returns exit 0 because every authored type
+# is either LOADED or STUB. Future scenes that author UNHANDLED prim
+# types fail the audit + this test.
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_FOUND)
+    add_test(
+        NAME    M28.UsdLoadingAuditSelfTest
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/_tools/usd_loading_audit.py
+                ${CMAKE_SOURCE_DIR}/tests/fixtures/m21_usdrender.usda
+    )
+    set_tests_properties(M28.UsdLoadingAuditSelfTest PROPERTIES
+        LABELS    "integration;m28;requires_python"
+        TIMEOUT   30
+    )
+
+    # Python-side unit tests for the audit tool's classify + parser.
+    add_test(
+        NAME    M28.UsdLoadingAuditUnit
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/_tools/test_usd_loading_audit.py
+    )
+    set_tests_properties(M28.UsdLoadingAuditUnit PROPERTIES
+        LABELS    "integration;m28;requires_python"
+        TIMEOUT   30
+    )
+endif()
