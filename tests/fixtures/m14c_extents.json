@@ -1,0 +1,28 @@
+{
+  "$comment": "Pyxis M14c smoke fixture — authored extent aggregation. Small dims for fast smoke.",
+
+  "render": {
+    "width":           256,
+    "height":          256,
+    "samplesPerFrame": 1,
+    "seed":            140
+  },
+
+  "output": {
+    "image":           "m14c_extents.exr",
+    "effectiveConfig": "m14c_extents.effective.json"
+  },
+
+  "diagnostics": {
+    "validationLayer": false,
+    "aftermath":       false
+  },
+
+  "limits": {
+    "framesInFlight":  3
+  },
+
+  "app": {
+    "ingest":          "usd_direct"
+  }
+}

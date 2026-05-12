@@ -256,3 +256,19 @@ set_tests_properties(M14.XformStateSmoke PROPERTIES
     LABELS    "integration;m14"
     TIMEOUT   120
 )
+
+# §41 M14c / V2.A.31 — bounding-box hints. Authored `extent` on a Mesh
+# triggers the StageWalker scene-bounds aggregate log line.
+add_test(
+    NAME    M14.ExtentsSmoke
+    COMMAND ${CMAKE_COMMAND}
+            -DPYXIS_EXE=$<TARGET_FILE:pyxis>
+            -DFIXTURE_CONFIG=${CMAKE_SOURCE_DIR}/tests/fixtures/m14c_extents.json
+            -DSCENE_PATH=${CMAKE_SOURCE_DIR}/tests/fixtures/m14c_extents.usda
+            -DOUTPUT_DIR=${CMAKE_BINARY_DIR}/tests/integration/m14c_extents
+            -P ${CMAKE_SOURCE_DIR}/tests/integration/m14c_extents_smoke.cmake
+)
+set_tests_properties(M14.ExtentsSmoke PROPERTIES
+    LABELS    "integration;m14"
+    TIMEOUT   120
+)
