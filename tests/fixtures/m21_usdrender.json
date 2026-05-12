@@ -1,0 +1,28 @@
+{
+  "$comment": "Pyxis M21 smoke fixture — UsdRender schema detection stub.",
+
+  "render": {
+    "width":           256,
+    "height":          256,
+    "samplesPerFrame": 1,
+    "seed":            21
+  },
+
+  "output": {
+    "image":           "m21_usdrender.exr",
+    "effectiveConfig": "m21_usdrender.effective.json"
+  },
+
+  "diagnostics": {
+    "validationLayer": false,
+    "aftermath":       false
+  },
+
+  "limits": {
+    "framesInFlight":  3
+  },
+
+  "app": {
+    "ingest":          "usd_direct"
+  }
+}

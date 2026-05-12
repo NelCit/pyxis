@@ -34,6 +34,7 @@ target_sources(pyxis_unit_tests PRIVATE
     MaterialSourceCounts.cpp
     FrameFlagParsing.cpp
     NurbsSkelDetection.cpp
+    UsdRenderDetection.cpp
 
     # The §9.2 RenderGraph + IRenderPass live in pyxis_renderer/Private
     # and don't cross the SHARED-DLL boundary. The unit-test harness is
@@ -81,6 +82,7 @@ target_link_libraries(pyxis_unit_tests
         usd
         usdGeom
         usdShade
+        usdRender
         usdSkel
         usdVol
         ar

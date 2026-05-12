@@ -80,6 +80,7 @@ target_link_libraries(pyxis_usd_ingest
         usd
         usdGeom
         usdLux
+        usdRender
         usdShade
         usdSkel
         usdVol
