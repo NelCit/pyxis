@@ -23,7 +23,9 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <utility>
+#include <vector>
 
 namespace pyxis {
 
@@ -321,12 +323,15 @@ Expected<void> GpuScene::Impl::UploadPendingTextures(nvrhi::ICommandList* comman
     if (!entry.live || !entry.needsGpuUpload || entry.resolvedPath.empty())
       continue;
 
-    // Sniff extension — case-insensitive ".exr" suffix routes to
-    // tinyexr; everything else goes through stb_image.
+    // Sniff extension — `.exr` → tinyexr; `.dds` → V2.A.14 BCn
+    // passthrough; everything else → stb_image.
     const std::string& path = entry.resolvedPath;
     const bool isExr = path.size() >= 4
         && (path.compare(path.size() - 4, 4, ".exr") == 0
             || path.compare(path.size() - 4, 4, ".EXR") == 0);
+    const bool isDds = path.size() >= 4
+        && (path.compare(path.size() - 4, 4, ".dds") == 0
+            || path.compare(path.size() - 4, 4, ".DDS") == 0);
 
     int width = 0;
     int height = 0;
@@ -334,7 +339,120 @@ Expected<void> GpuScene::Impl::UploadPendingTextures(nvrhi::ICommandList* comman
     nvrhi::Format pixelFormat = nvrhi::Format::UNKNOWN;
     std::size_t rowPitchBytes = 0;
 
-    if (isExr)
+    if (isDds)
+    {
+      // V2.A.14 — DDS BCn passthrough. DDS files store block-
+      // compressed BCn pixel data we hand directly to NVRHI; no
+      // decode step. Supported formats: BC1 / BC3 / BC5 / BC7
+      // (the common Omniverse / Substance authoring outputs).
+      // Layout: 4-byte magic ("DDS ") + 124-byte DDS_HEADER + opt
+      // 20-byte DXT10 extension + pixel data. See Microsoft's
+      // DirectDraw Surface reference for field offsets.
+      std::ifstream ddsFile(path, std::ios::binary | std::ios::ate);
+      if (!ddsFile)
+      {
+        Logging::Get().Warn(log::RENDER,
+                            std::string{"TextureCache: DDS open failed for "} + path
+                                + " — falling back to missing-texture (slot 0).");
+        entry.needsGpuUpload = false;
+        entry.bindlessSlot = 0;
+        continue;
+      }
+      const auto fileSize = static_cast<std::size_t>(ddsFile.tellg());
+      ddsFile.seekg(0);
+      std::vector<char> ddsBytes(fileSize);
+      ddsFile.read(ddsBytes.data(), static_cast<std::streamsize>(fileSize));
+      if (fileSize < 128u
+          || std::memcmp(ddsBytes.data(), "DDS ", 4) != 0)
+      {
+        Logging::Get().Warn(log::RENDER,
+                            std::string{"TextureCache: invalid DDS magic for "} + path);
+        entry.needsGpuUpload = false;
+        entry.bindlessSlot = 0;
+        continue;
+      }
+      // DDS_HEADER fields we care about (32-bit little-endian):
+      //   offset  4: dwSize        (must be 124)
+      //   offset 12: dwHeight
+      //   offset 16: dwWidth
+      //   offset 20: dwPitchOrLinearSize
+      //   offset 84: dwFourCC      (under DDS_PIXELFORMAT, +84 of header start)
+      auto readU32 = [&](std::size_t off) -> std::uint32_t {
+        std::uint32_t value = 0;
+        std::memcpy(&value, ddsBytes.data() + off, 4u);
+        return value;
+      };
+      width  = static_cast<int>(readU32(16u));
+      height = static_cast<int>(readU32(12u));
+      const std::uint32_t fourCC = readU32(84u);
+      // Map FourCC to NVRHI format. "DXT1" → BC1, "DXT5" → BC3,
+      // "ATI2"/"BC5U" → BC5, "DX10" routes through the DXT10 ext
+      // header (offset 128, 4-byte dxgiFormat). For sRGB / linear
+      // routing we honour the role like the stb_image branch.
+      const bool isSrgb = (entry.keyCopy.role == TextureKey::Role::BaseColor
+                          || entry.keyCopy.role == TextureKey::Role::Emission);
+      std::size_t pixelOffset = 128u;
+      if (fourCC == 0x31545844u)  // "DXT1"
+        pixelFormat = isSrgb ? nvrhi::Format::BC1_UNORM_SRGB : nvrhi::Format::BC1_UNORM;
+      else if (fourCC == 0x35545844u)  // "DXT5"
+        pixelFormat = isSrgb ? nvrhi::Format::BC3_UNORM_SRGB : nvrhi::Format::BC3_UNORM;
+      else if (fourCC == 0x32495441u)  // "ATI2" (BC5)
+        pixelFormat = nvrhi::Format::BC5_UNORM;
+      else if (fourCC == 0x30315844u && fileSize >= 148u)  // "DX10"
+      {
+        const std::uint32_t dxgi = readU32(128u);
+        pixelOffset = 148u;
+        // Common DXGI BCn codes (per dxgiformat.h):
+        //   83 = BC5_UNORM    71 = BC1_UNORM    72 = BC1_UNORM_SRGB
+        //   77 = BC3_UNORM    78 = BC3_UNORM_SRGB
+        //   98 = BC7_UNORM    99 = BC7_UNORM_SRGB
+        if (dxgi == 71u || dxgi == 72u)
+          pixelFormat = isSrgb ? nvrhi::Format::BC1_UNORM_SRGB : nvrhi::Format::BC1_UNORM;
+        else if (dxgi == 77u || dxgi == 78u)
+          pixelFormat = isSrgb ? nvrhi::Format::BC3_UNORM_SRGB : nvrhi::Format::BC3_UNORM;
+        else if (dxgi == 83u)
+          pixelFormat = nvrhi::Format::BC5_UNORM;
+        else if (dxgi == 98u || dxgi == 99u)
+          pixelFormat = isSrgb ? nvrhi::Format::BC7_UNORM_SRGB : nvrhi::Format::BC7_UNORM;
+        else
+        {
+          Logging::Get().Warn(log::RENDER,
+                              std::string{"TextureCache: unsupported DXGI format "}
+                                  + std::to_string(dxgi) + " in " + path);
+          entry.needsGpuUpload = false;
+          entry.bindlessSlot = 0;
+          continue;
+        }
+      }
+      else
+      {
+        Logging::Get().Warn(log::RENDER,
+                            std::string{"TextureCache: unsupported DDS FourCC "}
+                                + std::to_string(fourCC) + " in " + path);
+        entry.needsGpuUpload = false;
+        entry.bindlessSlot = 0;
+        continue;
+      }
+      if (width <= 0 || height <= 0 || fileSize <= pixelOffset)
+      {
+        Logging::Get().Warn(log::RENDER,
+                            std::string{"TextureCache: DDS pixel data truncated in "} + path);
+        entry.needsGpuUpload = false;
+        entry.bindlessSlot = 0;
+        continue;
+      }
+      // Copy raw block data into the entry's pixel buffer. NVRHI
+      // writes BCn rows of (width/4) blocks each 8 (BC1) or 16
+      // (BC3/5/7) bytes wide.
+      decodedPixels.assign(
+          reinterpret_cast<std::uint8_t*>(ddsBytes.data() + pixelOffset),
+          reinterpret_cast<std::uint8_t*>(ddsBytes.data() + fileSize));
+      const std::size_t bytesPerBlock =
+          (pixelFormat == nvrhi::Format::BC1_UNORM
+           || pixelFormat == nvrhi::Format::BC1_UNORM_SRGB) ? 8u : 16u;
+      rowPitchBytes = static_cast<std::size_t>((width + 3) / 4) * bytesPerBlock;
+    }
+    else if (isExr)
     {
       // tinyexr LoadEXR: malloc's float[w*h*4] in RGBA order. We
       // upload directly as RGBA32_FLOAT — 16 B/pixel, so a 1024×512
