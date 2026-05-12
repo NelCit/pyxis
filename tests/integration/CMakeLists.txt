@@ -412,6 +412,21 @@ set_tests_properties(V2A13.TimeCodeSmoke PROPERTIES
     TIMEOUT   120
 )
 
+# V2.A.4 — UsdSkel multi-frame headless smoke.
+add_test(
+    NAME    V2A4.SkelMultiFrameSmoke
+    COMMAND ${CMAKE_COMMAND}
+            -DPYXIS_EXE=$<TARGET_FILE:pyxis>
+            -DFIXTURE_CONFIG=${CMAKE_SOURCE_DIR}/tests/fixtures/va4_skel_animated.json
+            -DSCENE_PATH=${CMAKE_SOURCE_DIR}/tests/fixtures/va4_skel_animated.usda
+            -DOUTPUT_DIR=${CMAKE_BINARY_DIR}/tests/integration/va4_skel
+            -P ${CMAKE_SOURCE_DIR}/tests/integration/va4_skel_multiframe_smoke.cmake
+)
+set_tests_properties(V2A4.SkelMultiFrameSmoke PROPERTIES
+    LABELS    "integration;v2a4"
+    TIMEOUT   240
+)
+
 # §41 M28 / V2.A.28 — USD loading audit. Runs the pure-Python audit
 # tool against an in-tree fixture (one of each STUB type + standard
 # LOADED types); the tool returns exit 0 because every authored type

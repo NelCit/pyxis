@@ -176,6 +176,40 @@ int Run(int argc, char** argv) noexcept {
 
   if (cli.headless)
   {
+    // V2.A.4 multi-frame headless. When `--frame-range B..E[:S]` is
+    // authored, loop over each frame, override `config.output.image`
+    // with a numbered filename, and re-enter RunHeadless. Single-
+    // frame behaviour preserved when the range is unset.
+    if (cli.frameRangeEnd >= cli.frameRangeBegin && cli.frameRangeBegin >= 0)
+    {
+      const int step = cli.frameRangeStep > 0 ? cli.frameRangeStep : 1;
+      Logging::Get().Info(
+          log::APP,
+          "--frame-range " + std::to_string(cli.frameRangeBegin) + ".."
+              + std::to_string(cli.frameRangeEnd) + ":" + std::to_string(step)
+              + " → looping the headless render path one EXR per frame.");
+      for (int frame = cli.frameRangeBegin; frame <= cli.frameRangeEnd; frame += step)
+      {
+        Configuration perFrameConfig = config;
+        // Insert `.NNNN` before the extension so frame 12 of out.exr
+        // becomes out.0012.exr. Falls back to suffix-only when the
+        // path has no `.`.
+        const std::string baseOut = perFrameConfig.output.image;
+        const std::size_t dotPos = baseOut.rfind('.');
+        char frameTag[16];
+        std::snprintf(frameTag, sizeof(frameTag), ".%04d", frame);
+        perFrameConfig.output.image = (dotPos == std::string::npos)
+            ? baseOut + frameTag
+            : baseOut.substr(0, dotPos) + frameTag + baseOut.substr(dotPos);
+        const int frameRc = RunHeadless(perFrameConfig, scene, cli.saveAov,
+                                        cli.benchFrames, cli.profilePath,
+                                        cli.populationMask,
+                                        static_cast<double>(frame));
+        if (frameRc != 0)
+          return frameRc;
+      }
+      return EXIT_OK;
+    }
     return RunHeadless(config, scene, cli.saveAov, cli.benchFrames, cli.profilePath,
                        cli.populationMask,
                        (cli.frameNumber >= 0)

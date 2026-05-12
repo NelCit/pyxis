@@ -1,0 +1,102 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    startTimeCode = 0
+    endTimeCode = 24
+    timeCodesPerSecond = 24
+    doc = "Pyxis V2.A.4 fixture — UsdSkel CPU-skinned animated mesh. A 2-bone skeleton (root + root/spine); the spine joint rotates 60° around X across frames 0..24. The bound mesh (an 8-vertex tall box) has its top 4 verts skinned to spine, the bottom 4 to root, so the top half tilts while the bottom stays put. Multi-frame headless render produces a different EXR per frame — the CPU skinning math is the regression detector."
+)
+
+def Xform "World"
+{
+    def SkelRoot "Skel"
+    {
+        def Skeleton "Skeleton" (
+            prepend apiSchemas = ["SkelBindingAPI"]
+        )
+        {
+            uniform token[] joints = ["root", "root/spine"]
+            uniform matrix4d[] bindTransforms = [
+                ( (1,0,0,0), (0,1,0,0), (0,0,1,0), (0,0,0,1) ),
+                ( (1,0,0,0), (0,1,0,0), (0,0,1,0), (0,1,0,1) )
+            ]
+            uniform matrix4d[] restTransforms = [
+                ( (1,0,0,0), (0,1,0,0), (0,0,1,0), (0,0,0,1) ),
+                ( (1,0,0,0), (0,1,0,0), (0,0,1,0), (0,1,0,1) )
+            ]
+            rel skel:animationSource = </World/Skel/Anim>
+        }
+
+        def SkelAnimation "Anim"
+        {
+            uniform token[] joints = ["root", "root/spine"]
+            # Translate the spine joint along +X over time — top-half
+            # vertices follow because they're 100% weighted to spine.
+            # Frame 0: spine at rest (y=1). Frame 24: spine slid +1.5
+            # on X. Mid frame: half-way.
+            float3[] translations.timeSamples = {
+                0:  [(0, 0, 0), (0,   1, 0)],
+                12: [(0, 0, 0), (0.75, 1, 0)],
+                24: [(0, 0, 0), (1.5, 1, 0)],
+            }
+            quatf[] rotations = [(1, 0, 0, 0), (1, 0, 0, 0)]
+            half3[] scales = [(1, 1, 1), (1, 1, 1)]
+        }
+
+        def Mesh "TallBox" (
+            prepend apiSchemas = ["SkelBindingAPI"]
+        )
+        {
+            uniform token subdivisionScheme = "none"
+            int[] faceVertexCounts = [3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3]
+            int[] faceVertexIndices = [
+                0, 1, 2,  0, 2, 3,    # bottom face (y=0)
+                4, 6, 5,  4, 7, 6,    # top face (y=2)
+                0, 4, 5,  0, 5, 1,    # front face (z=+0.3)
+                3, 2, 6,  3, 6, 7,    # back face (z=-0.3)
+                0, 3, 7,  0, 7, 4,    # left face (x=-0.3)
+                1, 5, 6,  1, 6, 2,    # right face (x=+0.3)
+            ]
+            point3f[] points = [
+                (-0.3, 0,   0.3),  # 0 bottom-front-left
+                ( 0.3, 0,   0.3),  # 1 bottom-front-right
+                ( 0.3, 0,  -0.3),  # 2 bottom-back-right
+                (-0.3, 0,  -0.3),  # 3 bottom-back-left
+                (-0.3, 2,   0.3),  # 4 top-front-left
+                ( 0.3, 2,   0.3),  # 5 top-front-right
+                ( 0.3, 2,  -0.3),  # 6 top-back-right
+                (-0.3, 2,  -0.3),  # 7 top-back-left
+            ]
+            color3f[] primvars:displayColor = [(0.8, 0.4, 0.2)]
+
+            # All bottom verts → root (joint 0); all top verts → spine (joint 1).
+            int[] primvars:skel:jointIndices = [0, 0, 0, 0, 1, 1, 1, 1] (
+                elementSize = 1
+                interpolation = "vertex"
+            )
+            float[] primvars:skel:jointWeights = [1, 1, 1, 1, 1, 1, 1, 1] (
+                elementSize = 1
+                interpolation = "vertex"
+            )
+            rel skel:skeleton = </World/Skel/Skeleton>
+        }
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 1.5, 6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.0
+    }
+}

@@ -66,6 +66,16 @@ struct CliArgs {
   // place — minus-one means "not authored on the command line".
   int frameNumber = -1;          // --frame <int>  (-1 = default time)
 
+  // V2.A.4 multi-frame headless. `--frame-range BEGIN..END[:STEP]`
+  // renders one EXR per frame so animation can be inspected. Default
+  // STEP=1. When set, the headless harness ignores `--frame` and
+  // honours the range instead. Output filenames are derived from
+  // `--output` by inserting `.<frame>` before the extension:
+  // `out.exr` + frame 12 → `out.0012.exr`. All-zero range = disabled.
+  int frameRangeBegin = -1;
+  int frameRangeEnd   = -1;
+  int frameRangeStep  = 1;
+
   // M21 / V2.A.15 — USD composition load modes. Parsed but the rest
   // of the pipeline always uses UsdStage::LoadAll() in v2; honouring
   // --load-mode / --population-mask needs the StageWalker to switch

@@ -40,12 +40,19 @@ struct ResolvedScene;
 // per-pass timing percentiles to that path. Consumed by
 // `_tools/run_regression.py` which merges it with its own image-diff
 // metrics into the rolling per-test KPI CSV.
+// V2.A.4 multi-frame headless. When `frameRangeEnd >= frameRangeBegin`,
+// the harness runs the full render path once per frame in the range
+// (step = max(1, frameRangeStep)) and writes a numbered EXR per
+// frame. Single-frame behavior preserved when frameRangeEnd < 0.
 int RunHeadless(const Configuration& config, const ResolvedScene& scene,
                 std::string_view saveAovList = {},
                 uint32_t benchFrames = 0,
                 std::string_view profilePath = {},
                 std::string_view populationMask = {},
-                double frameNumber = -1.0) noexcept;
+                double frameNumber = -1.0,
+                int frameRangeBegin = -1,
+                int frameRangeEnd = -1,
+                int frameRangeStep = 1) noexcept;
 
 // Viewer mode. screenshotPath is the M1 --screenshot debug capture
 // (non-empty -> render a few warmup frames, write a PNG, exit 0).
