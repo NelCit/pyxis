@@ -161,27 +161,22 @@ int Run(int argc, char** argv) noexcept {
               "default time.");
   }
 
-  // M21 / V2.A.15 — composition load mode + population mask stubs.
+  // V2.A.15 — composition load mode. --load-mode is still a follow-up
+  // (UsdStage::Load{Payload|All} per prim); --population-mask is wired
+  // here through to IngestUsd via RunHeadless.
   if (!cli.loadMode.empty())
   {
     Logging::Get().Warn(
         log::APP,
         "--load-mode " + std::string{cli.loadMode}
-            + " accepted but not yet honoured; UsdStage::OpenMasked plumbing "
-              "is a follow-up milestone (V2.A.15). Stage is loaded fully.");
-  }
-  if (!cli.populationMask.empty())
-  {
-    Logging::Get().Warn(
-        log::APP,
-        "--population-mask " + std::string{cli.populationMask}
-            + " accepted but not yet honoured; full UsdStagePopulationMask "
-              "plumbing is a follow-up milestone (V2.A.15). All prims loaded.");
+            + " accepted but not yet honoured; per-prim payload-load "
+              "policy is a follow-up. Stage loads with full payloads.");
   }
 
   if (cli.headless)
   {
-    return RunHeadless(config, scene, cli.saveAov, cli.benchFrames, cli.profilePath);
+    return RunHeadless(config, scene, cli.saveAov, cli.benchFrames, cli.profilePath,
+                       cli.populationMask);
   }
   return RunViewer(config, scene, cli.screenshotPath, cli.shaderRebuildDir);
 }

@@ -382,6 +382,21 @@ set_tests_properties(M21.UsdRenderStubSmoke PROPERTIES
     TIMEOUT   120
 )
 
+# V2.A.15 full impl — UsdStage::OpenMasked smoke.
+add_test(
+    NAME    V2A15.PopulationMaskSmoke
+    COMMAND ${CMAKE_COMMAND}
+            -DPYXIS_EXE=$<TARGET_FILE:pyxis>
+            -DFIXTURE_CONFIG=${CMAKE_SOURCE_DIR}/tests/fixtures/m13_geom.json
+            -DSCENE_PATH=${CMAKE_SOURCE_DIR}/tests/fixtures/m13_geom.usda
+            -DOUTPUT_DIR=${CMAKE_BINARY_DIR}/tests/integration/va15_mask
+            -P ${CMAKE_SOURCE_DIR}/tests/integration/va15_population_mask_smoke.cmake
+)
+set_tests_properties(V2A15.PopulationMaskSmoke PROPERTIES
+    LABELS    "integration;v2a15"
+    TIMEOUT   120
+)
+
 # §41 M28 / V2.A.28 — USD loading audit. Runs the pure-Python audit
 # tool against an in-tree fixture (one of each STUB type + standard
 # LOADED types); the tool returns exit 0 because every authored type
