@@ -39,6 +39,7 @@ target_sources(pyxis_unit_tests PRIVATE
     NetworkCoverageDetection.cpp
     PopulationMaskParsing.cpp
     MaterialCoverageFields.cpp
+    MdlTranslation.cpp
 
     # The §9.2 RenderGraph + IRenderPass live in pyxis_renderer/Private
     # and don't cross the SHARED-DLL boundary. The unit-test harness is
