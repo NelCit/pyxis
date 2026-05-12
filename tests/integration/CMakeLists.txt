@@ -289,3 +289,19 @@ set_tests_properties(M15.VolumeStubSmoke PROPERTIES
     LABELS    "integration;m15"
     TIMEOUT   120
 )
+
+# §41 M16 / V2.A.10 + V2.A.11 — texture memory reporting smoke. Reuses
+# the M13 geom fixture (no UDIM, exercises the texture cache).
+add_test(
+    NAME    M16.TextureReportSmoke
+    COMMAND ${CMAKE_COMMAND}
+            -DPYXIS_EXE=$<TARGET_FILE:pyxis>
+            -DFIXTURE_CONFIG=${CMAKE_SOURCE_DIR}/tests/fixtures/m13_geom.json
+            -DSCENE_PATH=${CMAKE_SOURCE_DIR}/tests/fixtures/m13_geom.usda
+            -DOUTPUT_DIR=${CMAKE_BINARY_DIR}/tests/integration/m16_texture_report
+            -P ${CMAKE_SOURCE_DIR}/tests/integration/m16_texture_report_smoke.cmake
+)
+set_tests_properties(M16.TextureReportSmoke PROPERTIES
+    LABELS    "integration;m16"
+    TIMEOUT   120
+)

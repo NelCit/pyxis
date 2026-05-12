@@ -32,6 +32,7 @@
 #include <nvrhi/nvrhi.h>
 
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <fstream>
 #include <ios>
@@ -469,14 +470,36 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
   // debug names are too verbose for a one-liner.
   {
     const FrameStats sceneStats = gpuScene.LastFrameStats();
+    const std::uint64_t textureMiB = sceneStats.textureBytes >> 20;
     log.Info(log::APP,
              "headless: GpuScene committed — "
                  + std::to_string(sceneStats.meshCount)     + " meshes, "
                  + std::to_string(sceneStats.blasCount)     + " BLAS, "
                  + std::to_string(sceneStats.instanceCount) + " instances, "
                  + std::to_string(sceneStats.materialCount) + " materials, "
-                 + std::to_string(sceneStats.textureCount)  + " textures, "
+                 + std::to_string(sceneStats.textureCount)  + " textures ("
+                 + std::to_string(textureMiB)               + " MiB), "
                  + std::to_string(sceneStats.lightCount)    + " lights.");
+
+    // M16 / V2.A.10 + V2.A.11 — texture memory budget warning. Real
+    // streaming + eviction is a follow-up (needs an LRU + the §17
+    // memory-budget knob wired into a per-frame eviction pass); for
+    // now we emit a one-shot warning when the decoded texture cache
+    // crosses a soft threshold so the operator sees the cost. The
+    // 4 GiB ceiling matches the lobby's actual ~1.4 GiB load with
+    // generous headroom for Moana-scale scenes inside an 8 GiB VRAM
+    // budget (§17). The number lives here, not in a header, until a
+    // proper RenderSettings::textureMemoryBudgetMiB knob lands.
+    constexpr std::uint64_t TEXTURE_BUDGET_MIB = 4096u;
+    if (textureMiB > TEXTURE_BUDGET_MIB)
+    {
+      log.Warn(log::APP,
+               "headless: texture memory "
+                   + std::to_string(textureMiB)
+                   + " MiB exceeds soft budget "
+                   + std::to_string(TEXTURE_BUDGET_MIB)
+                   + " MiB — V2.A.11 streaming/eviction not yet active.");
+    }
   }
 
   // ---- M11 — §34.1 end-of-load summary table -------------------------
