@@ -1,0 +1,70 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis M20 / V2.A.4 fixture — NURBS + Skel detect-warn-skip stub. Authors one NurbsPatch + one SkelRoot alongside a visible Cube. The smoke test asserts pyxis exits 0, both warnings fire, and the cube still renders."
+)
+
+def Xform "World"
+{
+    def Cube "VisibleCube"
+    {
+        double size = 1.0
+        color3f[] primvars:displayColor = [(0.7, 0.4, 0.4)]
+        double3 xformOp:translate = (0, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    # NURBS patch — detect + warn + skip.
+    def NurbsPatch "NurbsPatchStub"
+    {
+        int uVertexCount = 4
+        int vVertexCount = 4
+        int uOrder = 4
+        int vOrder = 4
+        double[] uKnots = [0, 0, 0, 0, 1, 1, 1, 1]
+        double[] vKnots = [0, 0, 0, 0, 1, 1, 1, 1]
+        double uRange = 1
+        double vRange = 1
+        point3f[] points = [
+            (2, 0, 0), (2, 0.3, 0.3), (2, 0.6, 0.6), (2, 1, 1),
+            (2.3, 0, 0), (2.3, 0.3, 0.3), (2.3, 0.6, 0.6), (2.3, 1, 1),
+            (2.6, 0, 0), (2.6, 0.3, 0.3), (2.6, 0.6, 0.6), (2.6, 1, 1),
+            (3, 0, 0), (3, 0.3, 0.3), (3, 0.6, 0.6), (3, 1, 1)
+        ]
+    }
+
+    # Skel root + skeleton — detect + warn + skip.
+    def SkelRoot "SkelRootStub"
+    {
+        def Skeleton "Skeleton"
+        {
+            uniform token[] joints = ["root", "root/spine"]
+            uniform matrix4d[] bindTransforms = [
+                ( (1,0,0,0), (0,1,0,0), (0,0,1,0), (0,0,0,1) ),
+                ( (1,0,0,0), (0,1,0,0), (0,0,1,0), (0,1,0,1) )
+            ]
+            uniform matrix4d[] restTransforms = [
+                ( (1,0,0,0), (0,1,0,0), (0,0,1,0), (0,0,0,1) ),
+                ( (1,0,0,0), (0,1,0,0), (0,0,1,0), (0,1,0,1) )
+            ]
+        }
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 1.5, 6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.0
+    }
+}

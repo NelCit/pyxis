@@ -64,6 +64,10 @@
 #include <pxr/usd/usdGeom/imageable.h>
 #include <pxr/usd/usdShade/material.h>
 #include <pxr/usd/usdShade/materialBindingAPI.h>
+#include <pxr/usd/usdGeom/nurbsCurves.h>
+#include <pxr/usd/usdGeom/nurbsPatch.h>
+#include <pxr/usd/usdSkel/root.h>
+#include <pxr/usd/usdSkel/skeleton.h>
 #include <pxr/usd/usdVol/volume.h>
 #include <pxr/usd/ar/resolver.h>
 #include <pxr/usd/sdf/path.h>
@@ -2464,6 +2468,30 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
     else if (prim.IsA<pxr::UsdShadeMaterial>())
     {
       // Already translated + counted in pass 1.
+    }
+    else if (prim.IsA<pxr::UsdGeomNurbsPatch>() || prim.IsA<pxr::UsdGeomNurbsCurves>())
+    {
+      // M20 / V2.A.4 — NURBS detect/warn/skip. Full NURBS tessellation
+      // needs OpenSubdiv's NURBS path (or a custom tessellator); v2
+      // detects + skips so NURBS-bearing scenes render the rest of
+      // the geometry.
+      Logging::Get().Warn(log::APP,
+          "StageWalker: NURBS prim " + prim.GetPath().GetString()
+              + " (" + prim.GetTypeName().GetString()
+              + ") detected but not yet tessellated. Skipping.");
+      ++stats.skipped;
+    }
+    else if (prim.IsA<pxr::UsdSkelRoot>() || prim.IsA<pxr::UsdSkelSkeleton>())
+    {
+      // M20 / V2.A.4 — Skel detect/warn/skip. Full skeletal animation
+      // needs joint matrices on the GPU + per-vertex skinning weights
+      // + a per-frame transform update path. v2 detects + skips so
+      // skel-bearing scenes render the rest.
+      Logging::Get().Warn(log::APP,
+          "StageWalker: Skel prim " + prim.GetPath().GetString()
+              + " (" + prim.GetTypeName().GetString()
+              + ") detected but skinning is not yet supported. Skipping.");
+      ++stats.skipped;
     }
     else if (prim.IsA<pxr::UsdVolVolume>())
     {

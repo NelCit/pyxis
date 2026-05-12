@@ -1,0 +1,28 @@
+{
+  "$comment": "Pyxis M20 smoke fixture — NURBS + Skel detect-warn-skip.",
+
+  "render": {
+    "width":           256,
+    "height":          256,
+    "samplesPerFrame": 1,
+    "seed":            20
+  },
+
+  "output": {
+    "image":           "m20_nurbs_skel.exr",
+    "effectiveConfig": "m20_nurbs_skel.effective.json"
+  },
+
+  "diagnostics": {
+    "validationLayer": false,
+    "aftermath":       false
+  },
+
+  "limits": {
+    "framesInFlight":  3
+  },
+
+  "app": {
+    "ingest":          "usd_direct"
+  }
+}

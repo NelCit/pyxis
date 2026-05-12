@@ -81,6 +81,7 @@ target_link_libraries(pyxis_usd_ingest
         usdGeom
         usdLux
         usdShade
+        usdSkel
         usdVol
         sdf
         tf

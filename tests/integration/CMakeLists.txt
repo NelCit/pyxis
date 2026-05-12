@@ -351,3 +351,18 @@ set_tests_properties(M19.FrameFlagSmoke PROPERTIES
     LABELS    "integration;m19"
     TIMEOUT   120
 )
+
+# §41 M20 / V2.A.4 — NURBS + Skel detect/warn/skip stub.
+add_test(
+    NAME    M20.NurbsSkelStubSmoke
+    COMMAND ${CMAKE_COMMAND}
+            -DPYXIS_EXE=$<TARGET_FILE:pyxis>
+            -DFIXTURE_CONFIG=${CMAKE_SOURCE_DIR}/tests/fixtures/m20_nurbs_skel.json
+            -DSCENE_PATH=${CMAKE_SOURCE_DIR}/tests/fixtures/m20_nurbs_skel.usda
+            -DOUTPUT_DIR=${CMAKE_BINARY_DIR}/tests/integration/m20_nurbs_skel
+            -P ${CMAKE_SOURCE_DIR}/tests/integration/m20_nurbs_skel_smoke.cmake
+)
+set_tests_properties(M20.NurbsSkelStubSmoke PROPERTIES
+    LABELS    "integration;m20"
+    TIMEOUT   120
+)
