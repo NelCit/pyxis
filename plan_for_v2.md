@@ -15,9 +15,9 @@ v2 has two non-overlapping bodies of work:
 | Pillar | Goal | Out-of-scope |
 |---|---|---|
 | **A. Loading completeness** | Faithfully load every prim type, primvar, transform mode, time sample, variant, and relationship USD authors. The Pyxis-side scene state mirrors USD's intent. Renderer may *ignore* loaded data initially; loading it is non-negotiable. | New rendering algorithms |
-| **B. Real-time raytracer** | Replace v1's path-traced integrator with a **hybrid raytracer**: rasterized G-buffer feel + ray-traced reflections + ray-traced shadows + RTAO + denoiser. Real-time on RTX 4070+ at 1080p. Approximation over correctness — "OVRTX-equivalent at a glance", not "physically converged". | Full path tracing (v1 remains the offline path) |
+| **B. Real-time raytracer** | Three components per pixel: direct lighting, ray-traced shadows, 1-bounce ray-traced specular reflections. That's it — no RTAO, no light tree, no MIS, no denoiser, no TAA. Roughness-blended fallback to dome envmap on rough surfaces keeps reflections clean without ML denoising. Real-time on RTX 4070+ at 1080p. | Multi-bounce indirect, RTAO, denoisers, TAA, light tree (all v3+) |
 
-**Order**: Pillar A first (M12..M28), Pillar B second (M29..M33). Loading completeness is a prerequisite — the real-time pipeline still consumes Pyxis's `SceneWorld` view, so any prim type missing from ingest is also missing from real-time rendering.
+**Order**: Pillar A first (M12..M28), Pillar B second (M29..M31). Loading completeness is a prerequisite — the real-time pipeline still consumes Pyxis's `SceneWorld` view, so any prim type missing from ingest is also missing from real-time rendering.
 
 **On "completeness"**: this plan enumerates the **common production cases** under named milestones (M12..M27). The plan is not the proof of completeness — USD's schema set is enormous and corners exist that no enumeration catches. **M28** is the formal audit milestone: an automated walk of every `pxr/usd*/` schema header that compares against Pyxis's handler registry and reports unhandled prim types / applied APIs / attribute spec gaps. M28's exit gate is the audit-script signal, not a fixture-by-fixture check.
 
@@ -437,6 +437,65 @@ v1 handles `vertex` + `faceVarying` + `constant` + `uniform`. Missing:
 - **`SdfChangeBlock`** for batching — used internally by the live-update pipeline for atomic multi-prim edits.
 - **Layer offsets + scale** for time-remapped sublayers — animation retiming.
 
+### V2.A.29 OpenColorIO color management (M18)
+
+v1 hardcodes sRGB / Linear EOTFs based on `TextureKey::Role`. Production pipelines author textures in **ACEScg** or **Rec.709** or studio-custom color spaces.
+
+**Plan**:
+- New vcpkg dep: `opencolorio` (OCIO). Apache-2.0.
+- `UsdUVTexture::sourceColorSpace` resolves through an OCIO config when one is supplied via `Configuration::ocio.configPath` (new field on the config JSON, not the public renderer API).
+- Default OCIO config: built-in ACES 1.3 (OCIO ships a baseline). Studio override via env var `OCIO=path/to/config.ocio`.
+- Closesthit-side: linear-light path stays unchanged; OCIO is a decode-time transform on the CPU.
+- Display-side: tone-map pass optionally consumes an OCIO display+view transform instead of ACES-fixed.
+
+**Loaded but unused-on-GPU**:
+- Full OCIO graph metadata preserved per-texture (for round-trip USD-save).
+
+**Exit**: a fixture with ACEScg-authored textures + OCIO config renders correctly; the lobby unchanged (sRGB default still works).
+
+### V2.A.30 Material network outputs beyond surface (M18)
+
+USD `UsdShadeMaterial` exposes four output triplets: `surface`, `displacement`, `volume`, `light`. v1 reads only `surface`.
+
+**Plan**:
+- **`displacement`** output: load the network even though we don't render displacement (v1.x doesn't have a displacement pass; OMM/DMM micromaps are out of v2). Round-trip preservation.
+- **`volume`** output: when present alongside V2.A.5's Volumes, route to the volume integrator's material parameters.
+- **`light`** output: filterable shader networks for `UsdLuxLightFilter` (cookies / gobos). Load but ignore on GPU.
+
+**Loaded but unused-on-GPU**:
+- Displacement networks — preserved; no renderer consumer until v3.
+- Light shader networks — preserved.
+
+### V2.A.31 Bounding-box hints (M14)
+
+**Plan**:
+- **`UsdGeomBoundable::ComputeExtent` + `extentsHint`** — read at ingest, populate per-instance AABBs for the TLAS. Speeds up TLAS rebuilds (no recomputation) and lets Pillar B's primary ray do early-out frustum culling efficiently.
+- **`extent`** vs **`extentsHint`** distinction: `extent` is authored locally on the prim; `extentsHint` is pre-cached on a higher prim covering multiple descendants. Use whichever is authored.
+
+**Loaded but unused-on-GPU**:
+- Currently NVRHI/RTXMU recomputes AABBs from triangle data — the hint is loaded into Pyxis state but the BLAS builder doesn't consume it yet. Plumbing for "use authored AABB" lands when needed.
+
+### V2.A.32 Codeless schemas + custom prim types + UsdProc (M28)
+
+USD supports plugin-registered prim types beyond the built-in schema set:
+
+**Plan**:
+- **`UsdSchemaRegistry::FindConcretePrimDefinition`** — query at ingest to know whether a type is a known schema (handled) vs a plugin-defined type (codeless).
+- **Codeless schemas** (`_codelessSchemaTypeNames` in `plugInfo.json`) — log once with the type name + the plugin source. Don't crash.
+- **`UsdProcGenerativeProcedural`** — runtime procedural geometry. v2 logs + skips; v3 may execute via a procedural-evaluation framework.
+
+**Strategy**: M28's audit script picks these up automatically by walking against `UsdSchemaRegistry`. Unknown types → "explicit skip with log line" category, not "unhandled".
+
+### V2.A.33 displayColor + displayOpacity fallback (M14)
+
+**Plan**:
+- When a mesh has **no material binding**, fall back to `primvars:displayColor` (per-vertex or per-face RGB) + `primvars:displayOpacity` (alpha) as a Lambertian colour. v1 currently uses a hardcoded grey.
+- When BOTH are absent, v1's grey fallback remains.
+- Time-varying `displayColor` honoured via V2.A.13.
+
+**Loaded but unused-on-GPU**:
+- `displayColor` always loaded (even when a material is bound); the renderer ignores it if a material is bound but the data is preserved for inspector / USD round-trip.
+
 ### V2.A.28 Loaded-everything audit (M28 — formal completeness gate)
 
 **Strengthened from V2.A.11**: this milestone's exit gate is the **automated schema audit**, not fixture-by-fixture testing.
@@ -464,142 +523,104 @@ v1 handles `vertex` + `faceVarying` + `constant` + `uniform`. Missing:
 
 ### Philosophy
 
-> *"Real-time rendering is the art of skipping the right physics."*
+> *"For each pixel: direct lighting, shadows, specular reflections. That's almost everything."*
 
-v1's closesthit was a forward-Euler step toward a real path tracer — single bounce, NEE direct, no MIS. Production real-time renderers (OVRTX, Lumen, Frostbite) **never** path-trace; they decompose the rendering equation into **components** and use the cheapest technique that approximates each:
+v1's closesthit returned the direct contribution from N lights and stopped — a degenerate single-bounce path tracer. v2's real-time renderer is a **classic hybrid ray tracer**: per-pixel direct lighting + shadow rays (v1 already does these) plus one new addition: **per-pixel specular reflection rays**.
+
+Deliberately **out of scope**:
+
+- No path tracing (no recursive multi-bounce indirect).
+- No light tree, no MIS — v1's straight per-light enumeration runs fine for the ~30 lights the lobby ships and similar arch-viz scenes. Plain.
+- No RTAO. Ambient is a flat tunable.
+- No denoiser. With direct + 1 reflection ray + simple roughness-blend-with-envmap, the per-pixel result is clean enough without ML / spatial filtering machinery.
+- No TAA / temporal reprojection. Each frame is independent.
+
+This is the "RTX-On, 2018 vintage" feature set — exactly what the user asked for. Visually: hard direct lighting, hard ray-traced shadows, ray-traced reflections on glossy surfaces. No fake hacks (no SSR, no static envmap-only reflections, no screen-space shadow approximation). Just three ray-traced components, composited.
 
 | Component | v1 path tracer | v2 real-time |
 |---|---|---|
 | Primary visibility | TraceRay closest-hit | TraceRay closest-hit (unchanged) |
-| Direct lighting | Per-light shadow ray + Lambert+GGX | Per-light shadow ray + Lambert+GGX + **light tree sampling** + **MIS** |
-| Indirect specular | (none) | **1-bounce reflection TraceRay** + spatial-temporal denoise |
-| Indirect diffuse | (none) | **RTAO**: 1-spp AO ray + denoise (NOT proper indirect diffuse; cheap approximation) |
-| Indirect via probes | (none) | (deferred to v3 — DDGI / probe-based irradiance) |
-| Anti-aliasing | Halton jitter + accumulation | **TAA**: temporal reprojection + history buffer |
-| Tone-map | Reinhard / ACES | ACES (unchanged) + OCIO output (v2.A.10's optional addition) |
+| Direct lighting | Per-light shadow ray + Lambert+GGX | Per-light shadow ray + Lambert+GGX (unchanged) |
+| Indirect specular | (none) | **1-bounce reflection TraceRay** |
+| Indirect diffuse | (none) | Flat ambient × dome-light tint |
+| Anti-aliasing | Halton jitter + accumulation | Halton jitter + accumulation (unchanged) |
+| Tone-map | ACES | ACES (unchanged) |
 
-The omission of full indirect diffuse is deliberate. OVRTX's lobby render uses irradiance probes (DDGI) for indirect diffuse; we approximate via RTAO + a tunable ambient term. The result reads as "OVRTX-like at a glance" without the multi-bounce cost.
+### V2.B.1 Pipeline architecture (M29)
 
-### V2.B.1 Pipeline architecture (M21)
-
-New `RenderGraph` shape, replacing v1's `PathTrace → Accumulation → ToneMap → AovResolve → DebugView → CopyToHydraBuffer → Present`:
+The `RenderGraph` shape is mostly unchanged from v1; one new pass slots in between PathTrace and Accumulation:
 
 ```
-PrimaryHit → ShadowRays → ReflectionRays → RTAO →
-              Denoise (per component) →
-              TemporalReproject (TAA + history) →
-              Composite →
-              ToneMap →
-              AovResolve →
-              DebugView →
-              CopyToHydraBuffer →
-              Present
+PathTrace → ReflectionRays → Accumulation → ToneMap → AovResolve →
+            DebugView → CopyToHydraBuffer → Present
 ```
 
-Concretely:
+- **PathTrace** keeps its v1 name but the closesthit body is restructured:
+  - Loop over all lights, accumulate direct (Lambert + GGX) + shadow ray gating (already v1)
+  - **No multi-bounce** — closesthit returns direct + emission only
+  - Writes `reflectionDirection` AOV (the GGX-sampled reflection direction at the primary hit) for the next pass's input
+- **ReflectionRays** (NEW): per pixel, traces the reflection direction from `reflectionDirection` AOV, evaluates the secondary hit's direct + emission, writes `reflectionRadiance` AOV.
+- **Accumulation** + **ToneMap** + **AovResolve** + rest: unchanged from v1.
 
-- **PrimaryHit**: TraceRay closest-hit. Writes `albedo`, `normal`, `materialId`, `worldPos`, `motionVector`, `roughness`, `metallic` AOVs (G-buffer-like layout, but ray-traced not rasterized).
-- **ShadowRays**: per-direct-light TraceRay with `RAY_FLAG_SKIP_CLOSEST_HIT_SHADER | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH` (v1 already does this). Writes per-light `shadowMask` AOV. **Light tree sampling**: 64 lights/frame max via §40.5's stochastic light tree.
-- **ReflectionRays**: 1 TraceRay per pixel, GGX-importance-sampled direction. Hit's direct contribution evaluated inline. Writes `reflectionRadiance` AOV.
-- **RTAO**: per pixel, hemisphere-sampled AO ray. World-space radius configurable (`RenderSettings::aoRadius`). Writes `aoMask` AOV.
-- **Denoise** (per AOV): OIDN or OptiX denoiser, separately on `shadowMask`, `reflectionRadiance`, `aoMask`. Auxiliary inputs: `albedo` + `normal`. Each denoiser pass: ~1-3ms on 4070.
-- **TemporalReproject**: previous-frame motion vectors + history buffer for each component. Stabilizes 1-spp output.
-- **Composite**: combine `directRadiance + reflectionRadiance + emissive + (albedo × ambient × aoMask)`. Linear-light, pre-tone-map.
-- **ToneMap**: ACES (unchanged from v1).
+**Composite**: a single AOV-combining line in raygen or AovResolve:
+```
+final = directRadiance + reflectionRadiance × specularWeight
+```
+where `specularWeight` derives from material `metallic` + `specular` already in `OpenPBRMaterialGPU`.
 
-New passes that didn't exist in v1:
-- `pass.ShadowRays` (split out from PathTrace's per-light loop)
-- `pass.ReflectionRays`
-- `pass.RTAO`
-- `pass.DenoiseShadow`, `pass.DenoiseReflection`, `pass.DenoiseAO`
-- `pass.TemporalReproject`
-- `pass.Composite`
+### V2.B.2 Per-pixel direct lighting (no change from v1)
 
-### V2.B.2 Direct lighting + light tree (M21)
+Already shipped. v2 keeps the same body:
 
-v1's closesthit iterates every light, every pixel. Doesn't scale past ~50 lights.
+- Loop every authored light
+- Compute Lambert diffuse + Schlick-Fresnel GGX specular
+- Per-light shadow ray (RAY_FLAG_SKIP_CLOSEST_HIT_SHADER | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH)
+- Light/shadow linking via the v1-reserved `lightLinkSet`/`lightLinkMask` fields, populated by V2.A.19's collection resolution
 
-**Plan**:
-- **Light tree**: hierarchical BVH over lights, traversed stochastically. ~10 lights sampled per pixel for a 200-light scene (typical for an interior arch viz).
-- Built CPU-side at scene load, refit on `Dirty<Light>` events.
-- Stochastic descent: each level picks a child weighted by `(power × importance)`, importance derived from light's distance to the pixel's world-pos + cosine to surface normal.
-- MIS: weight between the light tree's sample direction and a BSDF-sampled direction. Critical for glossy surfaces lit by area lights.
-- Per-light shadow rays only fired for the sampled lights, not the full set.
-- Falls back to the v1 enumeration path when light count ≤ 16.
+**No light tree, no MIS** — for scenes with ≤ 50 lights (the v2 target lobby + typical arch viz), per-light enumeration is < 1 ms on RTX 4070 and doesn't need the complexity of stochastic sampling.
 
-**Reservation honoured**: §43.1 light/shadow linking already has `lightLinkSet` / `lightLinkMask` fields on `LightDesc` / `InstanceDesc`. The light-tree traversal AND-checks these masks before contributing.
+### V2.B.3 Per-pixel RT specular reflections (M30)
 
-**Exit**: 200-light synthetic test scene renders at the same per-frame cost as a 16-light scene (light-tree decorrelation working). Lobby's 30 lights run on the light tree path (over the 16-light threshold).
-
-### V2.B.3 RT reflections (M22)
+The single new feature. One reflection ray per pixel, evaluated against the world TLAS.
 
 **Plan**:
-- 1 TraceRay per pixel, direction = GGX-importance-sampled reflection.
-- Roughness-aware: very rough surfaces (`roughness > 0.7`) skip the reflection ray and fall back to ambient-only — reflection is invisible anyway, save the ray.
-- 1-bounce only (no recursion). 2nd-hit closesthit evaluates direct + emissive, no further reflection.
-- New `ReflectionRayPayload` (smaller than the primary HitInfo — only RGB radiance + hitT).
-- maxRecursionDepth = 3 (primary + reflection + reflection's shadow ray).
 
-**Denoising**: SVGF-style spatial-temporal filter on `reflectionRadiance`. Auxiliary inputs: world-space normal, depth, roughness, history.
+- Primary closesthit writes `reflectionDirection` AOV — the GGX-importance-sampled half-vector reflected against the primary normal. For metals: pure mirror (`roughness = 0`). For dielectrics: weighted by roughness.
+- New `pass.ReflectionRays` raygen variant — reads `reflectionDirection`, fires one TraceRay per pixel.
+- 2nd-hit closesthit (reused — same shader as primary) evaluates direct + emission, **no further reflection bounce**. maxRecursionDepth = 3 (primary + reflection + reflection's shadow rays).
+- **Roughness-aware fallback** to avoid visible noise on rough surfaces:
+  - `roughness < 0.1` → mirror-perfect reflection, trace
+  - `roughness > 0.7` → skip reflection entirely; the result would be ambient-dominated and not visible
+  - between: **lerp between traced reflection and dome-light contribution at the reflection direction**. The classic "rough reflections from prefiltered env" approximation. No noise; smooth visually plausible result.
+- Per-pixel cost: ~3 ms on lobby at 1080p RTX 4070 (one extra TraceRay + a shadow ray on the secondary hit).
+- New `ReflectionRayPayload`: smaller than primary `HitInfo` — RGB radiance + hitT, no AOV writes.
 
-**Exit**: lobby's marble floor reflects the ceiling lights + dome. Glossy chrome reflects the room.
+**Reflection AOV**: `reflectionRadiance` exposed in the AOV inspector for debugging.
 
-### V2.B.4 RTAO (M22)
+**Exit**:
+- Lobby's marble floor reflects the ceiling lights + dome
+- Glossy chrome surfaces reflect the room
+- Rough surfaces look smooth (no noise) because they blend to dome contribution
 
-**Plan**:
-- Per pixel, hemisphere cosine-weighted ray, world-radius configurable (default 2.0 scene-space units).
-- 1 ray per pixel; denoised spatially + temporally.
-- Returns `1.0` (unoccluded) or `1.0 - hitFraction` (partial occlusion).
-- Modulates `ambient × albedo` in the composite pass.
+### V2.B.4 Performance gate + KPI (M31)
 
-**Denoising**: shared SVGF infrastructure with reflections.
-
-**Exit**: lobby contact shadows under furniture; ambient darkening in corners.
-
-### V2.B.5 Denoiser integration (M23)
-
-**Plan**:
-- **OIDN** primary (Intel Open Image Denoise, Apache-2.0, vcpkg-packaged). Runs CUDA on NV / HIP on AMD / CPU fallback.
-- **OptiX Denoiser** optional (NV SDK download; better-quality temporal mode but NV-only).
-- Per-AOV denoise: `shadowMask`, `reflectionRadiance`, `aoMask` each get their own pass. **Not** combined into one denoiser invocation — each channel's noise profile is different.
-- Auxiliary inputs: `albedo` + `normal` AOVs (already written by v1).
-- History buffer (motion-vector reprojected previous frame) for temporal stability.
-- New `RenderSettings::denoiser = {Off, OIDN_Cpu, OIDN_Cuda, OptiX}` field.
-
-**Exit**: 1-spp single-pass output reads clean at 1080p.
-
-### V2.B.6 Temporal reprojection + TAA (M24)
-
-**Plan**:
-- Per-frame motion vectors: `worldFromLocalPrev` (already a §43.2-reserved field on `InstanceDesc`) feeds the closesthit's `motionVector` AOV.
-- History buffer: previous-frame composite + per-component buffers.
-- Reproject: read history at `worldPos.xy - motionVector.xy`. Clamp/clip via neighborhood color box.
-- 8-sample jitter on raygen (Halton already implemented).
-
-**Exit**: camera move under-1-spp budget reads stable; no shimmer.
-
-### V2.B.7 Performance gate + KPI (M25)
-
-**Hero scene**: World Lobby, 1080p, RTX 4070 Laptop. Visual target: OVRTX-equivalent at a glance.
+**Hero scene**: World Lobby, 1080p, RTX 4070 Laptop. Visual target: per-pixel direct + shadows + glossy reflections, OVRTX-like at a glance.
 
 **KPI budget**:
 
 | Pass | Budget |
 |---|---|
-| `pass.PrimaryHit` | 4 ms |
-| `pass.ShadowRays` (~10 lights via tree) | 3 ms |
+| `pass.PathTrace` (primary + per-light shadow rays) | 8 ms |
 | `pass.ReflectionRays` | 3 ms |
-| `pass.RTAO` | 1 ms |
-| `pass.DenoiseShadow` | 1 ms |
-| `pass.DenoiseReflection` | 1 ms |
-| `pass.DenoiseAO` | 1 ms |
-| `pass.TemporalReproject` | 0.5 ms |
-| `pass.Composite + ToneMap + AovResolve` | 1 ms |
-| **Total per frame** | **15.5 ms = 64 FPS** |
+| `pass.Accumulation + ToneMap + AovResolve + Composite` | 1 ms |
+| Headroom | 4 ms |
+| **Total per frame** | **16 ms = 60 FPS** |
 
-§34's "1080p hero camera" KPI gate is updated: `pass.PrimaryHit + pass.Shadow + pass.Reflection + pass.RTAO + pass.Denoise* + pass.TAA + pass.Composite < 16 ms p99` on RTX 4070 Laptop.
+§34's "1080p hero camera" KPI gate is updated for v2: `pass.PathTrace + pass.ReflectionRays + pass.Composite < 16 ms p99` on RTX 4070 Laptop.
 
 **Profiling overhead** (M11 gate): < 1% Release. Held over from v1.
+
+**No denoiser, no TAA, no light tree.** The single-frame output is the final image at 1-spp (with Halton jitter + accumulation when the camera is stationary, as v1 already supports).
 
 ---
 
@@ -609,28 +630,26 @@ v1's closesthit iterates every light, every pixel. Doesn't scale past ~50 lights
 
 | | Name | Plan ref | Exit |
 |---|---|---|---|
-| **M12** | Subdivision + visibility + purpose + mesh attr coverage | V2.A.1 + V2.A.2 + V2.A.26 | 83 lobby subdiv meshes refined; 4 invisible prims hidden; purpose filter active; orientation + holes + creases honoured |
+| **M12** | Subdivision + visibility + purpose + mesh attr coverage | V2.A.1 + V2.A.2 + V2.A.26 + V2.A.33 | 83 lobby subdiv meshes refined; 4 invisible prims hidden; purpose filter active; orientation + holes + creases honoured; displayColor fallback |
 | **M13** | Curves + points + analytic primitives | V2.A.3 + V2.A.21 | `BasisCurves` + `Points` + Sphere/Cube/Cylinder/Cone/Capsule ingest |
-| **M14** | xformOps + variants + UDIM + time-varying primvars + PointInstancer extras + stage metadata + prim state + camera extras + light extras + primvar edge cases | V2.A.6 + A.2 + A.7 + A.9 + A.13 + A.16 + A.17 + A.19 + A.20 + A.25 | Production-pipeline correctness pass (broad batch of small, low-risk additions) |
+| **M14** | xformOps + variants + UDIM + time-varying primvars + PointInstancer extras + stage metadata + prim state + camera extras + light extras + primvar edge cases + bounding-box hints | V2.A.6 + A.2 + A.7 + A.9 + A.13 + A.16 + A.17 + A.19 + A.20 + A.25 + A.31 | Production-pipeline correctness pass (broad batch of small, low-risk additions) |
 | **M15** | Volumes (OpenVDB) | V2.A.5 | Smoke fixture renders with absorption + scattering |
 | **M16** | NURBS + Skel + time-varying USD | V2.A.4 | Animated character renders, advancing per-frame |
 | **M17** | Texture streaming + LRU | V2.A.12 | Oversized-lobby × 10 renders at 8 GB VRAM with degraded mips |
-| **M18** | MaterialX coverage matrix + material binding details + texture/shader edge cases + MDL translation | V2.A.8 + V2.A.18 + V2.A.24 + V2.A.23 | Every OPS / StdSurface nodedef fixture-tested; binding strength honoured; wrap/filter modes; MDL OmniPBR/Glass/Surface → OpenPBR |
+| **M18** | MaterialX coverage matrix + material binding details + texture/shader edge cases + MDL translation + OCIO + material network outputs | V2.A.8 + V2.A.18 + V2.A.24 + V2.A.23 + V2.A.29 + V2.A.30 | Every OPS / StdSurface nodedef fixture-tested; binding strength honoured; wrap/filter modes; MDL OmniPBR/Glass/Surface → OpenPBR; OCIO color management; displacement/volume/light networks loaded |
 | **M19** | Asset resolvers + USDZ stress + UsdRender schema + composition fine points | V2.A.10 + V2.A.22 + V2.A.27 | USDZ + custom ArResolver fixtures pass; UsdRenderProduct/Var/Settings honoured |
 | **M21** | Texture compression + format coverage + USD composition load modes | V2.A.14 + V2.A.15 | BCn-encoded uploads; DDS / KTX2 / TIFF input; --load-mode + --population-mask |
-| **M28** | Loaded-everything audit (schema-walk) + round-trip integrity + dirty fixtures | V2.A.28 | `_tools/usd_loading_audit.py` returns zero unhandled rows; lobby USD round-trips byte-identical via `usddiff` |
-
-> *M20 from the original draft is folded into M28 as the formal completeness gate. Older M20/M21/M22 are shifted: what was M21 (pipeline pivot) is now M29.*
+| **M28** | Loaded-everything audit (schema-walk) + round-trip + dirty fixtures + codeless-schema log | V2.A.28 + V2.A.32 | `_tools/usd_loading_audit.py` returns zero unhandled rows; lobby USD round-trips byte-identical via `usddiff` |
 
 ### Real-time raytracer (Pillar B)
 
+Three milestones — scope deliberately tight per "direct + shadows + specular reflections, that's almost everything".
+
 | | Name | Plan ref | Exit |
 |---|---|---|---|
-| **M29** | Pipeline pivot + light tree + MIS | V2.B.1 + V2.B.2 | New `PrimaryHit + ShadowRays` passes; light tree handles 200-light scenes; MIS for direct |
-| **M30** | RT reflections + RTAO | V2.B.3 + V2.B.4 | Reflection + AO AOVs written, composite uses them |
-| **M31** | Denoiser integration | V2.B.5 | OIDN passes denoise each component; visible quality unlock |
-| **M32** | Temporal reprojection + TAA | V2.B.6 | Stable under-1-spp rendering during camera move |
-| **M33** | Lobby real-time gate | V2.B.7 | Lobby renders at 60 FPS p99, visually comparable to OVRTX reference |
+| **M29** | Pipeline restructure + reflection direction AOV | V2.B.1 + V2.B.2 | Primary closesthit body cleaned + emits `reflectionDirection` AOV; v1 direct + shadows unchanged; existing tests still byte-equal |
+| **M30** | RT specular reflections | V2.B.3 | `pass.ReflectionRays` renders glossy reflections on lobby's marble + chrome; roughness-aware mirror/envmap blend |
+| **M31** | Lobby real-time gate | V2.B.4 | Lobby at 60 FPS p99 at 1080p RTX 4070 Laptop with direct + shadows + reflections |
 
 ### Cuts to keep v2 from sprawling
 
@@ -655,14 +674,14 @@ Per §22.3, every v2 public API addition uses the trailing `_reserved*` slots re
 
 - `RenderSettings::subdivLevelCap` (claims `_reserved1`)
 - `RenderSettings::purposeFilter` (claims `_reserved2`)
-- `RenderSettings::denoiser` (claims `_reserved3`)
-- `RenderSettings::aoRadius` (claims `_reserved4`)
-- `RenderSettings::timeCode` (claims `_reserved5`)
+- `RenderSettings::reflectionMaxRoughness` (claims `_reserved3`) — above this roughness, blend to envmap instead of tracing
+- `RenderSettings::timeCode` (claims `_reserved4`)
+- `RenderSettings::ambientStrength` (claims `_reserved5`) — flat ambient term for diffuse indirect approximation
 - `OpenPBRMaterialDesc::volumeAbsorption / volumeScattering / volumeAnisotropy` (claims trailing `_reserved` slots)
 - New POD: `CurvesDesc`, `PointsDesc`, `VolumeDesc` — entirely new files in `Public/Pyxis/Renderer/Descs/`
 - New POD: `TimeSampleSet` (`Public/Pyxis/Renderer/Descs/TimeSampleSet.h`) — generic time-sample container loaded for any animated attribute
 - New POD: `SkeletalAnimation`, `JointTransform` for skel
-- New Profiler scopes: `pass.PrimaryHit`, `pass.ShadowRays`, `pass.ReflectionRays`, `pass.RTAO`, `pass.Denoise*`, `pass.TemporalReproject`, `pass.Composite`
+- New Profiler scopes: `pass.ReflectionRays` (only new pass in Pillar B; existing `pass.PathTrace` keeps its name)
 
 All additive. Version bump per v2 cut: 1.0.0 → 2.0.0 only when the **rendering algorithm** changes (M29 lands). M12-M28 are loading-correctness — each bumps minor (1.1.0, 1.2.0, …, 1.x.0). M29+ bumps to 2.0.0.
 
@@ -680,13 +699,13 @@ Same Windows / clang-cl / `/W4 /WX` baseline from v1. New vcpkg deps:
 
 - `opensubdiv` (M12)
 - `openvdb` (M15)
+- `opencolorio` (M18)
 - `nvtt` or `Compressonator` (M21 — texture compression)
 - `gli` / `tinyddsloader` (M21 — DDS input)
 - `libktx` (M21 — KTX2 input)
 - `libtiff` (M21 — TIFF input)
-- `oidn` (M31 — primary denoiser)
 
-OptiX is an NV SDK download, not vcpkg-packaged. Optional dep with `find_package(OptiX QUIET)` gate.
+No denoiser dep — v2's simplified Pillar B doesn't ship one. (Re-evaluate for v3 if RTAO / multi-bounce lands.)
 
 ### V2.4.4 Testing
 
@@ -719,11 +738,11 @@ A new `_documentation/v2-mxx-<short-name>.md` per milestone, same structure as `
    - Holds the broader Pillar A timeline more cleanly than slotting between M17 and M18.
 9. **M28.** Loaded-everything audit + round-trip. The formal completeness gate. Runs after M12-M21 land so the schema-walk script reports against the final handler registry.
 10. **Cut 1.x → 2.0.** Tag the loading-completeness milestone. Pillar A done.
-11. **M29.** Pipeline pivot. The single biggest commit in v2. Replaces the closesthit. Likely a v2 standalone PR.
-12. **M30-M32.** Real-time refinement passes. Sequenced because each depends on its predecessor (reflections need primary G-buffer; AO needs primary; denoisers need component AOVs; TAA needs motion vectors).
-13. **M33.** Lobby real-time gate. The KPI hit is the v2 ship signal.
+11. **M29.** Pipeline restructure. Primary closesthit cleanup + new `reflectionDirection` AOV. Existing v1 tests still byte-equal (this is preparation, not a behavioural change).
+12. **M30.** RT specular reflections. The single new feature.
+13. **M31.** Lobby real-time gate at 60 FPS p99. The v2 ship signal.
 
-Estimated calendar: M12-M28 is ~9 months at one milestone per 2-3 weeks (some bundled into M14/M18/M19). M29-M33 is ~3 months. Total v2: ~12-15 months from v1.0.0.
+Estimated calendar: M12-M28 is ~9 months at one milestone per 2-3 weeks (some bundled into M14/M18/M19). M29-M31 is ~1.5 months (Pillar B is deliberately tight). Total v2: ~10-12 months from v1.0.0.
 
 ---
 
@@ -733,19 +752,22 @@ A reminder, because the §42 list is long and tempting:
 
 | Deferred to v3+ | Why |
 |---|---|
-| **Full path-traced indirect diffuse** (multi-bounce) | RTAO is the v2 approximation; full indirect is offline-only |
-| **DDGI** / probe systems | Out of v2 scope; complex enough to warrant its own milestone block |
+| **Multi-bounce indirect diffuse** (path tracing) | v2 has ambient × dome only; indirect bounce is offline / v3 |
+| **RTAO** | Out of v2 scope per the simplified Pillar B; flat ambient covers it |
+| **Light tree + MIS** | Per-light enumeration runs fine for ≤ 50 lights (lobby + typical arch viz); revisit when scenes need it |
+| **Denoiser (OIDN / OptiX)** | v2 produces clean output without it via roughness-blended reflections |
+| **TAA / temporal reprojection** | Per-frame independent rendering; v2 doesn't accumulate motion-blurred history |
+| **DDGI** / probe systems | v3 |
 | **DLSS / DLSS-RR / DLSS3 / Reflex** | NV SDK gates; ship as opt-in v3 maybe |
 | **Spectral rendering** | Niche; almost no production USD authors spectral data |
 | **OMM (Opacity Micro Maps)** | RTXMU v1 didn't support; revisit if RTXMU adds the feature |
 | **DMM (Displacement Micro Maps)** | Same as OMM |
-| **Bidirectional path tracing / VCM** | Offline-only; v2 is real-time |
+| **Bidirectional path tracing / VCM** | Offline-only |
 | **D3D12 backend** | Windows-only via Vulkan in v2 |
 | **macOS / Linux ports** | Still §42 |
 | **Network / render-farm features** | Never v1/v2 scope |
 | **Hair Marschner BSDF** | v2 ships Lambert per-strand; Marschner deferred |
 | **Material editor UI** | Separate tool, not in pyxis_app |
-| **Custom OCIO color management** | Optional v2.A.10 if community asks; default ACES sufficient |
 
 If any of these become tempting, file an RFC under §44 first. Don't slip them in mid-milestone.
 
@@ -755,10 +777,10 @@ If any of these become tempting, file an RFC under §44 first. Don't slip them i
 
 v2 is done when:
 
-1. **Loading completeness**: a `_tools/usd_loading_audit.py` script walks a corpus of production USD scenes (lobby + a curated set of public Omniverse / NVIDIA samples) and reports < 1% unsupported-prim-type warnings. The current lobby reports 0% but the bar widens with M13+ work.
+1. **Loading completeness**: `_tools/usd_loading_audit.py` walks a corpus of production USD scenes (lobby + a curated set of public Omniverse / NVIDIA samples) and reports zero unhandled prim types / applied APIs / unhandled-attribute warnings. Codeless-schema types log explicitly; nothing is silently dropped.
 2. **Round-trip integrity**: `gpuScene.SaveAsUsd(path)` on the lobby produces a USD whose `usddiff` against the source is empty (modulo metadata reorderings USD's serializer can't avoid).
-3. **Real-time KPI**: lobby renders at 60 FPS p99 at 1080p on RTX 4070 Laptop, with all of: light-tree direct + RT shadows + RT reflections + RTAO + denoise + TAA enabled.
-4. **Visual reference**: side-by-side screenshot vs OVRTX-rendered lobby (https://docs.omniverse.nvidia.com/usd/latest/usd_content_samples/res_lobby.html) reads as "same scene, same lighting intent, different renderer" — not "different scene" or "obviously broken".
+3. **Real-time KPI**: lobby renders at 60 FPS p99 at 1080p on RTX 4070 Laptop, with: per-pixel direct lighting + per-light shadow rays + per-pixel 1-bounce RT specular reflections.
+4. **Visual reference**: side-by-side screenshot vs OVRTX-rendered lobby (https://docs.omniverse.nvidia.com/usd/latest/usd_content_samples/res_lobby.html) reads as "same scene, same lighting intent, different (simpler) renderer" — not "different scene" or "obviously broken". v2 deliberately ships a coarser-quality approximation; the absence of multi-bounce indirect / RTAO / proper denoising is visible at close inspection but the at-a-glance read is similar.
 5. **Profiler overhead**: still < 1% Release per M11 / §34 gate.
 6. **106/106 + new** tests pass.
 
