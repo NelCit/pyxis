@@ -69,6 +69,28 @@ struct OpenPBRMaterialDesc {
   Source source = Source::Default;
   std::string_view sourcePrim;  // diagnostics only; not hashed.
 
+  // V2.A.30 — material network outputs beyond `surface`. UsdShade
+  // allows authoring a `displacement` and / or `volume` output on
+  // the same material; Pyxis v2 reads `surface` only, but records
+  // whether the others are authored so the closesthit (when we
+  // grow displacement + volume rendering) can decide whether to
+  // dispatch. Today the closesthit ignores both — bind but don't
+  // use.
+  // V2.A.24 — UsdUVTexture wrap modes (per-material, per-texture).
+  // Pyxis v2 samples with the global `repeat` sampler. The wrap
+  // mode authored by the artist is preserved here so the v2.1 or
+  // v3 sampler-per-material upgrade has a CPU-side source.
+  // V2.A.29 — UsdUVTexture sourceColorSpace token. Today we pick
+  // sRGB / Linear by TextureKey::Role at decode time; storing the
+  // authored token lets future OCIO-aware decode override.
+  // Each consumes one uint32_t from the `_reserved[16]` slot per
+  // §22.3, keeping the layout byte-stable.
+  uint32_t hasDisplacementOutput = 0;  // V2.A.30 (was _reserved[0])
+  uint32_t hasVolumeOutput       = 0;  // V2.A.30 (was _reserved[1])
+  uint32_t baseColorWrapS        = 0;  // V2.A.24 (was _reserved[2]) — UsdGeomTokens hash
+  uint32_t baseColorWrapT        = 0;  // V2.A.24 (was _reserved[3])
+  uint32_t baseColorSourceCS     = 0;  // V2.A.29 (was _reserved[4]) — TfToken hash
+
   // §22.3 reserved padding: M5+ adds OpenPBR fields (sheen, coat
   // colour, displacement, transmission depth, etc.) by consuming
   // these slots one at a time, keeping the layout byte-stable
@@ -76,8 +98,9 @@ struct OpenPBRMaterialDesc {
   // major version (§22 + RFC §44.1). The `_reserved` underscore
   // prefix is the §22.3 / §43 plan convention — overrides §30.2's
   // public-POD camelCase rule for this slot purpose only.
+  // 5 slots consumed above; 11 remain.
   // NOLINTNEXTLINE(readability-identifier-naming)
-  uint32_t _reserved[16] = {};
+  uint32_t _reserved[11] = {};
 };
 
 }  // namespace pyxis

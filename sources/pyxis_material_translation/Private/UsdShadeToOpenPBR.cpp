@@ -157,13 +157,29 @@ pxr::TfToken ResolveUVTextureVarname(const pxr::UsdShadeShader& textureShader) n
 // all author `varname = "st"` so this is a no-op there, but it
 // prevents silently-wrong texturing on a future scene that authors
 // `varname = "st_1"` or `"UVMap"`.
+struct UVTextureBinding {
+  std::string  file;
+  pxr::TfToken varname;
+  pxr::TfToken wrapS;       // V2.A.24 — `useMetadata` / `repeat` / `mirror` / `clamp` / `black`.
+  pxr::TfToken wrapT;
+  pxr::TfToken sourceColorSpace;  // V2.A.29 — `auto` / `raw` / `sRGB`.
+};
+
 bool ResolveUVTextureBinding(const pxr::UsdShadeShader& shader,
                              const pxr::TfToken& inputName,
-                             std::string& outFile,
-                             pxr::TfToken& outVarname) noexcept
+                             UVTextureBinding& outBinding) noexcept
 {
   static const pxr::TfToken usdUVTextureToken("UsdUVTexture");  // NOLINT(readability-identifier-naming)
   static const pxr::TfToken fileToken("file");                  // NOLINT(readability-identifier-naming)
+  static const pxr::TfToken wrapSToken("wrapS");                // NOLINT(readability-identifier-naming)
+  static const pxr::TfToken wrapTToken("wrapT");                // NOLINT(readability-identifier-naming)
+  static const pxr::TfToken sourceColorSpaceToken("sourceColorSpace");  // NOLINT(readability-identifier-naming)
+
+  std::string&   outFile    = outBinding.file;
+  pxr::TfToken&  outVarname = outBinding.varname;
+  outBinding.wrapS = pxr::TfToken{};
+  outBinding.wrapT = pxr::TfToken{};
+  outBinding.sourceColorSpace = pxr::TfToken{};
 
   outFile.clear();
   outVarname = pxr::TfToken{};
@@ -253,6 +269,30 @@ bool ResolveUVTextureBinding(const pxr::UsdShadeShader& shader,
     }
   }
 
+  // V2.A.24 — record authored wrap modes (`useMetadata` / `repeat` /
+  // `mirror` / `clamp` / `black`). Pyxis's global sampler is `repeat`;
+  // the artist-authored value is preserved on the desc so future
+  // per-material sampler dispatch has a CPU-side source.
+  if (const pxr::UsdShadeInput wrapSInput = textureShader.GetInput(wrapSToken); wrapSInput)
+  {
+    pxr::VtValue value;
+    if (wrapSInput.Get(&value) && value.IsHolding<pxr::TfToken>())
+      outBinding.wrapS = value.UncheckedGet<pxr::TfToken>();
+  }
+  if (const pxr::UsdShadeInput wrapTInput = textureShader.GetInput(wrapTToken); wrapTInput)
+  {
+    pxr::VtValue value;
+    if (wrapTInput.Get(&value) && value.IsHolding<pxr::TfToken>())
+      outBinding.wrapT = value.UncheckedGet<pxr::TfToken>();
+  }
+  // V2.A.29 — UsdUVTexture sourceColorSpace authored by the artist.
+  if (const pxr::UsdShadeInput csInput = textureShader.GetInput(sourceColorSpaceToken); csInput)
+  {
+    pxr::VtValue value;
+    if (csInput.Get(&value) && value.IsHolding<pxr::TfToken>())
+      outBinding.sourceColorSpace = value.UncheckedGet<pxr::TfToken>();
+  }
+
   outVarname = ResolveUVTextureVarname(textureShader);
   return true;
 }
@@ -330,10 +370,10 @@ OpenPBRMaterialDesc FromUsdShade(const pxr::UsdShadeMaterial& material,
     static const pxr::TfToken stToken("st");  // NOLINT(readability-identifier-naming)
     auto resolveSlot = [&](const char* inputName,
                            TextureKey::Role role,
-                           TextureHandle& outSlot) {
-      std::string path;
-      pxr::TfToken varname;
-      if (!ResolveUVTextureBinding(surface, pxr::TfToken(inputName), path, varname))
+                           TextureHandle& outSlot,
+                           UVTextureBinding* captureOut = nullptr) {
+      UVTextureBinding binding;
+      if (!ResolveUVTextureBinding(surface, pxr::TfToken(inputName), binding))
         return;
       // M8a UV-set indirection: only the implicit-default UV (empty
       // varname → "st") and an explicit `varname = "st"` resolve to
@@ -343,7 +383,7 @@ OpenPBRMaterialDesc FromUsdShade(const pxr::UsdShadeMaterial& material,
       // material fall back to its scalar baseColor instead. The cost
       // is "no texture" for those materials in scenes that author
       // multi-UV setups; the gain is no visibly-wrong texturing.
-      if (!varname.IsEmpty() && varname != stToken)
+      if (!binding.varname.IsEmpty() && binding.varname != stToken)
       {
         // Caller-side log lives in the renderer/ingest, not here —
         // this lib doesn't pull spdlog. Texture stays invalid and
@@ -351,7 +391,9 @@ OpenPBRMaterialDesc FromUsdShade(const pxr::UsdShadeMaterial& material,
         // the scalar.
         return;
       }
-      outSlot = acquire(path, role, userData);
+      outSlot = acquire(binding.file, role, userData);
+      if (captureOut != nullptr)
+        *captureOut = binding;
     };
     // Role drives the §13 colorspace decision at decode time:
     // BaseColor + Emission = sRGB→linear EOTF; everything else
@@ -359,13 +401,33 @@ OpenPBRMaterialDesc FromUsdShade(const pxr::UsdShadeMaterial& material,
     // stays linear. UsdPreviewSurface authors metallic / roughness /
     // opacity as separate inputs; all three pull through the
     // RoughnessMetallic role since they're linear data channels.
-    resolveSlot("diffuseColor",  TextureKey::Role::BaseColor,         desc.baseColorMap);
+    UVTextureBinding baseColorBinding;  // V2.A.24 + V2.A.29 — captured for the diffuse slot.
+    resolveSlot("diffuseColor",  TextureKey::Role::BaseColor,         desc.baseColorMap,
+                &baseColorBinding);
     resolveSlot("metallic",      TextureKey::Role::RoughnessMetallic, desc.metallicMap);
     resolveSlot("roughness",     TextureKey::Role::RoughnessMetallic, desc.roughnessMap);
     resolveSlot("normal",        TextureKey::Role::NormalMap,         desc.normalMap);
     resolveSlot("emissiveColor", TextureKey::Role::Emission,          desc.emissionMap);
     resolveSlot("opacity",       TextureKey::Role::RoughnessMetallic, desc.opacityMap);
+
+    // V2.A.24 / V2.A.29 — stash artist-authored sampler config on the
+    // baseColor slot (the most commonly-authored texture). Pyxis still
+    // samples with the global `repeat` sampler in the closesthit; the
+    // info is preserved for the future per-material sampler dispatch.
+    desc.baseColorWrapS    = baseColorBinding.wrapS.Hash();
+    desc.baseColorWrapT    = baseColorBinding.wrapT.Hash();
+    desc.baseColorSourceCS = baseColorBinding.sourceColorSpace.Hash();
   }
+
+  // V2.A.30 — material network outputs beyond surface. UsdShade allows
+  // displacement + volume outputs alongside surface; Pyxis v2 reads
+  // only `surface` but records whether the others are authored so the
+  // closesthit (when displacement / volume rendering ship) knows to
+  // dispatch. Today the closesthit ignores both flags.
+  if (material.GetDisplacementOutput().HasConnectedSource())
+    desc.hasDisplacementOutput = 1u;
+  if (material.GetVolumeOutput().HasConnectedSource())
+    desc.hasVolumeOutput = 1u;
 
   desc.source = OpenPBRMaterialDesc::Source::UsdPreviewSurface;
   return desc;
