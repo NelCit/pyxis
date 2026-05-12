@@ -237,3 +237,22 @@ set_tests_properties(M13.AnalyticGeomSmoke PROPERTIES
     LABELS    "integration;m13"
     TIMEOUT   120  # In-tree fixture is ~7 prims; budget is generous.
 )
+
+# §41 M14 / V2.A.6 + V2.A.17 — advanced xformOps + prim state filter.
+# Authored fixture exercises xformOp:transform (full 4×4),
+# xformOp:rotateXYZ (Maya-style chain), xformOp:orient (quaternion),
+# and `active=false` (must NOT render). In-tree fixture, always
+# registered.
+add_test(
+    NAME    M14.XformStateSmoke
+    COMMAND ${CMAKE_COMMAND}
+            -DPYXIS_EXE=$<TARGET_FILE:pyxis>
+            -DFIXTURE_CONFIG=${CMAKE_SOURCE_DIR}/tests/fixtures/m14_xform_state.json
+            -DSCENE_PATH=${CMAKE_SOURCE_DIR}/tests/fixtures/m14_xform_state.usda
+            -DOUTPUT_DIR=${CMAKE_BINARY_DIR}/tests/integration/m14_xform_state
+            -P ${CMAKE_SOURCE_DIR}/tests/integration/m14_xform_state_smoke.cmake
+)
+set_tests_properties(M14.XformStateSmoke PROPERTIES
+    LABELS    "integration;m14"
+    TIMEOUT   120
+)

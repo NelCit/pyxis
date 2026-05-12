@@ -1,0 +1,28 @@
+{
+  "$comment": "Pyxis M14 smoke fixture — xformOps + active=false prim filter. Loads tests/fixtures/m14_xform_state.usda; small dims for fast smoke.",
+
+  "render": {
+    "width":           512,
+    "height":          512,
+    "samplesPerFrame": 1,
+    "seed":            14
+  },
+
+  "output": {
+    "image":           "m14_xform_state.exr",
+    "effectiveConfig": "m14_xform_state.effective.json"
+  },
+
+  "diagnostics": {
+    "validationLayer": false,
+    "aftermath":       false
+  },
+
+  "limits": {
+    "framesInFlight":  3
+  },
+
+  "app": {
+    "ingest":          "usd_direct"
+  }
+}
