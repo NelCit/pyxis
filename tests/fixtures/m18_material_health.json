@@ -1,0 +1,28 @@
+{
+  "$comment": "Pyxis M18 smoke fixture — material translation health report.",
+
+  "render": {
+    "width":           256,
+    "height":          256,
+    "samplesPerFrame": 1,
+    "seed":            18
+  },
+
+  "output": {
+    "image":           "m18_material_health.exr",
+    "effectiveConfig": "m18_material_health.effective.json"
+  },
+
+  "diagnostics": {
+    "validationLayer": false,
+    "aftermath":       false
+  },
+
+  "limits": {
+    "framesInFlight":  3
+  },
+
+  "app": {
+    "ingest":          "usd_direct"
+  }
+}
