@@ -20,6 +20,8 @@
 
 #include "Pyxis/UsdIngest/StageWalker.h"
 
+#include "SubdivRefine.h"
+
 #include <Pyxis/MaterialTranslation/UsdShadeToOpenPBR.h>
 #include <Pyxis/Platform/Logging/Log.h>
 #include <Pyxis/Platform/Logging/LogCategories.h>
@@ -388,6 +390,14 @@ struct PreparedSubMesh {
   std::vector<hlslpp::float2>  uv0;
   MaterialHandle               material  = MaterialHandle::Invalid;
   std::string                  debugName;
+  // M12 / V2.A.33 — displayColor fallback. Captured per-subset at
+  // PrepareMesh time so EmitPreparedMesh (which has GpuScene access)
+  // can synthesise a Lambertian material from displayColor when
+  // `material == Invalid`. `hasDisplayColor` distinguishes "no
+  // primvar authored → fall back to hard-coded grey" from
+  // "primvar authored as (0,0,0) → render black on purpose".
+  hlslpp::float3               displayColor    {0.18f, 0.18f, 0.18f};
+  bool                         hasDisplayColor = false;
 };
 
 struct PreparedMesh {
@@ -1158,6 +1168,35 @@ PreparedMesh PrepareMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xform
   if (!meshPrim.GetPrim().IsValid())
     return prepared;
 
+  // M12 / V2.A.2 — UsdGeomImageable visibility + purpose filter.
+  // v1 only checked visibility on lights; meshes silently inherited
+  // their authored `visibility = invisible` state but rendered anyway.
+  // ComputeVisibility walks up the hierarchy honouring inherited
+  // values — matches usdview / Storm semantics.
+  //
+  // Purpose: render `default` + `render` only. `proxy` is a low-fidelity
+  // standin shown by DCCs when full geometry is too heavy; `guide` is
+  // viewport-only annotations (camera frustums, light gizmos, etc.).
+  // Production scenes ship all four; the lobby authors only `default`
+  // today so this is a no-op there, but a 10-line correctness win for
+  // any other scene.
+  const pxr::UsdGeomImageable imageable(prim);
+  if (imageable
+      && imageable.ComputeVisibility(pxr::UsdTimeCode::Default())
+             == pxr::UsdGeomTokens->invisible)
+  {
+    return prepared;
+  }
+  if (imageable)
+  {
+    const pxr::TfToken purpose = imageable.ComputePurpose();
+    if (purpose == pxr::UsdGeomTokens->proxy
+        || purpose == pxr::UsdGeomTokens->guide)
+    {
+      return prepared;
+    }
+  }
+
   pxr::VtArray<pxr::GfVec3f> usdPoints;
   pxr::VtArray<int> usdCounts;
   pxr::VtArray<int> usdIndices;
@@ -1167,6 +1206,67 @@ PreparedMesh PrepareMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xform
 
   if (usdPoints.empty() || usdCounts.empty() || usdIndices.empty())
     return prepared;
+
+  // M12 / V2.A.26 — Mesh attribute coverage:
+  //
+  // orientation: USD default is `rightHanded`. `leftHanded` means the
+  // authored fv-index winding produces inward-facing normals when
+  // interpreted right-handed. Fix by reversing each face's fv-vertex
+  // order at triangulation time so the resulting triangles wind
+  // consistently right-handed (which the closesthit's normal +
+  // backface convention expects).
+  //
+  // holeIndices: per-face hole list. Each entry is a face index whose
+  // triangulation must be skipped (face is a topological hole). Empty
+  // for the lobby; common in industrial / CAD-derived USD.
+  pxr::TfToken orientationTok;
+  meshPrim.GetOrientationAttr().Get(&orientationTok);
+  // Non-const so the M12 subdiv block can force it off after refinement
+  // (OpenSubdiv emits canonical right-handed topology regardless of the
+  // source orientation).
+  bool leftHanded = (orientationTok == pxr::UsdGeomTokens->leftHanded);
+
+  pxr::VtIntArray holeIndices;
+  meshPrim.GetHoleIndicesAttr().Get(&holeIndices);
+
+  // V2.A.33 — displayColor / displayOpacity fallback. Read once per
+  // prim; applied per-subset below when the bound material is Invalid.
+  // USD's "displayColor" primvar is the canonical fallback colour
+  // when no material is authored (e.g. quick previews from DCC tools
+  // that haven't routed materials through MaterialX yet). Use the
+  // first value for constant / uniform / vertex / faceVarying interp
+  // — we don't yet refine per-vertex colour through the BSDF; one
+  // representative colour is the cheap visual win.
+  hlslpp::float3 fallbackDisplayColor{0.18f, 0.18f, 0.18f};
+  bool meshHasDisplayColor = false;
+  {
+    const pxr::UsdGeomPrimvarsAPI primvarsApi(prim);
+    const pxr::UsdGeomPrimvar displayPrimvar =
+        primvarsApi.GetPrimvar(pxr::TfToken("displayColor"));
+    if (displayPrimvar.HasValue())
+    {
+      pxr::VtArray<pxr::GfVec3f> displayColorArr;
+      displayPrimvar.ComputeFlattened(&displayColorArr);
+      if (!displayColorArr.empty())
+      {
+        fallbackDisplayColor = hlslpp::float3{
+            displayColorArr[0][0], displayColorArr[0][1], displayColorArr[0][2]};
+        meshHasDisplayColor = true;
+      }
+    }
+  }
+  // Sorted bool-vector lookup for "is face N a hole?". Bounded by face
+  // count; the common case is empty.
+  std::vector<bool> faceIsHole;
+  if (!holeIndices.empty())
+  {
+    faceIsHole.assign(usdCounts.size(), false);
+    for (const int faceIdx : holeIndices)
+    {
+      if (faceIdx >= 0 && static_cast<std::size_t>(faceIdx) < faceIsHole.size())
+        faceIsHole[static_cast<std::size_t>(faceIdx)] = true;
+    }
+  }
 
   // Convert positions into the §18.4 contiguous layout. Shared
   // across every sub-mesh emitted from this prim.
@@ -1285,6 +1385,88 @@ PreparedMesh PrepareMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xform
       stInterpolation = stPrimvar.GetInterpolation();
       stHasValue = true;
     }
+  }
+
+  // ---- M12 / V2.A.1 — Subdivision-surface refinement -----------------
+  // When the mesh authored `subdivisionScheme = catmullClark | loop`,
+  // we refine the polygon cage to its limit surface via OpenSubdiv.
+  // The refined positions + face topology + face-varying UVs replace
+  // the original arrays so the rest of PrepareMesh runs unchanged.
+  //
+  // Refinement level capped at 2 (Catmark → ~16× face count, Loop → 4×).
+  // Lobby's 83 subdiv meshes are 199-3854-vert cages; refined they
+  // become 3-60k-vert limit surfaces. Negligible VRAM vs the rest of
+  // the lobby budget.
+  //
+  // FVar UVs refine alongside positions via `Far::PrimvarRefiner::
+  // InterpolateFaceVarying` so texture seams stay coherent. Normals
+  // are NOT refined — they fall through to closesthit's face-normal
+  // branch (smoothLenSq < 1e-6); refined limit surfaces are dense
+  // enough that flat-per-quad normals already look smooth.
+  //
+  // Known v2.0 limitations:
+  //   * GeomSubset face indices reference the cage (0..NFaces-1) and
+  //     don't remap to the refined faces. Subdiv meshes with multiple
+  //     material bindings via GeomSubset render with the wrong slice.
+  //     None of the lobby's 83 subdiv meshes use GeomSubsets — fix
+  //     deferred to a follow-up if a real scene needs it.
+  //   * OpenSubdiv calls are serialised via an internal mutex
+  //     (`SubdivRefine.cpp::osMutex`). The Far layer isn't documented
+  //     as thread-safe across concurrent Create() calls.
+  const bool stIsFv = (stHasValue
+                       && stInterpolation == pxr::UsdGeomTokens->faceVarying
+                       && stUvs.size() == usdIndices.size());
+  const SubdivRefinedMesh refined =
+      RefineSubdivMesh(meshPrim, usdPoints, usdCounts, usdIndices,
+                       stIsFv ? stUvs : pxr::VtArray<pxr::GfVec2f>{},
+                       stIsFv, /*maxLevel=*/2);
+  if (refined.refined)
+  {
+    usdPoints = refined.points;
+    usdCounts = refined.faceVertexCounts;
+    usdIndices = refined.faceVertexIndices;
+
+    // `positions` (the contiguous hlslpp-shaped buffer) was built up-
+    // stream from the *cage* usdPoints. Rebuild it from the refined
+    // points so the downstream dedup pass indexes a buffer sized to
+    // the refined topology rather than OOB'ing past the cage.
+    positions.clear();
+    positions.reserve(usdPoints.size());
+    for (const pxr::GfVec3f& point : usdPoints)
+      positions.emplace_back(point[0], point[1], point[2]);
+
+    if (stIsFv && !refined.faceVaryingUvs.empty())
+    {
+      // Refined UVs are still face-varying, sized to the refined fv-
+      // stream. stInterpolation stays faceVarying; the `size ==
+      // usdIndices.size()` length check downstream now matches.
+      stUvs = refined.faceVaryingUvs;
+    }
+    else if (stHasValue)
+    {
+      // Source UVs were vertex-interp (per cage vertex). No FVar-
+      // refine path was taken — drop them. Closesthit's material-
+      // fallback colour takes over for these (rare on production
+      // scenes; lobby's subdiv meshes are mostly seamless surfaces
+      // with vertex-interp UVs already).
+      stUvs.clear();
+      stHasValue = false;
+    }
+
+    // Per-face start-offsets computed pre-refinement are stale.
+    faceStartOffsets.assign(usdCounts.size() + 1u, 0u);
+    std::size_t running = 0;
+    for (std::size_t faceIdx = 0; faceIdx < usdCounts.size(); ++faceIdx)
+    {
+      faceStartOffsets[faceIdx] = running;
+      running += static_cast<std::size_t>(usdCounts[faceIdx] > 0 ? usdCounts[faceIdx] : 0);
+    }
+    faceStartOffsets.back() = running;
+
+    // OpenSubdiv emits canonical right-handed topology and never holes;
+    // clear our cage-relative state so the triangulator stays clean.
+    faceIsHole.clear();
+    leftHanded = false;
   }
 
   // ---- Normals source data (M9 smooth-shading) ----------------------
@@ -1504,12 +1686,30 @@ PreparedMesh PrepareMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xform
       const int faceCount = usdCounts[faceIdx];
       if (faceCount < 3)
         return;
+      // M12 / V2.A.26 — skip faces marked as holes.
+      if (!faceIsHole.empty() && faceIsHole[faceIdx])
+        return;
       const std::size_t fvBase = faceStartOffsets[faceIdx];
       for (int triIdx = 0; triIdx < faceCount - 2; ++triIdx)
       {
-        indices.push_back(pushVertex(fvBase + 0u));
-        indices.push_back(pushVertex(fvBase + static_cast<std::size_t>(triIdx + 1)));
-        indices.push_back(pushVertex(fvBase + static_cast<std::size_t>(triIdx + 2)));
+        // Fan-triangulate. leftHanded meshes get reversed fv winding
+        // per triangle so the emitted triangles are consistently
+        // right-handed (which closesthit / face-normal computation
+        // assumes throughout). fvA = pivot; fvB/fvC swap on leftHanded.
+        const std::size_t fvA = fvBase + 0u;
+        const std::size_t fvB = fvBase + static_cast<std::size_t>(triIdx + 1);
+        const std::size_t fvC = fvBase + static_cast<std::size_t>(triIdx + 2);
+        indices.push_back(pushVertex(fvA));
+        if (leftHanded)
+        {
+          indices.push_back(pushVertex(fvC));
+          indices.push_back(pushVertex(fvB));
+        }
+        else
+        {
+          indices.push_back(pushVertex(fvB));
+          indices.push_back(pushVertex(fvC));
+        }
       }
     };
     if (subset.faceIndices.empty())
@@ -1599,6 +1799,8 @@ PreparedMesh PrepareMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xform
     subMesh.uv0      .assign(outUvs.begin(),       outUvs.end());
     subMesh.material  = subset.material;
     subMesh.debugName = primPath + subset.debugSuffix;
+    subMesh.displayColor    = fallbackDisplayColor;
+    subMesh.hasDisplayColor = meshHasDisplayColor;
     prepared.subMeshes.push_back(std::move(subMesh));
   }
   return prepared;
@@ -1639,10 +1841,32 @@ std::size_t EmitPreparedMesh(const PreparedMesh& prepared, GpuScene& scene,
     // metadata says so, so the BLAS keeps stage-unit local-space
     // geometry while the per-instance transform places it in
     // Pyxis-world (metres + Y-up).
+    // M12 / V2.A.33 — displayColor fallback. When the bound material
+    // is Invalid AND the prim authored `primvars:displayColor`,
+    // synthesise a Lambertian OpenPBR material with baseColor =
+    // displayColor. AcquireMaterial dedups by content hash so multiple
+    // meshes with identical displayColor share one material slot.
+    MaterialHandle materialToBind = subMesh.material;
+    if (materialToBind == MaterialHandle::Invalid && subMesh.hasDisplayColor)
+    {
+      // OpenPBRMaterialDesc::sourcePrim is std::string_view — must
+      // outlive the AcquireMaterial call. Store the owning string on
+      // the stack so the view points at live memory through the call.
+      const std::string syntheticSourcePrim = "displayColor:" + subMesh.debugName;
+      OpenPBRMaterialDesc fallbackDesc{};
+      fallbackDesc.baseColor = hlslpp::float3{subMesh.displayColor.x,
+                                              subMesh.displayColor.y,
+                                              subMesh.displayColor.z};
+      fallbackDesc.sourcePrim = syntheticSourcePrim;
+      const auto fallbackHandle = scene.AcquireMaterial(fallbackDesc);
+      if (fallbackHandle != MaterialHandle::Invalid)
+        materialToBind = fallbackHandle;
+    }
+
     InstanceDesc instanceDesc;
     instanceDesc.mesh           = *meshHandle;
     instanceDesc.worldFromLocal = prepared.worldFromLocal;
-    instanceDesc.material       = subMesh.material;
+    instanceDesc.material       = materialToBind;
     instanceDesc.debugName      = subMesh.debugName;
     const auto instanceHandle = scene.AppendInstance(instanceDesc);
     if (!instanceHandle.has_value())

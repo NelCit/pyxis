@@ -109,6 +109,13 @@ parameters.local.json
 # the perf-dashboard's job, not the repo's.
 tests/regression/**/kpis.csv
 
+# Per-run regression outputs — produced.exr (the just-rendered frame)
+# + profile.json (this run's KPI sidecar) + diff.exr (only written on
+# failure). Only baseline.exr + regression.json are tracked.
+tests/regression/**/produced.exr
+tests/regression/**/diff.exr
+tests/regression/**/profile.json
+
 # OS detritus
 Thumbs.db
 .DS_Store
