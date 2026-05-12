@@ -102,6 +102,13 @@ parameters.local.json
 # rely on the size-bounded default rule below.
 /resources/scenes/world_lobby/
 
+# M10 — per-fixture rolling KPI history (plan §35 / §36.6). Each
+# regression run appends one row to <fixture-dir>/kpis.csv; dev runs
+# would otherwise pollute git status. CI's nightly job uploads its
+# own copy as a pipeline artifact; long-term history persistence is
+# the perf-dashboard's job, not the repo's.
+tests/regression/**/kpis.csv
+
 # OS detritus
 Thumbs.db
 .DS_Store

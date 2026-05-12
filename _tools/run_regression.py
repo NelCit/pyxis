@@ -46,13 +46,16 @@ spinners — it has to read well in CI logs and in
 from __future__ import annotations
 
 import argparse
+import csv
+import datetime
 import json
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import OpenEXR  # type: ignore[import-not-found]
@@ -196,7 +199,14 @@ def _load_fixture(fixture_json: Path, repo_root: Path) -> Fixture:
 # Main driver
 # ---------------------------------------------------------------------
 
-def _run_pyxis(pyxis_exe: Path, fixture: Fixture, output_exr: Path) -> int:
+@dataclass(frozen=True)
+class RunOutcome:
+    returncode: int
+    wall_clock_ms: float
+
+
+def _run_pyxis(pyxis_exe: Path, fixture: Fixture, output_exr: Path,
+               profile_json: Optional[Path], bench_frames: int = 0) -> RunOutcome:
     args = [
         str(pyxis_exe),
         '--headless',
@@ -205,11 +215,120 @@ def _run_pyxis(pyxis_exe: Path, fixture: Fixture, output_exr: Path) -> int:
     ]
     if fixture.scene_path is not None:
         args.extend(['--scene', str(fixture.scene_path)])
+    if profile_json is not None:
+        args.extend(['--profile', str(profile_json)])
+    if bench_frames > 0:
+        args.extend(['--bench-frames', str(bench_frames)])
+    start = time.perf_counter()
     proc = subprocess.run(args, capture_output=True, text=True, encoding='utf-8',
                           errors='replace')
+    wall_ms = (time.perf_counter() - start) * 1000.0
     sys.stdout.write(proc.stdout)
     sys.stderr.write(proc.stderr)
-    return proc.returncode
+    return RunOutcome(returncode=proc.returncode, wall_clock_ms=wall_ms)
+
+
+# ---------------------------------------------------------------------
+# KPI CSV
+# ---------------------------------------------------------------------
+
+# Columns the rolling KPI CSV stores. Stable across runs so
+# _tools/perf_compare.py + perf_dashboard.py (M10 Phase D) can index
+# into them without a schema migration each time we add a metric.
+# When adding a column: APPEND to keep the existing CSV header valid
+# under csv.DictWriter's extrasaction='ignore' default.
+_KPI_COLUMNS = [
+    'timestamp_iso',
+    'fixture',
+    'status',
+    'pyxis_version',
+    'pyxis_git_sha',
+    'gpu_name',
+    'gpu_driver_version_raw',
+    'gpu_vendor_id',
+    'gpu_device_id',
+    'wall_clock_ms',
+    'rmse',
+    'mae',
+    'max_abs_delta',
+    'pixel_count',
+    'bench_frames',
+    'pathtrace_gpu_p50_ms',
+    'pathtrace_gpu_p99_ms',
+    'pathtrace_gpu_max_ms',
+    'commit_resources_cpu_p50_ms',
+    'commit_resources_cpu_p99_ms',
+    'frame_cpu_p50_ms',
+    'frame_cpu_p99_ms',
+]
+
+
+def _extract_pass_metric(passes: list[dict[str, Any]], name: str, kind: str,
+                         percentile: str) -> Optional[float]:
+    """Look up a per-pass percentile (returns None if not present in
+    this run — e.g. when bench was disabled or the scope was inactive).
+    Percentile key is one of ``p50_ms``/``p99_ms``/``max_ms``.
+    """
+    for entry in passes:
+        if entry.get('name') == name and entry.get('kind') == kind:
+            value = entry.get(percentile)
+            return float(value) if value is not None else None
+    return None
+
+
+def _append_kpi_csv(csv_path: Path, fixture: Fixture, outcome: RunOutcome,
+                    metrics: Optional[DiffMetrics], status: str,
+                    profile_path: Optional[Path]) -> None:
+    """Append one row to ``csv_path``; writes the header first if the
+    file didn't exist. Designed for ``perf_compare.py``'s rolling-
+    median consumption (M10 Phase D).
+    """
+    profile: dict[str, Any] = {}
+    if profile_path is not None and profile_path.exists():
+        try:
+            profile = json.loads(profile_path.read_text(encoding='utf-8'))
+        except (OSError, json.JSONDecodeError):
+            profile = {}
+
+    gpu = profile.get('gpu', {})
+    bench = profile.get('bench', {})
+    passes = bench.get('passes', []) if isinstance(bench, dict) else []
+
+    row: dict[str, Any] = {
+        'timestamp_iso': datetime.datetime.now(datetime.timezone.utc)
+                                 .replace(microsecond=0).isoformat(),
+        'fixture': fixture.name,
+        'status': status,
+        'pyxis_version': profile.get('pyxis_version', ''),
+        'pyxis_git_sha': profile.get('pyxis_git_sha', ''),
+        'gpu_name': gpu.get('name', ''),
+        'gpu_driver_version_raw': gpu.get('driver_version_raw', ''),
+        'gpu_vendor_id': gpu.get('vendor_id', ''),
+        'gpu_device_id': gpu.get('device_id', ''),
+        'wall_clock_ms': f'{outcome.wall_clock_ms:.3f}',
+        'rmse': f'{metrics.rmse:.6f}' if metrics else '',
+        'mae': f'{metrics.mae:.6f}' if metrics else '',
+        'max_abs_delta': f'{metrics.max_abs_delta:.6f}' if metrics else '',
+        'pixel_count': metrics.pixel_count if metrics else '',
+        'bench_frames': bench.get('frames', 0) if isinstance(bench, dict) else 0,
+        'pathtrace_gpu_p50_ms': _extract_pass_metric(passes, 'pass.PathTrace', 'Gpu', 'p50_ms'),
+        'pathtrace_gpu_p99_ms': _extract_pass_metric(passes, 'pass.PathTrace', 'Gpu', 'p99_ms'),
+        'pathtrace_gpu_max_ms': _extract_pass_metric(passes, 'pass.PathTrace', 'Gpu', 'max_ms'),
+        'commit_resources_cpu_p50_ms':
+            _extract_pass_metric(passes, 'render.commitResources', 'Cpu', 'p50_ms'),
+        'commit_resources_cpu_p99_ms':
+            _extract_pass_metric(passes, 'render.commitResources', 'Cpu', 'p99_ms'),
+        'frame_cpu_p50_ms': _extract_pass_metric(passes, 'render.frame.cpu', 'Cpu', 'p50_ms'),
+        'frame_cpu_p99_ms': _extract_pass_metric(passes, 'render.frame.cpu', 'Cpu', 'p99_ms'),
+    }
+
+    needs_header = not csv_path.exists()
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    with csv_path.open('a', newline='', encoding='utf-8') as fh:
+        writer = csv.DictWriter(fh, fieldnames=_KPI_COLUMNS, extrasaction='ignore')
+        if needs_header:
+            writer.writeheader()
+        writer.writerow(row)
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -224,6 +343,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument('--repo-root', type=Path,
                         default=Path(__file__).resolve().parent.parent,
                         help='Repo root for resolving relative fixture paths.')
+    parser.add_argument('--kpi-csv', type=Path, default=None,
+                        help='Optional path to append per-run KPIs as CSV. '
+                             'Default: <fixture-dir>/kpis.csv (created if missing). '
+                             'Pass "" to disable.')
+    parser.add_argument('--bench-frames', type=int, default=0,
+                        help='Forward to pyxis as --bench-frames so the profile '
+                             'JSON includes per-pass percentiles. 0 disables.')
     args = parser.parse_args(argv)
 
     fixture_json = args.fixture
@@ -253,6 +379,20 @@ def main(argv: Optional[list[str]] = None) -> int:
     produced_exr = args.output_dir / 'produced.exr'
     if produced_exr.exists():
         produced_exr.unlink()
+    profile_json = args.output_dir / 'profile.json'
+    if profile_json.exists():
+        profile_json.unlink()
+
+    # KPI CSV defaults to <fixture-dir>/kpis.csv so the rolling history
+    # ships next to its fixture; --kpi-csv "" disables, --kpi-csv <path>
+    # overrides (CI uploads to a shared location).
+    kpi_csv: Optional[Path]
+    if args.kpi_csv is None:
+        kpi_csv = fixture_json.parent / 'kpis.csv'
+    elif str(args.kpi_csv) == '':
+        kpi_csv = None
+    else:
+        kpi_csv = args.kpi_csv
 
     print(f'== Pyxis regression: {fixture.name} ==')
     print(f'   {fixture.description}')
@@ -261,12 +401,24 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f'   scene:    {fixture.scene_path}')
     print(f'   baseline: {fixture.baseline_path}')
     print(f'   output:   {produced_exr}')
+    if kpi_csv is not None:
+        print(f'   kpi csv:  {kpi_csv}')
 
-    rc = _run_pyxis(args.pyxis, fixture, produced_exr)
-    if rc != 0:
-        print(f'FAIL: pyxis.exe exited rc={rc}', file=sys.stderr)
+    # --bench-frames forwards into pyxis so the profile JSON carries
+    # per-pass percentiles. Default 0 (single-frame run) keeps the
+    # regression cheap; CI's nightly job sets a larger value.
+    outcome = _run_pyxis(args.pyxis, fixture, produced_exr, profile_json,
+                         bench_frames=args.bench_frames)
+    if outcome.returncode != 0:
+        if kpi_csv is not None:
+            _append_kpi_csv(kpi_csv, fixture, outcome, None, 'pyxis_nonzero_exit',
+                            profile_json)
+        print(f'FAIL: pyxis.exe exited rc={outcome.returncode}', file=sys.stderr)
         return 1
     if not produced_exr.exists():
+        if kpi_csv is not None:
+            _append_kpi_csv(kpi_csv, fixture, outcome, None, 'missing_output_exr',
+                            profile_json)
         print(f'FAIL: pyxis exited 0 but produced no EXR at {produced_exr}', file=sys.stderr)
         return 1
 
@@ -274,12 +426,18 @@ def main(argv: Optional[list[str]] = None) -> int:
         produced = _read_exr_rgba(produced_exr)
         baseline = _read_exr_rgba(fixture.baseline_path)
     except (OSError, ValueError, RuntimeError) as exc:
+        if kpi_csv is not None:
+            _append_kpi_csv(kpi_csv, fixture, outcome, None, 'exr_read_error',
+                            profile_json)
         print(f'ERROR: failed to read EXR: {exc}', file=sys.stderr)
         return 2
 
     try:
         metrics = _compute_metrics(produced, baseline)
     except ValueError as exc:
+        if kpi_csv is not None:
+            _append_kpi_csv(kpi_csv, fixture, outcome, None, 'shape_mismatch',
+                            profile_json)
         print(f'FAIL: {exc}', file=sys.stderr)
         return 1
 
@@ -315,9 +473,13 @@ def main(argv: Optional[list[str]] = None) -> int:
             print(f'   diff EXR:    {diff_path}')
         except (OSError, RuntimeError) as exc:
             print(f'   diff EXR write failed: {exc}', file=sys.stderr)
+        if kpi_csv is not None:
+            _append_kpi_csv(kpi_csv, fixture, outcome, metrics, 'fail', profile_json)
         print('FAIL: ' + '; '.join(failed_metrics), file=sys.stderr)
         return 1
 
+    if kpi_csv is not None:
+        _append_kpi_csv(kpi_csv, fixture, outcome, metrics, 'pass', profile_json)
     print('PASS')
     return 0
 
