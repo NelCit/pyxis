@@ -1,0 +1,13 @@
+# Pyxis tooling Python deps (M10 — plan §35 / §36.5).
+#
+# Used by `_tools/run_regression.py` to read tinyexr-produced EXRs
+# and compute RMSE / MAE / max-abs-delta against per-fixture baselines.
+# Both packages ship Windows wheels for Python 3.10+ on PyPI — no
+# compilation needed on dev or CI runners.
+#
+# Lower bounds picked at M10's v1.0 cut date; upper bounds left open so
+# floor-only patch updates pull in. Bump via vcpkg-style baseline-pin
+# review if a transitive ABI break ever lands.
+
+numpy>=1.26
+OpenEXR>=3.2

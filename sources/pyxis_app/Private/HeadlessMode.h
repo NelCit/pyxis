@@ -33,9 +33,17 @@ struct ResolvedScene;
 // + `benchFrames` measurement frames, then prints a §34 KPI table to
 // stdout (per-pass GPU + CPU min/p50/p99/max ms). Used to gate KPI
 // compliance for the §41 perf milestones (M8b Bistro, lobby, ...).
+//
+// `profilePath` (M10 — plan §35 / §36.6): when non-empty, after the
+// run completes (incl. any benchmark window), the headless harness
+// writes a single-document JSON describing GPU / driver / scene /
+// per-pass timing percentiles to that path. Consumed by
+// `_tools/run_regression.py` which merges it with its own image-diff
+// metrics into the rolling per-test KPI CSV.
 int RunHeadless(const Configuration& config, const ResolvedScene& scene,
                 std::string_view saveAovList = {},
-                uint32_t benchFrames = 0) noexcept;
+                uint32_t benchFrames = 0,
+                std::string_view profilePath = {}) noexcept;
 
 // Viewer mode. screenshotPath is the M1 --screenshot debug capture
 // (non-empty -> render a few warmup frames, write a PNG, exit 0).

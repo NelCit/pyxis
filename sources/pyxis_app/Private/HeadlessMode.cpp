@@ -27,9 +27,14 @@
 #include <Pyxis/Renderer/Profiler.h>
 #include <Pyxis/Renderer/PyxisRenderer.h>
 #include <Pyxis/Renderer/SceneWorldFacade.h>
+#include <Pyxis/Renderer/Version.h>
 
 #include <nvrhi/nvrhi.h>
 
+#include <chrono>
+#include <cstdio>
+#include <fstream>
+#include <ios>
 #include <memory>
 
 namespace pyxis::app {
@@ -322,7 +327,8 @@ void SaveAovsFromList(std::string_view saveAovList,
 }  // namespace
 
 int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
-                std::string_view saveAovList, uint32_t benchFrames) noexcept {
+                std::string_view saveAovList, uint32_t benchFrames,
+                std::string_view profilePath) noexcept {
   auto& log = Logging::Get();
 
   // §27 ValidateForHeadless: non-zero seed (§33.7), non-empty
@@ -579,6 +585,177 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
       log.Info(log::APP, std::string{line});
     }
     log.Info(log::APP, "========================================");
+
+    // ---- M10 — profile JSON sidecar ---------------------------------
+    // §35 / §36.6 KPI tracking. When --profile <path> is supplied,
+    // write a single JSON document describing GPU / driver / per-pass
+    // percentiles to that path so the regression harness can merge it
+    // with image-diff metrics into the rolling per-test KPI CSV.
+    // Hand-rolled writer (no nlohmann_json dep on this path so the
+    // pyxis_app's /EHs-c- perimeter stays exception-free) — the
+    // payload is small and the schema is fixed.
+    if (!profilePath.empty())
+    {
+      const AdapterInfo& adapter = deviceManager->GetAdapterInfo();
+      const auto unixSec =
+          std::chrono::duration_cast<std::chrono::seconds>(
+              std::chrono::system_clock::now().time_since_epoch()).count();
+      const char* adapterTypeStr = "other";
+      switch (adapter.type)
+      {
+        case AdapterType::Integrated: adapterTypeStr = "integrated"; break;
+        case AdapterType::Discrete:   adapterTypeStr = "discrete";   break;
+        case AdapterType::Virtual:    adapterTypeStr = "virtual";    break;
+        case AdapterType::Cpu:        adapterTypeStr = "cpu";        break;
+        default:                      adapterTypeStr = "other";      break;
+      }
+
+      const std::string adapterName{adapter.NameView()};
+      // Crude JSON escape: backslash + double-quote only. Adapter
+      // names are vendor strings (well-behaved ASCII in practice) so
+      // we don't need full Unicode-aware escaping.
+      std::string escapedName;
+      escapedName.reserve(adapterName.size());
+      for (const char chr : adapterName)
+      {
+        if (chr == '"' || chr == '\\')
+          escapedName.push_back('\\');
+        escapedName.push_back(chr);
+      }
+
+      std::ofstream out(std::string{profilePath}, std::ios::binary | std::ios::trunc);
+      if (!out)
+      {
+        log.Warn(log::APP, "headless: profile JSON write failed (could not open "
+                              + std::string{profilePath} + ")");
+      }
+      else
+      {
+        out << "{\n";
+        out << "  \"pyxis_version\": \"" << GetVersionString() << "\",\n";
+        out << "  \"pyxis_git_sha\": \"" << GetVersionGitSha() << "\",\n";
+        out << "  \"timestamp_unix\": " << unixSec << ",\n";
+        out << "  \"gpu\": {\n";
+        out << "    \"name\": \"" << escapedName << "\",\n";
+        out << "    \"type\": \"" << adapterTypeStr << "\",\n";
+        out << "    \"vendor_id\": " << adapter.vendorId << ",\n";
+        out << "    \"device_id\": " << adapter.deviceId << ",\n";
+        out << "    \"driver_version_raw\": " << adapter.driverVersionRaw << ",\n";
+        out << "    \"vram_bytes\": " << adapter.totalDeviceLocalBytes << "\n";
+        out << "  },\n";
+        out << "  \"render\": {\n";
+        out << "    \"width\": "  << config.render.width  << ",\n";
+        out << "    \"height\": " << config.render.height << ",\n";
+        out << "    \"samples_per_frame\": " << config.render.samplesPerFrame << ",\n";
+        out << "    \"seed\": " << config.render.seed << ",\n";
+        out << "    \"frames_in_flight\": " << deviceManager->GetFramesInFlight() << "\n";
+        out << "  },\n";
+        out << "  \"scene\": \"";
+        for (const char chr : resolvedScene.path)
+        {
+          if (chr == '\\' || chr == '"')
+            out << '\\';
+          out << chr;
+        }
+        out << "\",\n";
+        out << "  \"bench\": {\n";
+        out << "    \"frames\": " << benchFrames << ",\n";
+        out << "    \"passes\": [";
+        bool firstPass = true;
+        char numBuf[64];
+        for (PassAcc& acc : accumulators)
+        {
+          if (acc.samples.empty())
+            continue;
+          const double p50  = percentile(acc.samples, 0.50);
+          const double p99  = percentile(acc.samples, 0.99);
+          const double pmax = percentile(acc.samples, 1.00);
+          out << (firstPass ? "\n      " : ",\n      ");
+          firstPass = false;
+          out << "{\"name\": \"" << acc.name << "\", "
+              << "\"kind\": \""
+              << (acc.kind == FrameProfile::ScopeKind::Gpu ? "Gpu" : "Cpu")
+              << "\", ";
+          std::snprintf(numBuf, sizeof(numBuf), "%.6f", p50);
+          out << "\"p50_ms\": " << numBuf << ", ";
+          std::snprintf(numBuf, sizeof(numBuf), "%.6f", p99);
+          out << "\"p99_ms\": " << numBuf << ", ";
+          std::snprintf(numBuf, sizeof(numBuf), "%.6f", pmax);
+          out << "\"max_ms\": " << numBuf << "}";
+        }
+        out << (firstPass ? "]" : "\n    ]");
+        out << "\n  }\n";
+        out << "}\n";
+        log.Info(log::APP, "headless: profile JSON written to "
+                              + std::string{profilePath});
+      }
+    }
+  }
+  else if (!profilePath.empty())
+  {
+    // No --bench-frames, but the caller asked for a profile sidecar.
+    // Emit a minimal JSON without the bench/passes block so the
+    // downstream perf tooling can still record GPU/driver/scene
+    // metadata + the harness's own wall-clock measurement.
+    const AdapterInfo& adapter = deviceManager->GetAdapterInfo();
+    const auto unixSec =
+        std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+    const char* adapterTypeStr =
+        adapter.type == AdapterType::Discrete   ? "discrete"
+        : adapter.type == AdapterType::Integrated ? "integrated"
+        : adapter.type == AdapterType::Virtual    ? "virtual"
+        : adapter.type == AdapterType::Cpu        ? "cpu"
+                                                  : "other";
+    const std::string adapterName{adapter.NameView()};
+    std::string escapedName;
+    escapedName.reserve(adapterName.size());
+    for (const char chr : adapterName)
+    {
+      if (chr == '"' || chr == '\\')
+        escapedName.push_back('\\');
+      escapedName.push_back(chr);
+    }
+    std::ofstream out(std::string{profilePath}, std::ios::binary | std::ios::trunc);
+    if (!out)
+    {
+      log.Warn(log::APP, "headless: profile JSON write failed (could not open "
+                            + std::string{profilePath} + ")");
+    }
+    else
+    {
+      out << "{\n";
+      out << "  \"pyxis_version\": \"" << GetVersionString() << "\",\n";
+      out << "  \"pyxis_git_sha\": \"" << GetVersionGitSha() << "\",\n";
+      out << "  \"timestamp_unix\": " << unixSec << ",\n";
+      out << "  \"gpu\": {\n";
+      out << "    \"name\": \"" << escapedName << "\",\n";
+      out << "    \"type\": \"" << adapterTypeStr << "\",\n";
+      out << "    \"vendor_id\": " << adapter.vendorId << ",\n";
+      out << "    \"device_id\": " << adapter.deviceId << ",\n";
+      out << "    \"driver_version_raw\": " << adapter.driverVersionRaw << ",\n";
+      out << "    \"vram_bytes\": " << adapter.totalDeviceLocalBytes << "\n";
+      out << "  },\n";
+      out << "  \"render\": {\n";
+      out << "    \"width\": "  << config.render.width  << ",\n";
+      out << "    \"height\": " << config.render.height << ",\n";
+      out << "    \"samples_per_frame\": " << config.render.samplesPerFrame << ",\n";
+      out << "    \"seed\": " << config.render.seed << ",\n";
+      out << "    \"frames_in_flight\": " << deviceManager->GetFramesInFlight() << "\n";
+      out << "  },\n";
+      out << "  \"scene\": \"";
+      for (const char chr : resolvedScene.path)
+      {
+        if (chr == '\\' || chr == '"')
+          out << '\\';
+        out << chr;
+      }
+      out << "\",\n";
+      out << "  \"bench\": { \"frames\": 0, \"passes\": [] }\n";
+      out << "}\n";
+      log.Info(log::APP, "headless: profile JSON (no-bench) written to "
+                            + std::string{profilePath});
+    }
   }
 
   // ---- Effective-config dump + teardown ------------------------------

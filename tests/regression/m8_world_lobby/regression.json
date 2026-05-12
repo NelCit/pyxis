@@ -1,0 +1,21 @@
+{
+    "$schema-ref": "tests/regression/README.md",
+    "$comment": "Pyxis M10 image-regression fixture for the World Lobby hero camera. Consumed by _tools/run_regression.py. Plan §35.",
+
+    "name":        "M10.WorldLobbyRegression",
+    "description": "Lobby hero camera, M9-fidelity stable baseline. Standin until Bistro lands; same harness will retarget Bistro by editing the config + scene fields below.",
+
+    "config":   "tests/fixtures/m8_world_lobby.json",
+    "scene":    "resources/scenes/world_lobby/World_Lobby.usd",
+    "baseline": "baseline.exr",
+
+    "$tolerance-comment": [
+        "Initial tolerances are deliberately loose. With §36.5's strict-mode contract (RTX 4080 + pinned driver + pinned Vulkan SDK + Win 11 23H2/24H2) byte-identical EXRs are achievable; outside that matrix per-test floats kick in. M10 ships tolerant-mode defaults so the test goes green on any developer workstation; CI's nightly tightens via _tools/regression_matrix.json when M10's perf-tracking phase lands.",
+        "Values express normalised float-EXR pixel-delta — i.e. 0.02 RMSE means 2% of the 0..1 dynamic range averaged across all RGB+A samples. The dome's HDRI lift makes some pixels HDR (> 1.0); maxAbsoluteDelta therefore needs headroom."
+    ],
+    "tolerance": {
+        "rmse":             0.02,
+        "mae":              0.01,
+        "maxAbsoluteDelta": 0.50
+    }
+}

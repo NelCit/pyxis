@@ -343,12 +343,13 @@ inline shaderinterop::LightGpu PackLightGpu(const LightDesc& desc,
 // declares this. All NVRHI handles + STL containers live behind this
 // boundary per §18.9.
 //
-// NOLINTNEXTLINE(clang-analyzer-optin.performance.Padding) — field
-// order here groups related data for cache locality + readability
-// (per-resource sections, dirty-flag bools clustered at the end);
-// optimal-packing reorder would scatter related fields apart and
-// hurt the cognitive map without changing runtime hot-path costs
-// (Impl is allocated once per renderer instance, not in any loop).
+// Field order here groups related data for cache locality +
+// readability (per-resource sections, dirty-flag bools clustered
+// at the end); optimal-packing reorder would scatter related
+// fields apart and hurt the cognitive map without changing
+// runtime hot-path costs (Impl is allocated once per renderer
+// instance, not in any loop).
+// NOLINTNEXTLINE(clang-analyzer-optin.performance.Padding)
 struct GpuScene::Impl
 {
   // Per-mesh entry. Holds the CPU-side input MeshDesc spans + the
