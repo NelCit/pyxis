@@ -1,0 +1,28 @@
+{
+  "$comment": "Pyxis M15 smoke fixture — UsdVolVolume detect/warn/skip stub.",
+
+  "render": {
+    "width":           256,
+    "height":          256,
+    "samplesPerFrame": 1,
+    "seed":            15
+  },
+
+  "output": {
+    "image":           "m15_volume_stub.exr",
+    "effectiveConfig": "m15_volume_stub.effective.json"
+  },
+
+  "diagnostics": {
+    "validationLayer": false,
+    "aftermath":       false
+  },
+
+  "limits": {
+    "framesInFlight":  3
+  },
+
+  "app": {
+    "ingest":          "usd_direct"
+  }
+}

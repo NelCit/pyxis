@@ -80,6 +80,7 @@ target_link_libraries(pyxis_usd_ingest
         usdGeom
         usdLux
         usdShade
+        usdVol
         sdf
         tf
         gf
