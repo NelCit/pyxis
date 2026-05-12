@@ -546,27 +546,76 @@ This is the "RTX-On, 2018 vintage" feature set — exactly what the user asked f
 | Anti-aliasing | Halton jitter + accumulation | Halton jitter + accumulation (unchanged) |
 | Tone-map | ACES | ACES (unchanged) |
 
-### V2.B.1 Pipeline architecture (M29)
+### V2.B.1 Pipeline architecture (M29) — single-pass
 
-The `RenderGraph` shape is mostly unchanged from v1; one new pass slots in between PathTrace and Accumulation:
+The `RenderGraph` shape is **unchanged from v1**. No new render pass is added. The entire Pillar B addition lives inside the existing `pass.PathTrace`'s closesthit body.
 
 ```
-PathTrace → ReflectionRays → Accumulation → ToneMap → AovResolve →
-            DebugView → CopyToHydraBuffer → Present
+PathTrace → Accumulation → ToneMap → AovResolve → DebugView →
+            CopyToHydraBuffer → Present
 ```
 
-- **PathTrace** keeps its v1 name but the closesthit body is restructured:
-  - Loop over all lights, accumulate direct (Lambert + GGX) + shadow ray gating (already v1)
-  - **No multi-bounce** — closesthit returns direct + emission only
-  - Writes `reflectionDirection` AOV (the GGX-sampled reflection direction at the primary hit) for the next pass's input
-- **ReflectionRays** (NEW): per pixel, traces the reflection direction from `reflectionDirection` AOV, evaluates the secondary hit's direct + emission, writes `reflectionRadiance` AOV.
-- **Accumulation** + **ToneMap** + **AovResolve** + rest: unchanged from v1.
+The closesthit body gains one inline `TraceRay` for the reflection branch:
 
-**Composite**: a single AOV-combining line in raygen or AovResolve:
+```hlsl
+[shader("closesthit")]
+void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attribs) {
+    // (existing v1 prologue: read material, interp UV+normal+tangent, sample baseColor, etc.)
+
+    // -------- Direct + shadows (already v1, body unchanged) --------
+    for (uint i = 0; i < lightCount; ++i) {
+        // Lambert + GGX, per-light shadow ray, light/shadow linking gate (M14)
+        // accumulates into directDiffuse + directSpecular
+    }
+
+    // -------- New: per-pixel RT specular reflection (M30) --------
+    // Gated on: still under recursion budget + material is reflective enough
+    // to be worth the ray. Rough surfaces hit the envmap fallback below.
+    float3 reflected = float3(0, 0, 0);
+    const bool wantsReflection =
+        payload.recursionDepth < MAX_REFLECTION_DEPTH
+        && (mat.metalness > 0.01 || mat.specular > 0.01)
+        && roughness < gRenderSettings.reflectionMaxRoughness;
+
+    if (wantsReflection) {
+        const float3 refDir = reflect(WorldRayDirection(), nWorld);
+        RayDesc reflRay;
+        reflRay.Origin    = hitWorld + nWorld * 1e-3;
+        reflRay.Direction = refDir;
+        reflRay.TMin      = 1e-3;
+        reflRay.TMax      = 1e30;
+        HitInfo reflPayload;
+        reflPayload.color           = float3(0,0,0);
+        reflPayload.recursionDepth  = payload.recursionDepth + 1;  // increment
+        TraceRay(gTlas,
+                 RAY_FLAG_NONE,
+                 0xFFu,
+                 0, 0, 0,
+                 reflRay,
+                 reflPayload);
+        reflected = reflPayload.color;
+    } else if (mat.metalness > 0.01 || mat.specular > 0.01) {
+        // Rough surface — sample the dome envmap at the reflection direction.
+        // No ray cost; smooth result because the envmap is pre-filtered.
+        reflected = SampleEnvmap(reflect(WorldRayDirection(), nWorld));
+    }
+
+    // -------- Composite --------
+    const float3 specularWeight = SchlickF0(baseColor, mat.metalness, mat.specularIor);
+    payload.color = directDiffuse + directSpecular + emission +
+                    reflected * specularWeight;
+}
 ```
-final = directRadiance + reflectionRadiance × specularWeight
-```
-where `specularWeight` derives from material `metallic` + `specular` already in `OpenPBRMaterialGPU`.
+
+Key points:
+
+- **One `TraceRay` dispatch from raygen**. The reflection is a recursive `TraceRay` *inside* the closesthit, not a new pass.
+- **`HitInfo::recursionDepth` field added** to the shared payload — increments per bounce. The closesthit checks it to prevent further reflection on a reflection's hit (one bounce only).
+- **`maxRecursionDepth = 3` on the RT pipeline**: primary closesthit + reflection ray's closesthit + reflection's shadow rays. Already where v1's pipeline is (we set 2 for shadow rays in M9-fidelity; v2 bumps to 3).
+- **No new pass class, no new binding-set wiring, no new render-graph node.** Just an extension of the existing closesthit body.
+- **No intermediate AOV** — reflection radiance is composited inline into `payload.color`, never round-trips through a render target.
+
+**Trade-off acknowledged**: this design **doesn't scale** when Pillar B grows beyond direct + shadows + 1 reflection. If a future v3 adds RTAO or multi-bounce or denoising, the closesthit becomes too divergent and we'd refactor to a split-pass architecture then. For v2's tight scope, single-pass is the right shape.
 
 ### V2.B.2 Per-pixel direct lighting (no change from v1)
 
@@ -581,26 +630,34 @@ Already shipped. v2 keeps the same body:
 
 ### V2.B.3 Per-pixel RT specular reflections (M30)
 
-The single new feature. One reflection ray per pixel, evaluated against the world TLAS.
+The single new feature in Pillar B. Implemented as an **inline `TraceRay` inside the existing closesthit** — no new pass class.
 
 **Plan**:
 
-- Primary closesthit writes `reflectionDirection` AOV — the GGX-importance-sampled half-vector reflected against the primary normal. For metals: pure mirror (`roughness = 0`). For dielectrics: weighted by roughness.
-- New `pass.ReflectionRays` raygen variant — reads `reflectionDirection`, fires one TraceRay per pixel.
-- 2nd-hit closesthit (reused — same shader as primary) evaluates direct + emission, **no further reflection bounce**. maxRecursionDepth = 3 (primary + reflection + reflection's shadow rays).
-- **Roughness-aware fallback** to avoid visible noise on rough surfaces:
-  - `roughness < 0.1` → mirror-perfect reflection, trace
-  - `roughness > 0.7` → skip reflection entirely; the result would be ambient-dominated and not visible
-  - between: **lerp between traced reflection and dome-light contribution at the reflection direction**. The classic "rough reflections from prefiltered env" approximation. No noise; smooth visually plausible result.
-- Per-pixel cost: ~3 ms on lobby at 1080p RTX 4070 (one extra TraceRay + a shadow ray on the secondary hit).
-- New `ReflectionRayPayload`: smaller than primary `HitInfo` — RGB radiance + hitT, no AOV writes.
+- `HitInfo` payload (shared C++/Slang struct in `ShaderInterop.slang`) gains a `uint8_t recursionDepth` field. Initialised to 0 by raygen; incremented on the reflection ray; capped at `MAX_REFLECTION_DEPTH = 1` (one bounce only).
+- Pipeline `maxRecursionDepth` bumped from 2 (v1 shadow rays) to 3 (primary + reflection + reflection's shadow rays).
+- Closesthit's reflection block:
+  1. Read material `metalness` + `specular` + `roughness` (already there)
+  2. Compute reflection direction: `reflect(WorldRayDirection(), nWorld)`. For v2.0: pure mirror direction (perfect specular). GGX-importance-sampled direction is a v2.1 polish if roughness < threshold produces visible artifacts.
+  3. **Roughness-aware branching**:
+     - `roughness < gRenderSettings.reflectionMaxRoughness` AND material is reflective → fire inline `TraceRay`, get reflection radiance from the secondary closesthit invocation (which runs the same shader recursively, but its own reflection branch is gated by `recursionDepth >= MAX`).
+     - `roughness ≥ reflectionMaxRoughness` AND material is reflective → sample dome envmap at the reflection direction. No ray cost; smooth result.
+     - Not reflective (`metalness < 0.01 && specular < 0.01`) → skip entirely.
+  4. Composite: `payload.color = directDiffuse + directSpecular + emission + reflected * F0`
+- **Default `reflectionMaxRoughness = 0.3`** — surfaces rougher than this fall back to the envmap. Tunable per scene.
 
-**Reflection AOV**: `reflectionRadiance` exposed in the AOV inspector for debugging.
+**Why a hard threshold instead of stochastic GGX sampling at all roughnesses**:
+
+GGX-importance-sampled rays are noisy at high roughness without temporal accumulation or a denoiser. We're avoiding both. So we cut over to envmap-only at the roughness where GGX would start looking grainy. The result: marble + chrome reflect via rays; matte plaster / brushed metal reflect via envmap. Both look smooth.
+
+**Per-pixel cost**: ~2.5-3 ms on lobby at 1080p RTX 4070 (the reflection ray's closesthit also fires per-light shadow rays — that's the dominant cost in the reflected path).
+
+**No new public API beyond `RenderSettings::reflectionMaxRoughness`** (claims the `_reserved3` slot reserved in v1's `RenderSettings`).
 
 **Exit**:
-- Lobby's marble floor reflects the ceiling lights + dome
-- Glossy chrome surfaces reflect the room
-- Rough surfaces look smooth (no noise) because they blend to dome contribution
+- Lobby's marble floor reflects the ceiling lights + dome via ray-tracing
+- Glossy chrome surfaces reflect the room via ray-tracing
+- Rough surfaces (plaster, brushed wood) take the envmap fallback — smooth, no noise
 
 ### V2.B.4 Performance gate + KPI (M31)
 
@@ -610,13 +667,14 @@ The single new feature. One reflection ray per pixel, evaluated against the worl
 
 | Pass | Budget |
 |---|---|
-| `pass.PathTrace` (primary + per-light shadow rays) | 8 ms |
-| `pass.ReflectionRays` | 3 ms |
-| `pass.Accumulation + ToneMap + AovResolve + Composite` | 1 ms |
-| Headroom | 4 ms |
+| `pass.PathTrace` (primary + per-light shadow rays + inline reflection ray + reflected hit's shadow rays) | 10 ms |
+| `pass.Accumulation + ToneMap + AovResolve` | 1 ms |
+| Headroom | 5 ms |
 | **Total per frame** | **16 ms = 60 FPS** |
 
-§34's "1080p hero camera" KPI gate is updated for v2: `pass.PathTrace + pass.ReflectionRays + pass.Composite < 16 ms p99` on RTX 4070 Laptop.
+§34's "1080p hero camera" KPI gate is updated for v2: `pass.PathTrace + pass.Accumulation + pass.ToneMap + pass.AovResolve < 16 ms p99` on RTX 4070 Laptop.
+
+The single `pass.PathTrace` covers everything (primary visibility + direct + shadows + inline reflection + reflection's direct + reflection's shadows). No separate reflection pass to budget for.
 
 **Profiling overhead** (M11 gate): < 1% Release. Held over from v1.
 
@@ -643,13 +701,12 @@ The single new feature. One reflection ray per pixel, evaluated against the worl
 
 ### Real-time raytracer (Pillar B)
 
-Three milestones — scope deliberately tight per "direct + shadows + specular reflections, that's almost everything".
+Two milestones — scope is tight enough that the pipeline restructure isn't needed. Single-pass throughout.
 
 | | Name | Plan ref | Exit |
 |---|---|---|---|
-| **M29** | Pipeline restructure + reflection direction AOV | V2.B.1 + V2.B.2 | Primary closesthit body cleaned + emits `reflectionDirection` AOV; v1 direct + shadows unchanged; existing tests still byte-equal |
-| **M30** | RT specular reflections | V2.B.3 | `pass.ReflectionRays` renders glossy reflections on lobby's marble + chrome; roughness-aware mirror/envmap blend |
-| **M31** | Lobby real-time gate | V2.B.4 | Lobby at 60 FPS p99 at 1080p RTX 4070 Laptop with direct + shadows + reflections |
+| **M29** | RT specular reflections (inline in closesthit) | V2.B.1 + V2.B.2 + V2.B.3 | Closesthit gains inline `TraceRay` for reflection branch; `HitInfo` carries `recursionDepth`; pipeline `maxRecursionDepth = 3`; new `RenderSettings::reflectionMaxRoughness`. Lobby's marble + chrome ray-trace; rough surfaces envmap-fallback |
+| **M30** | Lobby real-time gate | V2.B.4 | Lobby at 60 FPS p99 at 1080p RTX 4070 Laptop with direct + shadows + reflections |
 
 ### Cuts to keep v2 from sprawling
 
@@ -738,11 +795,10 @@ A new `_documentation/v2-mxx-<short-name>.md` per milestone, same structure as `
    - Holds the broader Pillar A timeline more cleanly than slotting between M17 and M18.
 9. **M28.** Loaded-everything audit + round-trip. The formal completeness gate. Runs after M12-M21 land so the schema-walk script reports against the final handler registry.
 10. **Cut 1.x → 2.0.** Tag the loading-completeness milestone. Pillar A done.
-11. **M29.** Pipeline restructure. Primary closesthit cleanup + new `reflectionDirection` AOV. Existing v1 tests still byte-equal (this is preparation, not a behavioural change).
-12. **M30.** RT specular reflections. The single new feature.
-13. **M31.** Lobby real-time gate at 60 FPS p99. The v2 ship signal.
+11. **M29.** RT specular reflections. The whole Pillar B feature in one milestone: extend the existing closesthit with an inline `TraceRay` for reflection rays, bump pipeline `maxRecursionDepth` 2→3, add `RenderSettings::reflectionMaxRoughness`. Single-pass throughout — no new RenderGraph node, no new AOV.
+12. **M30.** Lobby real-time gate at 60 FPS p99. The v2 ship signal.
 
-Estimated calendar: M12-M28 is ~9 months at one milestone per 2-3 weeks (some bundled into M14/M18/M19). M29-M31 is ~1.5 months (Pillar B is deliberately tight). Total v2: ~10-12 months from v1.0.0.
+Estimated calendar: M12-M28 is ~9 months at one milestone per 2-3 weeks (some bundled into M14/M18/M19). M29-M30 is ~3 weeks (Pillar B is one inline closesthit extension + a perf-tuning pass). Total v2: ~10 months from v1.0.0.
 
 ---
 
