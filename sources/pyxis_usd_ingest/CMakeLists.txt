@@ -76,6 +76,7 @@ target_link_libraries(pyxis_usd_ingest
         Pyxis::Renderer
         Pyxis::MaterialTranslation
     PRIVATE
+        ar
         usd
         usdGeom
         usdLux
