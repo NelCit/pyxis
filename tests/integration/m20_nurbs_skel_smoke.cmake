@@ -33,12 +33,11 @@ if(NOT _rc EQUAL 0)
     message(FATAL_ERROR "m20_nurbs_skel_smoke: pyxis rc=${_rc}\nSTDOUT:\n${_stdout}")
 endif()
 
-string(REGEX MATCH "NURBS prim[^\n]*detected but not yet tessellated" _nurbs "${_stdout}")
+# V2.A.4 — UsdGeomNurbsPatch is now tessellated (cubic Bezier path);
+# the M20 stub-warning only fires for NurbsCurves + Skel. NurbsCurves
+# isn't in this fixture, so just assert the Skel warning. The patch
+# becomes a regular tessellated mesh + counts toward the mesh tally.
 string(REGEX MATCH "Skel prim[^\n]*detected but skinning is not yet supported" _skel "${_stdout}")
-if(NOT _nurbs)
-    message(FATAL_ERROR
-        "m20_nurbs_skel_smoke: expected NURBS warning.\nSTDOUT:\n${_stdout}")
-endif()
 if(NOT _skel)
     message(FATAL_ERROR
         "m20_nurbs_skel_smoke: expected Skel warning.\nSTDOUT:\n${_stdout}")
@@ -50,5 +49,4 @@ if(_bad)
 endif()
 
 message(STATUS "m20_nurbs_skel_smoke: PASSED")
-message(STATUS "  ${_nurbs}")
 message(STATUS "  ${_skel}")
