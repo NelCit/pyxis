@@ -79,6 +79,48 @@ pxr::UsdShadeShader FindMdlSurface(const pxr::UsdShadeMaterial& material) noexce
   return surface;
 }
 
+// V2.A.8 — find a MaterialX surface shader if the material's surface
+// is connected to one. The MaterialX nodedef id starts with `ND_` by
+// convention. Two canonical surface shaders Pyxis translates:
+//   `ND_open_pbr_surface_surfaceshader` (MaterialX OpenPBR — the
+//                                        canonical Pyxis target)
+//   `ND_standard_surface_surfaceshader` (Autodesk standard_surface)
+// Variants with different suffixes (e.g. `ND_open_pbr_surface_v100`)
+// are accepted via prefix match. Returns the shader along with a
+// boolean indicating which family it belongs to.
+struct MaterialXSurfaceMatch {
+  pxr::UsdShadeShader shader;
+  bool isOpenPBR        = false;
+  bool isStandardSurface = false;
+};
+
+MaterialXSurfaceMatch FindMaterialXSurface(
+    const pxr::UsdShadeMaterial& material) noexcept
+{
+  MaterialXSurfaceMatch match;
+  pxr::TfToken sourceName;
+  pxr::UsdShadeAttributeType sourceType;
+  const pxr::UsdShadeShader surface =
+      material.ComputeSurfaceSource(pxr::TfTokenVector{}, &sourceName, &sourceType);
+  if (!surface.GetPrim().IsValid())
+    return match;
+  pxr::TfToken shaderId;
+  if (!surface.GetShaderId(&shaderId))
+    return match;
+  const std::string& idStr = shaderId.GetString();
+  if (idStr.starts_with("ND_open_pbr_surface"))
+  {
+    match.shader     = surface;
+    match.isOpenPBR  = true;
+  }
+  else if (idStr.starts_with("ND_standard_surface"))
+  {
+    match.shader              = surface;
+    match.isStandardSurface   = true;
+  }
+  return match;
+}
+
 // Read a scalar float input. Returns `fallback` if the input isn't
 // authored, has the wrong type, or is connected to something we
 // don't follow at M4.
@@ -342,6 +384,61 @@ OpenPBRMaterialDesc FromUsdShade(const pxr::UsdShadeMaterial& material,
   const pxr::UsdShadeShader surface = FindUsdPreviewSurface(material);
   if (!surface.GetPrim().IsValid())
   {
+    // V2.A.8 — try MaterialX (open_pbr_surface / standard_surface)
+    // before MDL. These are the canonical authoring shaders for
+    // modern USD content authored outside Omniverse; Pyxis treats
+    // them as alternate "OpenPBR sources" — the input names differ
+    // from UsdPreviewSurface but the underlying math is the same.
+    if (const MaterialXSurfaceMatch mtlx = FindMaterialXSurface(material);
+        mtlx.shader.GetPrim().IsValid())
+    {
+      if (mtlx.isOpenPBR)
+      {
+        // OpenPBR MaterialX input names — `base_color`, `base_weight`,
+        // `base_metalness`, `specular_roughness`, etc. These map
+        // directly to the OpenPBR fields (Pyxis's POD IS the OpenPBR
+        // model, post-translation).
+        desc.baseColor = ReadColor(mtlx.shader, pxr::TfToken("base_color"),
+                                    hlslpp::float3{0.18f, 0.18f, 0.18f});
+        desc.baseWeight = ReadFloat(mtlx.shader, pxr::TfToken("base_weight"), 1.0f);
+        desc.metalness  = ReadFloat(mtlx.shader, pxr::TfToken("base_metalness"), 0.0f);
+        desc.roughness  = ReadFloat(mtlx.shader, pxr::TfToken("specular_roughness"), 0.5f);
+        desc.specularWeight = ReadFloat(mtlx.shader, pxr::TfToken("specular_weight"), 1.0f);
+        desc.specularIor    = ReadFloat(mtlx.shader, pxr::TfToken("specular_ior"), 1.5f);
+        desc.opacity        = ReadFloat(mtlx.shader, pxr::TfToken("geometry_opacity"), 1.0f);
+        desc.coatWeight     = ReadFloat(mtlx.shader, pxr::TfToken("coat_weight"), 0.0f);
+        desc.coatRoughness  = ReadFloat(mtlx.shader, pxr::TfToken("coat_roughness"), 0.0f);
+        desc.transmissionWeight = ReadFloat(mtlx.shader,
+                                              pxr::TfToken("transmission_weight"), 0.0f);
+        desc.emissionColor  = ReadColor(mtlx.shader, pxr::TfToken("emission_color"),
+                                          hlslpp::float3{0.0f, 0.0f, 0.0f});
+        desc.emissionLuminance = ReadFloat(mtlx.shader,
+                                            pxr::TfToken("emission_luminance"), 0.0f);
+      }
+      else  // standard_surface
+      {
+        // Autodesk standard_surface uses `base` as the weight, the
+        // colour goes through `base_color`. emission is a (float
+        // weight, color3) pair that we collapse into the OpenPBR
+        // luminance + color fields.
+        desc.baseColor  = ReadColor(mtlx.shader, pxr::TfToken("base_color"),
+                                     hlslpp::float3{0.18f, 0.18f, 0.18f});
+        desc.baseWeight = ReadFloat(mtlx.shader, pxr::TfToken("base"), 1.0f);
+        desc.metalness  = ReadFloat(mtlx.shader, pxr::TfToken("metalness"), 0.0f);
+        desc.roughness  = ReadFloat(mtlx.shader, pxr::TfToken("specular_roughness"), 0.5f);
+        desc.specularWeight = ReadFloat(mtlx.shader, pxr::TfToken("specular"), 1.0f);
+        desc.specularIor    = ReadFloat(mtlx.shader, pxr::TfToken("specular_IOR"), 1.5f);
+        desc.coatWeight     = ReadFloat(mtlx.shader, pxr::TfToken("coat"), 0.0f);
+        desc.coatRoughness  = ReadFloat(mtlx.shader, pxr::TfToken("coat_roughness"), 0.0f);
+        desc.transmissionWeight = ReadFloat(mtlx.shader,
+                                              pxr::TfToken("transmission"), 0.0f);
+        desc.emissionColor  = ReadColor(mtlx.shader, pxr::TfToken("emission_color"),
+                                          hlslpp::float3{0.0f, 0.0f, 0.0f});
+        desc.emissionLuminance = ReadFloat(mtlx.shader, pxr::TfToken("emission"), 0.0f);
+      }
+      desc.source = OpenPBRMaterialDesc::Source::MaterialX;
+      return desc;
+    }
     // V2.A.23 — try MDL before falling to default. Omniverse content
     // routinely authors MDL OmniPBR/Glass shaders instead of
     // UsdPreviewSurface; translate the common inputs so those scenes
