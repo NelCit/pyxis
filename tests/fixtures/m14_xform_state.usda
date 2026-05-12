@@ -1,0 +1,74 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis M14 / V2.A.6 + V2.A.17 fixture — exercises advanced xformOpOrder + the active=false prim filter. Layout: one Cube transformed via xformOp:transform (full 4x4), one Sphere transformed via xformOp:translate + xformOp:rotateXYZ + xformOp:scale (Maya-style chain), one Cylinder using xformOp:orient (quaternion), one InactiveCube authored with active=false (must NOT render). Hero camera frames all three visible prims."
+)
+
+def Xform "World"
+{
+    # Full 4x4 transform — places the cube at (-3, 1, 0) with 0.5 uniform scale.
+    def Cube "TransformOpCube"
+    {
+        double size = 2.0
+        color3f[] primvars:displayColor = [(0.9, 0.3, 0.3)]
+        matrix4d xformOp:transform = ( (0.5, 0, 0, 0),
+                                       (0, 0.5, 0, 0),
+                                       (0, 0, 0.5, 0),
+                                       (-3, 1, 0, 1) )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+    }
+
+    # Maya-style decomposed chain — translate then rotateXYZ then scale.
+    def Sphere "RotateXyzSphere"
+    {
+        double radius = 0.6
+        color3f[] primvars:displayColor = [(0.3, 0.9, 0.3)]
+        double3 xformOp:translate = (0, 1, 0)
+        float3 xformOp:rotateXYZ = (45, 30, 15)
+        float3 xformOp:scale = (0.8, 0.8, 0.8)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+    }
+
+    # Quaternion orient — 45° around Y axis.
+    def Cylinder "OrientCylinder"
+    {
+        double radius = 0.4
+        double height = 1.0
+        uniform token axis = "Y"
+        color3f[] primvars:displayColor = [(0.3, 0.3, 0.9)]
+        double3 xformOp:translate = (3, 1, 0)
+        quatf xformOp:orient = (0.9238795, 0, 0.3826834, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient"]
+    }
+
+    # active=false — MUST NOT render. Placed where a visible cube would
+    # otherwise be obvious if the filter regressed; the render smoke
+    # test asserts the pixel block at this location is the background.
+    def Cube "InactiveCube" (
+        active = false
+    )
+    {
+        double size = 2.0
+        color3f[] primvars:displayColor = [(1.0, 1.0, 1.0)]
+        double3 xformOp:translate = (0, 5, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 1.5, 8)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.0
+    }
+}

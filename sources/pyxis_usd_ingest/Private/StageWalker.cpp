@@ -1169,6 +1169,16 @@ PreparedMesh PrepareMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xform
   if (!meshPrim.GetPrim().IsValid())
     return prepared;
 
+  // M14 / V2.A.17 — prim state filter. Inactive prims (`active=false`)
+  // are typically already filtered by `UsdPrimRange`'s default traversal
+  // predicate, but production scenes occasionally invoke us via a
+  // traversal that includes inactive prims (e.g. a manual
+  // `Usd_PrimFlagsPredicate` override during dirty-fixture work).
+  // The check is one line + cheap; the cost of getting it wrong is
+  // silently rendering deactivated geometry.
+  if (!prim.IsActive())
+    return prepared;
+
   // M12 / V2.A.2 — UsdGeomImageable visibility + purpose filter.
   // v1 only checked visibility on lights; meshes silently inherited
   // their authored `visibility = invisible` state but rendered anyway.
@@ -1818,6 +1828,10 @@ PreparedMesh PrepareMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xform
                                                 const StageContext& stageCtx) noexcept
 {
   PreparedMesh prepared;
+
+  // M14 / V2.A.17 — prim state filter (same as PrepareMesh).
+  if (!prim.IsActive())
+    return prepared;
 
   // Visibility + purpose — same gate as PrepareMesh.
   const pxr::UsdGeomImageable imageable(prim);
