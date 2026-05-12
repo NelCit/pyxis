@@ -33,14 +33,16 @@ if(NOT _rc EQUAL 0)
     message(FATAL_ERROR "m20_nurbs_skel_smoke: pyxis rc=${_rc}\nSTDOUT:\n${_stdout}")
 endif()
 
-# V2.A.4 — UsdGeomNurbsPatch is now tessellated (cubic Bezier path);
-# the M20 stub-warning only fires for NurbsCurves + Skel. NurbsCurves
-# isn't in this fixture, so just assert the Skel warning. The patch
-# becomes a regular tessellated mesh + counts toward the mesh tally.
-string(REGEX MATCH "Skel prim[^\n]*detected but skinning is not yet supported" _skel "${_stdout}")
+# V2.A.4 — both NurbsPatch (cubic Bezier) and Skel (full UsdSkel CPU
+# skinning) are now real implementations, not stubs. The M20 stub
+# warnings no longer fire for these prim types. NurbsCurves is the
+# remaining stub but the fixture doesn't author one. So this smoke
+# now just asserts the run succeeds (already checked above) and the
+# Skel container is handled, not warned.
+string(REGEX MATCH "Skel container[^\n]*handled by CPU skinning pass" _skel "${_stdout}")
 if(NOT _skel)
     message(FATAL_ERROR
-        "m20_nurbs_skel_smoke: expected Skel warning.\nSTDOUT:\n${_stdout}")
+        "m20_nurbs_skel_smoke: expected Skel container handled log line.\nSTDOUT:\n${_stdout}")
 endif()
 
 string(REGEX MATCH "headless: render output is fully black[^\n]*" _bad "${_stdout}")

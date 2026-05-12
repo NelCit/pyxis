@@ -1,0 +1,28 @@
+{
+  "$comment": "Pyxis V2.A.4 fixture — animated skel multi-frame smoke.",
+
+  "render": {
+    "width":           256,
+    "height":          256,
+    "samplesPerFrame": 1,
+    "seed":            4
+  },
+
+  "output": {
+    "image":           "va4_skel.exr",
+    "effectiveConfig": "va4_skel.effective.json"
+  },
+
+  "diagnostics": {
+    "validationLayer": false,
+    "aftermath":       false
+  },
+
+  "limits": {
+    "framesInFlight":  3
+  },
+
+  "app": {
+    "ingest":          "usd_direct"
+  }
+}

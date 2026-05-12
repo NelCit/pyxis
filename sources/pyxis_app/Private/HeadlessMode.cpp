@@ -337,7 +337,15 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
                 std::string_view saveAovList, uint32_t benchFrames,
                 std::string_view profilePath,
                 std::string_view populationMask,
-                double frameNumber) noexcept {
+                double frameNumber,
+                int /*frameRangeBegin*/,
+                int /*frameRangeEnd*/,
+                int /*frameRangeStep*/) noexcept {
+  // V2.A.4 — the multi-frame loop lives in Application::Run (it
+  // overrides config.output.image per frame and re-enters here). The
+  // frameRangeBegin/End/Step params are accepted on the signature so
+  // future in-process loops have a target; the single-frame path
+  // ignores them.
   auto& log = Logging::Get();
 
   // §27 ValidateForHeadless: non-zero seed (§33.7), non-empty

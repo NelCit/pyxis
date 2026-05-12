@@ -21,6 +21,7 @@
 #include "Pyxis/UsdIngest/StageWalker.h"
 
 #include "AnalyticGeom.h"
+#include "SkelSkinning.h"
 #include "SubdivRefine.h"
 
 #include <Pyxis/MaterialTranslation/UsdShadeToOpenPBR.h>
@@ -1188,7 +1189,8 @@ void EmitPointInstancer(const pxr::UsdPrim& instancerPrim,
 PreparedMesh PrepareMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCache,
                          const MaterialHandleByPath& materialsByPath,
                          const MaterialsNeedingTangents& materialsNeedingTangents,
-                         const StageContext& stageCtx) noexcept {
+                         const StageContext& stageCtx,
+                         const SkelSkinnedPointsByPath* skinnedPoints) noexcept {
   auto& log = Logging::Get();
   PreparedMesh prepared;
   const pxr::UsdGeomMesh meshPrim(prim);
@@ -1240,6 +1242,20 @@ PreparedMesh PrepareMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xform
   meshPrim.GetPointsAttr().Get(&usdPoints);
   meshPrim.GetFaceVertexCountsAttr().Get(&usdCounts);
   meshPrim.GetFaceVertexIndicesAttr().Get(&usdIndices);
+
+  // V2.A.4 — UsdSkel CPU skinning. If StageWalker discovered a
+  // skinning query for this mesh, swap the cage points for the
+  // deformed-at-time-code ones. Topology (counts / indices) stays
+  // unchanged. The closesthit sees a regular rigid mesh.
+  if (skinnedPoints != nullptr)
+  {
+    if (auto skinIt = skinnedPoints->find(prim.GetPath().GetString());
+        skinIt != skinnedPoints->end() && !skinIt->second.empty()
+        && skinIt->second.size() == usdPoints.size())
+    {
+      usdPoints = skinIt->second;
+    }
+  }
 
   if (usdPoints.empty() || usdCounts.empty() || usdIndices.empty())
     return prepared;
@@ -2223,6 +2239,15 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
   pxr::UsdGeomXformCache xformCache(timeCode);
   const StageContext stageCtx = BuildStageContext(stage);
 
+  // V2.A.4 — UsdSkel CPU skinning. Pre-compute deformed points for
+  // every skinned mesh in every SkelRoot at the resolved time-code;
+  // PrepareMesh swaps these in for the rest-pose points when the
+  // mesh path appears in the map. Skinning depends only on USD data
+  // (no GpuScene mutation), so it's safe to run on the main thread
+  // here before pass3 fans out across OpenMP workers.
+  const SkelSkinnedPointsByPath skinnedPoints =
+      ComputeSkelSkinnedPoints(stage, timeCode);
+
   // Read the optional `boundCamera` hint from the root layer's
   // customLayerData (Omniverse + DCC convention). Empty string =
   // no hint; we'll fall back to first-camera-in-SdfPath-order.
@@ -2467,7 +2492,7 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
     {
       preparedMeshes[static_cast<std::size_t>(outIdx)] =
           PrepareMesh(geomPrim, localXformCache, materialsByPath,
-                      materialsNeedingTangents, stageCtx);
+                      materialsNeedingTangents, stageCtx, &skinnedPoints);
     }
     else
     {
@@ -2588,15 +2613,17 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
     }
     else if (prim.IsA<pxr::UsdSkelRoot>() || prim.IsA<pxr::UsdSkelSkeleton>())
     {
-      // M20 / V2.A.4 — Skel detect/warn/skip. Full skeletal animation
-      // needs joint matrices on the GPU + per-vertex skinning weights
-      // + a per-frame transform update path. v2 detects + skips so
-      // skel-bearing scenes render the rest.
-      Logging::Get().Warn(log::APP,
-          "StageWalker: Skel prim " + prim.GetPath().GetString()
+      // V2.A.4 — full UsdSkel CPU skinning is wired upstream
+      // (`ComputeSkelSkinnedPoints` ran during stage init; PrepareMesh
+      // swaps in deformed points for skinning targets). The SkelRoot /
+      // Skeleton prims themselves are organisational containers — the
+      // actual skinned UsdGeomMesh children flow through the regular
+      // geom dispatch above. Log once as informational; don't count
+      // as skipped.
+      Logging::Get().Info(log::APP,
+          "StageWalker: Skel container " + prim.GetPath().GetString()
               + " (" + prim.GetTypeName().GetString()
-              + ") detected but skinning is not yet supported. Skipping.");
-      ++stats.skipped;
+              + ") handled by CPU skinning pass (V2.A.4).");
     }
     else if (prim.IsA<pxr::UsdRenderSettings>()
              || prim.IsA<pxr::UsdRenderProduct>()

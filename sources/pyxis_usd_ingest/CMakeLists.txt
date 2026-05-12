@@ -29,6 +29,8 @@ target_sources(pyxis_usd_ingest PRIVATE
     Private/SubdivRefine.cpp
     Private/AnalyticGeom.h
     Private/AnalyticGeom.cpp
+    Private/SkelSkinning.h
+    Private/SkelSkinning.cpp
 )
 
 find_package(pxr CONFIG REQUIRED)

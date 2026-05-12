@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <string_view>
 
 namespace pyxis::app {
@@ -237,6 +238,47 @@ CliArgs Parse(int argc, char** argv) noexcept {
       }
       ++i;
     }
+    else if (Equals(arg, "--frame-range"))
+    {
+      // Format: BEGIN..END[:STEP] — e.g. 0..100 or 0..100:5.
+      // Parse by string-search since we don't want a third-party
+      // tokenizer for one CLI flag.
+      if (i + 1 >= argc)
+      {
+        out.invalid = true;
+        out.invalidArg = arg;
+        return out;
+      }
+      const std::string spec{argv[i + 1]};
+      const std::size_t dotPos = spec.find("..");
+      if (dotPos == std::string::npos)
+      {
+        out.invalid = true;
+        out.invalidArg = arg;
+        return out;
+      }
+      const std::string beginStr = spec.substr(0, dotPos);
+      const std::string tail = spec.substr(dotPos + 2);
+      std::string endStr = tail;
+      std::string stepStr = "1";
+      if (const std::size_t colonPos = tail.find(':');
+          colonPos != std::string::npos)
+      {
+        endStr  = tail.substr(0, colonPos);
+        stepStr = tail.substr(colonPos + 1);
+      }
+      if (!ParseInt32(beginStr.c_str(), out.frameRangeBegin)
+          || !ParseInt32(endStr.c_str(),   out.frameRangeEnd)
+          || !ParseInt32(stepStr.c_str(),  out.frameRangeStep)
+          || out.frameRangeStep <= 0
+          || out.frameRangeEnd < out.frameRangeBegin)
+      {
+        out.invalid = true;
+        out.invalidArg = arg;
+        return out;
+      }
+      ++i;
+    }
     else if (Equals(arg, "--load-mode"))
     {
       if (!TakeValue(argc, argv, i, out.loadMode))
@@ -306,9 +348,12 @@ void PrintUsage() noexcept {
       "                          frames + N measurement frames; print a §34 KPI table\n"
       "                          (pass.PathTrace, frame.cpu.commitResources, p50/p99/max).\n"
       "                          0 = disabled (default).\n"
-      "  --frame <int>           Time-varying USD frame to evaluate. M19 stub: parsed\n"
-      "                          and logged; full UsdTimeCode propagation is a follow-up\n"
-      "                          milestone (V2.A.4 / V2.A.13). -1 = default time.\n"
+      "  --frame <int>           Time-varying USD frame to evaluate (V2.A.13).\n"
+      "                          -1 = default time.\n"
+      "  --frame-range B..E[:S]  Multi-frame headless render (V2.A.4). Loops the\n"
+      "                          render for frames B, B+S, ..., <= E and writes one\n"
+      "                          numbered EXR per frame (out.0000.exr, out.0001.exr,\n"
+      "                          ...). Ignores --frame. Step defaults to 1.\n"
       "  --load-mode <mode>      USD composition load mode: none / metadata / all (default).\n"
       "                          M21 stub: parsed and logged; UsdStage::OpenMasked plumbing\n"
       "                          is a follow-up milestone (V2.A.15).\n"
