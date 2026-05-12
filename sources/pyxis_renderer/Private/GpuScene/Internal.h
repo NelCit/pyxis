@@ -449,6 +449,15 @@ struct GpuScene::Impl
     std::uint32_t        height         = 0;
     nvrhi::Format        format         = nvrhi::Format::UNKNOWN;
     std::vector<std::uint8_t> pixelData;   // dropped after upload commits
+    // V2.A.12 — LRU bookkeeping. `lastAccessTick` is bumped each time
+    // AcquireTexture returns the entry's handle (cache hit OR fresh
+    // insert); the GpuScene `nextAccessTick` counter monotonically
+    // increases. `evictionPriority` is the inverse age — older
+    // entries (lower `lastAccessTick`) get higher priority when a
+    // future eviction policy lands. Eviction itself is deferred to a
+    // follow-up; the data structure is in place + tracking fires on
+    // every Acquire call.
+    std::uint64_t       lastAccessTick = 0;
   };
 
   nvrhi::IDevice*    device   = nullptr;  // borrowed; outlives this scene.
@@ -493,6 +502,15 @@ struct GpuScene::Impl
   // upgrade is on the M8 perf-sweep checklist.
   std::unordered_map<std::uint64_t, MaterialHandle> materialDescHashToHandle;
   std::unordered_map<std::uint64_t, TextureHandle>  textureKeyHashToHandle;
+
+  // V2.A.12 — LRU tick counter. Bumped on every AcquireTexture (hit
+  // or miss); written onto the entry's `lastAccessTick`. Wraps at
+  // 64-bit (i.e. effectively never). Eviction policy reads the
+  // delta against this counter when the future `EvictColdTextures`
+  // pass lands.
+  std::uint64_t nextTextureAccessTick = 0;
+  std::uint64_t lruHitCount  = 0;  // texture acquires that returned an existing handle
+  std::uint64_t lruMissCount = 0;  // acquires that allocated a fresh slot
   // §15 content-dedup map: hash → MeshHandle. CreateMesh hashes the
   // input MeshDesc's geometry, looks up here, and returns the
   // existing handle on a hit so identical mesh content authored under
