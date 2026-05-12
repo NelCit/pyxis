@@ -141,7 +141,7 @@ struct FrameUiUniforms {
     // Row 1 — AOV-specific knobs the editor surfaces as sliders.
     // worldPosPeriod: scene-units period of the WorldPos AOV's sin
     // encoding (10 m default for human-scale scenes; bump to ~50 m
-    // for Bistro). Other fields reserved for future per-AOV display
+    // for World Lobby). Other fields reserved for future per-AOV display
     // knobs.
     float worldPosPeriod;
     uint  _reservedUi1;
@@ -383,7 +383,7 @@ static const uint MATERIAL_FLAG_EMISSIVE                = 1u << 12;
 
 // Bindless texture array capacity at PathTracePass binding 28.
 // Cap chosen to comfortably cover v1 production scenes (Lobby 169,
-// Bistro ~2K, Moana production sets ~50K is the post-v1 §5 target via
+// World Lobby ~2K, Moana production sets ~50K is the post-v1 §5 target via
 // true createBindlessLayout). The closesthit indexes via
 // `mat.baseColorTex`, gated on MATERIAL_FLAG_HAS_BASE_COLOR_MAP.
 static const uint BINDLESS_TEXTURES_CAP = 4096u;

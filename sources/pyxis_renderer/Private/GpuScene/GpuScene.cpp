@@ -33,7 +33,7 @@ GpuScene::GpuScene(nvrhi::IDevice* device, Profiler& profiler, const GpuSceneCre
   // M8a perf: pre-reserve entry vectors + dedup maps to skip the
   // first dozen geometric reallocations during scene load. Sized for
   // a "modest production scene" (lobby = ~1K meshes / 1K instances /
-  // ~150 materials / ~200 textures); larger scenes (Bistro ~50K) pay
+  // ~150 materials / ~200 textures); larger scenes (World Lobby ~50K) pay
   // a few extra reallocations past these caps but never the cliff
   // from 0 → 1024. Memory cost is bounded — each entry vector is at
   // most a few hundred bytes per slot, so 4096 reservations cost

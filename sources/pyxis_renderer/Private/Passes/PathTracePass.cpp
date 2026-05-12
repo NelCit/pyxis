@@ -165,7 +165,7 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
       // closesthit's `mat.flags & MATERIAL_FLAG_HAS_BASE_COLOR_MAP`
       // gate prevents access to them. Cap mirrors BINDLESS_TEXTURES_CAP
       // in ShaderInterop.slang. True createBindlessLayout (plan §5
-      // ~80K capacity) is a post-v1 sweep — 4096 covers Bistro + every
+      // ~80K capacity) is a post-v1 sweep — 4096 covers World Lobby + every
       // v1 production scene.
       nvrhi::BindingLayoutItem::Texture_SRV(28).setSize(
           shaderinterop::BINDLESS_TEXTURES_CAP),             // binding 28 bindless textures
@@ -1051,7 +1051,7 @@ void PathTracePass::Execute(nvrhi::ICommandList* commandList, const PassContext&
   frameUi._reservedUi0 = 0u;
   // Per-AOV knobs (row 1). worldPosPeriod default of 10 m matches the
   // pre-slider behaviour; the editor's WorldPos display can crank
-  // this up for Bistro-scale scenes (~50 m) without touching shader.
+  // this up for World Lobby-scale scenes (~50 m) without touching shader.
   frameUi.worldPosPeriod = (context.settings != nullptr
                             && context.settings->worldPosPeriod > 0.0f)
                                ? context.settings->worldPosPeriod

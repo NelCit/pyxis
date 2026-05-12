@@ -33,7 +33,7 @@ prevents access; cap-checking `mat.baseColorTex < BINDLESS_TEXTURES_CAP`
 is a defence-in-depth.
 
 Sizing rationale:
-- v1 §41 milestones target Bistro (~2K textures).
+- v1 §41 milestones target World Lobby (~2K textures).
 - Lobby has 169 textures.
 - Production game-engine scenes (UE marketplace assemblies) typically run 500–3 000 textures.
 - 4 096 covers all of the above with comfortable headroom.
@@ -70,7 +70,7 @@ to invalidate cached binding sets correctly.
    when a scene actually demands >4 096 textures.
 2. **8 192 cap** — ~2× the 4 096 cost (extra binding-set memory + a
    slightly larger descriptor set layout). No v1 scene needs it.
-3. **2 048 cap** — would block Bistro after M9 polish lands texture
+3. **2 048 cap** — would block World Lobby after M9 polish lands texture
    variants. Too tight.
 
 ## Drawbacks / risks
@@ -86,7 +86,7 @@ to invalidate cached binding sets correctly.
 ## Migration & impact
 
 - No public API change.
-- Affected milestones: M8a (within budget), M8b (Bistro: ~2K textures
+- Affected milestones: M8a (within budget), M8b (World Lobby: ~2K textures
   fits), M9 (texture variants might push some scenes over — flag for
   re-evaluation if a fixture authors >3 000 textures).
 - Post-v1: the §5 80K-cap landing requires this RFC be marked

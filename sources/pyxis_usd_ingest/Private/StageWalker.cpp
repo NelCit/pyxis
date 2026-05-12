@@ -991,7 +991,7 @@ void EmitPointInstancer(const pxr::UsdPrim& instancerPrim,
       consumedPrototypes.emplace(descendant.GetPath().GetString());
 
     // M6 limitation: only direct UsdGeomMesh prototypes (no nested
-    // Xform-wrapped hierarchies). Bistro foliage prototypes typically
+    // Xform-wrapped hierarchies). World Lobby foliage prototypes typically
     // ARE direct meshes; the deeper nested-prototype case lands at M9.
     if (!protoPrim.IsA<pxr::UsdGeomMesh>())
     {

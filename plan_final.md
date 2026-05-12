@@ -1,7 +1,7 @@
 # Pyxis — Engineering Plan
 
 A C++23 real-time path tracer inspired by Autodesk Aurora. NVRHI/Vulkan, Slang shaders, Windows-only v1.
-Primary target: render the Amazon Lumberyard Bistro USD scene end-to-end on an 8 GB-class GPU.
+Primary target: render the Amazon Lumberyard World Lobby USD scene end-to-end on an 8 GB-class GPU.
 
 **Design philosophy: the architecture below is the final-state design and ships day 0.**
 There is no v1-shim phase: the Flecs ECS world, the four-layer stack, the public API
@@ -127,7 +127,7 @@ Pyxis/
 ├─ _cmake/                        # CMake helpers (Slang.cmake, Vulkan.cmake, Compiler.cmake, Install.cmake, Version.cmake)
 │  ├─ All.cmake, Compiler.cmake, Slang.cmake, Utils.cmake, Version.cmake
 ├─ _tools/
-│  ├─ run_bistro_headless.cmd
+│  ├─ run_world_lobby_headless.cmd
 │  ├─ run_regression.py
 ├─ _documentation/
 │  ├─ overview.md, openpbr.md, hydra_delegate.md, profiling.md, parameters.md
@@ -314,7 +314,7 @@ mgmt only), OIDN/OptiX denoiser (deferred).
   for staging uploads.
 - Bindless: a single large `BindlessLayout` with `RawBuffer_SRV(space=1)` and
   `Texture_SRV(space=2)`. Capacities are asymmetric: `Texture_SRV(s=2)` reserves
-  ~80 k slots (Bistro uses ~2–3 k slots in v1; the remaining capacity is headroom
+  ~80 k slots (World Lobby uses ~2–3 k slots in v1; the remaining capacity is headroom
   for post-v1 production-class scenes with UDIM tiles at scale, and for room for
   growth), while `RawBuffer_SRV(s=1)` reserves only **256** slots (vertex/index/
   material pages from §14.5 occupy the first ~7; the remainder is headroom for
@@ -468,7 +468,7 @@ pyxis_platform/Device/
   Python), MaterialX support enabled, Hd / UsdImaging enabled, Vulkan/Imaging not required.
 - USD assets resolved via `ArResolver`; respect relative paths and USD asset resolver
   contexts; honor `USD_DEFAULT_RESOLVER_SEARCH_PATH`-style env vars.
-- For larger production-class packages (post-v1): do NOT preload all USDs. Use lazy population (default UsdImaging). Bistro at v1 fits comfortably in memory.
+- For larger production-class packages (post-v1): do NOT preload all USDs. Use lazy population (default UsdImaging). World Lobby at v1 fits comfortably in memory.
 - **Use Hydra 2.0 / Scene Indices** (`UsdImagingStageSceneIndex` + scene-index filters), not
   the legacy `UsdImagingDelegate`. Rationale: Scene Indices is the supported forward path in
   modern USD, gives a flat, queryable scene representation, removes the legacy adapter
@@ -1471,7 +1471,7 @@ section.
   cap memory.
 - UDIM: detected by `<UDIM>` token in resolved path. v1 strategy: **one bindless
   `Texture2D` per UDIM tile** (varying tile sizes are common in production assets — hero
-  meshes ship at 4K, distant rocks at 512). Bistro doesn't use UDIM at v1, so this path is
+  meshes ship at 4K, distant rocks at 512). World Lobby doesn't use UDIM at v1, so this path is
   exercised by a small synthetic UDIM fixture (§35); the architecture is in place for
   post-v1 production-class scenes. The shader looks up
   `(materialId, udimTile) → bindlessSlot` via a per-material UDIM lookup table
@@ -1498,7 +1498,7 @@ section.
   of ≤ 4 GiB** so each page fits inside `VkPhysicalDeviceLimits::maxStorageBufferRange`
   (4 GiB on most desktop hardware). Bindless SRVs are issued one per page; the mesh's
   `Geom` component carries `(pageIndex, vertexOffset, indexOffset)`. Page count is
-  bounded (Bistro fits in 1 vertex page, 1 index page on an 8 GB card; production-class scenes fit in ≤ 2 vertex pages, ≤ 1 index page on a 24 GB card). Requires
+  bounded (World Lobby fits in 1 vertex page, 1 index page on an 8 GB card; production-class scenes fit in ≤ 2 vertex pages, ≤ 1 index page on a 24 GB card). Requires
   Vulkan 1.3 or `VK_KHR_maintenance4` for the > 4 GiB allocation; both are mandatory
   in §5.
 
@@ -1534,7 +1534,7 @@ extended to multiple pages.
 - Skipping for v1: subdivision (rendered as polymesh hulls in v1 — the actual
   `pxOsd::Tokens->none` token is set inside the Hydra adapter, see §25.B);
   curves/points/volumes/nurbs likewise deferred. **Subdivision skipping is acceptable**
-  for first Bistro visuals.
+  for first World Lobby visuals.
 
 ---
 
@@ -1544,7 +1544,7 @@ extended to multiple pages.
 - Honor `HdInstancer` (native Hydra instancing), including nested instancing.
 - For each Rprim: walk `instancerId` chain, accumulate `instanceTransforms`,
   flatten into the `InstanceTable`. Cache the flattened transform array per dirty cycle.
-- One BLAS per **prototype mesh**; many TLAS instances reference it — the canonical instanced-foliage / scattered-prop case Bistro and any production-shaped scene rely on.
+- One BLAS per **prototype mesh**; many TLAS instances reference it — the canonical instanced-foliage / scattered-prop case World Lobby and any production-shaped scene rely on.
 - BLAS sharing rule: BLAS keyed on `MeshHandle`. If the same SdfPath mesh is consumed by N
   instancers, all share one BLAS. Unique BLAS only when the underlying mesh data differs
   (different topology hash).
@@ -1571,7 +1571,7 @@ handles three things we'd otherwise hand-roll:
 1. **BLAS suballocation pool.** RTXMU packs many BLAS into a small
    number of large `VkBuffer`s rather than one buffer per BLAS. Cuts
    the descriptor-set + allocation churn on production-scale scenes
-   dramatically (Bistro = ~10³ unique BLAS; full production-class scenes can hit ~10⁴).
+   dramatically (World Lobby = ~10³ unique BLAS; full production-class scenes can hit ~10⁴).
 2. **Scratch pool.** RTXMU sizes + reuses a single growable scratch
    buffer; we never allocate one ourselves. `vkCmdBuildAccelerationStructuresKHR`
    reads from the pool's slot picked by RTXMU.
@@ -1632,7 +1632,7 @@ for upstream RTXMU OMM support.
 ### 16.5 TLAS partitioning policy (post-v1 production-scale headroom)
 
 `VkAccelerationStructureInstanceKHR` ships a 24-bit `instanceCustomIndex` — a hard
-16 777 215 cap on instances inside one TLAS. Bistro at v1 sits comfortably under this cap
+16 777 215 cap on instances inside one TLAS. World Lobby at v1 sits comfortably under this cap
 (~10⁴ instances), so the sharding path described below is **dormant in v1** — `K=1`,
 single static + single dynamic TLAS. The architecture is preserved as headroom for
 post-v1 production-class scenes whose flattened instance count exceeds the cap (e.g.
@@ -1647,7 +1647,7 @@ detail). Strategy:
 2. **Static-TLAS sharding by `(SdfPath` hash mod K`)** when instance count > 16 M.
    Each shard is its own `TLAS_k`, all bound bindlessly; the closesthit performs K
    `RayQuery::Proceed` calls and keeps the closest hit. K is chosen so each shard
-   holds < 12 M instances (headroom). Bistro (M8a–M10) uses K=1; post-v1 production-scale scenes
+   holds < 12 M instances (headroom). World Lobby (M8a–M10) uses K=1; post-v1 production-scale scenes
    would use K=2 or K=3.
 3. **Cull-then-flatten**: instancer flattening is performed *after* a coarse
    per-instancer-region visibility cull driven by `parameters.json.hydra.purpose`
@@ -1667,7 +1667,7 @@ detail). Strategy:
 
 - A `BudgetTracker` aggregates: vertex/index, textures, BLAS, TLAS, scratch, staging,
   AOVs, render targets, **nested-instancer flatten cache** (per-`(SdfPath, time)` keyed,
-  invalidated only on `Dirty<Instancer>`; budget cap **2.5 GiB** v1 — Bistro's flatten is
+  invalidated only on `Dirty<Instancer>`; budget cap **2.5 GiB** v1 — World Lobby's flatten is
   well under 100 MiB, and the cap is sized as headroom for post-v1 production-class scenes
   (a full Moana-class flatten is ~2.2 GiB so the cap leaves slack for the dirty-replace path).
   Reported in spdlog and ImGui. **BLAS + scratch counters are sourced from
@@ -2546,7 +2546,7 @@ bump (§22.1); never remove flags.
 
 ### 19.2 Cancellation token
 
-`CommitResources` and the initial USD walk can take minutes on production-class scenes (Bistro is faster, ~tens of seconds). A cancellation
+`CommitResources` and the initial USD walk can take minutes on production-class scenes (World Lobby is faster, ~tens of seconds). A cancellation
 token lets hosts abort cleanly:
 
 ```cpp
@@ -2676,7 +2676,7 @@ struct PickResult {
 ```cpp
 // 32-bit handle layout (applies to MeshHandle / MaterialHandle / TextureHandle /
 // InstanceHandle / LightHandle):
-//   bits  0..23   slot index  (16 777 216 unique slots — generous headroom; Bistro uses ~10⁴, matches a TLAS-cap-sized scene for post-v1 production-class)
+//   bits  0..23   slot index  (16 777 216 unique slots — generous headroom; World Lobby uses ~10⁴, matches a TLAS-cap-sized scene for post-v1 production-class)
 //   bits 24..31   generation  (256 reuses before wrap; on wrap the slot is
 //                              quarantined and the handle is allocated from a
 //                              fresh slot).
@@ -2969,7 +2969,7 @@ loaded DLL. PATCH mismatch is logged at info level only.
 | Material network change (`HdMaterial::Sync`) | rerun OpenPBR conversion | rehash → maybe new MaterialHandle |
 | `HdRenderBuffer::Sync` (Bprim) | resize | reallocate AOV texture |
 
-For a static scene load (Bistro), only the **initial** sync triggers heavy paths
+For a static scene load (World Lobby), only the **initial** sync triggers heavy paths
 (`DirtyTopology`/`DirtyPoints`/`DirtyMaterialId`/`DirtyInstancer`); subsequent frames mostly
 toggle `DirtyTransform`/`DirtyParams` for the camera and reset accumulation.
 
@@ -3008,8 +3008,8 @@ toggle `DirtyTransform`/`DirtyParams` for the camera and reset accumulation.
 - Degenerate tris: dropped in topology conversion, counted.
 - Large mesh upload: chunked staging copy; mesh > 256 MB split across multiple staging fills.
 - Static assumption: positions never updated after first sync in v1.
-- Will-break-Bistro-if-skipped: subsets (yes — many production assets rely on per-face material binding
-  through subsets), instancer (yes), UVs (most materials), normals fallback (yes, Bistro ships
+- Will-break-World Lobby-if-skipped: subsets (yes — many production assets rely on per-face material binding
+  through subsets), instancer (yes), UVs (most materials), normals fallback (yes, World Lobby ships
   authored normals on most meshes).
 
 ### C. Instancing
@@ -3045,7 +3045,7 @@ toggle `DirtyTransform`/`DirtyParams` for the camera and reset accumulation.
 - Rect light: position + axes + emission.
 - Mesh emissive: handled implicitly by `OpenPBRMaterialDesc::emission*`; sampled via
   emissive-triangle alias table. v1: simple uniform sampling over emissive triangles.
-- Bistro needs: dome light (sky), distant light (sun), and rect/area lights for interior fixtures.
+- World Lobby needs: dome light (sky), distant light (sun), and rect/area lights for interior fixtures.
 
 ### H. Volumes & atmosphere
 - Detect any `HdVolume` Rprim. v1: log once, skip from TLAS.
@@ -3106,7 +3106,7 @@ v1 is **scene-linear sRGB end-to-end**. No ACES / OCIO. Concretely:
    look slightly desaturated versus a true ACES pipeline. This is logged in
    `unsupported_features.json` and tracked as a post-1.0 task. A future
    `render.outputColorSpace = "linearSrgb" | "acesCg"` config field is *reserved* in
-   `parameters.json` but pinned to `linearSrgb`. Bistro is sRGB-tagged, so this
+   `parameters.json` but pinned to `linearSrgb`. World Lobby is sRGB-tagged, so this
    caveat does not affect v1 reference images.
 
 ### J. Dirty bits — see §24.
@@ -3237,7 +3237,7 @@ single update contract; no parallel notice-driven mapping lives inside
 #### O.3 Determinism contract
 
 Both adapters MUST emit instances in `SdfPath`-sorted order. The shared regression
-harness (§35) opens the same Bistro scene through `pyxis_hydra` and `pyxis_usd_ingest`
+harness (§35) opens the same World Lobby scene through `pyxis_hydra` and `pyxis_usd_ingest`
 and asserts RMSE = 0 between the two output EXRs. Any divergence is a P0 bug.
 
 ### L. GpuScene design — see §8.
@@ -3248,7 +3248,7 @@ and asserts RMSE = 0 between the two output EXRs. Any divergence is a P0 bug.
 - Compaction default-on.
 - Bindless via `RawBuffer_SRV(space=1)` + `Texture_SRV(space=2)`.
 - Large buffer allocations go through NVRHI; for very large vertex/index pools, we use
-  multiple buffers of ≤ 2 GiB each on platforms where it matters; Bistro stays well under.
+  multiple buffers of ≤ 2 GiB each on platforms where it matters; World Lobby stays well under.
 - Staging strategy: ring + one-shot for oversize.
 - Queue sync: graphics + transfer + compute; a single `CommandList` per pass v1.
 - Image layouts: NVRHI tracks via `keepInitialState`/`setInitialState`; we use the
@@ -3294,8 +3294,8 @@ and asserts RMSE = 0 between the two output EXRs. Any divergence is a P0 bug.
 - Same loader is used for viewer, headless, profiling and tests — no special test config.
 
 Example configs in `_documentation/parameters.md`:
-- `parameters.bistro_viewer.json`
-- `parameters.bistro_headless.json`
+- `parameters.world_lobby_viewer.json`
+- `parameters.world_lobby_headless.json`
 - `parameters.regression_tiny.json`
 - `parameters.profile_benchmark.json`
 
@@ -3338,7 +3338,7 @@ included verbatim in the docs.
   shipped in v1; their EXR outputs must match byte-for-byte on the regression
   fixtures (§25.O.3).
 - `limits.budgetGiB` is normative for a 16 GiB target GPU (RTX 4080); the sum
-  leaves headroom for swapchain + ImGui + driver overhead. v1 hero scene (Bistro) fits
+  leaves headroom for swapchain + ImGui + driver overhead. v1 hero scene (World Lobby) fits
   comfortably under 8 GiB; the 16 GiB target leaves slack for post-v1 production-class
   scenes. On smaller GPUs the application scales every category proportionally.
 - `Configuration` C++ struct mirrors this 1:1 with `[[nodiscard]] static std::expected<Configuration, Error> parse(const Json&);`
@@ -3560,7 +3560,7 @@ binary-identical across builds so it is also a useful smoke-test asset.
   a magenta sphere, or a missing horizon line each indicates a
   specific subsystem regression.
 - Provides a stable composition for the M1–M3 viewer regression
-  thumbnail (§35) without needing the Bistro asset locally.
+  thumbnail (§35) without needing the World Lobby asset locally.
 
 **Behaviour**:
 - The default scene is read-only on disk; "Save Scene As USD…" (§29.7)
@@ -4260,7 +4260,7 @@ Pyxis follows one rule: **measure, then optimise.** Both regimes feed it:
   - `frame.cpu.commitResources` < 2 ms steady state
   - p99 / p50 frame ratio < 1.4 (catches stalls / GC)
 - **Load-time KPIs**:
-  - `render.frame.timeToFirstImage` for Bistro (M8a) < 15 s on the
+  - `render.frame.timeToFirstImage` for World Lobby (M8a) < 15 s on the
     lab machine
   - `assets.texture.decode` parallelism ≥ 6 of 8 worker threads sustained
   - `render.blas.build` ≥ 4 builds in flight at peak
@@ -4324,7 +4324,7 @@ Tracked once at end-of-load and once per second in steady state:
   quad, UV cube, multi-subset cube, double-sided plane, native-instanced cubes,
   point-instanced rocks, BLAS-sharing scene, UsdPreviewSurface, MaterialX standard_surface,
   MaterialX open_pbr_surface, RmanFallback, missing-texture, unsupported-node.
-- Bistro: full Bistro USD (interior + exterior) used for nightly regression at a hero
+- World Lobby: full World Lobby USD (interior + exterior) used for nightly regression at a hero
   camera. Full production-class scenes (Moana, ALab, etc.) are post-v1 / local-manual only.
 - Camera selection via `scene.camera` SdfPath.
 
@@ -4355,15 +4355,15 @@ Tracked once at end-of-load and once per second in steady state:
 | `emissive_mesh.usda` | Emissive-triangle alias-table sampling |
 | `large_mesh_chunked.usda` | Mesh > stagingRing/4 oversize one-shot upload path |
 | `aov_all_seven.usda` | Every supported AOV (`color`, `depth`, `normal`, `albedo`, `motionVector`, `materialId`, `instanceId` — §18.4 `AovFlag`) and format negotiation path (§25.I.1). The Python harness sweeps `HdAovDescriptor::format` across `{HdFormatFloat32Vec4, HdFormatFloat16Vec4, HdFormatFloat32, HdFormatFloat16Vec2, HdFormatInt32}` and asserts the renderer either accepts the request or returns `ErrorKind::AovFormatUnsupported` — never silently substitutes a wider format. v1 USD is single-frame (no animation, §42); the motionVector slice is exercised by the harness calling `RenderFrame` twice with a deliberate camera pan between calls and asserting (a) frame-0 motion vectors are all-zero (no prev camera — §18.6) and (b) frame-1 motion vectors match the pan magnitude within tolerance. |
-| `bistro/` | Full Amazon Lumberyard Bistro USD — v1 hero scene, nightly regression seed (M8a) |
+| `world_lobby/` | Full Amazon Lumberyard World Lobby USD — v1 hero scene, nightly regression seed (M8a) |
 
 A PR adding a new public-API verb or a new MaterialX coverage path **must** add or
 update a fixture above; reviewers check this before approval.
 
 ### CI / nightly
 - CI: builds + unit tests + tiny-scene regressions, target wall-clock ≤ 10 minutes.
-- Nightly (separate pipeline, not gating CI): Bistro regressions. Production-class
-  scenes (Moana, ALab, etc.) are local/manual; gated by env var `PYXIS_BISTRO_DATASET_PATH`
+- Nightly (separate pipeline, not gating CI): World Lobby regressions. Production-class
+  scenes (Moana, ALab, etc.) are local/manual; gated by env var `PYXIS_WORLD_LOBBY_DATASET_PATH`
   (and per-scene env vars for post-v1 datasets). Missing dataset → skip with clear message.
 - Performance regression tracking: harness records per-test
   `frame.firstFrame`, `frame.cpu`, **`frame.timeToFirstImage`** (wall-clock from
@@ -4572,7 +4572,7 @@ an S1 incident.
 | Tiny image regression | Python harness | RMSE > tolerance |
 | NVRHI validation (Debug) | Vulkan validation layer | Any error or perf warning |
 | Memory leak (Debug) | VMA `vmaCalculateStatistics` at process exit (intra-process GPU allocation tracking; `VkPhysicalDeviceMemoryBudget` reports system-wide pressure and cannot detect leaks) + `BudgetTracker` post-run delta | Non-zero leak |
-| Nightly | Bistro headless | RMSE > tolerance, peak GPU > +10% baseline |
+| Nightly | World Lobby headless | RMSE > tolerance, peak GPU > +10% baseline |
 
 CI lives under `_pipelines/pyxis_ci.yml`.
 Build matrix: Debug + Release; both use Vulkan validation in Debug only.
@@ -4595,10 +4595,10 @@ Build matrix: Debug + Release; both use Vulkan validation in Debug only.
 | M5 | UsdPreviewSurface→OpenPBR | textured cube via UsdPreviewSurface, OpenPBR shader |
 | M6 | Native instancing | instanced rocks, BLAS sharing, instance/material AOVs |
 | M7 | Lighting | dome + distant + rect lights; importance sampling |
-| M8a | Bistro render | full Bistro USD (interior + exterior) loads + renders headless and viewer; visually plausible; nightly regression seed |
-| M8b | Bistro performance pass | Bistro hero camera meets §34.3 KPIs (`pass.PathTrace < 12 ms`, `frame.cpu.commitResources < 2 ms`, `timeToFirstImage < 15 s`) on RTX 4080 reference; per-frame profile written |
-| M9 | Bistro visually correct | dome+sun alignment, normals/tangents fallbacks, emissive sampling, MaterialX coverage gaps closed for Bistro hero assets — hero camera converges to a recognizable, color-correct image |
-| M10 | Bistro headless + regression | nightly Bistro regression test green; per-test KPIs CSV emitted |
+| M8a | World Lobby render | full World Lobby USD (interior + exterior) loads + renders headless and viewer; visually plausible; nightly regression seed |
+| M8b | World Lobby performance pass | World Lobby hero camera meets §34.3 KPIs (`pass.PathTrace < 12 ms`, `frame.cpu.commitResources < 2 ms`, `timeToFirstImage < 15 s`) on RTX 4080 reference; per-frame profile written |
+| M9 | World Lobby visually correct | dome+sun alignment, normals/tangents fallbacks, emissive sampling, MaterialX coverage gaps closed for World Lobby hero assets — hero camera converges to a recognizable, color-correct image |
+| M10 | World Lobby headless + regression | nightly World Lobby regression test green; per-test KPIs CSV emitted |
 | M11 | Profiling/reporting polish | full spdlog summary, ImGui profiler panel, JSON/CSV reports |
 
 ---
@@ -4631,7 +4631,7 @@ Build matrix: Debug + Release; both use Vulkan validation in Debug only.
 14. `HdPyxisMesh`, `HdPyxisInstancer`, `HdPyxisCamera`, `HdPyxisRenderBuffer`.
 15. UsdPreviewSurface → OpenPBR adapter; texture cache; first textured Hydra render → M5.
 16. Lights (distant, dome, rect) → M7.
-17. Bistro stage open via `UsdImagingStageSceneIndex` (Hydra 2.0); attach flatten,
+17. World Lobby stage open via `UsdImagingStageSceneIndex` (Hydra 2.0); attach flatten,
     prototype-propagating, material-binding scene-index filters; subsets, instancers,
     large texture handling → M8a/M8b/M9.
 18. Headless mode polish; deterministic seeding; EXR writer; exit codes.
@@ -4642,7 +4642,7 @@ Build matrix: Debug + Release; both use Vulkan validation in Debug only.
     M4 onward. Same `MeshDesc`/`InstanceDesc`/`OpenPBRMaterialDesc` outputs; shares
     `pyxis_material_translation`. The walker emits prims in **`SdfPath`-sorted order**
     so instance IDs match the Hydra adapter byte-for-byte. M8a is gated on **both**
-    adapters loading Bistro and producing RMSE-zero regression images.
+    adapters loading World Lobby and producing RMSE-zero regression images.
 
 ---
 
@@ -4664,7 +4664,7 @@ actually is.
   no v1 stand-in, no scheduled refactor. Once a system is registered in M0/M3, its
   schedule slot is final.
 - **Both ingest adapters** (`pyxis_hydra` and `pyxis_usd_ingest`) ship from M0 and
-  are at parity: each Bistro regression image is rendered *twice* in CI (once per
+  are at parity: each World Lobby regression image is rendered *twice* in CI (once per
   adapter) and they must match byte-for-byte.
 - The folder layout (§2), all CMake targets (§3), all third-party deps (§4), the
   threading model (§31), the error contract (§18.6).
@@ -5079,7 +5079,7 @@ Each milestone has a corresponding verification step:
    timestamps appear, verify barriers don't crash NVRHI validation.
 4. Tiny `.usda` fixtures rendered headless → image diff vs in-tree baseline EXR
    (RMSE < per-test tolerance).
-5. Bistro test (nightly): renders, diff vs baseline, profiles within ±10% of
+5. World Lobby test (nightly): renders, diff vs baseline, profiles within ±10% of
    reference timings.
 6. spdlog summary at end of each headless run is parsed and asserted to contain all
    required fields (no silent missing scopes).
@@ -5128,7 +5128,7 @@ All four open questions from the previous draft have been resolved:
 
 1. **Subdivision in v1?** → Deferred. Render polymesh hulls; revisit after M11.
 2. **Texture compression?** → Deferred. Upload textures in their native format; rely on
-   `textures.maxResolution` to cap GPU footprint. Revisit if v1 hero scene (Bistro) or post-v1 production-class scenes exceed memory budget.
+   `textures.maxResolution` to cap GPU footprint. Revisit if v1 hero scene (World Lobby) or post-v1 production-class scenes exceed memory budget.
 3. **MaterialX coverage v1?** → In scope, scoped to `open_pbr_surface` (canonical 1:1 mapping)
    plus `standard_surface` as a translation shim into OpenPBR. Arbitrary node graphs are
    logged-and-skipped with constant-default fallback, not baked.
@@ -5294,34 +5294,34 @@ action`) layers on top for per-TU object caching.
   `inputs:texture:file`, non-uniform-scale normal correction (inverse-transpose), and
   the M9 polish items (cone spots, IES profiles).
 
-### Phase M8a — Bistro render
-- Add: full Amazon Lumberyard Bistro USD (interior + exterior) shipped via
-  `tests/fixtures/bistro/` (or fetched via `PYXIS_BISTRO_DATASET_PATH`).
-- Wire `UsdImagingStageSceneIndex` ingestion against the full Bistro stage; scene-index
+### Phase M8a — World Lobby render
+- Add: full Amazon Lumberyard World Lobby USD (interior + exterior) shipped via
+  `tests/fixtures/world_lobby/` (or fetched via `PYXIS_WORLD_LOBBY_DATASET_PATH`).
+- Wire `UsdImagingStageSceneIndex` ingestion against the full World Lobby stage; scene-index
   filters (flatten + prototype-propagating + material-binding), native instancing,
   subsets, large-texture handling exercised on real-shipped game-asset content.
-- Exit: Bistro renders headless and viewer; recognizable visuals; load profile written.
+- Exit: World Lobby renders headless and viewer; recognizable visuals; load profile written.
   Used as the nightly regression seed (§35).
 
-### Phase M8b — Bistro performance pass
+### Phase M8b — World Lobby performance pass
 - Tighten: lazy texture decode at scale, large-mesh chunked staging where needed, progress
   logging, `unsupported_features.json` writer, budget tracker hard caps active. No new
   features beyond M8a; pure perf + observability work driven by §34 profiles.
-- Exit: Bistro hero camera meets §34.3 KPIs on RTX 4080 reference (`pass.PathTrace < 12 ms`,
+- Exit: World Lobby hero camera meets §34.3 KPIs on RTX 4080 reference (`pass.PathTrace < 12 ms`,
   `pass.Accumulation+ToneMap+AovResolve < 2 ms`, `frame.cpu.commitResources < 2 ms`,
   `timeToFirstImage < 15 s`, p99/p50 < 1.4); per-frame profile written; load profile
   written.
 
-### Phase M9 — Bistro visually correct
+### Phase M9 — World Lobby visually correct
 - Polish: dome+sun alignment, normals/tangents fallbacks, double-sided, emissive
-  triangles, MaterialX coverage gaps closed for Bistro hero assets, small synthetic
-  UDIM fixture green (UDIM path validated even though Bistro itself doesn't use UDIM).
-- Exit: visually recognizable, color-correct Bistro frame on the hero camera; AOV outputs
+  triangles, MaterialX coverage gaps closed for World Lobby hero assets, small synthetic
+  UDIM fixture green (UDIM path validated even though World Lobby itself doesn't use UDIM).
+- Exit: visually recognizable, color-correct World Lobby frame on the hero camera; AOV outputs
   valid; accumulation converges.
 
-### Phase M10 — Bistro headless + regression
+### Phase M10 — World Lobby headless + regression
 - Add: Python regression harness, fixtures, CI pipeline (build + unit + tiny regressions),
-  nightly Bistro job.
+  nightly World Lobby job.
 - Exit: nightly green; per-test KPIs CSV emitted.
 
 ### Phase M11 — Profiling polish
@@ -5583,7 +5583,7 @@ and `/plan.md` are dual-owned by `@pyxis-renderer-team` *and* `@pyxis-maintainer
 - **Severity classes**:
   - **S1** — main branch fails to build, or the headless smoke-test crashes.
     Revert-or-fix within 24 h. Block all merges to main until green.
-  - **S2** — nightly Bistro RMSE regression > 2× tolerance, or peak GPU
+  - **S2** — nightly World Lobby RMSE regression > 2× tolerance, or peak GPU
     > +20 % baseline. Tracking issue + assignment within 48 h.
   - **S3** — flaky test, perf jitter inside ±10 % budget. Logged; addressed in
     the next maintenance sprint.

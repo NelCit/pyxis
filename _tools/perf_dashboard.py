@@ -14,7 +14,7 @@ Usage:
 
     # Multiple fixtures collapsed into one tabbed page:
     python perf_dashboard.py --csv tests/regression/lobby/kpis.csv \\
-                             --csv tests/regression/bistro/kpis.csv \\
+                             --csv tests/regression/world_lobby/kpis.csv \\
                              --out perf_dashboard.html
 
 Design rules:

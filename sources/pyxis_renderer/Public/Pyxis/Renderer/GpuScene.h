@@ -250,7 +250,7 @@ public:
   // Same data as the per-mesh BLAS index buffer; duplicated here
   // because BLAS index buffers are bound for AS-build, not as
   // structured buffers for shader read. Acceptable given the tiny
-  // overhead (one uint per mesh triangle, ~1-3 MB at Bistro scale).
+  // overhead (one uint per mesh triangle, ~1-3 MB at World Lobby scale).
   [[nodiscard]] nvrhi::IBuffer*          GetMeshIndicesBuffer() const noexcept;
   [[nodiscard]] nvrhi::IBuffer*          GetMeshIndexOffsetsBuffer() const noexcept;
 

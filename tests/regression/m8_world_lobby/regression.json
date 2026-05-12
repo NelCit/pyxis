@@ -3,7 +3,7 @@
     "$comment": "Pyxis M10 image-regression fixture for the World Lobby hero camera. Consumed by _tools/run_regression.py. Plan §35.",
 
     "name":        "M10.WorldLobbyRegression",
-    "description": "Lobby hero camera, M9-fidelity stable baseline. Standin until Bistro lands; same harness will retarget Bistro by editing the config + scene fields below.",
+    "description": "Lobby hero camera, M9-fidelity stable baseline. Standin until World Lobby lands; same harness will retarget World Lobby by editing the config + scene fields below.",
 
     "config":   "tests/fixtures/m8_world_lobby.json",
     "scene":    "resources/scenes/world_lobby/World_Lobby.usd",

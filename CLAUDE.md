@@ -6,7 +6,7 @@
 
 ## What Pyxis is
 
-C++23 real-time path tracer (NVRHI/Vulkan, Slang shaders, Windows-only v1) inspired by Autodesk Aurora. Primary target: render the Amazon Lumberyard Bistro USD scene end-to-end on a single Windows workstation (8 GB-class GPU).
+C++23 real-time path tracer (NVRHI/Vulkan, Slang shaders, Windows-only v1) inspired by Autodesk Aurora. Primary target: render the Amazon Lumberyard World Lobby USD scene end-to-end on a single Windows workstation (8 GB-class GPU).
 
 **Not**: production renderer, network/farm renderer, animation playback, full color management, volumetrics. Out-of-scope additions go through the §44 RFC process.
 
@@ -126,7 +126,7 @@ GPU-execution-only. CPU staging / upload draining / AS builds happen earlier, in
 
 ## Bindless layout (§5)
 
-Single `BindlessLayout`: `RawBuffer_SRV(space=1)` (256 slots — vertex/index/material pages) + `Texture_SRV(space=2)` (~80 000 slots — Bistro uses ~2–3 k slots in v1; remaining capacity is headroom for post-v1 production-class scenes with UDIM tiles at scale).
+Single `BindlessLayout`: `RawBuffer_SRV(space=1)` (256 slots — vertex/index/material pages) + `Texture_SRV(space=2)` (~80 000 slots — World Lobby uses ~2–3 k slots in v1; remaining capacity is headroom for post-v1 production-class scenes with UDIM tiles at scale).
 
 ## OpenPBR (§11) — canonical material
 
@@ -165,7 +165,7 @@ All inputs (UsdPreviewSurface, MaterialX `open_pbr_surface` / `standard_surface`
 - **Load-time** (one-shot per scene load, coarse) → spdlog summary, Chrome-tracing JSON, viewer Load Timeline panel.
 - **Per-frame** (every frame, 240-frame ring, fine) → Performance panel, CSV, Tracy (optional), in-process Profiler panel.
 
-KPIs (1080p hero camera, RTX 4080, post-warm): `pass.PathTrace < 12ms`, `frame.cpu.commitResources < 2ms`, p99/p50 < 1.4. Time-to-first-image on Bistro (M8a) < 15s on lab machine.
+KPIs (1080p hero camera, RTX 4080, post-warm): `pass.PathTrace < 12ms`, `frame.cpu.commitResources < 2ms`, p99/p50 < 1.4. Time-to-first-image on World Lobby (M8a) < 15s on lab machine.
 
 **Measure before you optimise.** PRs without profile evidence are rejected.
 
@@ -184,10 +184,10 @@ KPIs (1080p hero camera, RTX 4080, post-warm): `pass.PathTrace < 12ms`, `frame.c
 | M5 | UsdPreviewSurface→OpenPBR | textured cube, OpenPBR shader. M5 ships the **CPU material/texture infra** + the binding contract (`StructuredBuffer<OpenPBRMaterialGPU>` at binding 3, indexed by `InstanceID()`); the closesthit body is a `mat.baseColor`-only stub. Full BSDF + NEE arrives with lights at M7. |
 | M6 | Native instancing | 10k-instance scene, BLAS sharing, instance/material AOVs. M6 ships the **CPU + GPU instancing plumbing** (StageWalker UsdGeomPointInstancer expansion + per-instance `gInstanceMaterial` side-table at binding 4 freeing instanceCustomIndex for the §15 instance ID); the AOV write paths (closesthit payload extension + raygen UAV writes + headless EXR output) are **deferred to a follow-up PR**. |
 | M7 | Lighting | dome + distant + rect; NEE + MIS. M7 ships the **CPU + GPU lighting plumbing** (StageWalker UsdLux* → AddLight, light buffer at binding 5, per-mesh face-normal lookup at bindings 6/7/8) + a deliberately-simple closesthit (NdotL Lambert for Distant + Rect, Lambert against world up for Dome). Shadow rays, NEE, MIS, IBL importance sampling, area sampling all **deferred to M7-full** (the user's closesthit body replacement). |
-| M8a | Bistro render | full Bistro USD loads + renders headless and viewer; visually plausible; nightly regression seed |
-| M8b | Bistro performance pass | Bistro hero camera meets §34 KPIs (`pass.PathTrace < 12ms`, `commitResources < 2ms`, time-to-first-image < 15s) on RTX 4080 |
-| M9 | Bistro visually correct | dome+sun alignment, normals/tangents fallbacks, emissive sampling, MaterialX coverage gaps closed |
-| M10 | Bistro headless + regression | nightly Bistro regression test green; per-test KPIs CSV |
+| M8a | World Lobby render | full World Lobby USD loads + renders headless and viewer; visually plausible; nightly regression seed |
+| M8b | World Lobby performance pass | World Lobby hero camera meets §34 KPIs (`pass.PathTrace < 12ms`, `commitResources < 2ms`, time-to-first-image < 15s) on RTX 4080 |
+| M9 | World Lobby visually correct | dome+sun alignment, normals/tangents fallbacks, emissive sampling, MaterialX coverage gaps closed |
+| M10 | World Lobby headless + regression | nightly World Lobby regression test green; per-test KPIs CSV |
 | M11 | Profiling polish | full reports + ImGui panels; profiling overhead < 1% Release |
 
 ---

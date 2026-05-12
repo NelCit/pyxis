@@ -2,10 +2,10 @@
 
 **Status: PASSED** (all §34 KPIs met, no optimisation work required)
 
-The §41 M8b milestone normatively targets Bistro, but Bistro is currently
-unavailable in the repo's distributable form (M8a deferred a Bistro
+The §41 M8b milestone normatively targets World Lobby, but World Lobby is currently
+unavailable in the repo's distributable form (M8a deferred a World Lobby
 ingest path; the user-driven scene of record is the Omniverse-Collected
-World Lobby). This document substitutes the lobby for Bistro and verifies
+World Lobby). This document substitutes the lobby for World Lobby and verifies
 the §34 KPIs on the same RTX 4070-class hardware.
 
 ## Hardware / build
@@ -85,13 +85,13 @@ The 7.5× pass.PathTrace headroom and the empty-state commitResources
 budget both buy room for the M9 closesthit replacement (full OpenPBR
 BSDF, NEE, shadow rays, IBL importance sampling). Per-pixel cost will
 grow ~5–10× when shadow rays + the proper BSDF land, which lands
-within the 12 ms KPI for the lobby. Bistro at 50 K instances will
+within the 12 ms KPI for the lobby. World Lobby at 50 K instances will
 need re-measurement when its ingest lands.
 
 ## Open items not on this milestone
 
-- **Bistro perf pass** — strict §41 M8b requires Bistro. Move to a
-  follow-up milestone (M8b-bistro?) once a distributable Bistro USD
+- **World Lobby perf pass** — strict §41 M8b requires World Lobby. Move to a
+  follow-up milestone (M8b-world_lobby?) once a distributable World Lobby USD
   ingest path exists.
 - **`pass.Accumulation` / `pass.ToneMap` / `pass.AovResolve`** — these
   scopes are part of the §34.3 KPI list ("< 2 ms combined") but those
