@@ -31,6 +31,54 @@
 #include <utility>
 #include <vector>
 
+// Tracy CPU zones. Opt-in via -DPYXIS_TRACY=ON; when OFF the inline
+// helpers compile to nothing so there's zero runtime overhead (and
+// no Tracy include dependency). Plan §34.2 — Tracy is "optional, off
+// by default". The C API (TracyC.h) keeps pyxis_renderer's PIMPL
+// clean of C++ Tracy template instantiations.
+//
+// Profiler scopes bracket across ctor/dtor so a stack-local
+// `static const ___tracy_source_location_data` doesn't work — we'd
+// need to associate the static instance with a specific scope
+// instance, which the RAII pattern doesn't permit. Use Tracy's
+// dynamic-srcloc API instead: `___tracy_alloc_srcloc_name` heap-
+// allocs a srcloc id, `___tracy_emit_zone_begin_alloc` opens the
+// zone, `___tracy_emit_zone_end` closes it.
+#if defined(PYXIS_TRACY) && PYXIS_TRACY
+    #include <tracy/TracyC.h>
+#endif
+
+namespace pyxis::tracy_bridge {
+
+#if defined(PYXIS_TRACY) && PYXIS_TRACY
+using ZoneCtx = TracyCZoneCtx;
+
+[[nodiscard]] inline ZoneCtx CpuZoneBegin(std::string_view name, const char* file,
+                                          std::uint32_t line) noexcept {
+  // Tracy interns the srcloc id; subsequent emits with the same
+  // (file, line, name) reuse the entry. The function-name field is
+  // an empty literal — our scope names already carry the call-site
+  // identity, so the function context is noise.
+  const std::uint64_t srcLoc =
+      ___tracy_alloc_srcloc_name(line, file, std::strlen(file), "", 0, name.data(),
+                                 name.size(), 0);
+  return ___tracy_emit_zone_begin_alloc(srcLoc, 1);
+}
+
+inline void CpuZoneEnd(ZoneCtx ctx) noexcept { ___tracy_emit_zone_end(ctx); }
+inline void FrameMark() noexcept { ___tracy_emit_frame_mark(nullptr); }
+#else
+struct ZoneCtx {};
+[[nodiscard]] inline ZoneCtx CpuZoneBegin(std::string_view, const char*,
+                                          std::uint32_t) noexcept {
+  return {};
+}
+inline void CpuZoneEnd(ZoneCtx) noexcept {}
+inline void FrameMark() noexcept {}
+#endif
+
+}  // namespace pyxis::tracy_bridge
+
 namespace pyxis {
 
 namespace {
@@ -61,6 +109,11 @@ struct Profiler::Impl {
     std::uint32_t           depth = 0;
     double                  durationMs = 0.0;
     int                     queryIdx = -1;
+    // M11 — Tracy CPU-zone handle. Filled by CpuScope's ctor when
+    // PYXIS_TRACY is enabled; the matching dtor reads it back via
+    // _recordIndex and closes the zone. Empty-struct stub when
+    // Tracy is disabled (compiles to nothing, no per-scope cost).
+    tracy_bridge::ZoneCtx   tracyCtx{};
   };
 
   // SLOT_COUNT = MAX_FRAMES_IN_FLIGHT + 1 so by the time we rotate
@@ -264,6 +317,10 @@ void Profiler::EndFrame() {
   slot.frameIndex = _impl->frameIndex;
   slot.inFlight = true;
   ++_impl->frameIndex;
+  // M11 — emit the Tracy "frame mark" so the per-frame waterfall in
+  // the Tracy server lines up with our render-loop boundaries. No-op
+  // when PYXIS_TRACY is OFF.
+  tracy_bridge::FrameMark();
 }
 
 FrameProfile Profiler::LastFrameProfile() const {
@@ -339,6 +396,10 @@ Profiler::CpuScope::CpuScope(Profiler& profiler, std::string_view name)
   record.kind = FrameProfile::ScopeKind::Cpu;
   record.depth = _profiler->_impl->depth;
   record.queryIdx = -1;
+  // M11 — open the matching Tracy zone. The bridge helper compiles
+  // to a no-op when PYXIS_TRACY is OFF (the bridge's ZoneCtx is
+  // an empty struct), so this line has zero cost in default builds.
+  record.tracyCtx = tracy_bridge::CpuZoneBegin(name, __FILE__, __LINE__);
   _recordIndex = records.size();
   records.push_back(record);
   ++_profiler->_impl->depth;
@@ -356,6 +417,11 @@ Profiler::CpuScope::~CpuScope() {
   if (_recordIndex < records.size())
   {
     records[_recordIndex].durationMs = static_cast<double>(end - _startNs) / 1.0e6;
+    // M11 — close the Tracy zone we opened in the matching ctor.
+    // Reading the ctx via _recordIndex (not stored on CpuScope
+    // itself) keeps the public ABI's per-scope-instance size
+    // stable — the ctx lives on the private ScopeRecord.
+    tracy_bridge::CpuZoneEnd(records[_recordIndex].tracyCtx);
   }
 }
 

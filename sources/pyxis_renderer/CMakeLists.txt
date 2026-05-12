@@ -169,6 +169,21 @@ target_include_directories(pyxis_renderer PRIVATE ${Stb_INCLUDE_DIR})
 # for the input / decode side.
 find_package(tinyexr CONFIG REQUIRED)
 
+# Tracy — optional CPU/GPU profiling backend. OFF by default (plan
+# §34.2: "Tracy (optional, off by default)"); enable per-build via
+# `cmake -DPYXIS_TRACY=ON`. When ON, the renderer links against the
+# vcpkg-built Tracy::TracyClient SHARED library and the Profiler's
+# RAII scopes feed Tracy zones in addition to the in-process ring.
+# When OFF, the Tracy include is unreachable and the zone macros
+# compile to nothing (TRACY_ENABLE undefined) — zero overhead.
+option(PYXIS_TRACY "Enable the Tracy profiler client (CPU + GPU zones)." OFF)
+if(PYXIS_TRACY)
+    find_package(Tracy CONFIG REQUIRED)
+    target_compile_definitions(pyxis_renderer PRIVATE PYXIS_TRACY=1 TRACY_ENABLE=1)
+    target_link_libraries(pyxis_renderer PRIVATE Tracy::TracyClient)
+    message(STATUS "Pyxis: Tracy profiler enabled (Tracy::TracyClient linked).")
+endif()
+
 # stb_image's IMPLEMENTATION TU has missing-field-initializer
 # patterns inside the third-party header (same as stb_image_write
 # in pyxis_app). Disable the warning + clang-tidy on that single
