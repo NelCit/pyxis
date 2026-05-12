@@ -18,6 +18,7 @@
 #include <pxr/base/vt/value.h>
 
 #include <cctype>
+#include <filesystem>
 #include <string>
 #include <string_view>
 
@@ -180,11 +181,13 @@ pxr::TfToken ResolveUVTextureVarname(const pxr::UsdShadeShader& textureShader) n
 // prevents silently-wrong texturing on a future scene that authors
 // `varname = "st_1"` or `"UVMap"`.
 struct UVTextureBinding {
-  std::string  file;
+  std::string  file;       // V2.A.7: when hasUdim, this is the 1001-substituted path.
+  std::string  udimPattern;// V2.A.7: original path with `<UDIM>` token preserved.
   pxr::TfToken varname;
   pxr::TfToken wrapS;       // V2.A.24 — `useMetadata` / `repeat` / `mirror` / `clamp` / `black`.
   pxr::TfToken wrapT;
   pxr::TfToken sourceColorSpace;  // V2.A.29 — `auto` / `raw` / `sRGB`.
+  bool hasUdim = false;     // V2.A.7 — `<UDIM>` token was present in the asset path.
 };
 
 bool ResolveUVTextureBinding(const pxr::UsdShadeShader& shader,
@@ -242,14 +245,18 @@ bool ResolveUVTextureBinding(const pxr::UsdShadeShader& shader,
   if (outFile.empty())
     return false;
 
-  // M14b / V2.A.7 — UDIM graceful fallback. Real UDIM support needs
-  // a tile atlas + uv>1 sampler path in closesthit; v2 first cut
-  // detects `<UDIM>` in the asset path, substitutes tile 1001 (the
-  // bottom-left tile by USD spec), and logs once at the call site so
-  // the texture decode doesn't fail with a misleading "file not found"
-  // error. Multi-tile UDIM sampling is a M18 follow-up.
+  // V2.A.7 — UDIM. Detect `<UDIM>` in the asset path, preserve the
+  // pattern for multi-tile enumeration at the call site, and
+  // substitute `1001` (the bottom-left tile per USD spec) into the
+  // primary `file` field so the existing single-handle slot points
+  // at tile 1001. The caller's multi-tile loop then walks 1002..1099
+  // and acquires each existing tile into bindless. The closesthit
+  // shader samples only the 1001 handle today (per v2 "loaded but
+  // not yet shader-visible" directive).
   if (const auto udimPos = outFile.find("<UDIM>"); udimPos != std::string::npos)
   {
+    outBinding.udimPattern = outFile;
+    outBinding.hasUdim = true;
     constexpr std::size_t UDIM_TOKEN_LEN = 6u;  // length of literal "<UDIM>"
     outFile.replace(udimPos, UDIM_TOKEN_LEN, "1001");
   }
@@ -446,6 +453,40 @@ OpenPBRMaterialDesc FromUsdShade(const pxr::UsdShadeMaterial& material,
         return;
       }
       outSlot = acquire(binding.file, role, userData);
+
+      // V2.A.7 — UDIM multi-tile acquire. If the asset path had the
+      // `<UDIM>` token, enumerate every tile that exists on disk and
+      // call `acquire` for each so the bindless slots are populated.
+      // The closesthit only samples the primary (1001) handle today —
+      // the additional tiles are loaded ("binded but not used") so a
+      // follow-up shader change can pick them up without re-walking
+      // USD.
+      if (binding.hasUdim)
+      {
+        const std::size_t udimPos = binding.udimPattern.find("<UDIM>");
+        // 1001 is already acquired above as `outSlot`. Walk 1002..1099
+        // (full 10x10 UV-tile grid per the spec); skip files that
+        // don't exist on disk to keep the bindless population tight.
+        constexpr std::size_t UDIM_TOKEN_LEN = 6u;
+        int tilesLoaded = 1;  // tile 1001 already
+        for (int tile = 1002; tile <= 1099; ++tile)
+        {
+          std::string tilePath = binding.udimPattern;
+          tilePath.replace(udimPos, UDIM_TOKEN_LEN, std::to_string(tile));
+          // exists() can throw on filesystem errors; the error_code
+          // overload is the noexcept-safe variant. Treat any error as
+          // "tile not present" so a broken NFS mount doesn't crash
+          // the translator.
+          std::error_code existsErr;
+          if (!std::filesystem::exists(tilePath, existsErr) || existsErr)
+            continue;
+          const TextureHandle tileHandle = acquire(tilePath, role, userData);
+          if (tileHandle != TextureHandle::Invalid)
+            ++tilesLoaded;
+        }
+        (void)tilesLoaded;  // logging happens caller-side
+      }
+
       if (captureOut != nullptr)
         *captureOut = binding;
     };
