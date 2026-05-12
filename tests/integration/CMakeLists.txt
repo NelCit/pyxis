@@ -305,3 +305,18 @@ set_tests_properties(M16.TextureReportSmoke PROPERTIES
     LABELS    "integration;m16"
     TIMEOUT   120
 )
+
+# §41 M17 / V2.A.12 — ArResolver visibility smoke.
+add_test(
+    NAME    M17.ArResolverSmoke
+    COMMAND ${CMAKE_COMMAND}
+            -DPYXIS_EXE=$<TARGET_FILE:pyxis>
+            -DFIXTURE_CONFIG=${CMAKE_SOURCE_DIR}/tests/fixtures/m14c_extents.json
+            -DSCENE_PATH=${CMAKE_SOURCE_DIR}/tests/fixtures/m14c_extents.usda
+            -DOUTPUT_DIR=${CMAKE_BINARY_DIR}/tests/integration/m17_ar
+            -P ${CMAKE_SOURCE_DIR}/tests/integration/m17_ar_resolver_smoke.cmake
+)
+set_tests_properties(M17.ArResolverSmoke PROPERTIES
+    LABELS    "integration;m17"
+    TIMEOUT   120
+)

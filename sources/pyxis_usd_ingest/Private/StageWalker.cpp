@@ -65,6 +65,7 @@
 #include <pxr/usd/usdShade/material.h>
 #include <pxr/usd/usdShade/materialBindingAPI.h>
 #include <pxr/usd/usdVol/volume.h>
+#include <pxr/usd/ar/resolver.h>
 #include <pxr/usd/sdf/path.h>
 #include <pxr/base/gf/matrix4d.h>
 
@@ -2077,6 +2078,23 @@ std::optional<CameraDesc> BuildCameraDesc(const pxr::UsdPrim& prim,
 IngestResult StageWalker::WalkFile(std::string_view usdPath, GpuScene& scene) {
   auto& log = Logging::Get();
   const std::string pathString{usdPath};
+
+  // M17 / V2.A.12 — ArResolver visibility. USD's `ArGetResolver()`
+  // returns whatever resolver was registered at process start (the
+  // default `ArDefaultResolver` for filesystem paths; plugin-supplied
+  // resolvers for `omniverse://`, `s3://`, etc. when those plugins
+  // are loaded). Pyxis doesn't register a custom resolver in v2 — we
+  // ride the default — but logging the live resolver type makes
+  // resolver-context misconfigurations diagnosable at stage-open
+  // time instead of via mysterious "asset not found" failures
+  // downstream.
+  {
+    const pxr::ArResolver& resolver = pxr::ArGetResolver();
+    log.Info(log::APP,
+             "StageWalker: ArResolver = " + std::string(typeid(resolver).name())
+                 + " (default for filesystem paths; custom URI schemes "
+                   "require plugin resolvers).");
+  }
 
   using Clock = std::chrono::steady_clock;
   const auto walkStart = Clock::now();
