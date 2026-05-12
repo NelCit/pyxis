@@ -73,6 +73,12 @@ struct HitInfo {
     float3 worldHit;
     uint   elementId;    // PrimitiveIndex() — per-face id within the BLAS;
                          // ~0u on miss. Hydra's `HdAovTokens->elementId`.
+    // M29 / V2.B.1 — RT specular reflection recursion bookkeeping.
+    // Raygen sets to 0; closesthit's reflection branch (lands at M30)
+    // increments + propagates so we don't recurse past
+    // MAX_RECURSION_DEPTH = 3. Cheap (one uint = 4 bytes); the payload
+    // is already spilled past the 32-byte register-only ceiling.
+    uint   recursionDepth;  // 0 on primary; closesthit increments for traced rays
 };
 #endif
 

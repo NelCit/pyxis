@@ -204,7 +204,10 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
           .setAnyHitShader(_anyHitShader),
   };
   pipelineDesc.globalBindingLayouts = {_bindingLayout};
-  pipelineDesc.maxRecursionDepth = 2;
+  // M29 / V2.B.1 — bumped 2 → 3 so closesthit can trace a reflection
+  // ray (which itself can fire its own shadow ray for direct light).
+  // Reflection branch in closesthit lands at M30.
+  pipelineDesc.maxRecursionDepth = 3;
   _pipeline = _device->createRayTracingPipeline(pipelineDesc);
   if (!_pipeline)
   {
@@ -628,7 +631,10 @@ bool PathTracePass::ReloadShaders() noexcept {
           .setAnyHitShader(newAnyHit),
   };
   pipelineDesc.globalBindingLayouts = {_bindingLayout};
-  pipelineDesc.maxRecursionDepth = 2;
+  // M29 / V2.B.1 — bumped 2 → 3 so closesthit can trace a reflection
+  // ray (which itself can fire its own shadow ray for direct light).
+  // Reflection branch in closesthit lands at M30.
+  pipelineDesc.maxRecursionDepth = 3;
   nvrhi::rt::PipelineHandle newPipeline = _device->createRayTracingPipeline(pipelineDesc);
   if (!newPipeline)
   {
