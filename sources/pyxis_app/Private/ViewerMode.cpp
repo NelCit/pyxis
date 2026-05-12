@@ -825,8 +825,17 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
       const Profiler::CpuScope imguiCpu(profiler, "app.imgui.cpu");
       const FrameProfile frameProfile = renderer.LastFrameProfile();
       const FrameStats sceneStats = gpuScene.LastFrameStats();
+      // M11 — drain rolling p50/p99/max into a stack-sized buffer so
+      // the Performance panel's "Rolling" section can show per-pass
+      // KPIs alongside the current-frame breakdown. 64 is comfortable
+      // above our scope-count high-water (~16) without burning heap.
+      Profiler::RollingStat rollingScratch[64];
+      const std::uint32_t rollingCount =
+          profiler.GetRollingStats(rollingScratch,
+                                   static_cast<std::uint32_t>(std::size(rollingScratch)));
       imguiHost.BeginFrame();
-      imguiHost.BuildFpsPanel(frameProfile);
+      imguiHost.BuildFpsPanel(frameProfile,
+          std::span<const Profiler::RollingStat>(rollingScratch, rollingCount));
       imguiHost.BuildScenePanel(sceneStats);
       imguiHost.BuildEditorPanel(gpuScene);
 

@@ -440,7 +440,8 @@ void DrawDualLineChart(const float* seriesA, const float* seriesB,
 
 }  // namespace
 
-void ImGuiHost::BuildFpsPanel(const FrameProfile& frameProfile) noexcept {
+void ImGuiHost::BuildFpsPanel(const FrameProfile& frameProfile,
+                              std::span<const Profiler::RollingStat> rollingStats) noexcept {
   if (!_ready)
     return;
 
@@ -597,6 +598,35 @@ void ImGuiHost::BuildFpsPanel(const FrameProfile& frameProfile) noexcept {
       {
         if (timing.kind == FrameProfile::ScopeKind::Gpu)
           drawPassRow(timing);
+      }
+    }
+
+    // ----- M11 — rolling p50 / p99 / max (240-frame window) -----------
+    // Plan §34.2 / §34.3 KPI surface. The Profiler maintains one ring
+    // per named scope; we drain the current percentiles into the
+    // panel without copying scope-name strings (RollingStat carries
+    // its own inline name buffer). Empty span = profiler hasn't seen
+    // a single drained frame yet — show a placeholder.
+    if (ImGui::CollapsingHeader("Rolling (240f)"))
+    {
+      if (rollingStats.empty())
+      {
+        ImGui::TextDisabled("(warming up — no drained samples yet)");
+      }
+      else
+      {
+        ImGui::Text("%-30s  %-3s  %7s  %7s  %7s  %s",
+                    "scope", "kind", "p50", "p99", "max", "n");
+        for (const Profiler::RollingStat& stat : rollingStats)
+        {
+          const std::string_view name = stat.name.View();
+          if (name.empty() || stat.sampleCount == 0)
+            continue;
+          ImGui::Text("%-30.*s  %-3s  %5.3fms  %5.3fms  %5.3fms  %u",
+                      static_cast<int>(name.size()), name.data(),
+                      stat.kind == FrameProfile::ScopeKind::Gpu ? "GPU" : "CPU",
+                      stat.p50Ms, stat.p99Ms, stat.maxMs, stat.sampleCount);
+        }
       }
     }
 

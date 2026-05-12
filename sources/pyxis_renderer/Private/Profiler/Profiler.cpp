@@ -95,6 +95,48 @@ struct Profiler::Impl {
   double                                lastGpuFrameMs = 0.0;
   std::uint64_t                         lastFrameIndex = 0;
 
+  // ----- M11: 240-frame rolling history per named scope -----
+  // Keyed on the scope's inline-owning name (raw bytes from the
+  // FrameProfile::ScopeName buffer). 240 samples per pass × ~16
+  // unique passes today = ~30 KB total; well under any sane budget
+  // and bounded since the pass set is enumerated at startup.
+  struct RollingEntry {
+    FrameProfile::ScopeName name{};
+    FrameProfile::ScopeKind kind = FrameProfile::ScopeKind::Cpu;
+    // Fixed-size ring + size counter for O(1) push. When `count`
+    // reaches ROLLING_WINDOW, push advances `head` and clobbers the
+    // oldest sample — standard FIFO ring.
+    std::array<double, 240> samples{};
+    std::uint32_t           head  = 0;
+    std::uint32_t           count = 0;
+
+    void Push(double sampleMs) noexcept {
+      samples[head] = sampleMs;
+      head = (head + 1u) % static_cast<std::uint32_t>(samples.size());
+      if (count < samples.size())
+        ++count;
+    }
+  };
+  std::vector<RollingEntry> rolling;
+
+  // O(N) name lookup is fine here — N is ~16 unique passes; a hash
+  // map would add allocations to the hot path with no measurable
+  // benefit. Returns index into `rolling`, allocating a fresh slot
+  // on first sight of a new name.
+  std::size_t LookupOrAddRolling(const FrameProfile::ScopeName& name,
+                                 FrameProfile::ScopeKind        kind) noexcept {
+    const std::string_view nameView = name.View();
+    for (std::size_t i = 0; i < rolling.size(); ++i)
+    {
+      if (rolling[i].name.View() == nameView)
+        return i;
+    }
+    rolling.emplace_back();
+    rolling.back().name = name;
+    rolling.back().kind = kind;
+    return rolling.size() - 1;
+  }
+
   int AcquireQuery() noexcept {
     if (device == nullptr)
       return -1;
@@ -178,6 +220,19 @@ struct Profiler::Impl {
     lastGpuFrameMs = gpuSumMs;
     lastFrameIndex = slot.frameIndex;
 
+    // M11 — feed the rolling history. Skip unnamed records (length-0
+    // ScopeName) — those don't have a stable identity to aggregate
+    // against. The rolling entry is created lazily on first sight of
+    // each name so the set grows naturally as new render passes
+    // register.
+    for (const FrameProfile::PassTiming& timing : lastFrame)
+    {
+      if (timing.name.size == 0)
+        continue;
+      const std::size_t idx = LookupOrAddRolling(timing.name, timing.kind);
+      rolling[idx].Push(timing.durationMs);
+    }
+
     slot.records.clear();
     slot.cpuFrameMs = 0.0;
     slot.inFlight = false;
@@ -221,6 +276,53 @@ FrameProfile Profiler::LastFrameProfile() const {
   // drained its first slot.
   profile.frameIndex = _impl->lastFrameIndex;
   return profile;
+}
+
+std::uint32_t Profiler::GetRollingStats(RollingStat* out,
+                                        std::uint32_t capacity) const noexcept {
+  // Caller may pass (nullptr, 0) to query the count without copying.
+  if (out == nullptr)
+    return static_cast<std::uint32_t>(_impl->rolling.size());
+
+  // Percentile helper: copies the ring into a scratch buffer + sorts.
+  // Per-pass N ≤ 240 so O(N log N) per pass per call is trivial; this
+  // is a UI-cadence query (~30 Hz), not a hot path.
+  auto percentile = [](std::vector<double>& sorted, double pct) noexcept -> double {
+    if (sorted.empty())
+      return 0.0;
+    std::sort(sorted.begin(), sorted.end());
+    const auto idx = static_cast<std::size_t>(
+        (sorted.size() - 1) * std::clamp(pct, 0.0, 1.0));
+    return sorted[idx];
+  };
+
+  std::vector<double> scratch;
+  scratch.reserve(Impl::SLOT_COUNT > 0 ? 240u : 0u);  // bounded reserve
+
+  const std::uint32_t emitCount =
+      std::min(capacity, static_cast<std::uint32_t>(_impl->rolling.size()));
+  for (std::uint32_t i = 0; i < emitCount; ++i)
+  {
+    const Impl::RollingEntry& entry = _impl->rolling[i];
+    scratch.clear();
+    scratch.insert(scratch.end(), entry.samples.begin(),
+                   entry.samples.begin() + entry.count);
+    RollingStat& dst = out[i];
+    dst.name        = entry.name;
+    dst.kind        = entry.kind;
+    dst.sampleCount = entry.count;
+    if (entry.count == 0)
+    {
+      dst.p50Ms = 0.0;
+      dst.p99Ms = 0.0;
+      dst.maxMs = 0.0;
+      continue;
+    }
+    dst.p50Ms = percentile(scratch, 0.50);
+    dst.p99Ms = percentile(scratch, 0.99);
+    dst.maxMs = percentile(scratch, 1.00);
+  }
+  return emitCount;
 }
 
 // ---------------------------------------------------------------------------

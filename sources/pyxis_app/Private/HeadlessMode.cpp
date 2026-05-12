@@ -98,7 +98,8 @@ void LogDeterminismPin(const Configuration& config, uint32_t framesInFlight) noe
 // failed (catastrophic — no renderable scene available).
 [[nodiscard]] bool LoadSceneOrFallback(const Configuration& config,
                                        const ResolvedScene& resolvedScene,
-                                       GpuScene& gpuScene) noexcept
+                                       GpuScene& gpuScene,
+                                       pyxis::usd_ingest::IngestStats* outStats) noexcept
 {
   bool sceneLoaded = false;
   if (!resolvedScene.path.empty())
@@ -107,6 +108,8 @@ void LogDeterminismPin(const Configuration& config, uint32_t framesInFlight) noe
         IngestUsd(config.app.ingest, resolvedScene.path, gpuScene);
     const pyxis::usd_ingest::IngestStats& stats = result.Stats();
     sceneLoaded = stats.meshesEmitted > 0 || stats.camerasEmitted > 0;
+    if (outStats != nullptr)
+      *outStats = stats;
   }
   if (!sceneLoaded)
   {
@@ -408,12 +411,20 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
 
   // M4 ingest with cube fallback so pyxis.exe always produces a
   // renderable image (the §29.4.a contract). False return means the
-  // cube fallback also failed — catastrophic.
-  if (!LoadSceneOrFallback(config, resolvedScene, gpuScene))
+  // cube fallback also failed — catastrophic. `ingestStats` is
+  // out-filled with the per-pass timings StageWalker captured (so
+  // the M11 §34.1 end-of-load summary can break them down); zero-
+  // init when the cube fallback fires.
+  pyxis::usd_ingest::IngestStats ingestStats{};
+  const auto loadStartNs = std::chrono::steady_clock::now();
+  if (!LoadSceneOrFallback(config, resolvedScene, gpuScene, &ingestStats))
   {
     scene.Shutdown();
     return EXIT_RUNTIME_FAIL;
   }
+  const auto loadEndNs = std::chrono::steady_clock::now();
+  const double loadWallMs =
+      std::chrono::duration<double, std::milli>(loadEndNs - loadStartNs).count();
 
   RendererCreateDesc rendererDesc{};
   rendererDesc.initialWidth = config.render.width;
@@ -466,6 +477,63 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
                  + std::to_string(sceneStats.materialCount) + " materials, "
                  + std::to_string(sceneStats.textureCount)  + " textures, "
                  + std::to_string(sceneStats.lightCount)    + " lights.");
+  }
+
+  // ---- M11 — §34.1 end-of-load summary table -------------------------
+  // Plan §34.1 mandates "spdlog end-of-load summary (always emitted)":
+  // one table with each named ingest sub-phase's wall-time + first-
+  // frame CPU/GPU + total time-to-first-image. Surfaced here, after
+  // the first frame has rendered, so a developer scanning headless
+  // stdout (or a CI log) sees one canonical block instead of having
+  // to assemble it from scattered Info lines.
+  //
+  // The right-aligned numeric column makes columnar reads easy in any
+  // monospace terminal. Per-phase percentages are computed against
+  // wall-clock load time, NOT sum-of-phases — those don't add up
+  // when ingest passes run partly in parallel (M10 §B).
+  {
+    const auto& itim = ingestStats.timings;
+    auto pctOfLoad = [loadWallMs](double phaseMs) noexcept -> double {
+      return loadWallMs > 0.0 ? (100.0 * phaseMs / loadWallMs) : 0.0;
+    };
+    char line[160];
+    log.Info(log::APP, "===== §34.1 Load summary =====");
+    log.Info(log::APP, "phase                                ms          % of load");
+    std::snprintf(line, sizeof(line),
+                  "  ingest.usd.stageOpen               %8.1f       %5.1f%%",
+                  static_cast<double>(itim.stageOpenMs), pctOfLoad(itim.stageOpenMs));
+    log.Info(log::APP, std::string{line});
+    std::snprintf(line, sizeof(line),
+                  "  ingest.usd.traverseSort            %8.1f       %5.1f%%",
+                  static_cast<double>(itim.traverseSortMs), pctOfLoad(itim.traverseSortMs));
+    log.Info(log::APP, std::string{line});
+    std::snprintf(line, sizeof(line),
+                  "  ingest.shared.material.pass        %8.1f       %5.1f%%",
+                  static_cast<double>(itim.materialPassMs), pctOfLoad(itim.materialPassMs));
+    log.Info(log::APP, std::string{line});
+    std::snprintf(line, sizeof(line),
+                  "  ingest.usd.instancerPass           %8.1f       %5.1f%%",
+                  static_cast<double>(itim.instancerPassMs), pctOfLoad(itim.instancerPassMs));
+    log.Info(log::APP, std::string{line});
+    std::snprintf(line, sizeof(line),
+                  "  ingest.usd.meshLightCameraPass     %8.1f       %5.1f%%",
+                  static_cast<double>(itim.meshLightCameraMs),
+                  pctOfLoad(itim.meshLightCameraMs));
+    log.Info(log::APP, std::string{line});
+    std::snprintf(line, sizeof(line),
+                  "  ingest.usd.total                   %8.1f       %5.1f%%",
+                  static_cast<double>(itim.totalMs), pctOfLoad(itim.totalMs));
+    log.Info(log::APP, std::string{line});
+    // Time-to-first-image: wall-clock from headless start through the
+    // first frame's EndFrame. Per-frame CPU/GPU breakdown lives in
+    // the §34 KPI table below (only emitted when --bench-frames > 0,
+    // since single-frame headless doesn't drain the profiler ring
+    // far enough to resolve the GPU timestamps).
+    std::snprintf(line, sizeof(line),
+                  "  render.frame.timeToFirstImage      %8.1f (load wall-clock)",
+                  loadWallMs);
+    log.Info(log::APP, std::string{line});
+    log.Info(log::APP, "==============================");
   }
 
   // ---- Readback + EXR write ------------------------------------------
