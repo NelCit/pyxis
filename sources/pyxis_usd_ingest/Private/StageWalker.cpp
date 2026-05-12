@@ -1895,6 +1895,8 @@ PreparedMesh PrepareMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xform
     result = TessellateBasisCurves(pxr::UsdGeomBasisCurves(prim), worldUp);
   else if (prim.IsA<pxr::UsdGeomPoints>())
     result = TessellatePoints(pxr::UsdGeomPoints(prim), worldUp);
+  else if (prim.IsA<pxr::UsdGeomNurbsPatch>())
+    result = TessellateNurbsPatch(pxr::UsdGeomNurbsPatch(prim));
   else
     return prepared;  // unrecognised — caller already filtered, defensive only
 
@@ -1955,7 +1957,8 @@ PreparedMesh PrepareMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xform
       || prim.IsA<pxr::UsdGeomCone>()
       || prim.IsA<pxr::UsdGeomCapsule>()
       || prim.IsA<pxr::UsdGeomBasisCurves>()
-      || prim.IsA<pxr::UsdGeomPoints>();
+      || prim.IsA<pxr::UsdGeomPoints>()
+      || prim.IsA<pxr::UsdGeomNurbsPatch>();  // V2.A.4 — cubic Bezier path
 }
 
 // EmitPreparedMesh pushes a PreparedMesh into GpuScene — the
@@ -2571,16 +2574,16 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
     {
       // Already translated + counted in pass 1.
     }
-    else if (prim.IsA<pxr::UsdGeomNurbsPatch>() || prim.IsA<pxr::UsdGeomNurbsCurves>())
+    else if (prim.IsA<pxr::UsdGeomNurbsCurves>())
     {
-      // M20 / V2.A.4 — NURBS detect/warn/skip. Full NURBS tessellation
-      // needs OpenSubdiv's NURBS path (or a custom tessellator); v2
-      // detects + skips so NURBS-bearing scenes render the rest of
-      // the geometry.
+      // M20 / V2.A.4 — NURBS curves still detect/warn/skip; full
+      // curve tessellation lands when we extend the BasisCurves
+      // ribbon path to NURBS knots. UsdGeomNurbsPatch is fully
+      // handled by `TessellateNurbsPatch` via the geom-dispatch loop
+      // above (counted as a regular mesh prim, not skipped here).
       Logging::Get().Warn(log::APP,
-          "StageWalker: NURBS prim " + prim.GetPath().GetString()
-              + " (" + prim.GetTypeName().GetString()
-              + ") detected but not yet tessellated. Skipping.");
+          "StageWalker: NURBS curves " + prim.GetPath().GetString()
+              + " detected but not yet tessellated. Skipping.");
       ++stats.skipped;
     }
     else if (prim.IsA<pxr::UsdSkelRoot>() || prim.IsA<pxr::UsdSkelSkeleton>())

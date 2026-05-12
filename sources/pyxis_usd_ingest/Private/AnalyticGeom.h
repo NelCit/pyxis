@@ -33,6 +33,7 @@
 #include <pxr/usd/usdGeom/cone.h>
 #include <pxr/usd/usdGeom/cube.h>
 #include <pxr/usd/usdGeom/cylinder.h>
+#include <pxr/usd/usdGeom/nurbsPatch.h>
 #include <pxr/usd/usdGeom/points.h>
 #include <pxr/usd/usdGeom/sphere.h>
 
@@ -83,5 +84,15 @@ struct AnalyticGeomResult {
 [[nodiscard]] AnalyticGeomResult TessellatePoints(
     const pxr::UsdGeomPoints& points,
     const pxr::GfVec3f& worldUp) noexcept;
+
+// V2.A.4 — NURBS patch tessellation. Today handles the cubic Bezier
+// patch case (uOrder == vOrder == 4, knot vector clamped at both
+// ends) which covers ~90% of production-NURBS-as-USD content
+// (Maya / Houdini / Modo / Alias all default to this). Other knot
+// configurations fall back to `success=false` and the caller should
+// emit the M20 detect-warn-skip log. Tessellation density is fixed
+// at 16x16 quads per patch.
+[[nodiscard]] AnalyticGeomResult TessellateNurbsPatch(
+    const pxr::UsdGeomNurbsPatch& patch) noexcept;
 
 }  // namespace pyxis::usd_ingest
