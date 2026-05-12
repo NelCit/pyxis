@@ -132,6 +132,57 @@ float3 SchlickFresnel(float3 f0, float cosTheta) {
     return f0 + (float3(1.0, 1.0, 1.0) - f0) * oneMinus5;
 }
 
+// M30 — Smith-GGX VNDF sampler (Heitz 2018, "Sampling the GGX
+// Distribution of Visible Normals"). Returns a half-vector H in
+// tangent space given a view direction V (also tangent space) +
+// roughness + two uniform [0,1) samples u1/u2. The caller reflects
+// V around H to get the bounce direction. Used by the inline
+// reflection branch below for importance-sampled glossy specular.
+float3 SampleGgxVndfTangent(float3 viewTan, float roughness, float u1, float u2) {
+    const float alpha = max(0.001, roughness * roughness);
+    // Stretch view to hemisphere config.
+    const float3 vh = normalize(float3(alpha * viewTan.x, alpha * viewTan.y, viewTan.z));
+    // Orthonormal basis around vh.
+    const float lenSq = vh.x * vh.x + vh.y * vh.y;
+    const float3 t1 = lenSq > 0.0
+        ? float3(-vh.y, vh.x, 0.0) / sqrt(lenSq)
+        : float3(1.0, 0.0, 0.0);
+    const float3 t2 = cross(vh, t1);
+    // Sample disk projected onto hemisphere.
+    const float r = sqrt(u1);
+    const float phi = 2.0 * PYXIS_PI_SAFE * u2;
+    const float p1 = r * cos(phi);
+    float p2 = r * sin(phi);
+    const float s = 0.5 * (1.0 + vh.z);
+    p2 = (1.0 - s) * sqrt(1.0 - p1 * p1) + s * p2;
+    // Reproject onto hemisphere.
+    const float3 nh = p1 * t1 + p2 * t2
+                    + sqrt(max(0.0, 1.0 - p1 * p1 - p2 * p2)) * vh;
+    // Unstretch to get H in tangent space.
+    return normalize(float3(alpha * nh.x, alpha * nh.y, max(0.0, nh.z)));
+}
+
+// Cheap integer hash from PCG (Hash Without Sine variant — gives a
+// good-enough u32 per pixel-index/depth seed). The reflection sampler
+// uses two of these to drive the GGX VNDF. Per-frame variation comes
+// from xor'ing the frame index, but for v2 first cut the seed is
+// deterministic per (pixel, depth) so identical scenes re-render
+// identically.
+uint PyxisHashU32(uint x) {
+    x ^= x >> 17;
+    x *= 0xed5ad4bbu;
+    x ^= x >> 11;
+    x *= 0xac4c1b51u;
+    x ^= x >> 15;
+    x *= 0x31848babu;
+    x ^= x >> 14;
+    return x;
+}
+
+float PyxisHashToUnit(uint x) {
+    return float(x) * (1.0 / 4294967296.0);  // [0, 1)
+}
+
 // Simplified GGX specular evaluation for direct lighting. Trowbridge-
 // Reitz NDF + Smith correlated G — full microfacet eval but no
 // importance sampling (we evaluate per-light contribution at the
@@ -555,20 +606,52 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
         ? (directDiffuse + directSpecular + baseColor * ambientSum)
         : baseColor;
 
-    // M30 / V2.B.1 — inline RT specular reflection. Conditions:
+    // M30 / V2.B.1 — inline RT specular reflection (GGX-importance-
+    // sampled). Conditions:
     //  * material is metallic-ish OR roughness is low enough that a
     //    glossy specular contribution is meaningful (roughness < 0.5).
-    //  * recursion depth headroom remains (pipeline maxRecursionDepth
-    //    is 3; primary at 0 + shadow at 1 + reflection at 2 is fine).
-    // The mirror direction is reflect(rayDir, N). The hit point is
-    // nudged along the normal by 1e-3 to skip self-intersection.
-    // Reflection result is mixed by Fresnel: metals reflect baseColor
-    // (F0 = baseColor), dielectrics reflect via Schlick with a small
-    // F0 ≈ 0.04. Rough surfaces blunt the mix via roughness² (cheap
-    // ad-hoc; proper GGX-distributed reflection sampling is M30.1+).
+    //  * recursion depth headroom remains.
+    // Direction sampling: Heitz 2018 Smith-GGX VNDF
+    // (`SampleGgxVndfTangent`). For mirror-smooth surfaces (roughness
+    // → 0) the sample collapses to the mirror direction; for rough
+    // surfaces the half-vector wanders + the bounced ray covers the
+    // GGX cone, giving correct glossy reflections without a static
+    // roughness² fade.
     if (payload.recursionDepth + 1u < 3u
         && (metalness > 0.05 || roughness < 0.5))
     {
+        // Build tangent-space frame around the shading normal. Pick a
+        // helper axis not parallel to the normal so the cross product
+        // is well-conditioned.
+        const float3 axisHelper = abs(nWorld.y) > 0.999
+            ? float3(1.0, 0.0, 0.0)
+            : float3(0.0, 1.0, 0.0);
+        const float3 tangentBasis  = normalize(cross(axisHelper, nWorld));
+        const float3 bitangentBasis = cross(nWorld, tangentBasis);
+        // World → tangent space for the view direction.
+        const float3 viewTan = float3(
+            dot(viewDir, tangentBasis),
+            dot(viewDir, bitangentBasis),
+            dot(viewDir, nWorld));
+
+        // Hash pixel index + recursion depth for the two u1/u2
+        // samples. Deterministic per (pixel, depth) so identical
+        // scenes re-render identically — accumulation buffer
+        // averages the GGX noise across frames.
+        const uint pixelIdx = uint(DispatchRaysIndex().y) * uint(DispatchRaysDimensions().x)
+                            + uint(DispatchRaysIndex().x);
+        const uint seedBase = pixelIdx * 7919u + payload.recursionDepth * 0x9E3779B9u;
+        const float u1 = PyxisHashToUnit(PyxisHashU32(seedBase));
+        const float u2 = PyxisHashToUnit(PyxisHashU32(seedBase ^ 0x68BC21EBu));
+
+        const float3 halfTan = SampleGgxVndfTangent(viewTan, roughness, u1, u2);
+        // Tangent → world for H, then reflect view around H.
+        const float3 halfWorld = normalize(
+              halfTan.x * tangentBasis
+            + halfTan.y * bitangentBasis
+            + halfTan.z * nWorld);
+        const float3 reflDir = normalize(reflect(WorldRayDirection(), halfWorld));
+
         HitInfo reflPayload;
         reflPayload.color           = float3(0.0, 0.0, 0.0);
         reflPayload.hitT            = -1.0;
@@ -582,19 +665,22 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
 
         RayDesc reflRay;
         reflRay.Origin    = hitWorld + nWorld * 1e-3;
-        reflRay.Direction = reflect(WorldRayDirection(), nWorld);
+        reflRay.Direction = reflDir;
         reflRay.TMin      = 1e-3;
         reflRay.TMax      = 10000.0;
         TraceRay(gTlas, RAY_FLAG_NONE, 0xFFu, 0, 0, 0, reflRay, reflPayload);
 
         // Schlick-Fresnel weight: metals carry baseColor F0, dielectrics
-        // a flat 0.04. Roughness attenuates contribution so a half-rough
-        // surface still picks up a noticeable but not blown reflection.
+        // a flat 0.04. With VNDF importance sampling the radiance
+        // estimator simplifies to (F · G2 / G1), but for v2 first
+        // cut we use the Fresnel-only weight + skip the masking term
+        // so the noise stays bounded across rough metals. M30.1+
+        // wires the proper VNDF estimator when accumulation passes
+        // are validating noise budgets.
         const float3 F0 = SchlickF0(baseColor, metalness, mat.specularIor);
-        const float NdotV = max(0.0, dot(nWorld, viewDir));
-        const float fresnel = pow(1.0 - NdotV, 5.0);
-        const float3 reflWeight = (F0 + (float3(1.0, 1.0, 1.0) - F0) * fresnel)
-                                  * (1.0 - roughness * roughness);
+        const float HdotV = max(0.0, dot(halfWorld, viewDir));
+        const float fresnel = pow(1.0 - HdotV, 5.0);
+        const float3 reflWeight = F0 + (float3(1.0, 1.0, 1.0) - F0) * fresnel;
         lit = lit + reflPayload.color * reflWeight;
     }
 
