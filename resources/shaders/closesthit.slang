@@ -551,9 +551,53 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
     // M7-simple Lambertian-against-up approximation modulated by
     // baseColor. Specular is energy-conserving via the per-light F0
     // / metalness split inside GgxSpecular.
-    const float3 lit = (totalContribution > 0.0)
+    float3 lit = (totalContribution > 0.0)
         ? (directDiffuse + directSpecular + baseColor * ambientSum)
         : baseColor;
+
+    // M30 / V2.B.1 — inline RT specular reflection. Conditions:
+    //  * material is metallic-ish OR roughness is low enough that a
+    //    glossy specular contribution is meaningful (roughness < 0.5).
+    //  * recursion depth headroom remains (pipeline maxRecursionDepth
+    //    is 3; primary at 0 + shadow at 1 + reflection at 2 is fine).
+    // The mirror direction is reflect(rayDir, N). The hit point is
+    // nudged along the normal by 1e-3 to skip self-intersection.
+    // Reflection result is mixed by Fresnel: metals reflect baseColor
+    // (F0 = baseColor), dielectrics reflect via Schlick with a small
+    // F0 ≈ 0.04. Rough surfaces blunt the mix via roughness² (cheap
+    // ad-hoc; proper GGX-distributed reflection sampling is M30.1+).
+    if (payload.recursionDepth + 1u < 3u
+        && (metalness > 0.05 || roughness < 0.5))
+    {
+        HitInfo reflPayload;
+        reflPayload.color           = float3(0.0, 0.0, 0.0);
+        reflPayload.hitT            = -1.0;
+        reflPayload.normalWorld     = float3(0.0, 0.0, 0.0);
+        reflPayload.instanceId      = 0xFFFFFFFFu;
+        reflPayload.baseColor       = float3(0.0, 0.0, 0.0);
+        reflPayload.materialId      = 0xFFFFFFFFu;
+        reflPayload.worldHit        = float3(0.0, 0.0, 0.0);
+        reflPayload.elementId       = 0xFFFFFFFFu;
+        reflPayload.recursionDepth  = payload.recursionDepth + 1u;
+
+        RayDesc reflRay;
+        reflRay.Origin    = hitWorld + nWorld * 1e-3;
+        reflRay.Direction = reflect(WorldRayDirection(), nWorld);
+        reflRay.TMin      = 1e-3;
+        reflRay.TMax      = 10000.0;
+        TraceRay(gTlas, RAY_FLAG_NONE, 0xFFu, 0, 0, 0, reflRay, reflPayload);
+
+        // Schlick-Fresnel weight: metals carry baseColor F0, dielectrics
+        // a flat 0.04. Roughness attenuates contribution so a half-rough
+        // surface still picks up a noticeable but not blown reflection.
+        const float3 F0 = SchlickF0(baseColor, metalness, mat.specularIor);
+        const float NdotV = max(0.0, dot(nWorld, viewDir));
+        const float fresnel = pow(1.0 - NdotV, 5.0);
+        const float3 reflWeight = (F0 + (float3(1.0, 1.0, 1.0) - F0) * fresnel)
+                                  * (1.0 - roughness * roughness);
+        lit = lit + reflPayload.color * reflWeight;
+    }
+
     payload.color = lit + emission;
     payload.hitT  = RayTCurrent();
     // M7 follow-up — fields the raygen-side AOV inspector reads.
