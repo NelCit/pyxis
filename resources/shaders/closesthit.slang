@@ -481,14 +481,15 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
             shadowRay.TMin      = 1e-3;
             shadowRay.TMax      = max(1e-3, lightDist - 1e-3);
             HitInfo shadowPayload;
-            shadowPayload.color       = float3(0.0, 0.0, 0.0);  // pre-trace = occluded
-            shadowPayload.hitT        = -1.0;
-            shadowPayload.normalWorld = float3(0.0, 0.0, 0.0);
-            shadowPayload.instanceId  = 0xFFFFFFFFu;
-            shadowPayload.baseColor   = float3(0.0, 0.0, 0.0);
-            shadowPayload.materialId  = 0xFFFFFFFFu;
-            shadowPayload.worldHit    = float3(0.0, 0.0, 0.0);
-            shadowPayload.elementId   = 0xFFFFFFFFu;
+            shadowPayload.color           = float3(0.0, 0.0, 0.0);  // pre-trace = occluded
+            shadowPayload.hitT            = -1.0;
+            shadowPayload.normalWorld     = float3(0.0, 0.0, 0.0);
+            shadowPayload.instanceId      = 0xFFFFFFFFu;
+            shadowPayload.baseColor       = float3(0.0, 0.0, 0.0);
+            shadowPayload.materialId      = 0xFFFFFFFFu;
+            shadowPayload.worldHit        = float3(0.0, 0.0, 0.0);
+            shadowPayload.elementId       = 0xFFFFFFFFu;
+            shadowPayload.recursionDepth  = payload.recursionDepth + 1;  // M29
             TraceRay(gTlas,
                      RAY_FLAG_SKIP_CLOSEST_HIT_SHADER
                        | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH,

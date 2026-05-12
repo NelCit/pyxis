@@ -133,14 +133,15 @@ void main() {
     ray.TMax      = 10000.0f;
 
     HitInfo payload;
-    payload.color        = float3(0, 0, 0);
-    payload.hitT         = -1.0f;
-    payload.normalWorld  = float3(0, 0, 0);
-    payload.instanceId   = 0xFFFFFFFFu;
-    payload.baseColor    = float3(0, 0, 0);
-    payload.materialId   = 0xFFFFFFFFu;
-    payload.worldHit     = float3(0, 0, 0);
-    payload.elementId    = 0xFFFFFFFFu;
+    payload.color           = float3(0, 0, 0);
+    payload.hitT            = -1.0f;
+    payload.normalWorld     = float3(0, 0, 0);
+    payload.instanceId      = 0xFFFFFFFFu;
+    payload.baseColor       = float3(0, 0, 0);
+    payload.materialId      = 0xFFFFFFFFu;
+    payload.worldHit        = float3(0, 0, 0);
+    payload.elementId       = 0xFFFFFFFFu;
+    payload.recursionDepth  = 0;   // M29 / V2.B.1 — primary ray starts at depth 0
 
     // RAY_FLAG_NONE — keep the door open for future shadow/opaque-only
     // refinements. instanceMask = 0xFF matches what GpuScene's TLAS
