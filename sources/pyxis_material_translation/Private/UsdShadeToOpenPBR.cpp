@@ -56,6 +56,28 @@ pxr::UsdShadeShader FindUsdPreviewSurface(const pxr::UsdShadeMaterial& material)
   return surface;
 }
 
+// V2.A.23 — find an MDL surface shader if the material's surface is
+// connected to one. The MDL shader's `info:id` is a token whose
+// string starts with `mdl::` (e.g. `mdl::OmniPBR`, `mdl::Glass`,
+// `mdl::OmniGlass`). Returns an invalid Shader if no MDL surface is
+// found.
+pxr::UsdShadeShader FindMdlSurface(const pxr::UsdShadeMaterial& material) noexcept
+{
+  pxr::TfToken sourceName;
+  pxr::UsdShadeAttributeType sourceType;
+  const pxr::UsdShadeShader surface =
+      material.ComputeSurfaceSource(pxr::TfTokenVector{}, &sourceName, &sourceType);
+  if (!surface.GetPrim().IsValid())
+    return pxr::UsdShadeShader{};
+
+  pxr::TfToken shaderId;
+  if (!surface.GetShaderId(&shaderId))
+    return pxr::UsdShadeShader{};
+  if (!shaderId.GetString().starts_with("mdl::"))
+    return pxr::UsdShadeShader{};
+  return surface;
+}
+
 // Read a scalar float input. Returns `fallback` if the input isn't
 // authored, has the wrong type, or is connected to something we
 // don't follow at M4.
@@ -313,9 +335,41 @@ OpenPBRMaterialDesc FromUsdShade(const pxr::UsdShadeMaterial& material,
   const pxr::UsdShadeShader surface = FindUsdPreviewSurface(material);
   if (!surface.GetPrim().IsValid())
   {
-    // No UsdPreviewSurface connected (or material is empty / uses a
-    // MaterialX-only network). Return the grey default with the
-    // Default-source tag so the renderer's degraded path can flag it.
+    // V2.A.23 — try MDL before falling to default. Omniverse content
+    // routinely authors MDL OmniPBR/Glass shaders instead of
+    // UsdPreviewSurface; translate the common inputs so those scenes
+    // produce a recognisable result instead of grey defaults.
+    if (const pxr::UsdShadeShader mdl = FindMdlSurface(material); mdl.GetPrim().IsValid())
+    {
+      // MDL OmniPBR input names — chosen to match Omniverse's
+      // OmniPBR.mdl shader. Glass / Surface variants share enough
+      // overlap (diffuse_color_constant, metallic_constant, etc.)
+      // that the same readers cover them. Inputs that don't exist on
+      // a given variant fall through to the OpenPBR scalar defaults.
+      desc.baseColor = ReadColor(mdl, pxr::TfToken("diffuse_color_constant"),
+                                  hlslpp::float3{0.18f, 0.18f, 0.18f});
+      desc.metalness = ReadFloat(mdl, pxr::TfToken("metallic_constant"), 0.0f);
+      desc.roughness = ReadFloat(mdl, pxr::TfToken("reflection_roughness_constant"),
+                                  ReadFloat(mdl, pxr::TfToken("roughness_constant"), 0.5f));
+      desc.opacity   = ReadFloat(mdl, pxr::TfToken("opacity_constant"), 1.0f);
+      desc.emissionColor = ReadColor(mdl, pxr::TfToken("emissive_color"),
+                                      hlslpp::float3{0.0f, 0.0f, 0.0f});
+      desc.emissionLuminance = ReadFloat(mdl, pxr::TfToken("emissive_intensity"), 0.0f);
+      // Ior — OmniPBR exposes `ior_constant`; Glass surfaces author
+      // a higher default. UsdPreviewSurface's default is 1.5 too.
+      desc.specularIor = ReadFloat(mdl, pxr::TfToken("ior_constant"), 1.5f);
+      // Emission gate: OmniPBR's `enable_emission` flag — when off,
+      // the intensity / colour are honoured but the material won't
+      // light a surface. Reflect that by zeroing emissionLuminance.
+      if (ReadFloat(mdl, pxr::TfToken("enable_emission"), 1.0f) <= 0.0f)
+        desc.emissionLuminance = 0.0f;
+
+      desc.source = OpenPBRMaterialDesc::Source::MaterialX;  // groups with non-UsdPreviewSurface
+      return desc;
+    }
+    // No UsdPreviewSurface and no MDL surface — return the grey
+    // default with the Default-source tag so the renderer's degraded
+    // path can flag it.
     desc.source = OpenPBRMaterialDesc::Source::Default;
     return desc;
   }
