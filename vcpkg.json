@@ -77,6 +77,11 @@
       "default-features": false,
       "features": ["imaging", "materialx"],
       "$comment": "OpenUSD (M4+). `imaging` pulls Hd / UsdImaging (the Hydra delegate's host); `materialx` enables the open_pbr_surface / standard_surface networks pyxis_material_translation reads. Python deliberately off (plan §6 — we don't embed Python). Boost dropped in modern USD (26.x) so no Boost dep here. Linked PUBLIC into pyxis_hydra + pyxis_usd_ingest only; pyxis_renderer stays USD-free (§1 / §30.3). vcpkg builds USD as DLLs (port enforces ONLY_DYNAMIC_LIBRARY)."
+    },
+    {
+      "name": "opensubdiv",
+      "default-features": false,
+      "$comment": "Pixar's OpenSubdiv (M12 / V2.A.1). Refines authored UsdGeomMesh::subdivisionScheme=catmullClark|loop cages to the limit surface at ingest, so 83 of the lobby's meshes (8.8%) render as smooth surfaces instead of faceted cages. CPU-only path (default features off: no GL/DX/CUDA backends). Linked PRIVATE into pyxis_usd_ingest."
     }
   ],
 

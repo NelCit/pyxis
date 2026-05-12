@@ -25,10 +25,13 @@ target_sources(pyxis_usd_ingest PUBLIC
 
 target_sources(pyxis_usd_ingest PRIVATE
     Private/StageWalker.cpp
+    Private/SubdivRefine.h
+    Private/SubdivRefine.cpp
 )
 
 find_package(pxr CONFIG REQUIRED)
 find_package(mikktspace CONFIG REQUIRED)
+find_package(OpenSubdiv CONFIG REQUIRED)
 
 # OpenMP — used for parallel mesh prep in StageWalker. Use the LLVM
 # runtime (`/openmp:llvm`) rather than MSVC's legacy `/openmp` since
@@ -80,4 +83,9 @@ target_link_libraries(pyxis_usd_ingest
         gf
         vt
         mikktspace::mikktspace
+        # OpenSubdiv CPU refinement (M12 / V2.A.1). The osdCPU_static
+        # target ships the Far + Sdc + Vtr layers; GPU evaluation
+        # backends (osdGPU_static) intentionally not linked — we
+        # refine on the asset I/O pool at ingest time, not on the GPU.
+        OpenSubdiv::osdCPU_static
 )
