@@ -1,0 +1,28 @@
+{
+  "$comment": "Pyxis V2.A.13 fixture — animated xform smoke.",
+
+  "render": {
+    "width":           256,
+    "height":          256,
+    "samplesPerFrame": 1,
+    "seed":            13
+  },
+
+  "output": {
+    "image":           "va13_animated_xform.exr",
+    "effectiveConfig": "va13_animated_xform.effective.json"
+  },
+
+  "diagnostics": {
+    "validationLayer": false,
+    "aftermath":       false
+  },
+
+  "limits": {
+    "framesInFlight":  3
+  },
+
+  "app": {
+    "ingest":          "usd_direct"
+  }
+}

@@ -44,7 +44,8 @@ int RunHeadless(const Configuration& config, const ResolvedScene& scene,
                 std::string_view saveAovList = {},
                 uint32_t benchFrames = 0,
                 std::string_view profilePath = {},
-                std::string_view populationMask = {}) noexcept;
+                std::string_view populationMask = {},
+                double frameNumber = -1.0) noexcept;
 
 // Viewer mode. screenshotPath is the M1 --screenshot debug capture
 // (non-empty -> render a few warmup frames, write a PNG, exit 0).

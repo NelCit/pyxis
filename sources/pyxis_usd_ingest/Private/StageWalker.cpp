@@ -2054,7 +2054,10 @@ std::optional<CameraDesc> BuildCameraDesc(const pxr::UsdPrim& prim,
   if (!cameraPrim.GetPrim().IsValid())
     return std::nullopt;
 
-  const pxr::GfCamera gfCamera = cameraPrim.GetCamera(pxr::UsdTimeCode::Default());
+  // V2.A.13 — read intrinsics at the xform-cache's time so animated
+  // focal length / exposure / clipping range tracks the same frame
+  // as the camera's xform.
+  const pxr::GfCamera gfCamera = cameraPrim.GetCamera(xformCache.GetTime());
   const hlslpp::float4x4 worldFromCamera = ComposeWorldFromLocal(prim, xformCache, stageCtx);
 
   CameraDesc desc;
@@ -2082,7 +2085,8 @@ std::optional<CameraDesc> BuildCameraDesc(const pxr::UsdPrim& prim,
 
 }  // namespace
 
-IngestResult StageWalker::WalkFile(std::string_view usdPath, GpuScene& scene) {
+IngestResult StageWalker::WalkFile(std::string_view usdPath, GpuScene& scene,
+                                   double frameNumber) {
   auto& log = Logging::Get();
   const std::string pathString{usdPath};
 
@@ -2128,7 +2132,7 @@ IngestResult StageWalker::WalkFile(std::string_view usdPath, GpuScene& scene) {
     failed.GetImpl().stats.timings.totalMs = failed.GetImpl().stats.timings.stageOpenMs;
     return failed;
   }
-  IngestResult result = WalkStage(stage, scene);
+  IngestResult result = WalkStage(stage, scene, frameNumber);
   const auto walkEnd = Clock::now();
   // stageOpenMs is local to WalkFile (WalkStage didn't open the
   // stage); fold it in + recompute totalMs to include it.
@@ -2163,12 +2167,28 @@ IngestResult StageWalker::WalkFile(std::string_view usdPath, GpuScene& scene) {
 }
 
 IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
-                                    GpuScene& scene) {
+                                    GpuScene& scene,
+                                    double frameNumber) {
   IngestResult result;
   if (!stage)
     return result;
   IngestStats& stats = result.GetImpl().stats;
   auto& cameras = result.GetImpl().cameras;
+
+  // V2.A.13 — evaluation time. Negative frame = Default (no animation);
+  // any non-negative value drives the per-attr `.Get(timeCode)` calls
+  // and the xform-cache `.SetTime(timeCode)` below.
+  const pxr::UsdTimeCode timeCode =
+      (frameNumber >= 0.0) ? pxr::UsdTimeCode(frameNumber)
+                           : pxr::UsdTimeCode::Default();
+  if (frameNumber >= 0.0)
+  {
+    Logging::Get().Info(log::APP,
+        "StageWalker: evaluating at time-code " + std::to_string(frameNumber)
+            + " (V2.A.13 — xformOps + camera attrs respect time samples; "
+              "mesh / light primvar time samples follow in incremental "
+              "follow-ups).");
+  }
 
   using Clock = std::chrono::steady_clock;
   const auto walkStart = Clock::now();
@@ -2197,7 +2217,7 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
   // pipeline that captures the decoded values into long-lived PODs.
   stats.timings.prewarmPassMs = 0.0f;
 
-  pxr::UsdGeomXformCache xformCache;
+  pxr::UsdGeomXformCache xformCache(timeCode);
   const StageContext stageCtx = BuildStageContext(stage);
 
   // Read the optional `boundCamera` hint from the root layer's
@@ -2434,8 +2454,10 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
   {
     // Per-task xformCache — pxr::UsdGeomXformCache isn't thread-
     // safe. We lose cross-sibling-mesh xform caching but each
-    // per-prim xform-chain walk is small.
-    pxr::UsdGeomXformCache localXformCache;
+    // per-prim xform-chain walk is small. V2.A.13: each per-worker
+    // cache constructed at the same time-code as the outer cache so
+    // animated xforms resolve consistently.
+    pxr::UsdGeomXformCache localXformCache(timeCode);
     const std::size_t primIdx = meshPrimIndices[static_cast<std::size_t>(outIdx)];
     const pxr::UsdPrim& geomPrim = prims[primIdx];
     if (geomPrim.IsA<pxr::UsdGeomMesh>())

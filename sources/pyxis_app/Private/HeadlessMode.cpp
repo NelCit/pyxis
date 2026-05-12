@@ -101,13 +101,15 @@ void LogDeterminismPin(const Configuration& config, uint32_t framesInFlight) noe
                                        const ResolvedScene& resolvedScene,
                                        GpuScene& gpuScene,
                                        pyxis::usd_ingest::IngestStats* outStats,
-                                       std::string_view populationMask = {}) noexcept
+                                       std::string_view populationMask = {},
+                                       double frameNumber = -1.0) noexcept
 {
   bool sceneLoaded = false;
   if (!resolvedScene.path.empty())
   {
     const pyxis::usd_ingest::IngestResult result =
-        IngestUsd(config.app.ingest, resolvedScene.path, gpuScene, populationMask);
+        IngestUsd(config.app.ingest, resolvedScene.path, gpuScene,
+                  populationMask, frameNumber);
     const pyxis::usd_ingest::IngestStats& stats = result.Stats();
     sceneLoaded = stats.meshesEmitted > 0 || stats.camerasEmitted > 0;
     if (outStats != nullptr)
@@ -334,7 +336,8 @@ void SaveAovsFromList(std::string_view saveAovList,
 int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
                 std::string_view saveAovList, uint32_t benchFrames,
                 std::string_view profilePath,
-                std::string_view populationMask) noexcept {
+                std::string_view populationMask,
+                double frameNumber) noexcept {
   auto& log = Logging::Get();
 
   // §27 ValidateForHeadless: non-zero seed (§33.7), non-empty
@@ -420,7 +423,8 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
   // init when the cube fallback fires.
   pyxis::usd_ingest::IngestStats ingestStats{};
   const auto loadStartNs = std::chrono::steady_clock::now();
-  if (!LoadSceneOrFallback(config, resolvedScene, gpuScene, &ingestStats, populationMask))
+  if (!LoadSceneOrFallback(config, resolvedScene, gpuScene, &ingestStats,
+                           populationMask, frameNumber))
   {
     scene.Shutdown();
     return EXIT_RUNTIME_FAIL;

@@ -40,9 +40,13 @@ namespace pyxis::app {
 // Composition-fine-points like `--load-mode=none|metadata` aren't yet
 // honoured (the StageWalker always traverses); they live on
 // `loadMode` so the surface is open for the follow-up.
+// `frameNumber` (V2.A.13): time-code at which to evaluate the stage.
+// Negative = `UsdTimeCode::Default()` (no animation, default-time
+// fallthrough). Animated xform / camera attrs respect this value.
 pyxis::usd_ingest::IngestResult IngestUsd(std::string_view adapter,
                                           std::string_view usdPath,
                                           GpuScene& scene,
-                                          std::string_view populationMask = {});
+                                          std::string_view populationMask = {},
+                                          double frameNumber = -1.0);
 
 }  // namespace pyxis::app

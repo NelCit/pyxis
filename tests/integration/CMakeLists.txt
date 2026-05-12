@@ -397,6 +397,21 @@ set_tests_properties(V2A15.PopulationMaskSmoke PROPERTIES
     TIMEOUT   120
 )
 
+# V2.A.13 — UsdTimeCode propagation smoke.
+add_test(
+    NAME    V2A13.TimeCodeSmoke
+    COMMAND ${CMAKE_COMMAND}
+            -DPYXIS_EXE=$<TARGET_FILE:pyxis>
+            -DFIXTURE_CONFIG=${CMAKE_SOURCE_DIR}/tests/fixtures/va13_animated_xform.json
+            -DSCENE_PATH=${CMAKE_SOURCE_DIR}/tests/fixtures/va13_animated_xform.usda
+            -DOUTPUT_DIR=${CMAKE_BINARY_DIR}/tests/integration/va13_timecode
+            -P ${CMAKE_SOURCE_DIR}/tests/integration/va13_timecode_smoke.cmake
+)
+set_tests_properties(V2A13.TimeCodeSmoke PROPERTIES
+    LABELS    "integration;v2a13"
+    TIMEOUT   120
+)
+
 # §41 M28 / V2.A.28 — USD loading audit. Runs the pure-Python audit
 # tool against an in-tree fixture (one of each STUB type + standard
 # LOADED types); the tool returns exit 0 because every authored type

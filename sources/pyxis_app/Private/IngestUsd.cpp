@@ -61,7 +61,8 @@ namespace {
 pyxis::usd_ingest::IngestResult IngestUsd(std::string_view adapter,
                                           std::string_view usdPath,
                                           GpuScene& scene,
-                                          std::string_view populationMask) {
+                                          std::string_view populationMask,
+                                          double frameNumber) {
   auto& log = Logging::Get();
 
   // Banner format: "IngestUsd[<adapter>]: loading <path>". Adapter
@@ -94,6 +95,12 @@ pyxis::usd_ingest::IngestResult IngestUsd(std::string_view adapter,
   }
 
   pyxis::usd_ingest::StageWalker walker;
+  if (frameNumber >= 0.0)
+  {
+    log.Info(log::APP, "IngestUsd: --frame "
+                           + std::to_string(static_cast<int>(frameNumber))
+                           + " honoured (V2.A.13).");
+  }
   if (!populationMask.empty())
   {
     // V2.A.15 — composition load mode: realise only the prims under
@@ -117,11 +124,11 @@ pyxis::usd_ingest::IngestResult IngestUsd(std::string_view adapter,
       log.Error(log::APP,
           "IngestUsd: OpenMasked failed for " + std::string{usdPath}
               + "; falling back to full Open.");
-      return walker.WalkFile(usdPath, scene);
+      return walker.WalkFile(usdPath, scene, frameNumber);
     }
-    return walker.WalkStage(stage, scene);
+    return walker.WalkStage(stage, scene, frameNumber);
   }
-  return walker.WalkFile(usdPath, scene);
+  return walker.WalkFile(usdPath, scene, frameNumber);
 }
 
 }  // namespace pyxis::app
