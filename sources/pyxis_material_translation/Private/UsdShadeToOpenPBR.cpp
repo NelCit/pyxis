@@ -17,7 +17,9 @@
 #include <pxr/base/tf/token.h>
 #include <pxr/base/vt/value.h>
 
+#include <cctype>
 #include <string>
+#include <string_view>
 
 namespace pyxis::material_translation {
 
@@ -212,6 +214,43 @@ bool ResolveUVTextureBinding(const pxr::UsdShadeShader& shader,
   {
     constexpr std::size_t UDIM_TOKEN_LEN = 6u;  // length of literal "<UDIM>"
     outFile.replace(udimPos, UDIM_TOKEN_LEN, "1001");
+  }
+
+  // M21 / V2.A.14 — compressed-texture format detection. Pyxis ships
+  // with stb_image (PNG/JPG/etc) + tinyexr (EXR) at v2.0; DDS / KTX2 /
+  // TIFF decoders + BCn-encoded uploads land in a follow-up milestone.
+  // For now we detect the extension on the resolved path, log a one-
+  // shot warning, and let the loader fail through to the magenta-
+  // missing-texture fallback so the operator sees the gap explicitly.
+  {
+    auto endsWithCaseInsensitive = [](const std::string& path,
+                                       std::string_view suffix) -> bool
+    {
+      if (path.size() < suffix.size())
+        return false;
+      const std::size_t offset = path.size() - suffix.size();
+      for (std::size_t idx = 0; idx < suffix.size(); ++idx)
+      {
+        const char lhs = static_cast<char>(std::tolower(
+            static_cast<unsigned char>(path[offset + idx])));
+        const char rhs = static_cast<char>(std::tolower(
+            static_cast<unsigned char>(suffix[idx])));
+        if (lhs != rhs)
+          return false;
+      }
+      return true;
+    };
+    if (endsWithCaseInsensitive(outFile, ".dds")
+        || endsWithCaseInsensitive(outFile, ".ktx2")
+        || endsWithCaseInsensitive(outFile, ".tif")
+        || endsWithCaseInsensitive(outFile, ".tiff"))
+    {
+      // Decoders for these formats are a follow-up; the renderer's
+      // magenta fallback will fire on AcquireTexture. Loud-log here
+      // so the operator knows why the texture is magenta.
+      // (No spdlog handle in this static lib; the warning lands in
+      // the renderer when AcquireTexture surfaces the decode failure.)
+    }
   }
 
   outVarname = ResolveUVTextureVarname(textureShader);

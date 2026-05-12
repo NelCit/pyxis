@@ -237,6 +237,24 @@ CliArgs Parse(int argc, char** argv) noexcept {
       }
       ++i;
     }
+    else if (Equals(arg, "--load-mode"))
+    {
+      if (!TakeValue(argc, argv, i, out.loadMode))
+      {
+        out.invalid = true;
+        out.invalidArg = arg;
+        return out;
+      }
+    }
+    else if (Equals(arg, "--population-mask"))
+    {
+      if (!TakeValue(argc, argv, i, out.populationMask))
+      {
+        out.invalid = true;
+        out.invalidArg = arg;
+        return out;
+      }
+    }
     else
     {
       out.invalid = true;
@@ -291,6 +309,12 @@ void PrintUsage() noexcept {
       "  --frame <int>           Time-varying USD frame to evaluate. M19 stub: parsed\n"
       "                          and logged; full UsdTimeCode propagation is a follow-up\n"
       "                          milestone (V2.A.4 / V2.A.13). -1 = default time.\n"
+      "  --load-mode <mode>      USD composition load mode: none / metadata / all (default).\n"
+      "                          M21 stub: parsed and logged; UsdStage::OpenMasked plumbing\n"
+      "                          is a follow-up milestone (V2.A.15).\n"
+      "  --population-mask <p>   Comma-separated SdfPath prefixes for partial-stage load.\n"
+      "                          M21 stub: parsed and logged; full UsdStagePopulationMask\n"
+      "                          plumbing is a follow-up milestone (V2.A.15).\n"
       "\n"
       "Viewer extras:\n"
       "  --screenshot <path>     Run viewer briefly; write a PNG of the backbuffer.\n"

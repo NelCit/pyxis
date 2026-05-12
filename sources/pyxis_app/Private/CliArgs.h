@@ -66,6 +66,15 @@ struct CliArgs {
   // place — minus-one means "not authored on the command line".
   int frameNumber = -1;          // --frame <int>  (-1 = default time)
 
+  // M21 / V2.A.15 — USD composition load modes. Parsed but the rest
+  // of the pipeline always uses UsdStage::LoadAll() in v2; honouring
+  // --load-mode / --population-mask needs the StageWalker to switch
+  // to UsdStage::OpenMasked + population masks, and the renderer to
+  // tolerate partially-loaded stages. Stubbed via CliArgs so the
+  // surface is open for the follow-up. Empty = default-load-all.
+  std::string_view loadMode;          // --load-mode <none|metadata|all>
+  std::string_view populationMask;    // --population-mask <sdf-path>[,<sdf-path>...]
+
   // ---- M7 follow-up: AOV save -----------------------------------------
   // --save-aov <list>  Comma-separated list of raw AOVs to dump
   // alongside the regular `--output` BGRA8 EXR. The path stem of
