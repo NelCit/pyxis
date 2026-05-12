@@ -109,9 +109,16 @@ struct CameraUniforms {
     // CameraDesc::exposure / UsdGeomCamera::exposure. Three pad
     // floats keep the cbuffer 16-byte aligned (std140 rule).
     float exposure;
+    // M9-fidelity: pixel angular spread (radians per pixel along the
+    // vertical axis). Drives ray-cone-footprint LOD selection in the
+    // closesthit so distant surfaces sample mip levels instead of
+    // mip 0 (the SampleLevel(s, uv, 0)-pinned path in M5–M9 aliased
+    // hard at distance). Computed by the C++ side as
+    //   pixelSpreadRadians = 2 × atan(0.5 / focalLengthInPixels)
+    // ≈ 2 × tan(fovY / 2) / imageHeight for a standard pinhole.
+    float pixelSpreadRadians;
     float _camPad0;
     float _camPad1;
-    float _camPad2;
 };
 
 // FrameUiUniforms — per-frame viewer-only state the raygen reads
@@ -272,6 +279,17 @@ struct OpenPBRMaterialGPU {
     uint  transmissionTex;
     uint  coatRoughnessTex;
     uint  _reserved0;
+
+    // Row 5 — M9 emission RGB. UsdPreviewSurface authors the emissive
+    // tint as a color3f (`emissiveColor`); the closesthit emits
+    // `emissionColor × emissionLuminance × (sampled emissionTex)`
+    // when MATERIAL_FLAG_EMISSIVE is set. emissionLuminance lives on
+    // row 3 above as a scalar multiplier (set to 1.0 by default for
+    // UsdPreviewSurface materials with non-zero emissiveColor).
+    float emissionR;
+    float emissionG;
+    float emissionB;
+    uint  _reserved1;
 };
 
 // LightGpu — packed light entry the closesthit reads via the
@@ -314,11 +332,29 @@ struct LightGpu {
     float axisUz;
     uint  doubleSided;      // 0 = single-sided, 1 = double-sided (Rect)
 
-    // Row 4 — Rect axisV.
+    // Row 4 — Rect axisV + Dome rotation slot.
     float axisVx;
     float axisVy;
     float axisVz;
-    uint  _reserved0;
+    // M9-fidelity: per-prim dome rotation around world-Y in radians.
+    // Authored on the DomeLight's xformOpOrder. Miss shader rotates
+    // the lat-long sample direction by -domeRotationYRadians.
+    // Ignored for non-Dome kinds.
+    float domeRotationYRadians;
+
+    // Row 5 — UsdLuxShapingAPI cone (M9-fidelity). Spotlight
+    // half-angle stored as cos(angle) for cheap dot-product
+    // comparison in closesthit. cosOuter == 0.0 means "no cone"
+    // (cos 90°) and the closesthit path skips the falloff. Inner
+    // edge derives from softness: a 0..1 fraction of the half-
+    // angle that defines the smooth-step interior. Cone axis is
+    // derived per-kind in closesthit (Distant: -L.dir; Rect/Disk/
+    // Sphere: normalize(cross(axisU, axisV))) so we don't carry
+    // extra data here.
+    float shapingConeCosOuter;       // cos(coneHalfAngle)
+    float shapingConeCosInner;       // cos(coneHalfAngle × (1 - softness))
+    float _reserved1;
+    float _reserved2;
 };
 
 // Light kind enum mirroring pyxis::LightDesc::Kind. Closesthit
@@ -376,8 +412,10 @@ static const uint BINDLESS_TEXTURES_CAP = 4096u;
                   "See resources/shaders/ShaderInterop.slang.");
     static_assert(sizeof(PickResult) % 16 == 0,
                   "PickResult must be 16-byte aligned (structured-buffer rule).");
-    static_assert(sizeof(OpenPBRMaterialGPU) == 80,
-                  "OpenPBRMaterialGPU must be 80 bytes (5 rows of 16).");
+    static_assert(sizeof(OpenPBRMaterialGPU) == 96,
+                  "OpenPBRMaterialGPU must be 96 bytes (6 rows of 16) — M9 added "
+                  "emissionR/G/B on row 5 alongside the existing emissionLuminance "
+                  "scalar on row 3.");
     static_assert(sizeof(OpenPBRMaterialGPU) % 16 == 0,
                   "OpenPBRMaterialGPU must be 16-byte aligned (§23 cbuffer / "
                   "structured-buffer alignment rule).");

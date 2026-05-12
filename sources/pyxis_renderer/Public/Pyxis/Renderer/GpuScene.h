@@ -254,6 +254,24 @@ public:
   [[nodiscard]] nvrhi::IBuffer*          GetMeshIndicesBuffer() const noexcept;
   [[nodiscard]] nvrhi::IBuffer*          GetMeshIndexOffsetsBuffer() const noexcept;
 
+  // M9 smooth shading: per-vertex normals concatenated into one flat
+  // float4 buffer + per-mesh-slot start offsets. Closesthit reads:
+  //   nv0..2 = gMeshVertexNormals[gMeshVertexNormalOffsets[meshSlot] + v_i]
+  //   nLocal = barycentric_interp(nv0, nv1, nv2, attribs.bary)
+  // and falls back to the per-triangle face normal when |nLocal|≈0
+  // (mesh authored no normals). Float4 stride for std430 alignment +
+  // a future tangent.w sign-bit slot.
+  [[nodiscard]] nvrhi::IBuffer*          GetMeshVertexNormalsBuffer() const noexcept;
+  [[nodiscard]] nvrhi::IBuffer*          GetMeshVertexNormalOffsetsBuffer() const noexcept;
+
+  // M9 normal mapping: per-vertex tangents from MikkTSpace. float4
+  // stride — xyz is the unit tangent, w is the bitangent sign for
+  // the closesthit's `bitangent = sign × cross(N, T)` build. Empty
+  // for meshes without UVs or normals (MikkTSpace prereqs); the
+  // closesthit's normal-mapping branch then skips the TBN sample.
+  [[nodiscard]] nvrhi::IBuffer*          GetMeshTangentsBuffer() const noexcept;
+  [[nodiscard]] nvrhi::IBuffer*          GetMeshTangentOffsetsBuffer() const noexcept;
+
   // M7-IBL: env-map texture of the FIRST live UsdLuxDomeLight, or
   // nullptr if no dome with a resolved envMap exists. Miss shader
   // samples this at the ray direction's lat-long uv to draw the
@@ -261,11 +279,18 @@ public:
   // (production-renderer convention; multi-dome is post-v1 §43).
   [[nodiscard]] nvrhi::ITexture*         GetDomeEnvMapTexture() const noexcept;
 
-  // M5/M7: shared linear-clamp sampler used for every bindless
-  // texture lookup (materials' baseColor/normal/etc. + the dome
-  // env-map). Per-role samplers (anisotropic for tangent maps, etc.)
-  // are an M9 polish item.
+  // M5/M7: shared linear sampler for material bindless textures
+  // (baseColor / normal / metallic / roughness / emission). Wrap-
+  // Wrap-Wrap addressing covers the tiling architectural materials
+  // common in v1; per-role anisotropic samplers are M11+ polish.
   [[nodiscard]] nvrhi::ISampler*         GetBindlessSampler() const noexcept;
+
+  // M9-fidelity: dedicated sampler for the HDRI dome lat-long
+  // mapping. Wrap-U / Clamp-V — the V-axis clamp prevents the
+  // elevation seam at the poles from mirroring +Y onto -Y, an
+  // artefact visible at glancing-angle hits with the original
+  // shared bindlessSampler.
+  [[nodiscard]] nvrhi::ISampler*         GetDomeSampler() const noexcept;
 
   // M8a bindless textures: 4×4 magenta fallback bound at bindless
   // slot 0 so any material whose resolved texture failed to decode

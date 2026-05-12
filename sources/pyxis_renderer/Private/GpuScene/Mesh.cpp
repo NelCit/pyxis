@@ -158,6 +158,15 @@ Expected<MeshHandle> GpuScene::Impl::CreateMesh(const MeshDesc& meshDesc)
   // baseColor in that case.
   meshUvsNeedUpload     = true;
   meshIndicesNeedUpload = true;
+  // M9 smooth shading: mesh registration dirties the per-vertex
+  // normal buffer too. Empty `meshDesc.normals` is fine — the closesthit
+  // detects a near-zero magnitude and falls back to the M7 face-normal
+  // path, so meshes that authored no normals still render.
+  meshVertexNormalsNeedUpload = true;
+  // M9 normal mapping: same dirty-flag pattern. Empty `meshDesc.tangents`
+  // is fine — closesthit's normal-mapping branch detects the
+  // zero-magnitude case and skips its TBN sample.
+  meshTangentsNeedUpload = true;
 
   // Record the descHash on the entry + register the handle in the
   // dedup map. DestroyMesh erases the map entry symmetrically.

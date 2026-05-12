@@ -243,6 +243,10 @@ nvrhi::ISampler* GpuScene::GetBindlessSampler() const noexcept {
   return _impl->bindlessSampler.Get();
 }
 
+nvrhi::ISampler* GpuScene::GetDomeSampler() const noexcept {
+  return _impl->domeSampler.Get();
+}
+
 nvrhi::IBuffer* GpuScene::GetInstanceMeshBuffer() const noexcept {
   return _impl->instanceMeshBuffer.Get();
 }
@@ -269,6 +273,22 @@ nvrhi::IBuffer* GpuScene::GetMeshIndicesBuffer() const noexcept {
 
 nvrhi::IBuffer* GpuScene::GetMeshIndexOffsetsBuffer() const noexcept {
   return _impl->meshIndexOffsetsBuffer.Get();
+}
+
+nvrhi::IBuffer* GpuScene::GetMeshVertexNormalsBuffer() const noexcept {
+  return _impl->meshVertexNormalsBuffer.Get();
+}
+
+nvrhi::IBuffer* GpuScene::GetMeshVertexNormalOffsetsBuffer() const noexcept {
+  return _impl->meshVertexNormalOffsetsBuffer.Get();
+}
+
+nvrhi::IBuffer* GpuScene::GetMeshTangentsBuffer() const noexcept {
+  return _impl->meshTangentsBuffer.Get();
+}
+
+nvrhi::IBuffer* GpuScene::GetMeshTangentOffsetsBuffer() const noexcept {
+  return _impl->meshTangentOffsetsBuffer.Get();
 }
 
 nvrhi::ITexture* GpuScene::GetMissingTexture() const noexcept {

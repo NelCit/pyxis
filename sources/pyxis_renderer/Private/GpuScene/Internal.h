@@ -33,6 +33,8 @@
 
 #include <nvrhi/nvrhi.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
@@ -201,6 +203,14 @@ inline shaderinterop::OpenPBRMaterialGPU PackMaterialGpu(
   gpu.transmissionTex = transmissionSlot;
   gpu.coatRoughnessTex = coatRoughnessSlot;
   gpu._reserved0 = 0;
+  // M9 emission RGB. UsdPreviewSurface authors emissive as a color3f
+  // (`emissiveColor`); the closesthit emits emissionColor ×
+  // emissionLuminance × (sampled emissionTex) when the
+  // MATERIAL_FLAG_EMISSIVE bit is set.
+  gpu.emissionR = static_cast<float>(desc.emissionColor.x);
+  gpu.emissionG = static_cast<float>(desc.emissionColor.y);
+  gpu.emissionB = static_cast<float>(desc.emissionColor.z);
+  gpu._reserved1 = 0;
   return gpu;
 }
 
@@ -256,7 +266,33 @@ inline shaderinterop::LightGpu PackLightGpu(const LightDesc& desc,
   gpu.axisVx = static_cast<float>(desc.axisV.x);
   gpu.axisVy = static_cast<float>(desc.axisV.y);
   gpu.axisVz = static_cast<float>(desc.axisV.z);
-  gpu._reserved0 = 0;
+  // M9-fidelity dome Y-rotation. Only meaningful for Kind::Dome but
+  // packed unconditionally — the miss shader gates on kind itself.
+  gpu.domeRotationYRadians = static_cast<float>(desc.domeRotationY);
+  // M9-fidelity UsdLuxShapingAPI cone. Stored as cos(half-angle) for
+  // cheap dot-product comparison in closesthit. shapingConeAngle is
+  // in DEGREES on LightDesc per the UsdLuxShapingAPI convention; 90°
+  // (the default) means "no cone" — clamp cosOuter to 0.0 in that
+  // case so the closesthit path skips the falloff. Softness is a
+  // 0..1 fraction of the half-angle defining the smooth-step
+  // interior edge.
+  const float coneHalfAngleDeg = static_cast<float>(desc.shapingConeAngle);
+  if (coneHalfAngleDeg < 90.0f - 1e-4f)
+  {
+    constexpr float DEG_TO_RAD = 3.14159265358979323846f / 180.0f;
+    const float coneHalfAngleRad = coneHalfAngleDeg * DEG_TO_RAD;
+    const float softness = std::clamp(static_cast<float>(desc.shapingConeSoftness),
+                                      0.0f, 1.0f);
+    gpu.shapingConeCosOuter = std::cos(coneHalfAngleRad);
+    gpu.shapingConeCosInner = std::cos(coneHalfAngleRad * (1.0f - softness));
+  }
+  else
+  {
+    gpu.shapingConeCosOuter = 0.0f;  // sentinel: no cone
+    gpu.shapingConeCosInner = 0.0f;
+  }
+  gpu._reserved1 = 0.0f;
+  gpu._reserved2 = 0.0f;
   return gpu;
 }
 
@@ -306,6 +342,13 @@ inline shaderinterop::LightGpu PackLightGpu(const LightDesc& desc,
 // functions on it; the public header (GpuScene.h) only forward-
 // declares this. All NVRHI handles + STL containers live behind this
 // boundary per §18.9.
+//
+// NOLINTNEXTLINE(clang-analyzer-optin.performance.Padding) — field
+// order here groups related data for cache locality + readability
+// (per-resource sections, dirty-flag bools clustered at the end);
+// optimal-packing reorder would scatter related fields apart and
+// hurt the cognitive map without changing runtime hot-path costs
+// (Impl is allocated once per renderer instance, not in any loop).
 struct GpuScene::Impl
 {
   // Per-mesh entry. Holds the CPU-side input MeshDesc spans + the
@@ -477,6 +520,12 @@ struct GpuScene::Impl
   bool                 materialsNeedGpuUpload = false;
   nvrhi::BufferHandle  instanceMaterialBuffer;
   nvrhi::SamplerHandle bindlessSampler;
+  // M9-fidelity per-role samplers. `bindlessSampler` (above) is
+  // Wrap-Wrap-Wrap for tiling material textures; `domeSampler` is
+  // Wrap-Clamp-Wrap for the HDRI dome's lat-long mapping (V-axis
+  // clamp prevents the elevation seam at the poles from mirroring
+  // +Y onto -Y).
+  nvrhi::SamplerHandle domeSampler;
 
   // M7: structured buffer of LightGpu entries the closesthit reads
   // via the simple per-light contribution loop at binding 5. Sized
@@ -522,6 +571,28 @@ struct GpuScene::Impl
   nvrhi::BufferHandle  meshIndexOffsetsBuffer;
   bool                 meshUvsNeedUpload     = false;
   bool                 meshIndicesNeedUpload = false;
+
+  // M9 smooth shading: per-vertex normals concatenated into one flat
+  // float4 buffer + per-mesh-slot start offsets. Mirror of the
+  // per-triangle face-normal buffer above but per-VERTEX so the
+  // closesthit can barycentric-interpolate three vertex normals at
+  // each hit. Stored as float4 for std430 alignment + a future
+  // tangent.w sign-bit slot. Empty for meshes with no authored
+  // normals — closesthit detects a near-zero magnitude and falls
+  // back to the M7 face-normal path.
+  nvrhi::BufferHandle  meshVertexNormalsBuffer;
+  nvrhi::BufferHandle  meshVertexNormalOffsetsBuffer;
+  bool                 meshVertexNormalsNeedUpload = false;
+
+  // M9 normal mapping: per-vertex tangents from MikkTSpace. float4
+  // stride — xyz is the unit tangent, w is the bitangent sign
+  // (+/- 1) for the closesthit's `bitangent = sign × cross(N, T)`
+  // construction. Empty when the mesh has no UVs or normals (those
+  // are MikkTSpace prereqs); closesthit's normal-mapping branch then
+  // falls back to using the vertex-interpolated normal without TBN.
+  nvrhi::BufferHandle  meshTangentsBuffer;
+  nvrhi::BufferHandle  meshTangentOffsetsBuffer;
+  bool                 meshTangentsNeedUpload = false;
 
   // Magenta 4x4 fallback texture — slot 0 in the bindless table is
   // permanently the "missing texture" colour so any material whose
@@ -685,6 +756,8 @@ struct GpuScene::Impl
   [[nodiscard]] Expected<void> UploadMeshFaceNormals(nvrhi::ICommandList* commandList);
   [[nodiscard]] Expected<void> UploadMeshUvs(nvrhi::ICommandList* commandList);
   [[nodiscard]] Expected<void> UploadMeshIndices(nvrhi::ICommandList* commandList);
+  [[nodiscard]] Expected<void> UploadMeshVertexNormals(nvrhi::ICommandList* commandList);
+  [[nodiscard]] Expected<void> UploadMeshTangents(nvrhi::ICommandList* commandList);
 };
 
 }  // namespace pyxis

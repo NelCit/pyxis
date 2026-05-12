@@ -23,6 +23,11 @@
 
 namespace pyxis {
 
+// NOLINTNEXTLINE(clang-analyzer-optin.performance.Padding) — field
+// order is part of the §18 public ABI contract per §22.3; reordering
+// to shrink padding would break compiled consumers. Empty padding
+// is intentional and reserved for trailing _reserved slots per
+// §22.3 MINOR-additive growth rules.
 struct LightDesc {
   enum class Kind : uint8_t {
     Distant,
@@ -99,6 +104,13 @@ struct LightDesc {
   float shapingConeSoftness = 0.0f;
   float shapingFocus = 0.0f;
   hlslpp::float3 shapingFocusTint = {1.0f, 1.0f, 1.0f};
+
+  // M9-fidelity — DomeLight per-prim Y-axis rotation in radians.
+  // UsdLuxDomeLight is typically only rotated horizontally (spin
+  // the HDRI horizon). Miss shader rotates the lat-long sample
+  // direction by -domeRotationY before the atan2(x, z) → u lookup.
+  // Ignored for non-Dome kinds.
+  float domeRotationY = 0.0f;
 
   // §22.3 reserved padding. Started at `_reserved[8]` in v0.0.1; the
   // M8a additions above consumed 6 uint32-equivalent slots

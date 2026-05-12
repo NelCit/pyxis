@@ -31,6 +31,8 @@
 #include <Pyxis/Renderer/Descs/TextureKey.h>
 #include <Pyxis/Renderer/GpuScene.h>
 
+#include <mikktspace.h>
+
 #include <pxr/usd/usd/prim.h>
 #include <pxr/usd/usd/primRange.h>
 #include <pxr/usd/usd/relationship.h>
@@ -76,6 +78,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <execution>
+#include <numeric>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -129,6 +133,130 @@ bool IngestResult::GetCameraAt(uint32_t index, NamedCameraView* out) const noexc
 IngestResult::Impl& IngestResult::GetImpl() noexcept { return *_impl; }
 
 namespace {
+
+// M9-fidelity hard-edge dedup. UsdGeomMesh authors normals + UVs
+// with one of three interpolation modes:
+//   - vertex:      one value per usdPoints entry (already shared)
+//   - faceVarying: one value per face-vertex (independent per face)
+//   - constant/uniform: one value for the whole mesh / face
+// Only faceVarying introduces hard edges — when two faces sharing a
+// vertex want different normals (hard mesh edge) or different UVs
+// (UV seam at an island boundary). The pre-M9-fidelity pipeline
+// collapsed faceVarying to per-vertex by taking the first value
+// per shared vertex slot, dropping the second. With dedup we emit
+// a NEW vertex slot whenever (positionIdx, normal, uv) differs —
+// duplicating shared positions only as needed. UV seams + hard
+// crease edges then render correctly.
+//
+// **Chained per-position dedup** (not std::unordered_map). The
+// initial implementation used unordered_map<VertexKey, uint32_t>
+// keyed on (positionIdx + bit-cast normal + bit-cast uv); it was
+// correct but catastrophically slow in MSVC Debug builds —
+// std::unordered_map node allocations + iterator-debugging
+// overhead dragged lobby ingest from ~15s to ~160s.
+//
+// Replacement: per parent-mesh-position, a singly-linked chain
+// of (normal, uv, outIdx) entries pooled in a flat vector.
+// Lookup walks the chain comparing bit-patterns; in production
+// scenes most positions have one entry (chain length 1, one
+// memcmp per face-vertex), UV-seam corners + hard-edge vertices
+// have 2–4 entries. Zero per-FV allocations once the entry pool
+// is reserved. Same dedup semantics as the unordered_map — bit-
+// equal (n, uv) tuples collapse to the same slot, distinct
+// tuples split — but ~50× faster in Debug.
+struct VertexEntry {
+  std::uint32_t normalBits[3];   // bit-cast hlslpp::float3
+  std::uint32_t uvBits[2];       // bit-cast hlslpp::float2
+  std::uint32_t outIdx;          // slot in outPositions
+  std::int32_t  next;            // chain link, -1 = end
+};
+
+// MikkTSpace user-data + callbacks for per-mesh tangent generation.
+// MikkTSpace consumes (positions, normals, UVs) per-face-vertex and
+// produces per-(face, vertex) tangents — strictly the documented
+// "do NOT collapse via the existing index list" pattern. We feed it
+// the M9-fidelity hard-edge-deduplicated arrays (one tangent per
+// emitted vertex slot, where face-varying boundaries already split
+// into distinct slots), so each tangent write naturally lands on a
+// unique slot and the first-tangent-wins guard becomes a no-op.
+//
+// Pointers (not std::vector*) are intentional: MikkTSpace fires its
+// callbacks ~12 times per face, and MSVC Debug's std::vector<T>::
+// operator[] does iterator-debugging bounds checks each access. On
+// the lobby that overhead alone added tens of seconds to ingest;
+// caching raw const pointers + sizes once per mesh skirts the
+// per-callback std::vector machinery entirely.
+struct MikkContext {
+  const std::uint32_t*    triangleIndices   = nullptr;
+  std::size_t             triangleVertCount = 0;  // = triangleIndices length
+  const hlslpp::float3*   positions         = nullptr;
+  std::size_t             positionsCount    = 0;
+  const hlslpp::float3*   vertexNormals     = nullptr;
+  const hlslpp::float2*   vertexUvs         = nullptr;
+  hlslpp::float4*         outVertexTangents = nullptr;  // x,y,z,sign
+  bool*                   outTangentAssigned = nullptr;
+  std::size_t             outVertexCount    = 0;
+};
+
+int MikkGetNumFaces(const SMikkTSpaceContext* ctx) {
+  const auto* user = static_cast<const MikkContext*>(ctx->m_pUserData);
+  return static_cast<int>(user->triangleVertCount / 3u);
+}
+
+int MikkGetNumVerticesOfFace(const SMikkTSpaceContext* /*ctx*/, int /*face*/) {
+  return 3;  // Always triangulated upstream.
+}
+
+void MikkGetPosition(const SMikkTSpaceContext* ctx, float* outPos,
+                     int face, int vert) {
+  const auto* user = static_cast<const MikkContext*>(ctx->m_pUserData);
+  const std::uint32_t vertexIdx =
+      user->triangleIndices[static_cast<std::size_t>(face) * 3u
+                            + static_cast<std::size_t>(vert)];
+  const hlslpp::float3& pos = user->positions[vertexIdx];
+  outPos[0] = static_cast<float>(pos.x);
+  outPos[1] = static_cast<float>(pos.y);
+  outPos[2] = static_cast<float>(pos.z);
+}
+
+void MikkGetNormal(const SMikkTSpaceContext* ctx, float* outNormal,
+                   int face, int vert) {
+  const auto* user = static_cast<const MikkContext*>(ctx->m_pUserData);
+  const std::uint32_t vertexIdx =
+      user->triangleIndices[static_cast<std::size_t>(face) * 3u
+                            + static_cast<std::size_t>(vert)];
+  const hlslpp::float3& nrm = user->vertexNormals[vertexIdx];
+  outNormal[0] = static_cast<float>(nrm.x);
+  outNormal[1] = static_cast<float>(nrm.y);
+  outNormal[2] = static_cast<float>(nrm.z);
+}
+
+void MikkGetTexCoord(const SMikkTSpaceContext* ctx, float* outUv,
+                     int face, int vert) {
+  const auto* user = static_cast<const MikkContext*>(ctx->m_pUserData);
+  const std::uint32_t vertexIdx =
+      user->triangleIndices[static_cast<std::size_t>(face) * 3u
+                            + static_cast<std::size_t>(vert)];
+  const hlslpp::float2& uvCoord = user->vertexUvs[vertexIdx];
+  outUv[0] = static_cast<float>(uvCoord.x);
+  outUv[1] = static_cast<float>(uvCoord.y);
+}
+
+void MikkSetTSpaceBasic(const SMikkTSpaceContext* ctx, const float* tangent,
+                        float sign, int face, int vert) {
+  auto* user = static_cast<MikkContext*>(ctx->m_pUserData);
+  const std::uint32_t vertexIdx =
+      user->triangleIndices[static_cast<std::size_t>(face) * 3u
+                            + static_cast<std::size_t>(vert)];
+  if (vertexIdx >= user->outVertexCount)
+    return;
+  if (!user->outTangentAssigned[vertexIdx])
+  {
+    user->outVertexTangents[vertexIdx] =
+        hlslpp::float4{tangent[0], tangent[1], tangent[2], sign};
+    user->outTangentAssigned[vertexIdx] = true;
+  }
+}
 
 // Convert USD's row-major double-precision matrix to Pyxis's
 // column-vector + row-major float4x4 (plan §10). USD's GfMatrix4d
@@ -236,6 +364,36 @@ hlslpp::float4x4 ComposeWorldFromLocal(const pxr::UsdPrim& prim,
 
 using MaterialHandleByPath = std::unordered_map<std::string, MaterialHandle>;
 using ConsumedPrototypePaths = std::unordered_set<std::string>;
+// MikkTSpace tangent generation is the most expensive step in mesh
+// ingest (the lobby's 955 sub-meshes × ~140ms each = ~130s in Debug
+// before this gate). Tangents are only sampled by the closesthit's
+// normal-mapping branch, so we can skip MikkTSpace entirely on
+// meshes whose bound materials don't carry a normal map. Pass 1
+// fills this set with material handles whose OpenPBRMaterialDesc
+// resolved a non-Invalid normalMap; the per-subset emit checks
+// before invoking genTangSpaceDefault.
+using MaterialsNeedingTangents = std::unordered_set<MaterialHandle>;
+
+// Result of mesh-data extraction — the heavy CPU work (USD attr
+// reads, hard-edge dedup, MikkTSpace) lifted out of the GpuScene
+// mutation calls so it can run on worker threads in parallel. The
+// main / render thread later walks PreparedMesh.subMeshes serially
+// and feeds them to scene.CreateMesh / scene.AppendInstance — those
+// stay single-writer per §30.11.
+struct PreparedSubMesh {
+  std::vector<hlslpp::float3>  positions;
+  std::vector<std::uint32_t>   indices;
+  std::vector<hlslpp::float3>  normals;
+  std::vector<hlslpp::float4>  tangents;
+  std::vector<hlslpp::float2>  uv0;
+  MaterialHandle               material  = MaterialHandle::Invalid;
+  std::string                  debugName;
+};
+
+struct PreparedMesh {
+  std::vector<PreparedSubMesh> subMeshes;       // size 0 when prep failed / mesh dropped
+  hlslpp::float4x4             worldFromLocal;  // populated when subMeshes non-empty
+};
 
 // Build a Pyxis MeshDesc from a UsdGeomMesh prim. Returns
 // std::nullopt for ngon-only / empty / invalid meshes — the M5
@@ -701,6 +859,29 @@ void EmitLight(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCache,
       key.role = TextureKey::Role::Emission;  // HDR env-map: linear, no sRGB EOTF
       desc.envMap = scene.AcquireTexture(key);
     }
+    // M9-fidelity per-prim dome rotation. Read xformOp:rotateY (or
+    // the Y component of xformOp:rotateXYZ) directly from the prim
+    // — NOT from the composed worldFromLocal matrix, which already
+    // bakes in the stage Z→Y correction. UsdLuxDomeLight's typical
+    // authoring is a horizontal HDRI spin around world-Y; X / Z
+    // axes on a dome are uncommon and deferred. Convert degrees →
+    // radians for the miss-shader trig.
+    {
+      double rotateY = 0.0;
+      if (const pxr::UsdAttribute rotYAttr =
+              prim.GetAttribute(pxr::TfToken("xformOp:rotateY")))
+      {
+        rotYAttr.Get(&rotateY);
+      }
+      else if (const pxr::UsdAttribute rotXYZAttr =
+                   prim.GetAttribute(pxr::TfToken("xformOp:rotateXYZ")))
+      {
+        pxr::GfVec3d rotXYZ(0.0, 0.0, 0.0);
+        rotXYZAttr.Get(&rotXYZ);
+        rotateY = rotXYZ[1];
+      }
+      desc.domeRotationY = static_cast<float>(rotateY * (PI_F / 180.0f));
+    }
     // Dome's "area" is a full sphere of solid angle; the closesthit
     // already integrates over the sphere when sampling the env-map,
     // so leave areaForNormalize at 1 and let the dome's intensity
@@ -962,14 +1143,20 @@ void EmitPointInstancer(const pxr::UsdPrim& instancerPrim,
 // are bumped per sub-mesh inside this function so the caller doesn't
 // need to know about subsets. Returns the per-prim count for the
 // caller's local diagnostics.
-std::size_t EmitMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCache,
-                     const MaterialHandleByPath& materialsByPath,
-                     const StageContext& stageCtx, GpuScene& scene,
-                     IngestStats& stats) noexcept {
+// Prepare mesh data from a USD prim — pure CPU work, NO GpuScene
+// mutation. Safe to call concurrently from multiple worker threads
+// PROVIDED each thread passes its own xformCache (UsdGeomXformCache
+// is not thread-safe per pxr docs) and materialsByPath /
+// materialsNeedingTangents stay const-shared.
+PreparedMesh PrepareMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCache,
+                         const MaterialHandleByPath& materialsByPath,
+                         const MaterialsNeedingTangents& materialsNeedingTangents,
+                         const StageContext& stageCtx) noexcept {
   auto& log = Logging::Get();
+  PreparedMesh prepared;
   const pxr::UsdGeomMesh meshPrim(prim);
   if (!meshPrim.GetPrim().IsValid())
-    return 0;
+    return prepared;
 
   pxr::VtArray<pxr::GfVec3f> usdPoints;
   pxr::VtArray<int> usdCounts;
@@ -979,7 +1166,7 @@ std::size_t EmitMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCach
   meshPrim.GetFaceVertexIndicesAttr().Get(&usdIndices);
 
   if (usdPoints.empty() || usdCounts.empty() || usdIndices.empty())
-    return 0;
+    return prepared;
 
   // Convert positions into the §18.4 contiguous layout. Shared
   // across every sub-mesh emitted from this prim.
@@ -1007,7 +1194,7 @@ std::size_t EmitMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCach
                              + std::to_string(running) + " vs indices "
                              + std::to_string(usdIndices.size())
                              + "); dropping mesh.");
-      return 0;
+      return prepared;
     }
   }
 
@@ -1100,24 +1287,219 @@ std::size_t EmitMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCach
     }
   }
 
-  // ---- Per-subset emit loop ----------------------------------------
-  std::size_t emittedCount = 0;
-  const hlslpp::float4x4 worldFromLocal =
-      ComposeWorldFromLocal(prim, xformCache, stageCtx);
+  // ---- Normals source data (M9 smooth-shading) ----------------------
+  // UsdGeomMesh authors normals as either the schema-level
+  // `normals` attribute (the most common case — what the lobby uses)
+  // or as a `primvars:normals` primvar (modern style). Try the
+  // schema attr first; if absent, try the primvar. Closesthit reads
+  // these via per-vertex barycentric interpolation; in the face-
+  // varying case we collapse to per-vertex (taking the first normal
+  // per shared vertex), losing hard-edge fidelity. Vertex
+  // duplication for accurate hard edges is M11+ polish — for now
+  // smooth shading on shared edges is a major visual upgrade vs the
+  // M7-simple per-face fallback.
+  pxr::VtArray<pxr::GfVec3f> normalsArr;
+  pxr::TfToken               normalsInterpolation;
+  bool                       normalsHasValue = false;
+  {
+    const pxr::UsdAttribute schemaNormalsAttr = meshPrim.GetNormalsAttr();
+    if (schemaNormalsAttr && schemaNormalsAttr.HasAuthoredValue()
+        && schemaNormalsAttr.Get(&normalsArr) && !normalsArr.empty())
+    {
+      normalsInterpolation = meshPrim.GetNormalsInterpolation();
+      normalsHasValue = true;
+    }
+    else
+    {
+      const pxr::UsdGeomPrimvarsAPI primvarsApi(prim);
+      const pxr::UsdGeomPrimvar     normalsPrimvar =
+          primvarsApi.GetPrimvar(pxr::TfToken("normals"));
+      if (normalsPrimvar.HasValue())
+      {
+        normalsPrimvar.ComputeFlattened(&normalsArr);
+        if (!normalsArr.empty())
+        {
+          normalsInterpolation = normalsPrimvar.GetInterpolation();
+          normalsHasValue = true;
+        }
+      }
+    }
+  }
+
+  // ---- Per-subset accumulation loop --------------------------------
+  // Builds prepared.subMeshes; the GpuScene mutation calls live in
+  // EmitPreparedMesh below.
+  prepared.worldFromLocal = ComposeWorldFromLocal(prim, xformCache, stageCtx);
   const std::string primPath = prim.GetPath().GetString();
+
+  // Cached interpolation-mode flags — read once, branched per face-
+  // vertex below. The `faceVarying` length check (.size() == fvCount)
+  // is the tripwire that catches mis-authored primvars; when it
+  // fails we treat the channel as absent rather than indexing past
+  // the array's end.
+  const bool hasNormals       = normalsHasValue && !normalsArr.empty();
+  const bool normalsFv        = hasNormals
+                                && normalsInterpolation == pxr::UsdGeomTokens->faceVarying
+                                && normalsArr.size() == usdIndices.size();
+  const bool normalsVertex    = hasNormals
+                                && normalsInterpolation == pxr::UsdGeomTokens->vertex
+                                && normalsArr.size() == usdPoints.size();
+  const bool normalsConstant  = hasNormals
+                                && (normalsInterpolation == pxr::UsdGeomTokens->constant
+                                    || normalsInterpolation == pxr::UsdGeomTokens->uniform);
+  const bool emitNormals      = normalsFv || normalsVertex || normalsConstant;
+
+  const bool hasUvs           = stHasValue && !stUvs.empty();
+  const bool uvsFv            = hasUvs
+                                && stInterpolation == pxr::UsdGeomTokens->faceVarying
+                                && stUvs.size() == usdIndices.size();
+  const bool uvsVertex        = hasUvs
+                                && stInterpolation == pxr::UsdGeomTokens->vertex
+                                && stUvs.size() == usdPoints.size();
+  const bool uvsConstant      = hasUvs
+                                && (stInterpolation == pxr::UsdGeomTokens->constant
+                                    || stInterpolation == pxr::UsdGeomTokens->uniform);
 
   for (const SubsetEmitInfo& subset : subsetInfos)
   {
-    // Triangulate. For the no-subset path (faceIndices empty) we walk
-    // every face; for subsets we walk only the listed face ids,
-    // pulling each face's fv-range via faceStartOffsets.
-    std::vector<uint32_t> indices;
+    // M9-fidelity hard-edge dedup. Walks the face-vertex stream once
+    // per subset. Each face-vertex contributes a (position, normal,
+    // uv) triple; identical triples sharing a position collapse into
+    // the same output vertex slot, distinct triples (faceVarying
+    // boundaries — UV seams + crease edges) split into separate
+    // slots. Per-subset arrays are minimal — only positions actually
+    // touched by the subset's faces appear in the output.
+    auto getNormal = [&](std::size_t fvIdx, std::uint32_t positionIdx) -> hlslpp::float3 {
+      if (normalsFv)
+      {
+        const auto& src = normalsArr[fvIdx];
+        return hlslpp::float3{src[0], src[1], src[2]};
+      }
+      if (normalsVertex)
+      {
+        const auto& src = normalsArr[positionIdx];
+        return hlslpp::float3{src[0], src[1], src[2]};
+      }
+      if (normalsConstant)
+      {
+        const auto& src = normalsArr[0];
+        return hlslpp::float3{src[0], src[1], src[2]};
+      }
+      return hlslpp::float3{0.0f, 0.0f, 0.0f};
+    };
+    auto getUv = [&](std::size_t fvIdx, std::uint32_t positionIdx) -> hlslpp::float2 {
+      if (uvsFv)
+      {
+        const auto& uvSrc = stUvs[fvIdx];
+        return hlslpp::float2{uvSrc[0], uvSrc[1]};
+      }
+      if (uvsVertex)
+      {
+        const auto& uvSrc = stUvs[positionIdx];
+        return hlslpp::float2{uvSrc[0], uvSrc[1]};
+      }
+      if (uvsConstant)
+      {
+        const auto& uvSrc = stUvs[0];
+        return hlslpp::float2{uvSrc[0], uvSrc[1]};
+      }
+      return hlslpp::float2{0.0f, 0.0f};
+    };
+
+    // Per-position chain head — `headByPosition[pi]` indexes into
+    // `entries` for the first VertexEntry attached to USD-position
+    // `pi`, or -1 if none yet. Walked linearly per face-vertex
+    // lookup; chain length is 1 for interior shared positions, 2–4
+    // for UV-seam / crease corners.
+    //
+    // Reused across submeshes via thread_local storage. Each OpenMP
+    // worker thread keeps its own scratch with capacity preserved
+    // between meshes — first iteration pays for the alloc, subsequent
+    // iterations only pay for fill (assign / clear). This eliminates
+    // the per-submesh allocator-mutex contention that was the
+    // dominant Debug pass3b cost.
+    //
+    // (PrepareMesh lives in an anonymous namespace so it's not
+    // dllexport — `thread_local` is legal here. The lambda restriction
+    // we hit earlier only applies to `thread_local` declared INSIDE
+    // a lambda body that captures into an exported DLL.)
+    thread_local std::vector<std::int32_t>      headByPosition;
+    thread_local std::vector<VertexEntry>       entries;
+    thread_local std::vector<hlslpp::float3>    outPositions;
+    thread_local std::vector<hlslpp::float3>    outNormals;
+    thread_local std::vector<hlslpp::float2>    outUvs;
+    thread_local std::vector<std::uint32_t>     indices;
+    headByPosition.assign(usdPoints.size(), -1);  // resize + fill, capacity preserved
+    entries.clear();
+    outPositions.clear();
+    outNormals.clear();
+    outUvs.clear();
+    indices.clear();
     {
-      const std::size_t inputFvCount =
+      const std::size_t fvUpperBound =
           subset.faceIndices.empty() ? usdIndices.size()
-                                     : subset.faceIndices.size() * 4u;  // upper-bound guess
-      indices.reserve(inputFvCount * 3u / 2u);
+                                     : subset.faceIndices.size() * 4u;
+      entries.reserve(fvUpperBound);
+      outPositions.reserve(fvUpperBound);
+      if (emitNormals)
+        outNormals.reserve(fvUpperBound);
+      outUvs.reserve(fvUpperBound);
+      indices.reserve(fvUpperBound * 3u / 2u);
     }
+
+    auto pushVertex = [&](std::size_t fvIdx) -> std::uint32_t {
+      const auto positionIdx = static_cast<std::uint32_t>(usdIndices[fvIdx]);
+      if (positionIdx >= usdPoints.size())
+        return 0u;  // bounds-check defence; broken meshes drop bad fv refs
+      const hlslpp::float3 normal = getNormal(fvIdx, positionIdx);
+      const hlslpp::float2 uvOut  = getUv(fvIdx, positionIdx);
+
+      // Bit-cast key components — operator== over bit-patterns
+      // catches mathematically-distinct floats (e.g. NaNs) that
+      // memcmp also distinguishes, and keeps -0 / +0 as separate
+      // keys (deterministic, matches authoring intent).
+      const float normalArr[3] = {static_cast<float>(normal.x),
+                                  static_cast<float>(normal.y),
+                                  static_cast<float>(normal.z)};
+      const float uvArr[2]     = {static_cast<float>(uvOut.x),
+                                  static_cast<float>(uvOut.y)};
+      std::uint32_t normalBits[3];
+      std::uint32_t uvBits[2];
+      std::memcpy(normalBits, normalArr, sizeof(normalArr));
+      std::memcpy(uvBits,     uvArr,     sizeof(uvArr));
+
+      // Walk the chain attached to this position; reuse on match.
+      for (std::int32_t cur = headByPosition[positionIdx]; cur >= 0; )
+      {
+        const VertexEntry& cand = entries[static_cast<std::size_t>(cur)];
+        if (cand.normalBits[0] == normalBits[0]
+            && cand.normalBits[1] == normalBits[1]
+            && cand.normalBits[2] == normalBits[2]
+            && cand.uvBits[0]     == uvBits[0]
+            && cand.uvBits[1]     == uvBits[1])
+          return cand.outIdx;
+        cur = cand.next;
+      }
+
+      // No match — emit a new vertex slot + link into the chain.
+      const auto newIdx = static_cast<std::uint32_t>(outPositions.size());
+      outPositions.push_back(positions[positionIdx]);
+      if (emitNormals)
+        outNormals.push_back(normal);
+      outUvs.push_back(uvOut);
+      VertexEntry entry{};
+      entry.normalBits[0] = normalBits[0];
+      entry.normalBits[1] = normalBits[1];
+      entry.normalBits[2] = normalBits[2];
+      entry.uvBits[0]     = uvBits[0];
+      entry.uvBits[1]     = uvBits[1];
+      entry.outIdx        = newIdx;
+      entry.next          = headByPosition[positionIdx];
+      entries.push_back(entry);
+      headByPosition[positionIdx] = static_cast<std::int32_t>(entries.size() - 1u);
+      return newIdx;
+    };
+
     auto emitTrianglesForFace = [&](std::size_t faceIdx) {
       const int faceCount = usdCounts[faceIdx];
       if (faceCount < 3)
@@ -1125,9 +1507,9 @@ std::size_t EmitMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCach
       const std::size_t fvBase = faceStartOffsets[faceIdx];
       for (int triIdx = 0; triIdx < faceCount - 2; ++triIdx)
       {
-        indices.push_back(static_cast<uint32_t>(usdIndices[fvBase + 0]));
-        indices.push_back(static_cast<uint32_t>(usdIndices[fvBase + triIdx + 1]));
-        indices.push_back(static_cast<uint32_t>(usdIndices[fvBase + triIdx + 2]));
+        indices.push_back(pushVertex(fvBase + 0u));
+        indices.push_back(pushVertex(fvBase + static_cast<std::size_t>(triIdx + 1)));
+        indices.push_back(pushVertex(fvBase + static_cast<std::size_t>(triIdx + 2)));
       }
     };
     if (subset.faceIndices.empty())
@@ -1147,100 +1529,126 @@ std::size_t EmitMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCach
       continue;
     }
 
-    // Per-vertex UV buffer sized to positions.size() and zero-init
-    // unconditionally — even for meshes that author no `primvars:st`
-    // or whose UVs we fail to extract. GpuScene's flat-UV upload
-    // path indexes via `gMeshUvs[gMeshUvOffsets[meshSlot] + v_i]`;
-    // a short / missing UV array would let the closesthit's index
-    // spill into a neighbouring mesh's UV range and pull unrelated
-    // texels. Size-matched zero buffer keeps the worst case "sample
-    // (0,0) of the bound texture", which is at least mesh-local.
-    std::vector<hlslpp::float2> vertexUvs(usdPoints.size(), hlslpp::float2{0.0f, 0.0f});
-    if (stHasValue)
+    // Per-vertex tangents via MikkTSpace on the deduplicated arrays.
+    // Hard-edge dup means each (face, vert) maps to a vertex slot
+    // unique to its UV/normal combination, so MikkTSpace's per-(face,
+    // vert) tangent writes naturally land on the right slot — the
+    // first-tangent-wins guard becomes a no-op. Requires non-empty
+    // UVs + vertex normals + at least one triangle, AND the bound
+    // material to actually carry a normal map (the closesthit's
+    // MATERIAL_FLAG_HAS_NORMAL_MAP gate is the only consumer). The
+    // material check is the dominant perf win — 40% of lobby
+    // sub-meshes have no normal map and now skip MikkTSpace entirely.
+    const bool subsetNeedsTangents =
+        subset.material != MaterialHandle::Invalid
+        && materialsNeedingTangents.contains(subset.material);
+    thread_local std::vector<hlslpp::float4> vertexTangents;
+    thread_local std::vector<std::uint8_t>   tangentAssigned;
+    vertexTangents.clear();
+    tangentAssigned.clear();
+    if (subsetNeedsTangents && !indices.empty() && emitNormals
+        && (uvsFv || uvsVertex || uvsConstant))
     {
-      if (stInterpolation == pxr::UsdGeomTokens->vertex
-          && stUvs.size() == usdPoints.size())
+      vertexTangents.assign(outPositions.size(),
+                            hlslpp::float4{0.0f, 0.0f, 0.0f, 0.0f});
+      // std::vector<bool> is bit-packed; MikkTSpace's per-FV write
+      // path needs a plain bool* for the cached-pointer path. Use
+      // a uint8_t-typed vector so &v[i] is a sane T* pointer.
+      tangentAssigned.assign(outPositions.size(), 0u);
+      MikkContext userData{};
+      userData.triangleIndices    = indices.data();
+      userData.triangleVertCount  = indices.size();
+      userData.positions          = outPositions.data();
+      userData.positionsCount     = outPositions.size();
+      userData.vertexNormals      = outNormals.data();
+      userData.vertexUvs          = outUvs.data();
+      userData.outVertexTangents  = vertexTangents.data();
+      userData.outTangentAssigned = reinterpret_cast<bool*>(tangentAssigned.data());
+      userData.outVertexCount     = vertexTangents.size();
+      SMikkTSpaceInterface mikkInterface{};
+      mikkInterface.m_getNumFaces           = MikkGetNumFaces;
+      mikkInterface.m_getNumVerticesOfFace  = MikkGetNumVerticesOfFace;
+      mikkInterface.m_getPosition           = MikkGetPosition;
+      mikkInterface.m_getNormal             = MikkGetNormal;
+      mikkInterface.m_getTexCoord           = MikkGetTexCoord;
+      mikkInterface.m_setTSpaceBasic        = MikkSetTSpaceBasic;
+      SMikkTSpaceContext mikkCtx{};
+      mikkCtx.m_pInterface = &mikkInterface;
+      mikkCtx.m_pUserData  = &userData;
+      if (!genTangSpaceDefault(&mikkCtx))
       {
-        for (std::size_t i = 0; i < stUvs.size(); ++i)
-          vertexUvs[i] = hlslpp::float2{stUvs[i][0], stUvs[i][1]};
+        // MikkTSpace failed (degenerate UVs across the whole mesh,
+        // most likely) — drop the tangent buffer so the closesthit's
+        // normal-mapping branch falls back to vertex-normal-only.
+        vertexTangents.clear();
       }
-      else if (stInterpolation == pxr::UsdGeomTokens->faceVarying
-               && stUvs.size() == usdIndices.size())
-      {
-        // Walk face-vertex stream — full or subset — taking the
-        // FIRST UV per vertex. Subsets reuse the parent mesh's
-        // positions array, so each subset re-collapses faceVarying
-        // into the same vertex slots; identical content across
-        // subsets shares the §15 mesh-content dedup.
-        std::vector<bool> uvAssigned(usdPoints.size(), false);
-        auto walkFace = [&](std::size_t faceIdx) {
-          const int faceCount = usdCounts[faceIdx];
-          const std::size_t fvBase = faceStartOffsets[faceIdx];
-          for (int faceVertex = 0; faceVertex < faceCount; ++faceVertex)
-          {
-            const std::size_t fvIdx = fvBase + static_cast<std::size_t>(faceVertex);
-            const auto vertexIdx = static_cast<std::size_t>(usdIndices[fvIdx]);
-            if (vertexIdx < uvAssigned.size() && !uvAssigned[vertexIdx])
-            {
-              vertexUvs[vertexIdx] = hlslpp::float2{stUvs[fvIdx][0], stUvs[fvIdx][1]};
-              uvAssigned[vertexIdx] = true;
-            }
-          }
-        };
-        if (subset.faceIndices.empty())
-        {
-          for (std::size_t faceIdx = 0; faceIdx < usdCounts.size(); ++faceIdx)
-            walkFace(faceIdx);
-        }
-        else
-        {
-          for (const int faceIdx : subset.faceIndices)
-            walkFace(static_cast<std::size_t>(faceIdx));
-        }
-      }
-      else if ((stInterpolation == pxr::UsdGeomTokens->constant
-                || stInterpolation == pxr::UsdGeomTokens->uniform)
-               && !stUvs.empty())
-      {
-        const hlslpp::float2 single{stUvs[0][0], stUvs[0][1]};
-        std::fill(vertexUvs.begin(), vertexUvs.end(), single);
-      }
-      // Unknown / mismatched interpolation: leave vertexUvs at the
-      // zero-init the declaration above gave us.
     }
 
-    const std::string subDebugName = primPath + subset.debugSuffix;
+    // Copy (not move) into the per-thread output: move would steal
+    // the thread_local scratch buffer, dropping its capacity to 0
+    // and forcing the next submesh's first push_back to reallocate
+    // — defeating the whole point of the thread_local pool. assign()
+    // copies into a fresh PreparedSubMesh allocation (single alloc
+    // per channel per submesh, paid by the worker thread on the
+    // contended Debug heap) but leaves the scratch capacity intact.
+    PreparedSubMesh subMesh;
+    subMesh.positions.assign(outPositions.begin(), outPositions.end());
+    subMesh.indices  .assign(indices.begin(),      indices.end());
+    subMesh.normals  .assign(outNormals.begin(),   outNormals.end());
+    subMesh.tangents .assign(vertexTangents.begin(), vertexTangents.end());
+    subMesh.uv0      .assign(outUvs.begin(),       outUvs.end());
+    subMesh.material  = subset.material;
+    subMesh.debugName = primPath + subset.debugSuffix;
+    prepared.subMeshes.push_back(std::move(subMesh));
+  }
+  return prepared;
+}
+
+// EmitPreparedMesh pushes a PreparedMesh into GpuScene — the
+// single-writer half of the split. Must run on the render / main
+// thread per §30.11. Bumps stats.meshesEmitted /
+// stats.instancesEmitted per sub-mesh; returns the count actually
+// emitted (0 when prep failed or every CreateMesh / AppendInstance
+// failed).
+std::size_t EmitPreparedMesh(const PreparedMesh& prepared, GpuScene& scene,
+                             IngestStats& stats) noexcept {
+  auto& log = Logging::Get();
+  std::size_t emittedCount = 0;
+  for (const PreparedSubMesh& subMesh : prepared.subMeshes)
+  {
     MeshDesc meshDesc;
-    meshDesc.positions = positions;
-    meshDesc.indices = indices;
-    meshDesc.uv0 = vertexUvs;
-    meshDesc.debugName = subDebugName;
+    meshDesc.positions = subMesh.positions;
+    meshDesc.indices   = subMesh.indices;
+    meshDesc.uv0       = subMesh.uv0;
+    meshDesc.normals   = subMesh.normals;
+    meshDesc.tangents  = subMesh.tangents;
+    meshDesc.debugName = subMesh.debugName;
     const auto meshHandle = scene.CreateMesh(meshDesc);
     if (!meshHandle.has_value())
     {
       log.Error(log::APP, "StageWalker: CreateMesh failed for "
-                              + subDebugName + ": "
+                              + subMesh.debugName + ": "
                               + std::string{meshHandle.error().message.View()});
       continue;
     }
     ++stats.meshesEmitted;
 
     // World transform → instance. Material binding came from the
-    // subset (or the prim-level fallback) — see SubsetEmitInfo above.
+    // subset (or the prim-level fallback) at PrepareMesh time.
     // ComposeWorldFromLocal bakes metersPerUnit + Z->Y if the stage
     // metadata says so, so the BLAS keeps stage-unit local-space
     // geometry while the per-instance transform places it in
     // Pyxis-world (metres + Y-up).
     InstanceDesc instanceDesc;
-    instanceDesc.mesh = *meshHandle;
-    instanceDesc.worldFromLocal = worldFromLocal;
-    instanceDesc.material = subset.material;
-    instanceDesc.debugName = subDebugName;
+    instanceDesc.mesh           = *meshHandle;
+    instanceDesc.worldFromLocal = prepared.worldFromLocal;
+    instanceDesc.material       = subMesh.material;
+    instanceDesc.debugName      = subMesh.debugName;
     const auto instanceHandle = scene.AppendInstance(instanceDesc);
     if (!instanceHandle.has_value())
     {
       log.Error(log::APP, "StageWalker: AppendInstance failed for "
-                              + subDebugName + ": "
+                              + subMesh.debugName + ": "
                               + std::string{instanceHandle.error().message.View()});
       continue;
     }
@@ -1415,7 +1823,8 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
   // (HydraEngine routes through StageWalker at M5 — see HydraEngine.h)
   // so any difference in material translation breaks the §25.O.3
   // byte-equal invariant.
-  MaterialHandleByPath materialsByPath;
+  MaterialHandleByPath       materialsByPath;
+  MaterialsNeedingTangents   materialsNeedingTangents;
   // Texture-acquisition callback for the translator — stateless
   // function pointer + opaque scene-pointer userData. The translator
   // stays renderer-agnostic; the role passes through unchanged so
@@ -1442,6 +1851,12 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
     materialDesc.sourcePrim = primPath;
     const MaterialHandle handle = scene.AcquireMaterial(materialDesc);
     materialsByPath.emplace(primPath, handle);
+    // Track which materials carry a normal map so the mesh pass can
+    // skip MikkTSpace tangent generation on meshes that don't need
+    // them. ~40% of lobby materials are normal-map-free; skipping
+    // their meshes' MikkTSpace was the dominant ingest-perf win.
+    if (materialDesc.normalMap != TextureHandle::Invalid)
+      materialsNeedingTangents.insert(handle);
     ++stats.materialsEmitted;
   }
   const auto materialPassEnd = Clock::now();
@@ -1470,19 +1885,72 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
   // Pass 3 — meshes / camera / lights, with material handles resolved
   // from pass 1 and instancer prototypes skipped (pass 2 already
   // expanded them).
+  //
+  // Mesh prep runs in parallel across the asset I/O pool (§31). The
+  // heavy work (USD attr reads, hard-edge dedup, MikkTSpace tangents)
+  // is pure CPU and doesn't touch GpuScene, so it parallelises well.
+  // The actual GpuScene mutations (CreateMesh + AppendInstance) stay
+  // on this thread to honour §30.11's single-writer-Flecs constraint.
+  // SdfPath-sorted ordering is preserved by indexing preparedMeshes
+  // in iteration order.
   const auto meshPassStart = Clock::now();
+
+  // Pass 3a — collect mesh prim indices (skipping consumed prototypes)
+  // into a parallel-prep work list.
+  std::vector<std::size_t> meshPrimIndices;
+  meshPrimIndices.reserve(prims.size());
+  for (std::size_t i = 0; i < prims.size(); ++i)
+  {
+    if (!prims[i].IsA<pxr::UsdGeomMesh>())
+      continue;
+    if (consumedPrototypes.contains(prims[i].GetPath().GetString()))
+      continue;
+    meshPrimIndices.push_back(i);
+  }
+
+  // Pass 3b — parallel mesh prep. Each worker gets its own
+  // UsdGeomXformCache (pxr's cache isn't thread-safe). The
+  // materialsByPath / materialsNeedingTangents maps are const-shared.
+  // PrepareMesh writes only to its assigned slot in preparedMeshes
+  // and to the worker's local xformCache; no cross-worker state.
+  std::vector<PreparedMesh> preparedMeshes(meshPrimIndices.size());
+  const auto pass3bStart = Clock::now();
+  // OpenMP parallel-for. Lower per-task overhead than MSVC's PPL/
+  // ConcRT (used by std::execution::par) — measured benefit on the
+  // lobby in Debug (where PPL's task-tracking machinery + Debug
+  // heap contention made std::execution::par 25% SLOWER than seq).
+  // Release: ~3-4x speedup with 8 cores.
+  const std::int64_t meshCount = static_cast<std::int64_t>(meshPrimIndices.size());
+#pragma omp parallel for schedule(dynamic, 4)
+  for (std::int64_t outIdx = 0; outIdx < meshCount; ++outIdx)
+  {
+    // Per-task xformCache — pxr::UsdGeomXformCache isn't thread-
+    // safe. We lose cross-sibling-mesh xform caching but each
+    // per-prim xform-chain walk is small.
+    pxr::UsdGeomXformCache localXformCache;
+    const std::size_t primIdx = meshPrimIndices[static_cast<std::size_t>(outIdx)];
+    preparedMeshes[static_cast<std::size_t>(outIdx)] =
+        PrepareMesh(prims[primIdx], localXformCache, materialsByPath,
+                    materialsNeedingTangents, stageCtx);
+  }
+  const auto pass3bEnd = Clock::now();
+  const auto pass3bMs =
+      std::chrono::duration<float, std::milli>(pass3bEnd - pass3bStart).count();
+  Logging::Get().Info(log::APP,
+      "StageWalker pass3b (parallel mesh prep): " + std::to_string(static_cast<int>(pass3bMs)) + "ms");
+
+  // Pass 3c — single-writer drain: walk prims in SdfPath order and
+  // emit prepared meshes / cameras / lights in lockstep.
+  const auto pass3cStart = Clock::now();
+  std::size_t nextPreparedIdx = 0;
   for (const pxr::UsdPrim& prim : prims)
   {
     if (prim.IsA<pxr::UsdGeomMesh>())
     {
       if (consumedPrototypes.contains(prim.GetPath().GetString()))
         continue;
-      // EmitMesh internally bumps stats.meshesEmitted /
-      // stats.instancesEmitted per emitted sub-mesh (one prim with N
-      // GeomSubsets emits N meshes + N instances). The return value is
-      // available for per-prim diagnostics; the running counters drive
-      // the post-pass log line below.
-      EmitMesh(prim, xformCache, materialsByPath, stageCtx, scene, stats);
+      EmitPreparedMesh(preparedMeshes[nextPreparedIdx], scene, stats);
+      ++nextPreparedIdx;
     }
     else if (prim.IsA<pxr::UsdGeomCamera>())
     {
@@ -1524,6 +1992,13 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
       }
     }
   }
+  const auto pass3cEnd = Clock::now();
+  const auto pass3cMs =
+      std::chrono::duration<float, std::milli>(pass3cEnd - pass3cStart).count();
+  Logging::Get().Info(log::APP,
+      "StageWalker pass3c (serial drain + cameras + lights): "
+          + std::to_string(static_cast<int>(pass3cMs)) + "ms");
+
   // Active-camera selection. Honour the root-layer's `boundCamera`
   // hint if present (Omniverse + DCC convention: the camera the
   // scene's authoring tool was last looking through). Fall back to

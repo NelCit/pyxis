@@ -239,6 +239,17 @@ OpenPBRMaterialDesc FromUsdShade(const pxr::UsdShadeMaterial& material,
   desc.coatRoughness = ReadFloat(surface, pxr::TfToken("clearcoatRoughness"), 0.01f);
   desc.emissionColor =
       ReadColor(surface, pxr::TfToken("emissiveColor"), hlslpp::float3{0.0f, 0.0f, 0.0f});
+  // UsdPreviewSurface authors emissive as a color3f only — there's no
+  // separate luminance multiplier. Set emissionLuminance = 1 when the
+  // tint is non-zero so the closesthit's `emissionColor × luminance`
+  // term + the MaterialFlag::Emissive bit fire correctly. Magnitude-
+  // based threshold keeps materials with explicit `emissiveColor =
+  // (0, 0, 0)` non-emissive.
+  const float emissionMagnitudeSq = static_cast<float>(
+      desc.emissionColor.x * desc.emissionColor.x
+      + desc.emissionColor.y * desc.emissionColor.y
+      + desc.emissionColor.z * desc.emissionColor.z);
+  desc.emissionLuminance = (emissionMagnitudeSq > 1e-6f) ? 1.0f : 0.0f;
 
   // OpenPBR's transmission == UsdPreviewSurface's "transmission via
   // 1 - opacity" approximation when the network doesn't author a

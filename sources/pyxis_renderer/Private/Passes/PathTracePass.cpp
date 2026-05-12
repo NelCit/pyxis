@@ -82,7 +82,9 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
   const AssetLocator locator;
   const Path raygenPath = locator.LocateResource("shaders/raygen.spv");
   const Path missPath = locator.LocateResource("shaders/miss.spv");
+  const Path shadowMissPath = locator.LocateResource("shaders/shadow_miss.spv");
   const Path closestHitPath = locator.LocateResource("shaders/closesthit.spv");
+  const Path anyHitPath = locator.LocateResource("shaders/anyhit.spv");
 
   // Slang emits the SPIR-V `OpEntryPoint` name as `"main"` for every
   // [shader(...)]-attributed function regardless of the source-side
@@ -92,9 +94,12 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
   // VUID-VkPipelineShaderStageCreateInfo-pName-00707.
   _raygenShader = LoadSpirv(_device, raygenPath.View(), nvrhi::ShaderType::RayGeneration, "main");
   _missShader = LoadSpirv(_device, missPath.View(), nvrhi::ShaderType::Miss, "main");
+  _shadowMissShader =
+      LoadSpirv(_device, shadowMissPath.View(), nvrhi::ShaderType::Miss, "main");
   _closestHitShader =
       LoadSpirv(_device, closestHitPath.View(), nvrhi::ShaderType::ClosestHit, "main");
-  if (!_raygenShader || !_missShader || !_closestHitShader)
+  _anyHitShader = LoadSpirv(_device, anyHitPath.View(), nvrhi::ShaderType::AnyHit, "main");
+  if (!_raygenShader || !_missShader || !_shadowMissShader || !_closestHitShader || !_anyHitShader)
   {
     Logging::Get().Error(log::RENDER, "PathTracePass: shader load failed; pass will skip");
     return;
@@ -164,6 +169,15 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
       // v1 production scene.
       nvrhi::BindingLayoutItem::Texture_SRV(28).setSize(
           shaderinterop::BINDLESS_TEXTURES_CAP),             // binding 28 bindless textures
+      // M9 smooth shading — per-vertex normals + per-mesh start offsets.
+      nvrhi::BindingLayoutItem::StructuredBuffer_SRV(29),    // binding 29 mesh vertex normals
+      nvrhi::BindingLayoutItem::StructuredBuffer_SRV(30),    // binding 30 mesh vertex-normal offsets
+      // M9 normal mapping — per-vertex tangents (float4: xyz tangent + w sign).
+      nvrhi::BindingLayoutItem::StructuredBuffer_SRV(31),    // binding 31 mesh tangents
+      nvrhi::BindingLayoutItem::StructuredBuffer_SRV(32),    // binding 32 mesh tangent offsets
+      // M9-fidelity per-role samplers — dome (Wrap-Clamp-Wrap) at 33;
+      // bindlessSampler at 10 stays as material sampler (Wrap-Wrap-Wrap).
+      nvrhi::BindingLayoutItem::Sampler(33),                 // binding 33 dome HDRI sampler
   };
   _bindingLayout = _device->createBindingLayout(layoutDesc);
   if (!_bindingLayout)
@@ -172,22 +186,25 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
     return;
   }
 
-  // Pipeline state — three shader stages registered by `exportName`,
-  // one hit group bundling closesthit (no anyhit / intersection in
-  // M3), maxRecursionDepth=1 because we only TraceRay from raygen
-  // and the closesthit doesn't recurse.
+  // Pipeline state — four shader stages registered by `exportName`,
+  // one hit group bundling closesthit + anyhit. M9-fidelity:
+  // maxRecursionDepth=2 (raygen→primary closesthit + closesthit→
+  // shadow ray which only invokes anyhit/miss, but RT pipeline
+  // accounting still counts it as a recursion level).
   nvrhi::rt::PipelineDesc pipelineDesc;
   pipelineDesc.shaders = {
       nvrhi::rt::PipelineShaderDesc{}.setExportName("RayGenMain").setShader(_raygenShader),
       nvrhi::rt::PipelineShaderDesc{}.setExportName("MissMain").setShader(_missShader),
+      nvrhi::rt::PipelineShaderDesc{}.setExportName("ShadowMissMain").setShader(_shadowMissShader),
   };
   pipelineDesc.hitGroups = {
       nvrhi::rt::PipelineHitGroupDesc{}
           .setExportName("HitGroupDefault")
-          .setClosestHitShader(_closestHitShader),
+          .setClosestHitShader(_closestHitShader)
+          .setAnyHitShader(_anyHitShader),
   };
   pipelineDesc.globalBindingLayouts = {_bindingLayout};
-  pipelineDesc.maxRecursionDepth = 1;
+  pipelineDesc.maxRecursionDepth = 2;
   _pipeline = _device->createRayTracingPipeline(pipelineDesc);
   if (!_pipeline)
   {
@@ -205,7 +222,8 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
     return;
   }
   _shaderTable->setRayGenerationShader("RayGenMain");
-  _shaderTable->addMissShader("MissMain");
+  _shaderTable->addMissShader("MissMain");        // miss-index 0: primary rays (sky / dome)
+  _shaderTable->addMissShader("ShadowMissMain");  // miss-index 1: shadow rays (visibility)
   _shaderTable->addHitGroup("HitGroupDefault");
 
   // Camera uniforms constant buffer — sized for one CameraUniforms
@@ -367,6 +385,66 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
     return;
   }
 
+  // M9 smooth-shading fallbacks. Vertex-normal buffer is one zero
+  // float4; the offset table fallback shares the uint-stride helper
+  // with the index/UV-offset fallbacks above.
+  _fallbackMeshVertexNormalOffsetsBuffer =
+      makeUintFallback("PathTrace.FallbackMeshVertexNormalOffsets");
+  if (!_fallbackMeshVertexNormalOffsetsBuffer)
+  {
+    Logging::Get().Error(log::RENDER,
+                         "PathTracePass: createBuffer(FallbackMeshVertexNormalOffsets) failed");
+    return;
+  }
+  {
+    nvrhi::BufferDesc nFallbackDesc;
+    nFallbackDesc.byteSize = sizeof(hlslpp::float4);
+    nFallbackDesc.structStride = sizeof(hlslpp::float4);
+    nFallbackDesc.canHaveRawViews = false;
+    nFallbackDesc.canHaveTypedViews = false;
+    nFallbackDesc.format = nvrhi::Format::UNKNOWN;
+    nFallbackDesc.debugName = "PathTrace.FallbackMeshVertexNormals";
+    nFallbackDesc.initialState = nvrhi::ResourceStates::ShaderResource;
+    nFallbackDesc.keepInitialState = true;
+    _fallbackMeshVertexNormalsBuffer = _device->createBuffer(nFallbackDesc);
+  }
+  if (!_fallbackMeshVertexNormalsBuffer)
+  {
+    Logging::Get().Error(log::RENDER,
+                         "PathTracePass: createBuffer(FallbackMeshVertexNormals) failed");
+    return;
+  }
+
+  // M9 tangent fallbacks. Same shape as the vertex-normal fallbacks
+  // above; closesthit detects zero-magnitude tangent and skips the
+  // TBN sample.
+  _fallbackMeshTangentOffsetsBuffer =
+      makeUintFallback("PathTrace.FallbackMeshTangentOffsets");
+  if (!_fallbackMeshTangentOffsetsBuffer)
+  {
+    Logging::Get().Error(log::RENDER,
+                         "PathTracePass: createBuffer(FallbackMeshTangentOffsets) failed");
+    return;
+  }
+  {
+    nvrhi::BufferDesc tFallbackDesc;
+    tFallbackDesc.byteSize = sizeof(hlslpp::float4);
+    tFallbackDesc.structStride = sizeof(hlslpp::float4);
+    tFallbackDesc.canHaveRawViews = false;
+    tFallbackDesc.canHaveTypedViews = false;
+    tFallbackDesc.format = nvrhi::Format::UNKNOWN;
+    tFallbackDesc.debugName = "PathTrace.FallbackMeshTangents";
+    tFallbackDesc.initialState = nvrhi::ResourceStates::ShaderResource;
+    tFallbackDesc.keepInitialState = true;
+    _fallbackMeshTangentsBuffer = _device->createBuffer(tFallbackDesc);
+  }
+  if (!_fallbackMeshTangentsBuffer)
+  {
+    Logging::Get().Error(log::RENDER,
+                         "PathTracePass: createBuffer(FallbackMeshTangents) failed");
+    return;
+  }
+
   nvrhi::BufferDesc faceNormalsFallbackDesc;
   faceNormalsFallbackDesc.byteSize = sizeof(hlslpp::float4);
   faceNormalsFallbackDesc.structStride = sizeof(hlslpp::float4);
@@ -517,15 +595,21 @@ bool PathTracePass::ReloadShaders() noexcept {
   const AssetLocator locator;
   const Path raygenPath     = locator.LocateResource("shaders/raygen.spv");
   const Path missPath       = locator.LocateResource("shaders/miss.spv");
+  const Path shadowMissPath = locator.LocateResource("shaders/shadow_miss.spv");
   const Path closestHitPath = locator.LocateResource("shaders/closesthit.spv");
+  const Path anyHitPath     = locator.LocateResource("shaders/anyhit.spv");
 
   nvrhi::ShaderHandle newRaygen =
       LoadSpirv(_device, raygenPath.View(), nvrhi::ShaderType::RayGeneration, "main");
   nvrhi::ShaderHandle newMiss =
       LoadSpirv(_device, missPath.View(), nvrhi::ShaderType::Miss, "main");
+  nvrhi::ShaderHandle newShadowMiss =
+      LoadSpirv(_device, shadowMissPath.View(), nvrhi::ShaderType::Miss, "main");
   nvrhi::ShaderHandle newClosestHit =
       LoadSpirv(_device, closestHitPath.View(), nvrhi::ShaderType::ClosestHit, "main");
-  if (!newRaygen || !newMiss || !newClosestHit)
+  nvrhi::ShaderHandle newAnyHit =
+      LoadSpirv(_device, anyHitPath.View(), nvrhi::ShaderType::AnyHit, "main");
+  if (!newRaygen || !newMiss || !newShadowMiss || !newClosestHit || !newAnyHit)
   {
     log.Error(log::RENDER, "PathTracePass::ReloadShaders: shader load failed; keeping old pipeline");
     return false;
@@ -535,14 +619,16 @@ bool PathTracePass::ReloadShaders() noexcept {
   pipelineDesc.shaders = {
       nvrhi::rt::PipelineShaderDesc{}.setExportName("RayGenMain").setShader(newRaygen),
       nvrhi::rt::PipelineShaderDesc{}.setExportName("MissMain").setShader(newMiss),
+      nvrhi::rt::PipelineShaderDesc{}.setExportName("ShadowMissMain").setShader(newShadowMiss),
   };
   pipelineDesc.hitGroups = {
       nvrhi::rt::PipelineHitGroupDesc{}
           .setExportName("HitGroupDefault")
-          .setClosestHitShader(newClosestHit),
+          .setClosestHitShader(newClosestHit)
+          .setAnyHitShader(newAnyHit),
   };
   pipelineDesc.globalBindingLayouts = {_bindingLayout};
-  pipelineDesc.maxRecursionDepth = 1;
+  pipelineDesc.maxRecursionDepth = 2;
   nvrhi::rt::PipelineHandle newPipeline = _device->createRayTracingPipeline(pipelineDesc);
   if (!newPipeline)
   {
@@ -559,7 +645,8 @@ bool PathTracePass::ReloadShaders() noexcept {
     return false;
   }
   newShaderTable->setRayGenerationShader("RayGenMain");
-  newShaderTable->addMissShader("MissMain");
+  newShaderTable->addMissShader("MissMain");        // miss-index 0: primary rays
+  newShaderTable->addMissShader("ShadowMissMain");  // miss-index 1: shadow rays
   newShaderTable->addHitGroup("HitGroupDefault");
 
   // Atomic-ish swap: every reference taken in Execute reads from the
@@ -568,7 +655,9 @@ bool PathTracePass::ReloadShaders() noexcept {
   // side) the next Execute picks up the new pipeline + table.
   _raygenShader     = std::move(newRaygen);
   _missShader       = std::move(newMiss);
+  _shadowMissShader = std::move(newShadowMiss);
   _closestHitShader = std::move(newClosestHit);
+  _anyHitShader     = std::move(newAnyHit);
   _pipeline         = std::move(newPipeline);
   _shaderTable      = std::move(newShaderTable);
   _shadersOk = true;
@@ -599,10 +688,15 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(RenderTargets const
   current[slot(BindingSlot::MeshFaceOffsets)]  = _scene->GetMeshFaceOffsetsBuffer();
   current[slot(BindingSlot::DomeTexture)]      = _scene->GetDomeEnvMapTexture();
   current[slot(BindingSlot::BindlessSampler)]  = _scene->GetBindlessSampler();
-  current[slot(BindingSlot::MeshUvs)]          = _scene->GetMeshUvsBuffer();
-  current[slot(BindingSlot::MeshUvOffsets)]    = _scene->GetMeshUvOffsetsBuffer();
-  current[slot(BindingSlot::MeshIndices)]      = _scene->GetMeshIndicesBuffer();
-  current[slot(BindingSlot::MeshIndexOffsets)] = _scene->GetMeshIndexOffsetsBuffer();
+  current[slot(BindingSlot::MeshUvs)]                = _scene->GetMeshUvsBuffer();
+  current[slot(BindingSlot::MeshUvOffsets)]          = _scene->GetMeshUvOffsetsBuffer();
+  current[slot(BindingSlot::MeshIndices)]            = _scene->GetMeshIndicesBuffer();
+  current[slot(BindingSlot::MeshIndexOffsets)]       = _scene->GetMeshIndexOffsetsBuffer();
+  current[slot(BindingSlot::MeshVertexNormals)]      = _scene->GetMeshVertexNormalsBuffer();
+  current[slot(BindingSlot::MeshVertexNormalOffsets)]= _scene->GetMeshVertexNormalOffsetsBuffer();
+  current[slot(BindingSlot::MeshTangents)]           = _scene->GetMeshTangentsBuffer();
+  current[slot(BindingSlot::MeshTangentOffsets)]     = _scene->GetMeshTangentOffsetsBuffer();
+  current[slot(BindingSlot::DomeSampler)]            = _scene->GetDomeSampler();
   current[slot(BindingSlot::ColorHdrAov)]      = targets.colorHdr;
   current[slot(BindingSlot::NormalAov)]        = targets.normalAov;
   current[slot(BindingSlot::DepthAov)]         = targets.depthAov;
@@ -694,17 +788,38 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(RenderTargets const
   nvrhi::IBuffer* meshIndexOffsetsBuffer = _scene->GetMeshIndexOffsetsBuffer();
   if (meshIndexOffsetsBuffer == nullptr)
     meshIndexOffsetsBuffer = _fallbackMeshIndexOffsetsBuffer.Get();
-  // M7-IBL: dome HDRI texture + sampler. Scene's first live dome
-  // wins; falls back to the 1×1 black texture + the local linear-
-  // clamp sampler when no dome with a resolved env-map exists. The
-  // miss shader handles the all-black case via the M7-simple
-  // "use authored color" branch.
+  // M9 smooth shading — per-vertex normals + their offset table.
+  nvrhi::IBuffer* meshVertexNormalsBuffer = _scene->GetMeshVertexNormalsBuffer();
+  if (meshVertexNormalsBuffer == nullptr)
+    meshVertexNormalsBuffer = _fallbackMeshVertexNormalsBuffer.Get();
+  nvrhi::IBuffer* meshVertexNormalOffsetsBuffer = _scene->GetMeshVertexNormalOffsetsBuffer();
+  if (meshVertexNormalOffsetsBuffer == nullptr)
+    meshVertexNormalOffsetsBuffer = _fallbackMeshVertexNormalOffsetsBuffer.Get();
+  // M9 normal mapping — per-vertex tangents + their offset table.
+  nvrhi::IBuffer* meshTangentsBuffer = _scene->GetMeshTangentsBuffer();
+  if (meshTangentsBuffer == nullptr)
+    meshTangentsBuffer = _fallbackMeshTangentsBuffer.Get();
+  nvrhi::IBuffer* meshTangentOffsetsBuffer = _scene->GetMeshTangentOffsetsBuffer();
+  if (meshTangentOffsetsBuffer == nullptr)
+    meshTangentOffsetsBuffer = _fallbackMeshTangentOffsetsBuffer.Get();
+  // M9-fidelity per-role samplers — dome sampler at binding 33.
+  // Falls back to the material sampler when GpuScene hasn't created
+  // the dome sampler yet (truly empty scene); identical filter
+  // settings, just different addressing modes.
+  nvrhi::ISampler* domeSampler = _scene->GetDomeSampler();
+  if (domeSampler == nullptr)
+    domeSampler = _fallbackDomeSampler.Get();
+  // M7-IBL: dome HDRI texture + the M9-fidelity material sampler at
+  // binding 10 (now used for material textures only; dome sampler
+  // moved to binding 33 above). Scene's first live dome wins; the
+  // 1×1 black fallback texture handles "no dome" — miss shader's
+  // "use authored color" branch fires when sampling that all-black.
   nvrhi::ITexture* domeTexture = _scene->GetDomeEnvMapTexture();
   if (domeTexture == nullptr)
     domeTexture = _fallbackDomeTexture.Get();
-  nvrhi::ISampler* domeSampler = _scene->GetBindlessSampler();
-  if (domeSampler == nullptr)
-    domeSampler = _fallbackDomeSampler.Get();
+  nvrhi::ISampler* materialSampler = _scene->GetBindlessSampler();
+  if (materialSampler == nullptr)
+    materialSampler = _fallbackDomeSampler.Get();
 
   // M7 follow-up — caller-owned raw AOVs + pick buffer. Each falls
   // back to the 1×1 / 1-element scratch resource when the caller
@@ -748,7 +863,7 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(RenderTargets const
       nvrhi::BindingSetItem::StructuredBuffer_SRV(7, meshFaceNormalsBuffer),
       nvrhi::BindingSetItem::StructuredBuffer_SRV(8, meshFaceOffsetsBuffer),
       nvrhi::BindingSetItem::Texture_SRV(9, domeTexture),
-      nvrhi::BindingSetItem::Sampler(10, domeSampler),
+      nvrhi::BindingSetItem::Sampler(10, materialSampler),
       nvrhi::BindingSetItem::Texture_UAV(11, colorHdrAov),
       nvrhi::BindingSetItem::Texture_UAV(12, normalAov),
       nvrhi::BindingSetItem::Texture_UAV(13, depthAov),
@@ -766,6 +881,14 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(RenderTargets const
       nvrhi::BindingSetItem::StructuredBuffer_SRV(25, meshUvOffsetsBuffer),
       nvrhi::BindingSetItem::StructuredBuffer_SRV(26, meshIndicesBuffer),
       nvrhi::BindingSetItem::StructuredBuffer_SRV(27, meshIndexOffsetsBuffer),
+      // M9 smooth shading.
+      nvrhi::BindingSetItem::StructuredBuffer_SRV(29, meshVertexNormalsBuffer),
+      nvrhi::BindingSetItem::StructuredBuffer_SRV(30, meshVertexNormalOffsetsBuffer),
+      // M9 normal mapping.
+      nvrhi::BindingSetItem::StructuredBuffer_SRV(31, meshTangentsBuffer),
+      nvrhi::BindingSetItem::StructuredBuffer_SRV(32, meshTangentOffsetsBuffer),
+      // M9-fidelity per-role samplers — dome at binding 33.
+      nvrhi::BindingSetItem::Sampler(33, domeSampler),
   };
 
   // ---- Bindless texture array (binding 28) -----------------------------
@@ -890,9 +1013,25 @@ void PathTracePass::Execute(nvrhi::ICommandList* commandList, const PassContext&
   // radiance by 2^exposure before the ACES tonemap fires. Pads stay
   // zero — the cbuffer's size assert pins their presence.
   cameraUniforms.exposure  = camera.exposure;
+  // M9-fidelity: per-pixel angular spread for ray-cone-footprint LOD
+  // selection in the closesthit. Standard pinhole derivation:
+  //   pixelSpread = 2 × tan(fovY/2) / imageHeight
+  // We extract fovY from the projection matrix's [1][1] entry
+  // (= 1/tan(fovY/2) for a column-vector / row-major projection
+  // matrix). imageHeight comes from the bound output texture.
+  const auto outputHeight = static_cast<float>(output->getDesc().height);
+  // hlslpp::float4x4 stores rows as float[4]; row-1 column-1 is
+  // the canonical cot(fovY/2) entry of a column-vector / row-major
+  // perspective projection matrix.
+  float projRow1[16];
+  hlslpp::store(projRow1, camera.projFromView);
+  const float projYY = projRow1[5];  // row 1, col 1 in row-major float[16]
+  const float tanHalfFov = (projYY > 1e-6f) ? (1.0f / projYY) : 0.0f;
+  cameraUniforms.pixelSpreadRadians = (outputHeight > 0.0f && tanHalfFov > 0.0f)
+                                          ? (2.0f * tanHalfFov / outputHeight)
+                                          : 0.0f;
   cameraUniforms._camPad0  = 0.0f;
   cameraUniforms._camPad1  = 0.0f;
-  cameraUniforms._camPad2  = 0.0f;
   commandList->writeBuffer(_cameraUniformsBuffer.Get(), &cameraUniforms, sizeof(cameraUniforms));
 
   // ---- Upload viewer-only per-frame UI state -------------------------
@@ -976,7 +1115,7 @@ void PathTracePass::Execute(nvrhi::ICommandList* commandList, const PassContext&
     const void*  defaultBytes;
     std::size_t  defaultByteSize;
   };
-  const std::array<BufferFallbackSpec, 10> bufferFallbacks{{
+  const std::array<BufferFallbackSpec, 14> bufferFallbacks{{
       {&GpuScene::GetMaterialBuffer,         &PathTracePass::_fallbackMaterialBuffer,
        &FALLBACK_MATERIAL_GREY,    sizeof(FALLBACK_MATERIAL_GREY)   },
       {&GpuScene::GetInstanceMaterialBuffer, &PathTracePass::_fallbackInstanceMaterialBuffer,
@@ -997,6 +1136,16 @@ void PathTracePass::Execute(nvrhi::ICommandList* commandList, const PassContext&
       {&GpuScene::GetMeshIndicesBuffer,      &PathTracePass::_fallbackMeshIndicesBuffer,
        &FALLBACK_UINT_ZERO,        sizeof(FALLBACK_UINT_ZERO)       },
       {&GpuScene::GetMeshIndexOffsetsBuffer, &PathTracePass::_fallbackMeshIndexOffsetsBuffer,
+       &FALLBACK_UINT_ZERO,        sizeof(FALLBACK_UINT_ZERO)       },
+      // M9 smooth shading.
+      {&GpuScene::GetMeshVertexNormalsBuffer,        &PathTracePass::_fallbackMeshVertexNormalsBuffer,
+       FALLBACK_FLOAT4_ZERO,       sizeof(FALLBACK_FLOAT4_ZERO)     },
+      {&GpuScene::GetMeshVertexNormalOffsetsBuffer,  &PathTracePass::_fallbackMeshVertexNormalOffsetsBuffer,
+       &FALLBACK_UINT_ZERO,        sizeof(FALLBACK_UINT_ZERO)       },
+      // M9 normal mapping.
+      {&GpuScene::GetMeshTangentsBuffer,             &PathTracePass::_fallbackMeshTangentsBuffer,
+       FALLBACK_FLOAT4_ZERO,       sizeof(FALLBACK_FLOAT4_ZERO)     },
+      {&GpuScene::GetMeshTangentOffsetsBuffer,       &PathTracePass::_fallbackMeshTangentOffsetsBuffer,
        &FALLBACK_UINT_ZERO,        sizeof(FALLBACK_UINT_ZERO)       },
   }};
   for (const BufferFallbackSpec& spec : bufferFallbacks)

@@ -224,3 +224,22 @@ pyxis_compile_slang_shader(
     STAGE       closesthit
     OUTPUT      closesthit.spv
 )
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/anyhit.slang
+    ENTRY_POINT main
+    STAGE       anyhit
+    OUTPUT      anyhit.spv
+)
+# M9-fidelity shadow rays — second miss shader stitched into the
+# shader binding table at miss-index 1. Closesthit traces a shadow
+# ray per direct light with RAY_FLAG_SKIP_CLOSEST_HIT_SHADER |
+# RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH; this miss writes
+# payload.color=1.0 (=visible) iff no opaque hit blocks the path.
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/shadow_miss.slang
+    ENTRY_POINT main
+    STAGE       miss
+    OUTPUT      shadow_miss.spv
+)
