@@ -22,11 +22,19 @@ TextureHandle GpuScene::Impl::AcquireTexture(const TextureKey& textureKey)
     textures.emplace_back();  // sentinel slot 0
 
   const std::uint64_t hash = HashTextureKey(textureKey);
+  // V2.A.12 — bump access tick + hit counter on cache-hit. Eviction
+  // policy (when it lands) reads `lastAccessTick` to find the coldest
+  // entries; bumping on hit keeps frequently-sampled textures warm.
+  ++nextTextureAccessTick;
   if (auto found = textureKeyHashToHandle.find(hash);
       found != textureKeyHashToHandle.end())
   {
+    if (TextureEntry* hitEntry = ResolveTexture(found->second); hitEntry != nullptr)
+      hitEntry->lastAccessTick = nextTextureAccessTick;
+    ++lruHitCount;
     return found->second;
   }
+  ++lruMissCount;
 
   // O(1) free-list pop; DestroyTexture pushes back symmetrically.
   uint32_t slot = 0;
