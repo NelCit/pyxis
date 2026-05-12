@@ -1,0 +1,37 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis M14c / V2.A.31 fixture — authored `extent` on Mesh prims. The StageWalker's scene-bounds aggregator logs the combined min/max; this fixture proves it picks up authored extents without re-computing from points."
+)
+
+def Xform "World"
+{
+    def Mesh "MeshWithExtent"
+    {
+        float3[] extent = [(-1, -1, -1), (1, 1, 1)]
+        point3f[] points = [(-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1)]
+        int[] faceVertexCounts = [3, 3]
+        int[] faceVertexIndices = [0, 1, 2, 0, 2, 3]
+        color3f[] primvars:displayColor = [(0.7, 0.5, 0.3)]
+        double3 xformOp:translate = (0, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 1.5, 8)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.0
+    }
+}

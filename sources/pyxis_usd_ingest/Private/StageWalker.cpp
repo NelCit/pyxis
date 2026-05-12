@@ -39,6 +39,7 @@
 #include <pxr/usd/usd/prim.h>
 #include <pxr/usd/usd/primRange.h>
 #include <pxr/usd/usd/relationship.h>
+#include <pxr/usd/usdGeom/boundable.h>
 #include <pxr/usd/usdGeom/mesh.h>
 #include <pxr/usd/usdGeom/camera.h>
 #include <pxr/usd/usdGeom/metrics.h>
@@ -82,6 +83,7 @@
 #include <chrono>
 #include <cstring>
 #include <execution>
+#include <limits>
 #include <numeric>
 #include <string>
 #include <unordered_map>
@@ -2316,6 +2318,53 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
       std::chrono::duration<float, std::milli>(pass3bEnd - pass3bStart).count();
   Logging::Get().Info(log::APP,
       "StageWalker pass3b (parallel mesh prep): " + std::to_string(static_cast<int>(pass3bMs)) + "ms");
+
+  // M14c / V2.A.31 — scene bounding-box aggregate. Walk each mesh
+  // prim's authored `extent` (UsdGeomBoundable's per-prim min/max
+  // bound) when present. Inexpensive informational pass — logged so
+  // viewer / batch tools can frame the scene without re-walking every
+  // mesh, and so missing-extent prims are visible in the log. Real
+  // GPU consumption (frustum culling, dome-light placement) lands
+  // when the renderer needs scene bounds; today it's diagnostics.
+  {
+    pxr::GfVec3f sceneMin{ std::numeric_limits<float>::infinity(),
+                           std::numeric_limits<float>::infinity(),
+                           std::numeric_limits<float>::infinity()};
+    pxr::GfVec3f sceneMax{-std::numeric_limits<float>::infinity(),
+                          -std::numeric_limits<float>::infinity(),
+                          -std::numeric_limits<float>::infinity()};
+    std::size_t extentedPrimCount = 0;
+    for (const pxr::UsdPrim& prim : prims)
+    {
+      const pxr::UsdGeomBoundable boundable(prim);
+      if (!boundable)
+        continue;
+      pxr::VtArray<pxr::GfVec3f> extentArr;
+      if (!boundable.GetExtentAttr() || !boundable.GetExtentAttr().Get(&extentArr))
+        continue;
+      if (extentArr.size() != 2)
+        continue;
+      const pxr::GfVec3f& primMin = extentArr[0];
+      const pxr::GfVec3f& primMax = extentArr[1];
+      for (int axis = 0; axis < 3; ++axis)
+      {
+        sceneMin[axis] = std::min(sceneMin[axis], primMin[axis]);
+        sceneMax[axis] = std::max(sceneMax[axis], primMax[axis]);
+      }
+      ++extentedPrimCount;
+    }
+    if (extentedPrimCount > 0)
+    {
+      Logging::Get().Info(log::APP,
+          "StageWalker scene bounds (from " + std::to_string(extentedPrimCount)
+          + " authored extents): min=(" + std::to_string(sceneMin[0])
+          + ", " + std::to_string(sceneMin[1])
+          + ", " + std::to_string(sceneMin[2])
+          + ") max=(" + std::to_string(sceneMax[0])
+          + ", " + std::to_string(sceneMax[1])
+          + ", " + std::to_string(sceneMax[2]) + ")");
+    }
+  }
 
   // Pass 3c — single-writer drain: walk prims in SdfPath order and
   // emit prepared meshes / cameras / lights in lockstep.
