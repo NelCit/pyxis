@@ -1,0 +1,185 @@
+# Pyxis nightly regression pipeline (M10 — plan §35 / §36.6 / §37).
+#
+# Runs the image-regression harness + per-test KPI capture against
+# every fixture under tests/regression/ for which a baseline exists
+# AND the corresponding scene is on disk. Designed to be SEPARATE
+# from the per-PR build CI (`build.yml`) so a regression bake doesn't
+# gate developer iteration; per §37 nightly fails on RMSE > tolerance
+# OR > 10% perf regression.
+#
+# Triggers:
+#   - schedule: 03:00 UTC every day
+#   - manual via the Actions tab (workflow_dispatch)
+#
+# Scene-dataset gating:
+#   The full Bistro / Lobby / etc. scenes are heavy ZIPs (~3-10 GB
+#   each) that GitHub-hosted runners don't carry. The matrix loops
+#   through declared dataset_path env vars; if the scene .usd doesn't
+#   exist after the optional download step, the fixture is skipped
+#   with a STATUS-line message (no failure). This matches the
+#   PYXIS_BISTRO_DATASET_PATH convention from §35 / §41 M10.
+
+name: nightly
+
+on:
+  schedule:
+    # 03:00 UTC = quiet hours for both EU + US contributors. The plan
+    # doesn't pin the time; revisit when there's a perf-regression
+    # response rota.
+    - cron: '0 3 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read       # checkout the repo
+  actions: read        # read prior workflow runs for KPI history fetch
+  pull-requests: write # comment the perf-compare report on a triggering PR if/when wired
+
+jobs:
+  windows-bistro:
+    name: nightly windows regression
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    env:
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\\vcpkg_cache
+      VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+      PYXIS_PRESET: ci
+      # Bistro is bundled by Amazon Lumberyard; the GHA runner caches
+      # the tarball under a docs-public S3 URL when present. Empty =
+      # skip the Bistro fixture for this run (still runs lobby etc.
+      # when their scenes happen to be packaged).
+      PYXIS_BISTRO_DATASET_URL: ""
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Export GHA cache tokens
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Install Vulkan SDK
+        uses: jakoch/install-vulkan-sdk-action@v1
+        with:
+          vulkan_version: 1.4.341.1
+          install_runtime: true
+          cache: true
+          stripdown: true
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: bc71aa640f89933294f16e004b212c7fd3183eed
+          vcpkgDirectory: ${{ runner.workspace }}\vcpkg
+          doNotCache: true
+
+      - name: Configure CMake
+        run: cmake --preset $env:PYXIS_PRESET
+
+      - name: Build Release
+        # CI preset's default config is Release; --target pyxis builds
+        # the headless harness needs.
+        run: cmake --build --preset $env:PYXIS_PRESET --target pyxis
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install regression deps
+        run: python -m pip install --upgrade pip; python -m pip install -r _tools/requirements.txt
+
+      # Restore prior KPI CSV history from the gha-cache so the rolling
+      # median in perf_compare has something to compare against. The
+      # cache key includes the fixture set + the OS + the major+minor
+      # python version so cross-rev runs share history.
+      - name: Restore KPI history
+        id: kpi-cache
+        uses: actions/cache@v4
+        with:
+          path: tests/regression/**/kpis.csv
+          key: pyxis-kpi-history-${{ runner.os }}-py312-${{ github.run_id }}
+          restore-keys: |
+            pyxis-kpi-history-${{ runner.os }}-py312-
+
+      # Optional Bistro download. URL is intentionally empty by default
+      # — only flips on when the project ships a stable download
+      # mirror. The actual fixture-skip happens inside run_regression
+      # when the scene .usd isn't found, so the whole job degrades
+      # gracefully to "lobby only" when Bistro isn't yet wired.
+      - name: Download Bistro (optional)
+        if: env.PYXIS_BISTRO_DATASET_URL != ''
+        run: |
+          New-Item -ItemType Directory -Force -Path resources\scenes\bistro | Out-Null
+          curl -L -o bistro.zip $env:PYXIS_BISTRO_DATASET_URL
+          Expand-Archive -Path bistro.zip -DestinationPath resources\scenes\bistro
+
+      - name: Run regression matrix
+        # Walk every fixture under tests/regression/ — each one is
+        # one subdirectory with regression.json + baseline.exr. Skip
+        # silently if the referenced scene .usd doesn't exist on
+        # disk (matches the M8a smoke-test convention).
+        run: |
+          $exe = "build/${env:PYXIS_PRESET}/bin/Release/pyxis.exe"
+          if (-not (Test-Path $exe)) { $exe = "build/${env:PYXIS_PRESET}/bin/pyxis.exe" }
+          $fixtures = Get-ChildItem tests/regression -Directory
+          $any_fail = $false
+          foreach ($fix in $fixtures) {
+            $json = Join-Path $fix.FullName "regression.json"
+            if (-not (Test-Path $json)) { continue }
+            $outdir = Join-Path "regression_out" $fix.Name
+            New-Item -ItemType Directory -Force -Path $outdir | Out-Null
+            Write-Host "==> $($fix.Name)"
+            python _tools/run_regression.py `
+              --pyxis $exe `
+              --fixture $fix.FullName `
+              --output-dir $outdir `
+              --bench-frames 30
+            if ($LASTEXITCODE -ne 0) { $any_fail = $true }
+          }
+          if ($any_fail) {
+            Write-Host "::error::one or more regressions failed; see per-fixture stdout above"
+            exit 1
+          }
+
+      - name: Perf-regression report
+        if: always()
+        # Aggregate one markdown report per fixture into the workflow
+        # summary so reviewers can see deltas without downloading the
+        # CSV. The job continues past warn (`|| true`); the regression
+        # step above already failed on RMSE-out-of-tolerance.
+        run: |
+          $summary = $env:GITHUB_STEP_SUMMARY
+          "## Pyxis nightly perf-regression report" | Out-File -Append $summary
+          ""                                          | Out-File -Append $summary
+          Get-ChildItem tests/regression -Directory | ForEach-Object {
+            $csv = Join-Path $_.FullName "kpis.csv"
+            if (-not (Test-Path $csv)) { return }
+            python _tools/perf_compare.py --csv $csv --markdown >> $summary
+            "" | Out-File -Append $summary
+          }
+
+      - name: Render perf dashboard
+        if: always()
+        run: |
+          $csvs = Get-ChildItem tests/regression -Recurse -Filter kpis.csv |
+                  ForEach-Object { "--csv `"$($_.FullName)`"" }
+          if ($csvs.Count -eq 0) {
+            Write-Host "no KPI CSVs found; skipping dashboard render"
+          } else {
+            Invoke-Expression ("python _tools/perf_dashboard.py " +
+                               ($csvs -join ' ') + " --out perf_dashboard.html")
+          }
+
+      - name: Upload KPI artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pyxis-nightly-kpis
+          path: |
+            tests/regression/**/kpis.csv
+            regression_out/**/*
+            perf_dashboard.html
+          retention-days: 30
