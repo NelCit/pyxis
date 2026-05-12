@@ -64,6 +64,7 @@
 #include <pxr/usd/usdGeom/imageable.h>
 #include <pxr/usd/usdShade/material.h>
 #include <pxr/usd/usdShade/materialBindingAPI.h>
+#include <pxr/usd/usdVol/volume.h>
 #include <pxr/usd/sdf/path.h>
 #include <pxr/base/gf/matrix4d.h>
 
@@ -2409,6 +2410,21 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
     else if (prim.IsA<pxr::UsdShadeMaterial>())
     {
       // Already translated + counted in pass 1.
+    }
+    else if (prim.IsA<pxr::UsdVolVolume>())
+    {
+      // M15 / V2.A.5 — Volumes detection. Full OpenVDB rendering is a
+      // separate milestone (needs an `openvdb` vcpkg dep + AABB BLAS
+      // shape + a volume integrator pass + OpenPBR volume coefficients).
+      // For now we detect the prim, log a per-prim warning so the user
+      // sees that the volume was intentionally skipped, and continue.
+      // The pipeline produces a complete render with the volume just
+      // absent — better than crashing or silently dropping the prim.
+      Logging::Get().Warn(log::APP,
+          "StageWalker: UsdVolVolume " + prim.GetPath().GetString()
+              + " detected but not yet rendered (OpenVDB integration "
+                "is a follow-up milestone). Skipping.");
+      ++stats.skipped;
     }
     else
     {

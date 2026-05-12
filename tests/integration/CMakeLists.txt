@@ -272,3 +272,20 @@ set_tests_properties(M14.ExtentsSmoke PROPERTIES
     LABELS    "integration;m14"
     TIMEOUT   120
 )
+
+# §41 M15 / V2.A.5 — UsdVolVolume detect/warn/skip stub. Full OpenVDB
+# rendering is a follow-up milestone; this proves a volume-bearing
+# scene doesn't crash and that the rest of the geometry still renders.
+add_test(
+    NAME    M15.VolumeStubSmoke
+    COMMAND ${CMAKE_COMMAND}
+            -DPYXIS_EXE=$<TARGET_FILE:pyxis>
+            -DFIXTURE_CONFIG=${CMAKE_SOURCE_DIR}/tests/fixtures/m15_volume_stub.json
+            -DSCENE_PATH=${CMAKE_SOURCE_DIR}/tests/fixtures/m15_volume_stub.usda
+            -DOUTPUT_DIR=${CMAKE_BINARY_DIR}/tests/integration/m15_volume_stub
+            -P ${CMAKE_SOURCE_DIR}/tests/integration/m15_volume_stub_smoke.cmake
+)
+set_tests_properties(M15.VolumeStubSmoke PROPERTIES
+    LABELS    "integration;m15"
+    TIMEOUT   120
+)
