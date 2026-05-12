@@ -336,3 +336,18 @@ set_tests_properties(M18.MaterialHealthSmoke PROPERTIES
     LABELS    "integration;m18"
     TIMEOUT   120
 )
+
+# §41 M19 / V2.A.4 + V2.A.13 — --frame N stub smoke.
+add_test(
+    NAME    M19.FrameFlagSmoke
+    COMMAND ${CMAKE_COMMAND}
+            -DPYXIS_EXE=$<TARGET_FILE:pyxis>
+            -DFIXTURE_CONFIG=${CMAKE_SOURCE_DIR}/tests/fixtures/m14c_extents.json
+            -DSCENE_PATH=${CMAKE_SOURCE_DIR}/tests/fixtures/m14c_extents.usda
+            -DOUTPUT_DIR=${CMAKE_BINARY_DIR}/tests/integration/m19_frame
+            -P ${CMAKE_SOURCE_DIR}/tests/integration/m19_frame_flag_smoke.cmake
+)
+set_tests_properties(M19.FrameFlagSmoke PROPERTIES
+    LABELS    "integration;m19"
+    TIMEOUT   120
+)

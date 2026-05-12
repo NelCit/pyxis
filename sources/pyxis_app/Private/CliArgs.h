@@ -57,6 +57,15 @@ struct CliArgs {
   // §41 perf milestones.
   uint32_t benchFrames = 0;      // --bench-frames <int>  (0 = disabled)
 
+  // M19 / V2.A.4 + V2.A.13 — time-varying USD evaluation frame.
+  // Parsed but the rest of the pipeline still evaluates at
+  // `UsdTimeCode::Default()` for v2; full time-code propagation
+  // (per-attr `.Get(timeCode)` calls + stage->SetEditTarget(time))
+  // lands when we wire up animated scene tests. Flag plumbs through
+  // CliArgs so future plumbing has a parsing target already in
+  // place — minus-one means "not authored on the command line".
+  int frameNumber = -1;          // --frame <int>  (-1 = default time)
+
   // ---- M7 follow-up: AOV save -----------------------------------------
   // --save-aov <list>  Comma-separated list of raw AOVs to dump
   // alongside the regular `--output` BGRA8 EXR. The path stem of

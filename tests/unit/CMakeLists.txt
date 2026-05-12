@@ -32,6 +32,7 @@ target_sources(pyxis_unit_tests PRIVATE
     TextureMemoryReporting.cpp
     ArResolverVisibility.cpp
     MaterialSourceCounts.cpp
+    FrameFlagParsing.cpp
 
     # The §9.2 RenderGraph + IRenderPass live in pyxis_renderer/Private
     # and don't cross the SHARED-DLL boundary. The unit-test harness is
@@ -46,6 +47,10 @@ target_sources(pyxis_unit_tests PRIVATE
     # Configuration.h are pure POD declarations — we don't need to
     # drag the matching .cpp files in.
     ${CMAKE_SOURCE_DIR}/sources/pyxis_app/Private/Scene/SceneResolver.cpp
+
+    # M19 — CliArgs.cpp recompiled directly so FrameFlagParsing tests
+    # can call Parse() without linking against the pyxis_app exe.
+    ${CMAKE_SOURCE_DIR}/sources/pyxis_app/Private/CliArgs.cpp
 
     # M13 / V2.A.3 — analytic-prim tessellators live in
     # pyxis_usd_ingest/Private; recompile directly so the test exe
