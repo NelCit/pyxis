@@ -320,3 +320,19 @@ set_tests_properties(M17.ArResolverSmoke PROPERTIES
     LABELS    "integration;m17"
     TIMEOUT   120
 )
+
+# §41 M18 / V2.A.8 + V2.A.18 — material translation health log smoke.
+# Uses the M5 three-materials fixture (all UsdPreviewSurface).
+add_test(
+    NAME    M18.MaterialHealthSmoke
+    COMMAND ${CMAKE_COMMAND}
+            -DPYXIS_EXE=$<TARGET_FILE:pyxis>
+            -DFIXTURE_CONFIG=${CMAKE_SOURCE_DIR}/tests/fixtures/m18_material_health.json
+            -DSCENE_PATH=${CMAKE_SOURCE_DIR}/tests/fixtures/m5_three_materials.usd
+            -DOUTPUT_DIR=${CMAKE_BINARY_DIR}/tests/integration/m18_material_health
+            -P ${CMAKE_SOURCE_DIR}/tests/integration/m18_material_health_smoke.cmake
+)
+set_tests_properties(M18.MaterialHealthSmoke PROPERTIES
+    LABELS    "integration;m18"
+    TIMEOUT   120
+)

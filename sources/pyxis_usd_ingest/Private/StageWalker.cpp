@@ -2226,6 +2226,17 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
         return static_cast<GpuScene*>(userData)->AcquireTexture(key);
       };
   const auto materialPassStart = Clock::now();
+  // M18 / V2.A.8 + V2.A.18 — material translation health counters.
+  // We already translate UsdPreviewSurface + MaterialX (open_pbr +
+  // standard_surface) + fall back to grey on unsupported networks.
+  // The fallback is silent today; counting the per-source breakdown
+  // surfaces "how many materials silently degraded" at end-of-pass1
+  // so operators know whether the scene needs richer MaterialX /
+  // MDL / RenderMan coverage before chasing other render issues.
+  std::uint32_t srcCountUsdPreview = 0;
+  std::uint32_t srcCountMaterialX = 0;
+  std::uint32_t srcCountRenderMan = 0;
+  std::uint32_t srcCountDefault = 0;
   for (const pxr::UsdPrim& prim : prims)
   {
     if (!prim.IsA<pxr::UsdShadeMaterial>())
@@ -2243,11 +2254,36 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
     // their meshes' MikkTSpace was the dominant ingest-perf win.
     if (materialDesc.normalMap != TextureHandle::Invalid)
       materialsNeedingTangents.insert(handle);
+    switch (materialDesc.source)
+    {
+      case OpenPBRMaterialDesc::Source::UsdPreviewSurface: ++srcCountUsdPreview; break;
+      case OpenPBRMaterialDesc::Source::MaterialX:        ++srcCountMaterialX;   break;
+      case OpenPBRMaterialDesc::Source::RenderManFallback:++srcCountRenderMan;   break;
+      case OpenPBRMaterialDesc::Source::Default:          ++srcCountDefault;     break;
+    }
     ++stats.materialsEmitted;
   }
   const auto materialPassEnd = Clock::now();
   stats.timings.materialPassMs =
       std::chrono::duration<float, std::milli>(materialPassEnd - materialPassStart).count();
+  if (stats.materialsEmitted > 0)
+  {
+    Logging::Get().Info(log::APP,
+        "StageWalker material health: UsdPreviewSurface=" + std::to_string(srcCountUsdPreview)
+        + " MaterialX=" + std::to_string(srcCountMaterialX)
+        + " RenderManFallback=" + std::to_string(srcCountRenderMan)
+        + " Default(fallback-grey)=" + std::to_string(srcCountDefault)
+        + " (total " + std::to_string(stats.materialsEmitted) + ")");
+    if (srcCountDefault > 0)
+    {
+      Logging::Get().Warn(log::APP,
+          std::to_string(srcCountDefault) + " of "
+              + std::to_string(stats.materialsEmitted)
+              + " materials fell back to grey default — unsupported "
+                "MaterialX / MDL / RenderMan network (V2.A.8 / V2.A.24 "
+                "follow-up).");
+    }
+  }
 
   // Pass 2 — UsdGeomPointInstancer (M6). Walked BEFORE the standalone
   // mesh pass so any prototype meshes referenced by an instancer get
