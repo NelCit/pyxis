@@ -33,8 +33,14 @@ namespace pyxis::app {
 struct Configuration;
 struct ResolvedScene;
 
+// `loadMode` (V2.A.15) + `variantSelections` (V2.A.2): plumbed through
+// to IngestUsd alongside the existing `populationMask` + `frameNumber`
+// knobs. The viewer applies them on startup ingest (the editor's "Open
+// scene..." flow still goes through the no-override fast path).
 int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScene,
                   std::string_view screenshotPath,
-                  std::string_view shaderRebuildDirOverride = {}) noexcept;
+                  std::string_view shaderRebuildDirOverride = {},
+                  std::string_view loadMode = {},
+                  std::string_view variantSelections = {}) noexcept;
 
 }  // namespace pyxis::app

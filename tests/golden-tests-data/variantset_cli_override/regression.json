@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden variantset_cli_override — same fixture as variantset_authored_default (stage default = look:small_red); --variant on the CLI overrides to look:big_blue via UsdEditContext on the session layer. Expected baseline shows a bigger blue cube at a different position than the default. V2.A.2.", "variant": "/World/VariantSubject:look=big_blue" }

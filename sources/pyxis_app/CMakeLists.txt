@@ -44,6 +44,8 @@ target_sources(pyxis PRIVATE
     Private/EditorPanel.cpp
     Private/IngestUsd.h
     Private/IngestUsd.cpp
+    Private/VariantParser.h
+    Private/VariantParser.cpp
     Private/HeadlessMode.h
     Private/HeadlessMode.cpp
     Private/ViewerMode.h

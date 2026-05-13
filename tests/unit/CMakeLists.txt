@@ -39,6 +39,7 @@ target_sources(pyxis_unit_tests PRIVATE
     LoadModeAndMaskParsing.cpp
     NetworkCoverageDetection.cpp
     PopulationMaskParsing.cpp
+    VariantSelectionParsing.cpp
     MaterialCoverageFields.cpp
     MdlTranslation.cpp
     UdimMultiTile.cpp
@@ -84,6 +85,10 @@ target_sources(pyxis_unit_tests PRIVATE
     # M19 — CliArgs.cpp recompiled directly so FrameFlagParsing tests
     # can call Parse() without linking against the pyxis_app exe.
     ${CMAKE_SOURCE_DIR}/sources/pyxis_app/Private/CliArgs.cpp
+
+    # V2.A.2 — VariantParser is pure-stdlib; recompile directly so the
+    # unit test exercises the real parser instead of a copy.
+    ${CMAKE_SOURCE_DIR}/sources/pyxis_app/Private/VariantParser.cpp
 
     # M13 / V2.A.3 — analytic-prim tessellators live in
     # pyxis_usd_ingest/Private; recompile directly so the test exe
