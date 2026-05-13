@@ -34,6 +34,7 @@
 #include <nvrhi/nvrhi.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <string>
@@ -411,6 +412,29 @@ struct GpuScene::Impl
     LightDesc    descCopy{};
   };
 
+  // V2.A.5 — UsdVolVolume / OpenVDBAsset slot. Owns the dense float
+  // voxel buffer (CPU-side, dropped after upload) + the NVRHI 3D
+  // texture (R32_FLOAT). The closesthit doesn't sample the texture
+  // in v2 — the entry exists so the volume-integrator follow-up has
+  // a stable per-volume container to bind from. Size + transform
+  // metadata is kept on the entry so the future integrator pass can
+  // build a per-volume cbuffer without re-reading the source .vdb.
+  struct VolumeEntry
+  {
+    bool                    live           = false;
+    bool                    quarantined    = false;
+    bool                    needsGpuUpload = false;
+    std::uint8_t            generation     = 0;
+    std::array<uint32_t, 3> dimensions{0, 0, 0};
+    std::array<float, 3>    bboxMin{0, 0, 0};
+    std::array<float, 3>    bboxMax{0, 0, 0};
+    std::array<float, 16>   indexToWorld{};
+    std::vector<float>      voxelData;     // dropped after upload commits
+    nvrhi::TextureHandle    texture;
+    std::uint64_t           bytesOnGpu     = 0;  // textureBytes contribution.
+    std::string             debugName;
+  };
+
   // M5: material entry. Holds the CPU-side OpenPBRMaterialDesc copy
   // + the slot index inside the material GPU buffer (the bindless
   // table the closesthit reads via instanceCustomIndex). `descHash`
@@ -477,6 +501,7 @@ struct GpuScene::Impl
   std::vector<LightEntry>    lights;
   std::vector<MaterialEntry> materials;
   std::vector<TextureEntry>  textures;
+  std::vector<VolumeEntry>   volumes;
 
   // O(1) slot recycling. Each Destroy verb pushes the freed slot;
   // each Acquire / Append verb pops the latest one. Stack ordering
@@ -491,6 +516,12 @@ struct GpuScene::Impl
   std::vector<std::uint32_t> freeMaterialSlots;
   std::vector<std::uint32_t> freeTextureSlots;
   std::vector<std::uint32_t> freeLightSlots;
+  std::vector<std::uint32_t> freeVolumeSlots;
+  // V2.A.5 — set when a fresh AddVolume needs CommitResources to
+  // create the matching nvrhi::TextureHandle + write the dense
+  // float buffer into it via writeTexture(). Cleared after
+  // UploadPendingVolumes drains the queue.
+  bool                       volumesNeedGpuUpload = false;
 
   // M5 dedup maps: hash → handle. AcquireMaterial / AcquireTexture
   // hash their input desc / key, look up here, and return the
@@ -694,6 +725,8 @@ struct GpuScene::Impl
   { return LookupEntryImpl(static_cast<uint32_t>(handle), instances); }
   [[nodiscard]] const LightEntry*    LookupLight(LightHandle handle) const noexcept
   { return LookupEntryImpl(static_cast<uint32_t>(handle), lights); }
+  [[nodiscard]] const VolumeEntry*   LookupVolume(VolumeHandle handle) const noexcept
+  { return LookupEntryImpl(static_cast<uint32_t>(handle), volumes); }
 
   [[nodiscard]] MeshEntry*     ResolveMesh(MeshHandle handle) noexcept
   { return BumpIfStaleAndReturn(handle, LookupMesh(handle)); }
@@ -705,6 +738,8 @@ struct GpuScene::Impl
   { return BumpIfStaleAndReturn(handle, LookupInstance(handle)); }
   [[nodiscard]] LightEntry*    ResolveLight(LightHandle handle) noexcept
   { return BumpIfStaleAndReturn(handle, LookupLight(handle)); }
+  [[nodiscard]] VolumeEntry*   ResolveVolume(VolumeHandle handle) noexcept
+  { return BumpIfStaleAndReturn(handle, LookupVolume(handle)); }
 
   // Resolve a TextureHandle to its bindless slot index, or to
   // INVALID_BINDLESS_TEXTURE for Invalid / out-of-range / dead
@@ -761,6 +796,11 @@ struct GpuScene::Impl
   void                 UpdateLight(LightHandle lightHandle, const LightDesc& lightDesc);
   void                 RemoveLight(LightHandle lightHandle);
 
+  // Volume.cpp (V2.A.5)
+  VolumeHandle         AddVolume(const VolumeDesc& volumeDesc);
+  void                 RemoveVolume(VolumeHandle volumeHandle);
+  [[nodiscard]] bool   HasVolume(VolumeHandle volumeHandle) const;
+
   // Commit.cpp (Clear + CommitResources — both touch every table).
   // CommitResources is an orchestrator over the per-resource-type
   // member functions below; each one services one upload/build phase
@@ -781,6 +821,7 @@ struct GpuScene::Impl
   [[nodiscard]] Expected<void> UploadMeshIndices(nvrhi::ICommandList* commandList);
   [[nodiscard]] Expected<void> UploadMeshVertexNormals(nvrhi::ICommandList* commandList);
   [[nodiscard]] Expected<void> UploadMeshTangents(nvrhi::ICommandList* commandList);
+  [[nodiscard]] Expected<void> UploadPendingVolumes(nvrhi::ICommandList* commandList);
 };
 
 }  // namespace pyxis

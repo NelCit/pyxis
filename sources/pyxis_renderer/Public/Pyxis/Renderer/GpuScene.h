@@ -41,6 +41,7 @@
 #include <Pyxis/Renderer/Descs/MeshDesc.h>
 #include <Pyxis/Renderer/Descs/OpenPBRMaterialDesc.h>
 #include <Pyxis/Renderer/Descs/TextureKey.h>
+#include <Pyxis/Renderer/Descs/VolumeDesc.h>
 #include <Pyxis/Renderer/Error.h>
 #include <Pyxis/Renderer/Forward.h>
 #include <Pyxis/Renderer/RendererApi.h>
@@ -132,6 +133,20 @@ public:
   [[nodiscard]] LightHandle AddLight(const LightDesc& lightDesc);
   void UpdateLight(LightHandle lightHandle, const LightDesc& lightDesc);
   void RemoveLight(LightHandle lightHandle);
+
+  // ---- Volumes (V2.A.5) ----------------------------------------------
+  // AddVolume copies the dense voxel buffer + metadata, allocates a
+  // VolumeHandle, and queues an NVRHI 3D-texture upload that drains
+  // during the next CommitResources. Returns Invalid on bad inputs
+  // (dim == 0, voxel-count mismatch, dimension > 2048, or handle-
+  // space exhausted) and a one-shot spdlog warning fires.
+  //
+  // The shader doesn't sample the resulting texture in v2 (see
+  // VolumeDesc.h); the API surface ships now so the future volume-
+  // integrator pass has a stable contract to bind.
+  [[nodiscard]] VolumeHandle AddVolume(const VolumeDesc& volumeDesc);
+  void                       RemoveVolume(VolumeHandle volumeHandle);
+  [[nodiscard]] bool         HasVolume(VolumeHandle volumeHandle) const;
 
   // ---- Frame boundary ------------------------------------------------
   // Drains pending mutations, runs the Flecs phase pipeline, builds
@@ -317,6 +332,14 @@ public:
   // (slot 0 fallback) for each null.
   [[nodiscard]] uint32_t                 GetBindlessTextureCount() const noexcept;
   [[nodiscard]] nvrhi::ITexture*         GetBindlessTextureAt(uint32_t bindlessSlot) const noexcept;
+
+  // V2.A.5 — render-side accessor for the per-volume Texture3D. Sparse
+  // (includes dead slots). The volume-integrator follow-up will walk
+  // these to populate a bindless slot; until then the textures are
+  // alive on the GPU but unbound to any shader. Returns nullptr for
+  // dead / un-uploaded entries.
+  [[nodiscard]] uint32_t                 GetVolumeCount() const noexcept;
+  [[nodiscard]] nvrhi::ITexture*         GetVolumeTextureAt(uint32_t volumeSlot) const noexcept;
 
 private:
   // PIMPL: NVRHI handles, entry-table vectors, per-frame ring slots

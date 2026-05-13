@@ -45,6 +45,7 @@ target_sources(pyxis_renderer PUBLIC
         Public/Pyxis/Renderer/Descs/CameraDesc.h
         Public/Pyxis/Renderer/Descs/LightDesc.h
         Public/Pyxis/Renderer/Descs/TextureKey.h
+        Public/Pyxis/Renderer/Descs/VolumeDesc.h
         Public/Pyxis/Renderer/Descs/GpuSceneCreateDesc.h
         Public/Pyxis/Renderer/Descs/FrameStats.h
 
@@ -73,6 +74,7 @@ target_sources(pyxis_renderer PRIVATE
     Private/GpuScene/Texture.cpp
     Private/GpuScene/Instance.cpp
     Private/GpuScene/Light.cpp
+    Private/GpuScene/Volume.cpp
     Private/GpuScene/Commit.cpp
     Private/GpuScene/DdsParser.h
     Private/GpuScene/DdsParser.cpp

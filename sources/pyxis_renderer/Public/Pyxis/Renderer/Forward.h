@@ -25,6 +25,12 @@ enum class MaterialHandle : uint32_t { Invalid = 0 };
 enum class TextureHandle : uint32_t { Invalid = 0 };
 enum class InstanceHandle : uint32_t { Invalid = 0 };
 enum class LightHandle : uint32_t { Invalid = 0 };
+// V2.A.5 — UsdVolVolume / OpenVDBAsset slot. Same 24-bit slot +
+// 8-bit generation packing as the others. Closesthit doesn't sample
+// the bound 3D texture in v2; the API surface is here so a future
+// volume-integrator pass can reach the GPU buffer without a
+// MAJOR-version rev (§22.3 additive growth).
+enum class VolumeHandle : uint32_t { Invalid = 0 };
 
 // 24-bit slot mask + 8-bit generation mask (plan §19.7).
 inline constexpr uint32_t HANDLE_SLOT_BITS = 24;

@@ -2684,17 +2684,40 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
           continue;
         }
         const LoadedVolume& vol = *loadResult;
-        Logging::Get().Info(log::APP,
-            "StageWalker: UsdVolVolume " + prim.GetPath().GetString()
-                + " field '" + fieldPath.GetString() + "' loaded '"
-                + vol.gridName + "' from " + resolved
-                + " — dims=" + std::to_string(vol.dimensions[0])
-                + "x" + std::to_string(vol.dimensions[1])
-                + "x" + std::to_string(vol.dimensions[2])
-                + ", active=" + std::to_string(vol.activeVoxelCount)
-                + ", dense=" + std::to_string(vol.voxels.size())
-                + " (GPU upload + shader sampling are a follow-up).");
-        ++loaded;
+        // V2.A.5 GPU half — push the loaded grid through GpuScene's
+        // AddVolume so an NVRHI 3D texture (R32_FLOAT) lands on the
+        // GPU at the next CommitResources. The shader doesn't sample
+        // it yet (no bindless slot wired); the texture is alive on
+        // the device for the volume-integrator follow-up.
+        VolumeDesc volumeDesc{};
+        volumeDesc.voxels       = std::span<const float>{vol.voxels};
+        volumeDesc.dimensions   = vol.dimensions;
+        volumeDesc.bboxMin      = vol.bboxMinIndex;
+        volumeDesc.bboxMax      = vol.bboxMaxIndex;
+        volumeDesc.indexToWorld = vol.indexToWorld;
+        const std::string debugName = prim.GetPath().GetString() + ":" + vol.gridName;
+        volumeDesc.debugName  = debugName;
+        const VolumeHandle volumeHandle = scene.AddVolume(volumeDesc);
+        const std::string handleStr =
+            (volumeHandle == VolumeHandle::Invalid) ? std::string{"Invalid"}
+                : std::to_string(static_cast<uint32_t>(volumeHandle));
+        std::string logLine = "StageWalker: UsdVolVolume ";
+        logLine.append(prim.GetPath().GetString());
+        logLine.append(" field '").append(fieldPath.GetString());
+        logLine.append("' loaded '").append(vol.gridName);
+        logLine.append("' from ").append(resolved);
+        logLine.append(" — dims=").append(std::to_string(vol.dimensions[0]));
+        logLine.append("x").append(std::to_string(vol.dimensions[1]));
+        logLine.append("x").append(std::to_string(vol.dimensions[2]));
+        logLine.append(", active=").append(std::to_string(vol.activeVoxelCount));
+        logLine.append(", dense=").append(std::to_string(vol.voxels.size()));
+        logLine.append(" bound at VolumeHandle=").append(handleStr);
+        logLine.append(" (shader sampling is a follow-up).");
+        Logging::Get().Info(log::APP, logLine);
+        if (volumeHandle == VolumeHandle::Invalid)
+          ++failed;
+        else
+          ++loaded;
       }
       if (loaded == 0 && failed == 0)
       {

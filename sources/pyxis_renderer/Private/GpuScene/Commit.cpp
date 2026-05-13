@@ -61,6 +61,7 @@ void GpuScene::Impl::Clear() noexcept
 
   materials.clear();
   textures.clear();
+  volumes.clear();
 
   materialDescHashToHandle.clear();
   textureKeyHashToHandle.clear();
@@ -76,6 +77,8 @@ void GpuScene::Impl::Clear() noexcept
   freeMaterialSlots.clear();
   freeTextureSlots.clear();
   freeLightSlots.clear();
+  freeVolumeSlots.clear();
+  volumesNeedGpuUpload = false;
 
   // GPU buffers: drop refs. CommitResources will lazily re-allocate
   // on the first AcquireMaterial / AppendInstance / AddLight after
@@ -176,6 +179,7 @@ Expected<void> GpuScene::Impl::CommitResources(nvrhi::ICommandList* commandList)
   PYXIS_TRY(UploadMeshIndices(commandList));
   PYXIS_TRY(UploadMeshVertexNormals(commandList));
   PYXIS_TRY(UploadMeshTangents(commandList));
+  PYXIS_TRY(UploadPendingVolumes(commandList));
   return {};
 }
 

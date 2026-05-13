@@ -19,6 +19,7 @@ target_sources(pyxis_unit_tests PRIVATE
     GpuSceneMesh.cpp
     GpuSceneInstance.cpp
     GpuSceneLight.cpp
+    GpuSceneVolume.cpp
     GpuSceneCamera.cpp
     GpuSceneClear.cpp
     GpuSceneLookupInstanceMaterial.cpp
