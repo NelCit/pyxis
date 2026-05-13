@@ -23,6 +23,7 @@
 #include "AnalyticGeom.h"
 #include "SkelSkinning.h"
 #include "SubdivRefine.h"
+#include "VolumeLoader.h"
 
 #include <Pyxis/MaterialTranslation/UsdShadeToOpenPBR.h>
 #include <Pyxis/Platform/Logging/Log.h>
@@ -73,6 +74,8 @@
 #include <pxr/usd/usdSkel/root.h>
 #include <pxr/usd/usdSkel/skeleton.h>
 #include <pxr/usd/usdVol/volume.h>
+#include <pxr/usd/usdVol/openVDBAsset.h>
+#include <pxr/usd/usdVol/tokens.h>
 #include <pxr/usd/ar/resolver.h>
 #include <pxr/usd/sdf/path.h>
 #include <pxr/base/gf/matrix4d.h>
@@ -2645,18 +2648,66 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
     }
     else if (prim.IsA<pxr::UsdVolVolume>())
     {
-      // M15 / V2.A.5 — Volumes detection. Full OpenVDB rendering is a
-      // separate milestone (needs an `openvdb` vcpkg dep + AABB BLAS
-      // shape + a volume integrator pass + OpenPBR volume coefficients).
-      // For now we detect the prim, log a per-prim warning so the user
-      // sees that the volume was intentionally skipped, and continue.
-      // The pipeline produces a complete render with the volume just
-      // absent — better than crashing or silently dropping the prim.
-      Logging::Get().Warn(log::APP,
-          "StageWalker: UsdVolVolume " + prim.GetPath().GetString()
-              + " detected but not yet rendered (OpenVDB integration "
-                "is a follow-up milestone). Skipping.");
-      ++stats.skipped;
+      // V2.A.5 — UsdVolVolume with OpenVDBAsset field-relationships.
+      // For each `.vdb` referenced by an OpenVDBAsset child prim, load
+      // the grid via VolumeLoader and log the dense voxel count +
+      // active bbox. The decoded grid currently lives on CPU only;
+      // the GPU 3D-texture upload + bindless slot + shader sampling
+      // are a follow-up volume-integrator milestone (per the
+      // "load full, bind but don't sample" v2 cut).
+      const pxr::UsdVolVolume volumePrim{prim};
+      const auto fieldRels = volumePrim.GetFieldPaths();
+      uint32_t loaded = 0;
+      uint32_t failed = 0;
+      for (const auto& [fieldName, fieldPath] : fieldRels)
+      {
+        const pxr::UsdPrim fieldPrim = stage->GetPrimAtPath(fieldPath);
+        if (!fieldPrim || !fieldPrim.IsA<pxr::UsdVolOpenVDBAsset>())
+          continue;
+        const pxr::UsdVolOpenVDBAsset assetPrim{fieldPrim};
+        pxr::SdfAssetPath assetPathValue;
+        if (!assetPrim.GetFilePathAttr().Get(&assetPathValue))
+          continue;
+        const std::string resolved = assetPathValue.GetResolvedPath().empty()
+                                         ? assetPathValue.GetAssetPath()
+                                         : assetPathValue.GetResolvedPath();
+        if (resolved.empty())
+          continue;
+        auto loadResult = LoadVdbGrid(resolved);
+        if (!loadResult)
+        {
+          Logging::Get().Warn(log::APP,
+              "StageWalker: UsdVolVolume " + prim.GetPath().GetString()
+                  + " field '" + fieldPath.GetString() + "': "
+                  + loadResult.error());
+          ++failed;
+          continue;
+        }
+        const LoadedVolume& vol = *loadResult;
+        Logging::Get().Info(log::APP,
+            "StageWalker: UsdVolVolume " + prim.GetPath().GetString()
+                + " field '" + fieldPath.GetString() + "' loaded '"
+                + vol.gridName + "' from " + resolved
+                + " — dims=" + std::to_string(vol.dimensions[0])
+                + "x" + std::to_string(vol.dimensions[1])
+                + "x" + std::to_string(vol.dimensions[2])
+                + ", active=" + std::to_string(vol.activeVoxelCount)
+                + ", dense=" + std::to_string(vol.voxels.size())
+                + " (GPU upload + shader sampling are a follow-up).");
+        ++loaded;
+      }
+      if (loaded == 0 && failed == 0)
+      {
+        Logging::Get().Warn(log::APP,
+            "StageWalker: UsdVolVolume " + prim.GetPath().GetString()
+                + " has no OpenVDBAsset field-relationships; skipping.");
+        ++stats.skipped;
+      }
+      else
+      {
+        stats.volumesEmitted += loaded;
+        stats.skipped        += failed;
+      }
     }
     else
     {

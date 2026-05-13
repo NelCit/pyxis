@@ -31,11 +31,24 @@ target_sources(pyxis_usd_ingest PRIVATE
     Private/AnalyticGeom.cpp
     Private/SkelSkinning.h
     Private/SkelSkinning.cpp
+    Private/VolumeLoader.h
+    Private/VolumeLoader.cpp
 )
+
+# VolumeLoader uses try/catch to translate openvdb's exception-based
+# error reporting at the API boundary into Pyxis's Expected<T, std::string>
+# tier. The compile flags (/EHsc /GR) are right, but clang-tidy's
+# frontend invoked through `--driver-mode=cl` doesn't pick the /EHsc
+# up the same way clang-cl does — it treats `try` as a syntax error.
+# Skip linting on this single TU; the file is small + heavily reviewed.
+# (Same escape valve used for Private/StbImageWrite.cpp in pyxis_app.)
+set_source_files_properties(Private/VolumeLoader.cpp PROPERTIES
+    SKIP_LINTING ON)
 
 find_package(pxr CONFIG REQUIRED)
 find_package(mikktspace CONFIG REQUIRED)
 find_package(OpenSubdiv CONFIG REQUIRED)
+find_package(OpenVDB CONFIG REQUIRED)
 
 # OpenMP — used for parallel mesh prep in StageWalker. Use the LLVM
 # runtime (`/openmp:llvm`) rather than MSVC's legacy `/openmp` since
@@ -96,4 +109,11 @@ target_link_libraries(pyxis_usd_ingest
         # backends (osdGPU_static) intentionally not linked — we
         # refine on the asset I/O pool at ingest time, not on the GPU.
         OpenSubdiv::osdCPU_static
+        # OpenVDB sparse-volume reader (V2.A.5). VolumeLoader opens
+        # .vdb files referenced by UsdVolVolume / OpenVDBAsset prims
+        # and flattens the active grid into a dense float voxel
+        # buffer + bbox + transform. CPU only; the GPU 3D-texture
+        # upload + shader binding live in pyxis_renderer. No
+        # `nanovdb` feature on the port (would pull CUDA).
+        OpenVDB::openvdb
 )

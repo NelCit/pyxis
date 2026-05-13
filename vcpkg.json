@@ -82,6 +82,11 @@
       "name": "opensubdiv",
       "default-features": false,
       "$comment": "Pixar's OpenSubdiv (M12 / V2.A.1). Refines authored UsdGeomMesh::subdivisionScheme=catmullClark|loop cages to the limit surface at ingest, so 83 of the lobby's meshes (8.8%) render as smooth surfaces instead of faceted cages. CPU-only path (default features off: no GL/DX/CUDA backends). Linked PRIVATE into pyxis_usd_ingest."
+    },
+    {
+      "name": "openvdb",
+      "default-features": false,
+      "$comment": "OpenVDB sparse-volume reader (V2.A.5). Pyxis loads .vdb files referenced by UsdVolVolume + OpenVDBAsset prims, flattens the active grid to a dense float voxel buffer, and binds it as a Texture3D for the shader. The shader binding is wired but the closesthit doesn't sample yet — that's a follow-up volume-integrator milestone. Default features off (no `nanovdb` — that pulls CUDA which Pyxis doesn't use; no `ax`; no `tools`). Linked PRIVATE into pyxis_usd_ingest."
     }
   ],
 

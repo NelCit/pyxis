@@ -45,10 +45,18 @@ target_sources(pyxis_unit_tests PRIVATE
     NurbsTessellation.cpp
     TextureLruEviction.cpp
     DdsParserFixture.cpp
+    VolumeLoaderFixture.cpp
 
     # V2.A.14 DDS parser lives in pyxis_renderer's Private. The unit
     # test compiles it directly (same convention as RenderGraph + CliArgs).
     ${CMAKE_SOURCE_DIR}/sources/pyxis_renderer/Private/GpuScene/DdsParser.cpp
+
+    # V2.A.5 VolumeLoader lives in pyxis_usd_ingest's Private. The
+    # unit test compiles it directly so it doesn't need to import the
+    # symbol across the DLL boundary. SKIP_LINTING the test sibling
+    # too (try/catch trips clang-tidy's frontend the same way; the
+    # production TU already has it skipped).
+    ${CMAKE_SOURCE_DIR}/sources/pyxis_usd_ingest/Private/VolumeLoader.cpp
 
     # The §9.2 RenderGraph + IRenderPass live in pyxis_renderer/Private
     # and don't cross the SHARED-DLL boundary. The unit-test harness is
@@ -87,6 +95,7 @@ pyxis_set_target_compile_options(pyxis_unit_tests)
 pyxis_enable_exceptions_and_rtti(pyxis_unit_tests)
 
 find_package(pxr CONFIG REQUIRED)
+find_package(OpenVDB CONFIG REQUIRED)
 
 target_link_libraries(pyxis_unit_tests
     PRIVATE
@@ -104,9 +113,21 @@ target_link_libraries(pyxis_unit_tests
         tf
         vt
         gf
+        # V2.A.5 — VolumeLoaderFixture authors a synthetic .vdb at
+        # test setup time + the recompiled VolumeLoader.cpp pulls
+        # openvdb's read path. CPU only; no nanovdb feature.
+        OpenVDB::openvdb
         GTest::gtest
         GTest::gtest_main
 )
+
+# V2.A.5 — VolumeLoader.cpp uses try/catch (openvdb's API is
+# exception-based) which trips clang-tidy's frontend through the
+# clang-cl driver. Same SKIP_LINTING escape the production target
+# uses; the test TU compiling the same .cpp must skip too.
+set_source_files_properties(
+    ${CMAKE_SOURCE_DIR}/sources/pyxis_usd_ingest/Private/VolumeLoader.cpp
+    PROPERTIES SKIP_LINTING ON)
 
 # UsdShadeToOpenPBR.cpp pulls USD's headers which trip C++20's
 # is_pod deprecation; same silence the ingest libs use.
