@@ -218,6 +218,54 @@ else()
         "and reconfigure to enable.")
 endif()
 
+# OpenPBR Shader Playground smoke. Companion to M8a.WorldLobbySmoke for
+# §11 OpenPBR coverage: every material in the playground is authored
+# in the OpenPBR shader graph the renderer's closesthit is canonicalised
+# on. Same conditional-registration pattern: scene path is a cache
+# variable; if the .usda doesn't exist at configure time, the test
+# silently de-registers so a clean clone still `ctest`s green.
+#
+# Setup steps the user must run ONCE (before reconfigure):
+#   1. Download OpenPBRShaderPlayground-1.0.zip (SIGGRAPH 2024 sample).
+#   2. Extract to <repo>/resources/scenes/openpbr_playground/ so the
+#      entry-point lands at
+#      .../openpbr_playground/ShdrPlygrnd/ShdrPlygrnd_OpenPBR.usda.
+#   3. Re-run `cmake -S . -B build/dev` to pick up the test.
+#
+# Override path: pass -DOPENPBR_PLAYGROUND_SCENE_PATH=<absolute .usda>
+# to point at an already-extracted copy outside the repo (e.g. directly
+# at ~/Downloads/OpenPBRShaderPlayground-1.0/ShdrPlygrnd/
+# ShdrPlygrnd_OpenPBR.usda). Resolved at configure time, not at test
+# time, so a missing scene at configure time silently de-registers.
+set(_openpbr_playground_default_scene
+    "${CMAKE_SOURCE_DIR}/resources/scenes/openpbr_playground/ShdrPlygrnd/ShdrPlygrnd_OpenPBR.usda")
+set(OPENPBR_PLAYGROUND_SCENE_PATH "${_openpbr_playground_default_scene}" CACHE FILEPATH
+    "Path to the OpenPBR Shader Playground entry-point .usda (default: \
+ShdrPlygrnd_OpenPBR.usda under resources/scenes/openpbr_playground/). \
+Test is skipped if the file doesn't exist.")
+if(EXISTS "${OPENPBR_PLAYGROUND_SCENE_PATH}")
+    add_test(
+        NAME    OpenPbrPlayground.Smoke
+        COMMAND ${CMAKE_COMMAND}
+                -DPYXIS_EXE=$<TARGET_FILE:pyxis>
+                -DFIXTURE_CONFIG=${CMAKE_SOURCE_DIR}/tests/fixtures/openpbr_playground.json
+                -DSCENE_PATH=${OPENPBR_PLAYGROUND_SCENE_PATH}
+                -DOUTPUT_DIR=${CMAKE_BINARY_DIR}/tests/integration/openpbr_playground
+                -P ${CMAKE_SOURCE_DIR}/tests/integration/openpbr_playground_smoke.cmake
+    )
+    set_tests_properties(OpenPbrPlayground.Smoke PROPERTIES
+        LABELS    "integration;openpbr;requires_external_scene"
+        TIMEOUT   600  # ~50 textured materials + 47 USD layers — same
+                       # cold-cache budget as M8a.WorldLobbySmoke.
+    )
+    message(STATUS "OpenPbrPlayground.Smoke registered (scene: ${OPENPBR_PLAYGROUND_SCENE_PATH})")
+else()
+    message(STATUS
+        "OpenPbrPlayground.Smoke skipped — no scene at ${OPENPBR_PLAYGROUND_SCENE_PATH}. "
+        "Extract OpenPBRShaderPlayground-1.0.zip into resources/scenes/openpbr_playground/ "
+        "(or pass -DOPENPBR_PLAYGROUND_SCENE_PATH=<absolute path>) and reconfigure to enable.")
+endif()
+
 # §41 M13 / V2.A.3 — analytic prim + curves + points framework test.
 # Loads a self-contained .usda fixture (one of each prim type) headless;
 # proves StageWalker's geom-type dispatch + AnalyticGeom tessellators
