@@ -101,6 +101,7 @@ parameters.local.json
 # user wants the M8 framework to load. Add the directory name here OR
 # rely on the size-bounded default rule below.
 /resources/scenes/world_lobby/
+/resources/scenes/openpbr_playground/
 
 # M10 — per-fixture rolling KPI history (plan §35 / §36.6). Each
 # regression run appends one row to <fixture-dir>/kpis.csv; dev runs

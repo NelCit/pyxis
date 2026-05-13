@@ -1,0 +1,28 @@
+{
+  "$comment": "Pyxis OpenPBR Shader Playground fixture — SIGGRAPH 2024 OpenPBR coverage scene (47 .usd*, ~50 materials, ~57 MB geometry). Companion to m8_world_lobby for §11 OpenPBR validation: every material is authored via the OpenPBR shader graph the renderer's closesthit is canonicalised on. Standalone: provides §34 KPI dims (1920x1080), pinned seed for repeatability, FIF=3 for §33.7 byte-equal contract. Scene path is supplied separately via --scene so the fixture is reusable when a future drop of the Playground reshapes its directory layout.",
+
+  "render": {
+    "width":           1920,
+    "height":          1080,
+    "samplesPerFrame": 1,
+    "seed":            42
+  },
+
+  "output": {
+    "image":           "openpbr_playground.exr",
+    "effectiveConfig": "openpbr_playground.effective.json"
+  },
+
+  "diagnostics": {
+    "validationLayer": false,
+    "aftermath":       false
+  },
+
+  "limits": {
+    "framesInFlight":  3
+  },
+
+  "app": {
+    "ingest":          "usd_direct"
+  }
+}
