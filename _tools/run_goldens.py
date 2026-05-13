@@ -3,16 +3,22 @@
 
 Walks `tests/golden-tests-data/` and runs every subdirectory as a
 pixel-equal regression against the matching `tests/golden-tests-
-expected/<name>/baseline.exr`. Two modes:
+expected/<name>/baseline.png`. Two modes:
 
     python _tools/run_goldens.py
         Default: render each fixture, byte-compare against the
-        checked-in baseline.exr. Exits 1 if any test mismatches.
+        checked-in baseline.png. Exits 1 if any test mismatches.
 
     python _tools/run_goldens.py --rebake
         Render each fixture and overwrite the matching expected
-        baseline.exr in-place. Use this after a deliberate visual
+        baseline.png in-place. Use this after a deliberate visual
         change ships.
+
+PNG (not EXR) because PNG is human-inspectable in any standard
+viewer, diff-friendly in GitHub PR review, and ~10× smaller in the
+repo. 8-bit precision loss vs the renderer's BGRA8 RT is zero —
+the RT is already 8-bit. The headless writer selects PNG vs EXR
+by output-path extension; this harness drives `produced.png`.
 
 Each subdir under `tests/golden-tests-data/` (except `_shared`) must
 contain `fixture.usda` + `regression.json`; the matching expected
@@ -89,7 +95,7 @@ def run_test(pyxis_exe: Path, test_dir: Path, rebake: bool,
     name = test_dir.name
     fixture = test_dir / "fixture.usda"
     baseline_dir = EXPECTED_DIR / name
-    baseline = baseline_dir / "baseline.exr"
+    baseline = baseline_dir / "baseline.png"
     config = test_dir / "config.json"
     if not config.exists():
         config = SHARED_CONFIG
@@ -105,7 +111,7 @@ def run_test(pyxis_exe: Path, test_dir: Path, rebake: bool,
 
     work_dir = output_root / name
     work_dir.mkdir(parents=True, exist_ok=True)
-    produced = work_dir / "produced.exr"
+    produced = work_dir / "produced.png"
 
     print(f"[{name}] rendering ...")
     rc = run_pyxis(pyxis_exe, config, fixture, produced, frame, work_dir)
@@ -113,7 +119,7 @@ def run_test(pyxis_exe: Path, test_dir: Path, rebake: bool,
         print(f"[{name}] FAIL (pyxis exited rc={rc})")
         return False
     if not produced.exists():
-        print(f"[{name}] FAIL (no EXR produced at {produced})")
+        print(f"[{name}] FAIL (no PNG produced at {produced})")
         return False
 
     if rebake:

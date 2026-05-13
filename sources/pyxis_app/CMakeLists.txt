@@ -29,6 +29,8 @@ target_sources(pyxis PRIVATE
     Private/Output/BackbufferScreenshot.cpp
     Private/Output/ExrWriter.h
     Private/Output/ExrWriter.cpp
+    Private/Output/PngWriter.h
+    Private/Output/PngWriter.cpp
     Private/Output/TextureReadback.h
     Private/Output/TextureReadback.cpp
     Private/Camera/FlyCameraController.h

@@ -1,6 +1,6 @@
 # Pyxis golden test data (USD fixtures + render configs)
 
-Inputs to the golden-test suite. Outputs (the `baseline.exr` per
+Inputs to the golden-test suite. Outputs (the `baseline.png` per
 test) live under [../golden-tests-expected/<test-name>/](../golden-tests-expected/).
 See that directory's README for the feature-coverage table + run /
 rebake instructions.
@@ -11,7 +11,7 @@ tests/golden-tests-data/<test-name>/
     regression.json    # tolerances + optional --frame override
 
 tests/golden-tests-expected/<test-name>/
-    baseline.exr       # checked-in expected pixels
+    baseline.png       # checked-in expected pixels
 ```
 
 The shared default render config lives at
