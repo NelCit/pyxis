@@ -76,14 +76,26 @@ struct CliArgs {
   int frameRangeEnd   = -1;
   int frameRangeStep  = 1;
 
-  // M21 / V2.A.15 — USD composition load modes. Parsed but the rest
-  // of the pipeline always uses UsdStage::LoadAll() in v2; honouring
-  // --load-mode / --population-mask needs the StageWalker to switch
-  // to UsdStage::OpenMasked + population masks, and the renderer to
-  // tolerate partially-loaded stages. Stubbed via CliArgs so the
-  // surface is open for the follow-up. Empty = default-load-all.
+  // M21 / V2.A.15 — USD composition load modes.
+  //   --load-mode all     → UsdStage::InitialLoadSet::LoadAll  (default).
+  //   --load-mode none    → UsdStage::InitialLoadSet::LoadNone — open the
+  //                         stage with all payloads unloaded. Pairs with
+  //                         `--population-mask` to slice a 100 GB stage.
+  //   --load-mode metadata→ alias for `none`, matches the v2 plan's
+  //                         three-mode vocabulary (`{all,none,explicit}`).
+  // Any other value warns + falls back to LoadAll so a typo doesn't
+  // silently change scene composition.
   std::string_view loadMode;          // --load-mode <none|metadata|all>
   std::string_view populationMask;    // --population-mask <sdf-path>[,<sdf-path>...]
+
+  // V2.A.2 (M12) — variant selection overrides applied via the stage's
+  // session layer after Open / OpenMasked, before WalkStage. The format
+  // is comma-separated triples; each "<primPath>:<setName>=<value>"
+  // overrides the variant the stage would otherwise resolve transitively.
+  //   --variant /World/Hero:shadingComplexity=high
+  //   --variant /World/Cup:season=winter,/World/Hero:lod=high
+  // Empty = honour the stage's authored variant selections.
+  std::string_view variantSelections;  // --variant <spec>
 
   // ---- M7 follow-up: AOV save -----------------------------------------
   // --save-aov <list>  Comma-separated list of raw AOVs to dump
