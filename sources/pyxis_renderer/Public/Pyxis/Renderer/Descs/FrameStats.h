@@ -37,6 +37,13 @@ struct FrameStats {
   uint64_t pendingBlasBuilds = 0;
   uint64_t staleHandleDrops = 0;
   bool degraded = false;
+  // V2.A.5 — appended after the v1 layout. Counts UsdVolVolume /
+  // OpenVDBAsset slots actually loaded + the VRAM their R32_FLOAT
+  // 3D textures consume. Keeping them at the tail preserves the
+  // existing struct layout for any external consumer compiled
+  // against the v1.0 ABI.
+  uint64_t volumeCount = 0;
+  uint64_t volumeBytes = 0;
 };
 
 }  // namespace pyxis

@@ -190,6 +190,38 @@ void GpuScene::RemoveLight(LightHandle lightHandle)
   _impl->RemoveLight(lightHandle);
 }
 
+// ---- Volumes (V2.A.5) ------------------------------------------------------
+// Bodies in Volume.cpp.
+VolumeHandle GpuScene::AddVolume(const VolumeDesc& volumeDesc)
+{
+  return _impl->AddVolume(volumeDesc);
+}
+
+void GpuScene::RemoveVolume(VolumeHandle volumeHandle)
+{
+  _impl->RemoveVolume(volumeHandle);
+}
+
+bool GpuScene::HasVolume(VolumeHandle volumeHandle) const
+{
+  return _impl->HasVolume(volumeHandle);
+}
+
+uint32_t GpuScene::GetVolumeCount() const noexcept
+{
+  return static_cast<uint32_t>(_impl->volumes.size());
+}
+
+nvrhi::ITexture* GpuScene::GetVolumeTextureAt(uint32_t volumeSlot) const noexcept
+{
+  if (volumeSlot >= _impl->volumes.size())
+    return nullptr;
+  const Impl::VolumeEntry& entry = _impl->volumes[volumeSlot];
+  if (!entry.live)
+    return nullptr;
+  return entry.texture.Get();
+}
+
 // ---- Scene-wide reset + frame boundary -------------------------------------
 // Bodies in Commit.cpp.
 void GpuScene::Clear() noexcept
@@ -483,15 +515,30 @@ FrameStats GpuScene::LastFrameStats() const {
     const uint64_t bytesPerPixel = nvrhi::getFormatInfo(entry.format).bytesPerBlock;
     textureBytes += static_cast<uint64_t>(entry.width) * entry.height * bytesPerPixel;
   }
+  // V2.A.5 — live volumes + their VRAM footprint. `bytesOnGpu` is
+  // computed at AddVolume time as `dim_x * dim_y * dim_z * sizeof(float)`
+  // since every volume binds a R32_FLOAT 3D texture. Slot 0 sentinel
+  // is `live=false` so the sum naturally excludes it.
+  uint64_t liveVolumeCount = 0;
+  uint64_t volumeBytes = 0;
+  for (const Impl::VolumeEntry& entry : _impl->volumes)
+  {
+    if (!entry.live)
+      continue;
+    ++liveVolumeCount;
+    volumeBytes += entry.bytesOnGpu;
+  }
   stats.meshCount = liveMeshCount;
   stats.blasCount = liveBlasCount;
   stats.instanceCount = liveInstanceCount;
   stats.lightCount = liveLightCount;
   stats.materialCount = liveMaterialCount;
   stats.textureCount = liveTextureCount;
+  stats.volumeCount = liveVolumeCount;
   stats.vertexBytes = vertexBytes;
   stats.indexBytes = indexBytes;
   stats.textureBytes = textureBytes;
+  stats.volumeBytes = volumeBytes;
   stats.blasBytes = blasBytesEstimate;
   // TLAS byte estimate: VkAccelerationStructureInstanceKHR is 64 B
   // per instance + ~64 B internal book-keeping per entry. Same
