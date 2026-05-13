@@ -1,0 +1,62 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden material_render_context_priority — V2.A.18 multi-render-context surface resolution. Material authors BOTH outputs:surface (universal → UsdPreviewSurface, dark grey) and outputs:mtlx:surface (MaterialX ND_open_pbr_surface, hot pink base_color). Per the V2.A.18 priority chain (mdl → mtlx → universal), mtlx wins → cube renders hot pink. Pre-PR3 the translator picked the universal surface unconditionally; a regression there would render the cube dark grey."
+)
+def Xform "World"
+{
+    def Scope "Looks"
+    {
+        def Material "MultiContextMat"
+        {
+            token outputs:surface.connect      = </World/Looks/MultiContextMat/UPS.outputs:surface>
+            token outputs:mtlx:surface.connect = </World/Looks/MultiContextMat/Mtlx.outputs:surface>
+
+            def Shader "UPS"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.10, 0.10, 0.10)
+                float inputs:metallic = 0.0
+                float inputs:roughness = 0.5
+                token outputs:surface
+            }
+
+            def Shader "Mtlx"
+            {
+                uniform token info:id = "ND_open_pbr_surface_surfaceshader"
+                color3f inputs:base_color = (0.85, 0.20, 0.55)
+                float inputs:base_weight = 1.0
+                float inputs:specular_roughness = 0.4
+                token outputs:surface
+            }
+        }
+    }
+
+    def Cube "Subject" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </World/Looks/MultiContextMat>
+        double size = 1.0
+        double3 xformOp:translate = (0, 0.8, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 1.2, 4)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.2
+    }
+}

@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden material_render_context_priority — V2.A.18 multi-render-context resolution. Material authors UsdPreviewSurface (universal, dark grey) AND ND_open_pbr_surface (mtlx, hot pink). The MaterialX context wins per the V2.A.18 priority chain; the cube must render hot pink, not dark grey." }

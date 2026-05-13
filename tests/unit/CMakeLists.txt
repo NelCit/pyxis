@@ -40,6 +40,8 @@ target_sources(pyxis_unit_tests PRIVATE
     NetworkCoverageDetection.cpp
     PopulationMaskParsing.cpp
     VariantSelectionParsing.cpp
+    MaterialNetworkV2A18.cpp
+    MaterialBindingResolutionV2A18.cpp
     MaterialCoverageFields.cpp
     MdlTranslation.cpp
     UdimMultiTile.cpp

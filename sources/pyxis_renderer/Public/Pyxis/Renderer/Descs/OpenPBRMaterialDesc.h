@@ -91,6 +91,25 @@ struct OpenPBRMaterialDesc {
   uint32_t baseColorWrapT        = 0;  // V2.A.24 (was _reserved[3])
   uint32_t baseColorSourceCS     = 0;  // V2.A.29 (was _reserved[4]) — TfToken hash
 
+  // V2.A.18 — UsdTransform2d UV transform applied to the baseColor
+  // slot (the most commonly authored). USD's UsdTransform2d node
+  // composes its UV input through scale → rotation → translation,
+  // matching MaterialX's `texcoord` xform convention. v2 loads the
+  // values onto every UsdPreviewSurface material whose UsdUVTexture
+  // is connected through a UsdTransform2d; the closesthit still
+  // samples with unmodified UVs in v2.0, but the data is preserved
+  // for the v2.1 sampler-per-material upgrade. Float storage; the
+  // 4-byte alignment matches the surrounding uint32_t reserved
+  // slots so the binary layout stays byte-stable (§22.3). Defaults
+  // are the identity transform (translation=(0,0), rotation=0,
+  // scale=(1,1)) so a material WITHOUT a UsdTransform2d still
+  // round-trips through the closesthit's UV math unchanged.
+  float baseColorUvTranslationX  = 0.0f;  // V2.A.18 (was _reserved[5])
+  float baseColorUvTranslationY  = 0.0f;  // V2.A.18 (was _reserved[6])
+  float baseColorUvRotationDeg   = 0.0f;  // V2.A.18 (was _reserved[7]) — USD authors degrees; we keep the unit.
+  float baseColorUvScaleX        = 1.0f;  // V2.A.18 (was _reserved[8])
+  float baseColorUvScaleY        = 1.0f;  // V2.A.18 (was _reserved[9])
+
   // §22.3 reserved padding: M5+ adds OpenPBR fields (sheen, coat
   // colour, displacement, transmission depth, etc.) by consuming
   // these slots one at a time, keeping the layout byte-stable
@@ -98,9 +117,9 @@ struct OpenPBRMaterialDesc {
   // major version (§22 + RFC §44.1). The `_reserved` underscore
   // prefix is the §22.3 / §43 plan convention — overrides §30.2's
   // public-POD camelCase rule for this slot purpose only.
-  // 5 slots consumed above; 11 remain.
+  // 10 slots consumed above; 6 remain.
   // NOLINTNEXTLINE(readability-identifier-naming)
-  uint32_t _reserved[11] = {};
+  uint32_t _reserved[6] = {};
 };
 
 }  // namespace pyxis

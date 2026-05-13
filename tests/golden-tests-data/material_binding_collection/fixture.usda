@@ -1,0 +1,75 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden material_binding_collection — V2.A.18 collection-based material binding. Three cubes; a UsdCollectionAPI 'red' on /World includes CubeA + CubeC; /World binds the red OpenPBR material to that collection. CubeB has no binding and renders with the renderer's default grey. End-to-end exercise of UsdShadeMaterialBindingAPI::ComputeBoundMaterial's collection-walk path."
+)
+def Xform "World" (
+    prepend apiSchemas = ["MaterialBindingAPI", "CollectionAPI:red"]
+)
+{
+    rel material:binding:collection:red = [
+        </World/Looks/RedMat>,
+        </World.collection:red>,
+    ]
+    uniform token collection:red:expansionRule = "expandPrims"
+    rel collection:red:includes = [
+        </World/CubeA>,
+        </World/CubeC>,
+    ]
+
+    def Scope "Looks"
+    {
+        def Material "RedMat"
+        {
+            token outputs:surface.connect = </World/Looks/RedMat/Shader.outputs:surface>
+
+            def Shader "Shader"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.85, 0.20, 0.20)
+                float inputs:metallic = 0.0
+                float inputs:roughness = 0.4
+                token outputs:surface
+            }
+        }
+    }
+
+    def Cube "CubeA"
+    {
+        double size = 0.8
+        double3 xformOp:translate = (-1.4, 0.5, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Cube "CubeB"
+    {
+        double size = 0.8
+        double3 xformOp:translate = (0, 0.5, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Cube "CubeC"
+    {
+        double size = 0.8
+        double3 xformOp:translate = (1.4, 0.5, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 1.0, 5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.2
+    }
+}
