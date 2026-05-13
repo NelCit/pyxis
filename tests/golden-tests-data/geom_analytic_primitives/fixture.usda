@@ -1,0 +1,68 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden geom_analytic_primitives — Sphere/Cube/Cylinder/Cone/Capsule lined up along +X. V2.A.21 / M13 — each tessellates to a triangle mesh via AnalyticGeom.cpp and renders with displayColor."
+)
+
+def Xform "World"
+{
+    def Sphere "Sphere"
+    {
+        double radius = 0.5
+        color3f[] primvars:displayColor = [(0.85, 0.20, 0.20)]
+        double3 xformOp:translate = (-2.4, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def Cube "Cube"
+    {
+        double size = 0.8
+        color3f[] primvars:displayColor = [(0.20, 0.85, 0.20)]
+        double3 xformOp:translate = (-1.2, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def Cylinder "Cylinder"
+    {
+        double radius = 0.4
+        double height = 1.0
+        uniform token axis = "Y"
+        color3f[] primvars:displayColor = [(0.20, 0.20, 0.85)]
+        double3 xformOp:translate = (0, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def Cone "Cone"
+    {
+        double radius = 0.4
+        double height = 1.0
+        uniform token axis = "Y"
+        color3f[] primvars:displayColor = [(0.90, 0.85, 0.20)]
+        double3 xformOp:translate = (1.2, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def Capsule "Capsule"
+    {
+        double radius = 0.3
+        double height = 0.6
+        uniform token axis = "Y"
+        color3f[] primvars:displayColor = [(0.85, 0.20, 0.85)]
+        double3 xformOp:translate = (2.4, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 1.4, 6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.0
+    }
+}

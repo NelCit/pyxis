@@ -1,0 +1,31 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden analytic_sphere_only — single UsdGeomSphere centred, large radius. Pins the AnalyticGeom::TessellateSphere lat/long output."
+)
+def Xform "World"
+{
+    def Sphere "Subject"
+    {
+        double radius = 1.0
+        color3f[] primvars:displayColor = [(0.70, 0.50, 0.85)]
+        double3 xformOp:translate = (0, 1.2, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 1.5, 4)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.2
+    }
+}

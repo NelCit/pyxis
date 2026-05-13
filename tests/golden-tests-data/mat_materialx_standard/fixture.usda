@@ -1,0 +1,58 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden mat_materialx_standard — one Sphere bound to a MaterialX `ND_standard_surface_surfaceshader`. V2.A.8 — Autodesk standard_surface input names (base / specular_IOR / etc) translate to OpenPBR fields."
+)
+
+def Xform "World"
+{
+    def Sphere "Sphere" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double radius = 0.7
+        double3 xformOp:translate = (0, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        rel material:binding = </World/Materials/Copper>
+    }
+
+    def Scope "Materials"
+    {
+        def Material "Copper"
+        {
+            token outputs:surface.connect = </World/Materials/Copper/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "ND_standard_surface_surfaceshader"
+                float inputs:base = 1.0
+                color3f inputs:base_color = (0.88, 0.45, 0.30)
+                float inputs:metalness = 0.8
+                float inputs:specular_roughness = 0.20
+                float inputs:specular = 1.0
+                float inputs:specular_IOR = 1.40
+                color3f inputs:emission_color = (0, 0, 0)
+                float inputs:emission = 0.0
+                token outputs:surface
+            }
+        }
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 1.4, 3)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.2
+    }
+}

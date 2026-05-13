@@ -1,0 +1,66 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden instancer_basic — UsdGeomPointInstancer with one Cube prototype + 9 instances in a 3x3 XZ grid. M6 — EmitPointInstancer expands the instancer, registers one BLAS for the prototype, and appends 9 instances with per-instance world transforms."
+)
+
+def Xform "World"
+{
+    def PointInstancer "Instancer"
+    {
+        rel prototypes = [</World/Instancer/Prototypes/Cube>]
+        int[] protoIndices = [0, 0, 0, 0, 0, 0, 0, 0, 0]
+        point3f[] positions = [
+            (-1.4, 0.4, -1.4), (0, 0.4, -1.4), (1.4, 0.4, -1.4),
+            (-1.4, 0.4,    0), (0, 0.4,    0), (1.4, 0.4,    0),
+            (-1.4, 0.4,  1.4), (0, 0.4,  1.4), (1.4, 0.4,  1.4)
+        ]
+
+        def Scope "Prototypes"
+        {
+            # PointInstancer prototypes are UsdGeomMesh only (the M6
+            # StageWalker::EmitPointInstancer limitation). Author an
+            # 8-vertex triangle-list cube by hand. Half-extent 0.35 →
+            # matches a Cube of size 0.7.
+            def Mesh "Cube"
+            {
+                uniform token subdivisionScheme = "none"
+                int[] faceVertexCounts = [3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3]
+                int[] faceVertexIndices = [
+                    0, 1, 2,  0, 2, 3,
+                    4, 6, 5,  4, 7, 6,
+                    0, 4, 5,  0, 5, 1,
+                    1, 5, 6,  1, 6, 2,
+                    2, 6, 7,  2, 7, 3,
+                    3, 7, 4,  3, 4, 0
+                ]
+                point3f[] points = [
+                    (-0.35, -0.35,  0.35), ( 0.35, -0.35,  0.35),
+                    ( 0.35, -0.35, -0.35), (-0.35, -0.35, -0.35),
+                    (-0.35,  0.35,  0.35), ( 0.35,  0.35,  0.35),
+                    ( 0.35,  0.35, -0.35), (-0.35,  0.35, -0.35)
+                ]
+                color3f[] primvars:displayColor = [(0.7, 0.5, 0.85)]
+            }
+        }
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 4, 4)
+        float xformOp:rotateX = -45
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.0
+    }
+}

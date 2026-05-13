@@ -1,0 +1,59 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden mat_materialx_openpbr — one Sphere bound to a Material whose surface output is a MaterialX `ND_open_pbr_surface_surfaceshader`. V2.A.8 — base_color / base_metalness / specular_roughness / emission_luminance translate to OpenPBRMaterialDesc fields."
+)
+
+def Xform "World"
+{
+    def Sphere "Sphere" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double radius = 0.7
+        double3 xformOp:translate = (0, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        rel material:binding = </World/Materials/Plastic>
+    }
+
+    def Scope "Materials"
+    {
+        def Material "Plastic"
+        {
+            token outputs:surface.connect = </World/Materials/Plastic/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "ND_open_pbr_surface_surfaceshader"
+                color3f inputs:base_color = (0.10, 0.45, 0.85)
+                float inputs:base_weight = 1.0
+                float inputs:base_metalness = 0.0
+                float inputs:specular_roughness = 0.35
+                float inputs:specular_weight = 1.0
+                float inputs:specular_ior = 1.45
+                color3f inputs:emission_color = (0, 0, 0)
+                float inputs:emission_luminance = 0.0
+                float inputs:geometry_opacity = 1.0
+                token outputs:surface
+            }
+        }
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 1.4, 3)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.2
+    }
+}

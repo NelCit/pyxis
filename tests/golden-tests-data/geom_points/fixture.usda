@@ -1,0 +1,41 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden geom_points — 6 UsdGeomPoints billboarded as quads. V2.A.3 / M13 — AnalyticGeom's TessellatePoints emits one quad per point in the worldUp plane."
+)
+
+def Xform "World"
+{
+    def Points "Points"
+    {
+        point3f[] points = [
+            (-2.0, 0.5, 0),
+            (-1.2, 0.5, 0),
+            (-0.4, 0.5, 0),
+            ( 0.4, 0.5, 0),
+            ( 1.2, 0.5, 0),
+            ( 2.0, 0.5, 0)
+        ]
+        float[] widths = [0.3, 0.3, 0.3, 0.3, 0.3, 0.3]
+        color3f[] primvars:displayColor = [(0.95, 0.55, 0.15)]
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 1.5, 6)
+        float xformOp:rotateX = -10
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.0
+    }
+}

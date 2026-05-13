@@ -1,0 +1,28 @@
+{
+  "$comment": "Pyxis golden-test default render config. 256x256, seed=42, FIF=3 for byte-equal under §33.7. Each test's regression.json references this via `config:_shared/config.json`.",
+
+  "render": {
+    "width":           256,
+    "height":          256,
+    "samplesPerFrame": 1,
+    "seed":            42
+  },
+
+  "output": {
+    "image":           "produced.exr",
+    "effectiveConfig": "produced.effective.json"
+  },
+
+  "diagnostics": {
+    "validationLayer": false,
+    "aftermath":       false
+  },
+
+  "limits": {
+    "framesInFlight":  3
+  },
+
+  "app": {
+    "ingest":          "usd_direct"
+  }
+}

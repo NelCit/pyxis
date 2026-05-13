@@ -1,0 +1,48 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden geom_nurbs_bezier — a UsdGeomNurbsPatch authored as a 4x4 cubic Bezier control net. V2.A.4 / M20 — AnalyticGeom's TessellateNurbsPatch evaluates the Bernstein basis on a 16x16 grid and emits a triangle mesh."
+)
+
+def Xform "World"
+{
+    def NurbsPatch "Patch"
+    {
+        int uVertexCount = 4
+        int vVertexCount = 4
+        int uOrder = 4
+        int vOrder = 4
+        double[] uKnots = [0, 0, 0, 0, 1, 1, 1, 1]
+        double[] vKnots = [0, 0, 0, 0, 1, 1, 1, 1]
+        double uRange = 1
+        double vRange = 1
+        # A gently arching 4x4 control net — the centre CVs lifted along
+        # +Y so the tessellated limit surface bulges upward.
+        point3f[] points = [
+            (-1, 0, -1), (-0.33, 0.0, -1), (0.33, 0.0, -1), (1, 0, -1),
+            (-1, 0, -0.33), (-0.33, 0.7, -0.33), (0.33, 0.7, -0.33), (1, 0, -0.33),
+            (-1, 0,  0.33), (-0.33, 0.7,  0.33), (0.33, 0.7,  0.33), (1, 0,  0.33),
+            (-1, 0,  1), (-0.33, 0.0,  1), (0.33, 0.0,  1), (1, 0,  1)
+        ]
+        color3f[] primvars:displayColor = [(0.6, 0.4, 0.85)]
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 2.5, 3.5)
+        float xformOp:rotateX = -35
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.2
+    }
+}

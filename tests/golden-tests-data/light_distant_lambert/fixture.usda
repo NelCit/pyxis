@@ -1,0 +1,40 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden light_distant_lambert — Sphere lit by a single UsdLuxDistantLight pointing along -Z. M7 — closesthit's N·L Lambertian contribution + shadow-ray gate. No dome; the background is the miss-shader sentinel."
+)
+
+def Xform "World"
+{
+    def Sphere "Sphere"
+    {
+        double radius = 0.7
+        color3f[] primvars:displayColor = [(0.85, 0.55, 0.30)]
+        double3 xformOp:translate = (0, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DistantLight "Sun"
+    {
+        color3f inputs:color = (1, 0.95, 0.85)
+        float inputs:intensity = 3.0
+        float inputs:angle = 0.5
+        # Light's local -Z is the propagation direction; rotate so the
+        # light shines roughly from camera-right + slightly downward.
+        float xformOp:rotateY = -45
+        float xformOp:rotateX = -25
+        uniform token[] xformOpOrder = ["xformOp:rotateY", "xformOp:rotateX"]
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 1.4, 3)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}

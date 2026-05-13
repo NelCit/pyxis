@@ -455,4 +455,31 @@ if(Python3_FOUND)
         LABELS    "integration;m28;requires_python"
         TIMEOUT   30
     )
+
+    # ---- Golden tests (pixel-equal regression vs checked-in baseline) ----
+    # One ctest entry per subdir under tests/golden-tests-data/. Each
+    # runs _tools/run_goldens.py with --filter <name> so failures
+    # report on the specific golden, not the whole suite.
+    file(GLOB _golden_dirs RELATIVE ${CMAKE_SOURCE_DIR}/tests/golden-tests-data
+         ${CMAKE_SOURCE_DIR}/tests/golden-tests-data/*)
+    foreach(_golden_dir IN LISTS _golden_dirs)
+        set(_golden_full ${CMAKE_SOURCE_DIR}/tests/golden-tests-data/${_golden_dir})
+        if(NOT _golden_dir STREQUAL "_shared"
+                AND NOT _golden_dir STREQUAL "README.md"
+                AND IS_DIRECTORY ${_golden_full}
+                AND EXISTS ${_golden_full}/fixture.usda)
+            add_test(
+                NAME    Golden.${_golden_dir}
+                COMMAND ${Python3_EXECUTABLE}
+                        ${CMAKE_SOURCE_DIR}/_tools/run_goldens.py
+                        --pyxis $<TARGET_FILE:pyxis>
+                        --output-root ${CMAKE_BINARY_DIR}/tests/golden-tests-produced
+                        --filter ${_golden_dir}
+            )
+            set_tests_properties(Golden.${_golden_dir} PROPERTIES
+                LABELS  "integration;golden;requires_python"
+                TIMEOUT 120
+            )
+        endif()
+    endforeach()
 endif()

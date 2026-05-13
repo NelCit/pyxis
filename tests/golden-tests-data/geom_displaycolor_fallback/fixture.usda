@@ -1,0 +1,48 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden geom_displaycolor_fallback — three Cubes with displayColor primvars but NO UsdShade material binding. M12 / V2.A.33 — EmitPreparedMesh synthesises a per-mesh OpenPBR material from displayColor when the resolved material handle is Invalid."
+)
+
+def Xform "World"
+{
+    def Cube "Red"
+    {
+        double size = 0.9
+        color3f[] primvars:displayColor = [(0.9, 0.1, 0.1)]
+        double3 xformOp:translate = (-1.5, 0.5, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def Cube "Green"
+    {
+        double size = 0.9
+        color3f[] primvars:displayColor = [(0.1, 0.8, 0.1)]
+        double3 xformOp:translate = (0, 0.5, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def Cube "Blue"
+    {
+        double size = 0.9
+        color3f[] primvars:displayColor = [(0.1, 0.2, 0.9)]
+        double3 xformOp:translate = (1.5, 0.5, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 1.5, 5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.0
+    }
+}

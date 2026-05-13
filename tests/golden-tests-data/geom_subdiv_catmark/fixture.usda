@@ -1,0 +1,51 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden geom_subdiv_catmark — a coarse 8-vertex cube cage with subdivisionScheme=catmullClark. OpenSubdiv (V2.A.1 / M12) refines it to a smooth limit surface; renders rounded, not faceted."
+)
+
+def Xform "World"
+{
+    def Mesh "Cage"
+    {
+        uniform token subdivisionScheme = "catmullClark"
+        uniform token interpolateBoundary = "edgeAndCorner"
+        uniform token faceVaryingLinearInterpolation = "cornersPlus1"
+        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+        int[] faceVertexIndices = [
+            0, 1, 2, 3,    # bottom
+            4, 7, 6, 5,    # top (CCW from above)
+            0, 4, 5, 1,    # front
+            1, 5, 6, 2,    # right
+            2, 6, 7, 3,    # back
+            3, 7, 4, 0     # left
+        ]
+        point3f[] points = [
+            (-0.7, -0.7, -0.7), ( 0.7, -0.7, -0.7),
+            ( 0.7, -0.7,  0.7), (-0.7, -0.7,  0.7),
+            (-0.7,  0.7, -0.7), ( 0.7,  0.7, -0.7),
+            ( 0.7,  0.7,  0.7), (-0.7,  0.7,  0.7)
+        ]
+        color3f[] primvars:displayColor = [(0.85, 0.55, 0.15)]
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (1.6, 1.4, 2.6)
+        float xformOp:rotateY = 30
+        float xformOp:rotateX = -22
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateY", "xformOp:rotateX"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.2
+    }
+}
