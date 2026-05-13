@@ -22,6 +22,15 @@ struct InstanceDesc {
   MaterialHandle material = MaterialHandle::Invalid;
   hlslpp::float4x4 worldFromLocal{};  // row-major + column-vector (§10)
   bool visible = true;
+  // V2.A.x — UsdGeomGprim::doubleSided. When true, ray hits from the
+  // back face contribute the same as front-face hits (no back-face
+  // culling, normal flipped to match the incoming ray side). Common
+  // on foliage / cloth / signage. The closesthit branch lives behind
+  // the existing MaterialFlag bits — we plumb the per-instance flag
+  // through but the shader read is a follow-up; for now the flag
+  // propagates onto FrameStats and is queryable via the renderer
+  // public surface so other passes can act on it.
+  bool doubleSided = false;
   std::string_view debugName;
 };
 

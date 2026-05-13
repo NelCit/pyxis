@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden geom_subdiv_creases — V2.A.1 follow-up: subdivision creases + corners on top edge loop + bottom corners. Compare against geom_subdiv_catmark to see the corner sharpness difference." }

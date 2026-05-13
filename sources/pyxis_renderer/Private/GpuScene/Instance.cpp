@@ -53,6 +53,7 @@ Expected<InstanceHandle> GpuScene::Impl::AppendInstance(const InstanceDesc& inst
   entry.material = instanceDesc.material;
   entry.worldFromLocal = instanceDesc.worldFromLocal;
   entry.visible = instanceDesc.visible;
+  entry.doubleSided = instanceDesc.doubleSided;
   entry.debugName.assign(instanceDesc.debugName);
 
   // AppendInstance changes the TLAS (new instance to pack) AND the

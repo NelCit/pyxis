@@ -401,6 +401,7 @@ struct GpuScene::Impl
     MaterialHandle   material    = MaterialHandle::Invalid;
     hlslpp::float4x4 worldFromLocal{};
     bool             visible     = true;
+    bool             doubleSided = false;  // V2.A.x — UsdGeomGprim::doubleSided.
     std::string      debugName;
   };
 

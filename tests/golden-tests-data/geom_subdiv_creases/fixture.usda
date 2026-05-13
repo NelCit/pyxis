@@ -1,0 +1,56 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden geom_subdiv_creases — catmullClark cube cage with creased top edges + sharp corners. V2.A.1 follow-up — cornerIndices/cornerSharpnesses + creaseIndices/creaseLengths/creaseSharpnesses flow into OpenSubdiv. Differs visibly from geom_subdiv_catmark (smooth) — the creased edges + corners stay angular."
+)
+
+def Xform "World"
+{
+    def Mesh "Cage"
+    {
+        uniform token subdivisionScheme = "catmullClark"
+        uniform token interpolateBoundary = "edgeAndCorner"
+        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+        int[] faceVertexIndices = [
+            0, 1, 2, 3,    # bottom
+            4, 7, 6, 5,    # top (CCW from above)
+            0, 4, 5, 1,    # front
+            1, 5, 6, 2,    # right
+            2, 6, 7, 3,    # back
+            3, 7, 4, 0     # left
+        ]
+        point3f[] points = [
+            (-0.7, -0.7, -0.7), ( 0.7, -0.7, -0.7),
+            ( 0.7, -0.7,  0.7), (-0.7, -0.7,  0.7),
+            (-0.7,  0.7, -0.7), ( 0.7,  0.7, -0.7),
+            ( 0.7,  0.7,  0.7), (-0.7,  0.7,  0.7)
+        ]
+        # Top-face perimeter as one 4-segment crease loop
+        # (v4 → v5 → v6 → v7 → v4). 5 indices, 1 length, fully sharp.
+        int[] creaseIndices = [4, 5, 6, 7, 4]
+        int[] creaseLengths = [5]
+        float[] creaseSharpnesses = [10]
+        # All four bottom corners stay sharp.
+        int[] cornerIndices = [0, 1, 2, 3]
+        float[] cornerSharpnesses = [10, 10, 10, 10]
+        color3f[] primvars:displayColor = [(0.85, 0.55, 0.15)]
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (1.6, 1.4, 2.6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.2
+    }
+}
