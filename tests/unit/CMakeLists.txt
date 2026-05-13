@@ -47,6 +47,12 @@ target_sources(pyxis_unit_tests PRIVATE
     TextureLruEviction.cpp
     DdsParserFixture.cpp
     VolumeLoaderFixture.cpp
+    SubdivCreaseFixture.cpp
+    InstanceDoubleSided.cpp
+
+    # V2.A.1 follow-up — SubdivRefine.cpp lives in pyxis_usd_ingest
+    # Private. The fixture compiles it directly.
+    ${CMAKE_SOURCE_DIR}/sources/pyxis_usd_ingest/Private/SubdivRefine.cpp
 
     # V2.A.14 DDS parser lives in pyxis_renderer's Private. The unit
     # test compiles it directly (same convention as RenderGraph + CliArgs).
@@ -97,6 +103,7 @@ pyxis_enable_exceptions_and_rtti(pyxis_unit_tests)
 
 find_package(pxr CONFIG REQUIRED)
 find_package(OpenVDB CONFIG REQUIRED)
+find_package(OpenSubdiv CONFIG REQUIRED)
 
 target_link_libraries(pyxis_unit_tests
     PRIVATE
@@ -118,6 +125,9 @@ target_link_libraries(pyxis_unit_tests
         # test setup time + the recompiled VolumeLoader.cpp pulls
         # openvdb's read path. CPU only; no nanovdb feature.
         OpenVDB::openvdb
+        # V2.A.1 follow-up — SubdivCreaseFixture recompiles
+        # SubdivRefine.cpp which uses OpenSubdiv's Far layer.
+        OpenSubdiv::osdCPU_static
         GTest::gtest
         GTest::gtest_main
 )

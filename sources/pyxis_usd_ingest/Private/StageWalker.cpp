@@ -419,6 +419,7 @@ struct PreparedSubMesh {
 struct PreparedMesh {
   std::vector<PreparedSubMesh> subMeshes;       // size 0 when prep failed / mesh dropped
   hlslpp::float4x4             worldFromLocal;  // populated when subMeshes non-empty
+  bool                         doubleSided = false;  // V2.A.x — UsdGeomGprim::doubleSided.
 };
 
 // Build a Pyxis MeshDesc from a UsdGeomMesh prim. Returns
@@ -1568,6 +1569,18 @@ PreparedMesh PrepareMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xform
   // Builds prepared.subMeshes; the GpuScene mutation calls live in
   // EmitPreparedMesh below.
   prepared.worldFromLocal = ComposeWorldFromLocal(prim, xformCache, stageCtx);
+  // V2.A.x — UsdGeomGprim::doubleSided. Read once per prim; copied to
+  // every subset's emitted InstanceDesc so the renderer can drop
+  // back-face culling on foliage / cloth / signage.
+  {
+    bool authoredDoubleSided = false;
+    if (const pxr::UsdAttribute attr = meshPrim.GetDoubleSidedAttr();
+        attr && attr.HasAuthoredValue())
+    {
+      attr.Get(&authoredDoubleSided);
+    }
+    prepared.doubleSided = authoredDoubleSided;
+  }
   const std::string primPath = prim.GetPath().GetString();
 
   // Cached interpolation-mode flags — read once, branched per face-
@@ -2041,6 +2054,7 @@ std::size_t EmitPreparedMesh(const PreparedMesh& prepared, GpuScene& scene,
     instanceDesc.mesh           = *meshHandle;
     instanceDesc.worldFromLocal = prepared.worldFromLocal;
     instanceDesc.material       = materialToBind;
+    instanceDesc.doubleSided    = prepared.doubleSided;
     instanceDesc.debugName      = subMesh.debugName;
     const auto instanceHandle = scene.AppendInstance(instanceDesc);
     if (!instanceHandle.has_value())

@@ -119,6 +119,121 @@ SubdivRefinedMesh RefineSubdivMesh(
   options.SetVtxBoundaryInterpolation(MapBoundaryInterp(boundaryToken));
   options.SetFVarLinearInterpolation(MapFVarInterp(fvarToken));
 
+  // ---- USD → OpenSubdiv crease conversion ------------------------------
+  // V2.A.1 follow-up: subdivision creases. UsdGeomMesh authors crease
+  // edges + sharp corners as five attributes:
+  //   * cornerIndices       int[]   — sharp vertex indices
+  //   * cornerSharpnesses   float[] — one weight per corner
+  //   * creaseIndices       int[]   — flat list of crease vertex chains
+  //   * creaseLengths       int[]   — per-crease vertex count (>= 2)
+  //   * creaseSharpnesses   float[] — either ONE weight per crease
+  //                                   (uniform) or sum(creaseLengths-1)
+  //                                   weights (per-segment).
+  //
+  // OpenSubdiv's TopologyDescriptor wants creases as flat vertex-INDEX
+  // PAIRS — for a chain of L vertices that's 2*(L-1) indices and L-1
+  // weights. Translate here so a chain `[v0,v1,v2]` with uniform
+  // weight w becomes `[v0,v1, v1,v2]` paired with `[w,w]`.
+  //
+  // Without this, hard edges on production assets (mechanical parts,
+  // architectural trim, character feature lines) refine into smoothly
+  // rounded surfaces — visibly wrong vs the authoring intent.
+  pxr::VtArray<int>   usdCornerIndices;
+  pxr::VtArray<float> usdCornerSharpnesses;
+  pxr::VtArray<int>   usdCreaseIndices;
+  pxr::VtArray<int>   usdCreaseLengths;
+  pxr::VtArray<float> usdCreaseSharpnesses;
+  mesh.GetCornerIndicesAttr().Get(&usdCornerIndices);
+  mesh.GetCornerSharpnessesAttr().Get(&usdCornerSharpnesses);
+  mesh.GetCreaseIndicesAttr().Get(&usdCreaseIndices);
+  mesh.GetCreaseLengthsAttr().Get(&usdCreaseLengths);
+  mesh.GetCreaseSharpnessesAttr().Get(&usdCreaseSharpnesses);
+
+  std::vector<int>   osCornerIndices;
+  std::vector<float> osCornerWeights;
+  if (usdCornerIndices.size() == usdCornerSharpnesses.size())
+  {
+    osCornerIndices.assign(usdCornerIndices.begin(), usdCornerIndices.end());
+    osCornerWeights.assign(usdCornerSharpnesses.begin(), usdCornerSharpnesses.end());
+  }
+  else if (!usdCornerIndices.empty() || !usdCornerSharpnesses.empty())
+  {
+    log.Warn(log::APP, "SubdivRefine: corner-index/sharpness count mismatch on "
+                            + mesh.GetPrim().GetPath().GetString()
+                            + " (" + std::to_string(usdCornerIndices.size())
+                            + " vs " + std::to_string(usdCornerSharpnesses.size())
+                            + "); skipping corners.");
+  }
+
+  std::vector<int>   osCreasePairIndices;
+  std::vector<float> osCreasePairWeights;
+  if (!usdCreaseLengths.empty() && !usdCreaseIndices.empty())
+  {
+    std::size_t totalLengthSum = 0;
+    std::size_t totalSegments  = 0;
+    for (const int len : usdCreaseLengths)
+    {
+      if (len < 2)
+      {
+        log.Warn(log::APP, "SubdivRefine: crease-length " + std::to_string(len)
+                                + " < 2 on " + mesh.GetPrim().GetPath().GetString()
+                                + "; skipping creases.");
+        osCreasePairIndices.clear();
+        osCreasePairWeights.clear();
+        totalLengthSum = 0;
+        break;
+      }
+      totalLengthSum += static_cast<std::size_t>(len);
+      totalSegments  += static_cast<std::size_t>(len - 1);
+    }
+    if (totalLengthSum != usdCreaseIndices.size() && totalLengthSum > 0)
+    {
+      log.Warn(log::APP, "SubdivRefine: crease-index count " + std::to_string(usdCreaseIndices.size())
+                              + " != sum(creaseLengths) " + std::to_string(totalLengthSum)
+                              + " on " + mesh.GetPrim().GetPath().GetString()
+                              + "; skipping creases.");
+      totalSegments = 0;
+    }
+    if (totalSegments > 0)
+    {
+      // USD authoring allows either one weight per CREASE or one
+      // weight per SEGMENT. Detect by sharpness count.
+      const bool perSegment = (usdCreaseSharpnesses.size() == totalSegments);
+      const bool perCrease  = (usdCreaseSharpnesses.size() == usdCreaseLengths.size());
+      if (!perSegment && !perCrease)
+      {
+        log.Warn(log::APP, "SubdivRefine: crease-sharpness count "
+                                + std::to_string(usdCreaseSharpnesses.size())
+                                + " is neither per-crease (" + std::to_string(usdCreaseLengths.size())
+                                + ") nor per-segment (" + std::to_string(totalSegments)
+                                + ") on " + mesh.GetPrim().GetPath().GetString()
+                                + "; skipping creases.");
+      }
+      else
+      {
+        osCreasePairIndices.reserve(totalSegments * 2);
+        osCreasePairWeights.reserve(totalSegments);
+        std::size_t indexCursor   = 0;
+        std::size_t segmentCursor = 0;
+        for (std::size_t creaseIdx = 0; creaseIdx < usdCreaseLengths.size(); ++creaseIdx)
+        {
+          const auto length = static_cast<std::size_t>(usdCreaseLengths[creaseIdx]);
+          for (std::size_t segIdx = 0; segIdx + 1 < length; ++segIdx)
+          {
+            osCreasePairIndices.push_back(usdCreaseIndices[indexCursor + segIdx]);
+            osCreasePairIndices.push_back(usdCreaseIndices[indexCursor + segIdx + 1]);
+            const float weight = perSegment
+                                     ? usdCreaseSharpnesses[segmentCursor + segIdx]
+                                     : usdCreaseSharpnesses[creaseIdx];
+            osCreasePairWeights.push_back(weight);
+          }
+          indexCursor   += length;
+          segmentCursor += (length - 1);
+        }
+      }
+    }
+  }
+
   // ---- Validate + copy into stable local buffers -----------------------
   // OpenSubdiv reads through the pointers we hand it during topology
   // refinement. VtArray<int>::cdata() points into reference-counted
@@ -182,6 +297,18 @@ SubdivRefinedMesh RefineSubdivMesh(
   desc.numFaces = static_cast<int>(stableCounts.size());
   desc.numVertsPerFace = stableCounts.data();
   desc.vertIndicesPerFace = stableIndices.data();
+  if (!osCornerIndices.empty())
+  {
+    desc.numCorners = static_cast<int>(osCornerIndices.size());
+    desc.cornerVertexIndices = osCornerIndices.data();
+    desc.cornerWeights = osCornerWeights.data();
+  }
+  if (!osCreasePairWeights.empty())
+  {
+    desc.numCreases = static_cast<int>(osCreasePairWeights.size());
+    desc.creaseVertexIndexPairs = osCreasePairIndices.data();
+    desc.creaseWeights = osCreasePairWeights.data();
+  }
 
   // Optional face-varying UV channel descriptor. OpenSubdiv treats each
   // FVar channel independently — we register one for UVs when present.
