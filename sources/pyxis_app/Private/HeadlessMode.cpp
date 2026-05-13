@@ -5,6 +5,7 @@
 #include "Config/Configuration.h"
 #include "Output/AovExrSaver.h"
 #include "Output/ExrWriter.h"
+#include "Output/PngWriter.h"
 #include "Output/TextureReadback.h"
 #include "Render/AovRegistry.h"
 #include "Render/AovTextures.h"
@@ -191,9 +192,29 @@ void LogDeterminismPin(const Configuration& config, uint32_t framesInFlight) noe
   return true;
 }
 
+// True iff `path` ends with `.png` (case-insensitive). Lets the
+// readback path pick PNG (golden tests, human-inspectable) vs EXR
+// (HDR / AOV) by file extension alone — no extra CLI flag.
+[[nodiscard]] bool PathHasPngExtension(std::string_view path) noexcept
+{
+  if (path.size() < 4)
+    return false;
+  const auto tail = path.substr(path.size() - 4);
+  if (tail[0] != '.')
+    return false;
+  const auto lower = [](char chr) -> char {
+    return (chr >= 'A' && chr <= 'Z') ? static_cast<char>(chr + ('a' - 'A')) : chr;
+  };
+  return lower(tail[1]) == 'p' && lower(tail[2]) == 'n' && lower(tail[3]) == 'g';
+}
+
 // Run TextureReadback through phase 1 (record copy) + phase 2 (map
 // the staging buffer), warn if the entire image is black (silent
-// PathTracePass no-op detector), then write the BGRA8 EXR to disk.
+// PathTracePass no-op detector), then write the BGRA8 image to disk.
+// File format is selected by the `outputPath` extension: `.png`
+// dispatches to WritePngBgra8 (sRGB-encoded, human-inspectable,
+// golden-test friendly); anything else dispatches to WriteExrBgra8
+// (linear-float, HDR-friendly, the historical default).
 // Returns false on any failure.
 [[nodiscard]] bool ReadbackAndWriteExr(nvrhi::IDevice* device,
                                        nvrhi::ICommandList* commandList,
@@ -250,8 +271,11 @@ void LogDeterminismPin(const Configuration& config, uint32_t framesInFlight) noe
                          : "headless: render output is fully black — PathTracePass likely skipped");
   }
 
-  auto writeResult = WriteExrBgra8(outputPath, readback->Width(), readback->Height(),
-                                   readback->Data(), readback->RowPitch());
+  auto writeResult = PathHasPngExtension(outputPath)
+                         ? WritePngBgra8(outputPath, readback->Width(), readback->Height(),
+                                         readback->Data(), readback->RowPitch())
+                         : WriteExrBgra8(outputPath, readback->Width(), readback->Height(),
+                                         readback->Data(), readback->RowPitch());
   if (!writeResult)
   {
     log.Error(log::APP, "headless: " + writeResult.error());

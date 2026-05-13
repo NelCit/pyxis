@@ -9,10 +9,17 @@ tests/golden-tests-data/<test-name>/
     regression.json    # tolerances + optional --frame override
 
 tests/golden-tests-expected/<test-name>/
-    baseline.exr       # checked-in expected pixels
+    baseline.png       # checked-in expected pixels
 ```
 
-A test passes iff the rendered EXR matches `baseline.exr` byte-for-byte.
+A test passes iff the rendered PNG matches `baseline.png` byte-for-byte.
+PNG was picked over EXR because (a) it opens in any image viewer + on
+GitHub's PR-image diff view for free, (b) the repo footprint is ~half
+the EXR size, and (c) the renderer's headless RT is BGRA8_UNORM so
+there's no precision loss going to 8-bit PNG. The writer applies a
+fixed linear→sRGB encode (256-entry LUT) so baselines render
+correctly in standard viewers without losing determinism.
+
 Default tolerances target byte-equal under the §33.7 / §36.5 strict-mode
 contract (RTX 4070 Laptop + pinned NVIDIA driver + pinned Vulkan SDK +
 Win 11 24H2).
@@ -62,6 +69,6 @@ python _tools/run_goldens.py --rebake
 
 Drop a fixture under [../golden-tests-data/<short-name>/](../golden-tests-data/)
 and a sibling baseline dir here. The convention is short-name dir,
-single `fixture.usda`, single `regression.json`, single `baseline.exr`.
+single `fixture.usda`, single `regression.json`, single `baseline.png`.
 Multi-frame animation features get one sub-test per sampled frame
 (e.g. `anim_skel_frame0` / `anim_skel_frame24`).
