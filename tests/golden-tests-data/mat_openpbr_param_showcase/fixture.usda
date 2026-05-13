@@ -1,0 +1,67 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden mat_openpbr_param_showcase — single Sphere bound to a UsdPreviewSurface with a richly-set parameter vector: warm diffuse, mid metallic, low roughness, full clearcoat with low clearcoatRoughness, non-zero emissiveColor, ior=1.55, opacity=1 (deliberately opaque — opacityThreshold cutout is §42 deferred). Many MaterialFlag bits should light up at once. This is the cross-channel regression: anything that breaks one term (e.g. clearcoat that no longer composites over the base) will show up here even when the per-channel sweeps still pass."
+)
+
+def Xform "World"
+{
+    def Sphere "Sphere" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double radius = 0.75
+        double3 xformOp:translate = (0, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        rel material:binding = </World/Materials/Showcase>
+    }
+
+    def Scope "Materials"
+    {
+        def Material "Showcase"
+        {
+            token outputs:surface.connect = </World/Materials/Showcase/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.78, 0.42, 0.16)
+                float inputs:metallic = 0.65
+                float inputs:roughness = 0.22
+                float inputs:clearcoat = 1.0
+                float inputs:clearcoatRoughness = 0.04
+                color3f inputs:emissiveColor = (0.08, 0.04, 0.02)
+                float inputs:ior = 1.55
+                float inputs:opacity = 1.0
+                int inputs:useSpecularWorkflow = 0
+                token outputs:surface
+            }
+        }
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 1.4, 3)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (0.95, 0.97, 1.0)
+        float inputs:intensity = 1.4
+    }
+
+    def DistantLight "KeyLight"
+    {
+        color3f inputs:color = (1.0, 0.95, 0.85)
+        float inputs:intensity = 4
+        float xformOp:rotateX = -35
+        float xformOp:rotateY = 25
+        uniform token[] xformOpOrder = ["xformOp:rotateX", "xformOp:rotateY"]
+    }
+}

@@ -1,0 +1,44 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden camera_under_nested_xform — Camera sits under two levels of transformed Xforms (outer translate + inner rotate). The composed world transform must place the camera correctly. Catches regressions where the camera's world transform is read from prim-local instead of UsdGeomXformCache::GetLocalToWorldTransform."
+)
+
+def Xform "World"
+{
+    def Cube "Cube"
+    {
+        double size = 1.2
+        color3f[] primvars:displayColor = [(0.55, 0.85, 0.45)]
+        double3 xformOp:translate = (0, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Xform "CameraRig"
+    {
+        double3 xformOp:translate = (0, 1.5, 4)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def Xform "Mount"
+        {
+            float xformOp:rotateY = 25
+            uniform token[] xformOpOrder = ["xformOp:rotateY"]
+
+            def Camera "Camera"
+            {
+                float focalLength = 35.0
+                float horizontalAperture = 36.0
+                float verticalAperture = 20.25
+                float2 clippingRange = (0.1, 1000)
+            }
+        }
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.0
+    }
+}

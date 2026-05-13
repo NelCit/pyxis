@@ -1,0 +1,35 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden xform_negative_scale_x — Cube authored with xformOp:scale = (-1, 1, 1). The negative scale flips handedness; the StageWalker is expected to either pass the transform through (closesthit reverses winding from the determinant sign) or flip the index buffer at ingest. Either way the cube must render *correctly* (not inside-out or invisible). Common artifact of DCC FBX/Maya exports that mirror across X."
+)
+
+def Xform "World"
+{
+    def Cube "MirroredCube"
+    {
+        double size = 1.2
+        color3f[] primvars:displayColor = [(0.30, 0.85, 0.55)]
+        double3 xformOp:translate = (0, 1, 0)
+        float3 xformOp:scale = (-1, 1, 1)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (1.5, 1.4, 2.6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.2
+    }
+}

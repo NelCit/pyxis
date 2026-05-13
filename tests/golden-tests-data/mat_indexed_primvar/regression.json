@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden mat_indexed_primvar — indexed primvars:displayColor (palette + separate indices). Four triangles map to four distinct palette entries. Catches regressions where indexed primvars are read as non-indexed (all faces would show palette entry 0)." }

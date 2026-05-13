@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden xform_non_uniform_scale — Cube with xformOp:scale = (2, 0.5, 1). Stretched + Distant light reveal whether normals are transformed by the inverse-transpose (correct) or the world matrix (wrong, produces visibly biased shading)." }

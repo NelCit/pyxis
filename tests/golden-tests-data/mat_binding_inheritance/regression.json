@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden mat_binding_inheritance — Material bound on parent Xform, leaf Mesh inherits. Sentinel red displayColor on the Mesh would be visible if the binding isn't inherited (catches the regression directly)." }

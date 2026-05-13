@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden geom_displaycolor_per_vertex — quad with 4 vertex colors interpolated barycentrically. Must produce a smooth 4-corner gradient. Catches regressions where vertex-interp primvars are silently treated as constant or per-face." }

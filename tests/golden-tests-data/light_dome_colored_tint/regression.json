@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden light_dome_colored_tint — warm-tinted DomeLight (1.0, 0.55, 0.30). Pixels must skew warm vs the white-dome twin. Catches regressions where DomeLight.color is silently ignored." }

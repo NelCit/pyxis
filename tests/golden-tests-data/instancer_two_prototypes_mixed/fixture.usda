@@ -1,0 +1,81 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden instancer_two_prototypes_mixed — UsdGeomPointInstancer with TWO prototypes (Cube + Sphere via tessellated mesh) and protoIndices = [0, 1, 0, 1] alternating. Existing instancer_multi_proto may use a different ratio; this one specifically tests that protoIndices is read PER instance (not as a constant) and that BLAS sharing across distinct prototypes works. M6 / §15."
+)
+
+def Xform "World"
+{
+    def PointInstancer "Instancer"
+    {
+        rel prototypes = [
+            </World/Instancer/Prototypes/Cube>,
+            </World/Instancer/Prototypes/Octa>
+        ]
+        int[] protoIndices = [0, 1, 0, 1]
+        point3f[] positions = [
+            (-1.5, 0.5, 0), (-0.5, 0.5, 0),
+            ( 0.5, 0.5, 0), ( 1.5, 0.5, 0)
+        ]
+
+        def Scope "Prototypes"
+        {
+            def Mesh "Cube"
+            {
+                uniform token subdivisionScheme = "none"
+                int[] faceVertexCounts = [3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3]
+                int[] faceVertexIndices = [
+                    0, 1, 2,  0, 2, 3,
+                    4, 6, 5,  4, 7, 6,
+                    0, 4, 5,  0, 5, 1,
+                    1, 5, 6,  1, 6, 2,
+                    2, 6, 7,  2, 7, 3,
+                    3, 7, 4,  3, 4, 0
+                ]
+                point3f[] points = [
+                    (-0.35, -0.35,  0.35), ( 0.35, -0.35,  0.35),
+                    ( 0.35, -0.35, -0.35), (-0.35, -0.35, -0.35),
+                    (-0.35,  0.35,  0.35), ( 0.35,  0.35,  0.35),
+                    ( 0.35,  0.35, -0.35), (-0.35,  0.35, -0.35)
+                ]
+                color3f[] primvars:displayColor = [(0.85, 0.40, 0.20)]
+            }
+
+            def Mesh "Octa"
+            {
+                # Octahedron — 6 verts, 8 tri faces.
+                uniform token subdivisionScheme = "none"
+                int[] faceVertexCounts = [3, 3, 3, 3, 3, 3, 3, 3]
+                int[] faceVertexIndices = [
+                    0, 1, 4,  1, 2, 4,  2, 3, 4,  3, 0, 4,
+                    0, 5, 1,  1, 5, 2,  2, 5, 3,  3, 5, 0
+                ]
+                point3f[] points = [
+                    ( 0.40, 0.0,  0.0), ( 0.0, 0.0,  0.40),
+                    (-0.40, 0.0,  0.0), ( 0.0, 0.0, -0.40),
+                    ( 0.0,  0.40, 0.0), ( 0.0, -0.40, 0.0)
+                ]
+                color3f[] primvars:displayColor = [(0.20, 0.55, 0.85)]
+            }
+        }
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 2, 3.5)
+        float xformOp:rotateX = -25
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.0
+    }
+}

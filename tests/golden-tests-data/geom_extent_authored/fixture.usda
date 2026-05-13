@@ -1,0 +1,40 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden geom_extent_authored — quad with an explicit `extent` attribute (the authored bounding box) that differs from what's tightly fit to `points`. M14c / V2.A.31 — UsdGeom advertises the authored extent as a hint; the StageWalker uses it for the scene-bounds aggregate. Catches regressions where the authored extent is ignored (BLAS bounds fall back to computed) or where it's used as the BLAS bound directly (would clip geometry — invariant says the authored extent must enclose the points)."
+)
+
+def Xform "World"
+{
+    def Mesh "Quad"
+    {
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-1, 0, -1), (1, 0, -1), (1, 0, 1), (-1, 0, 1)]
+        # Tight extent of `points` is (-1,0,-1) to (1,0,1). Author a
+        # looser extent to test that the renderer reads this hint
+        # without using it as the rendering bound.
+        float3[] extent = [(-1.2, -0.1, -1.2), (1.2, 0.1, 1.2)]
+        color3f[] primvars:displayColor = [(0.30, 0.65, 0.85)]
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 2.5, 3)
+        float xformOp:rotateX = -45
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.0
+    }
+}

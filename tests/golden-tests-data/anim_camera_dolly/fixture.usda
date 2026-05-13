@@ -1,0 +1,41 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    startTimeCode = 0
+    endTimeCode = 100
+    timeCodesPerSecond = 24
+    doc = "Pyxis golden anim_camera_dolly — Camera with xformOp:translate animated, dollying from (0, 1.4, 6) at frame 0 to (0, 1.4, 1.5) at frame 100. Static Cube at the origin. Rendered at frame 50 (midpoint). Catches regressions where Camera xform time-samples are ignored or where the camera's local-to-world resolves only at load time."
+)
+
+def Xform "World"
+{
+    def Cube "Cube"
+    {
+        double size = 1.2
+        color3f[] primvars:displayColor = [(0.85, 0.55, 0.30)]
+        double3 xformOp:translate = (0, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate.timeSamples = {
+            0:   (0, 1.4, 6.0),
+            50:  (0, 1.4, 3.75),
+            100: (0, 1.4, 1.5),
+        }
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.0
+    }
+}

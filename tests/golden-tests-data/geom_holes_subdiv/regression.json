@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden geom_holes_subdiv — catmullClark cage + holeIndices=[1, 3]. Holes must survive refinement (the dropped faces stay dropped through OpenSubdiv's Far layer). Catches regressions where holes are filtered before subdivision (whole sub-cage missing) or after (subdivided then holes removed leaving polygonal stubs)." }

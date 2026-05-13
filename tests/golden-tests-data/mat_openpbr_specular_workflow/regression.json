@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden mat_openpbr_specular_workflow — UsdPreviewSurface useSpecularWorkflow=1 + explicit specularColor + no metallic. UsdShadeToOpenPBR must remap into OpenPBR. Catches regressions where the spec workflow falls through to metallic=0 (sphere would look flat-diffuse blue instead of having a specular highlight)." }

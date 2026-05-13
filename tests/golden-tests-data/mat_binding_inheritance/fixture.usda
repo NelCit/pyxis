@@ -1,0 +1,76 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden mat_binding_inheritance — Material:binding is authored on the parent Xform, not on the child Mesh. UsdShade MaterialBindingAPI inherits down the hierarchy by default; the leaf Mesh must pick up the parent's binding. Catches regressions where MaterialBindingAPI is queried only on the leaf prim and the inherited binding is missed."
+)
+
+def Xform "World"
+{
+    def Xform "ParentWithMat" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </World/Materials/SkyBlue>
+        double3 xformOp:translate = (0, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        # Child Mesh does NOT author its own material:binding.
+        def Mesh "Cube"
+        {
+            uniform token subdivisionScheme = "none"
+            int[] faceVertexCounts = [3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3]
+            int[] faceVertexIndices = [
+                0, 1, 2,  0, 2, 3,
+                4, 6, 5,  4, 7, 6,
+                0, 4, 5,  0, 5, 1,
+                1, 5, 6,  1, 6, 2,
+                2, 6, 7,  2, 7, 3,
+                3, 7, 4,  3, 4, 0
+            ]
+            point3f[] points = [
+                (-0.55, -0.55,  0.55), ( 0.55, -0.55,  0.55),
+                ( 0.55, -0.55, -0.55), (-0.55, -0.55, -0.55),
+                (-0.55,  0.55,  0.55), ( 0.55,  0.55,  0.55),
+                ( 0.55,  0.55, -0.55), (-0.55,  0.55, -0.55)
+            ]
+            # Sentinel displayColor — if the Mesh ends up renderering with a
+            # fallback (no inherited binding picked up), it will show in red.
+            # The expected baseline is the SkyBlue material, not this red.
+            color3f[] primvars:displayColor = [(1.0, 0.0, 0.0)]
+        }
+    }
+
+    def Scope "Materials"
+    {
+        def Material "SkyBlue"
+        {
+            token outputs:surface.connect = </World/Materials/SkyBlue/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.25, 0.55, 0.95)
+                float inputs:metallic = 0.0
+                float inputs:roughness = 0.4
+                token outputs:surface
+            }
+        }
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (1.6, 1.4, 2.6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.2
+    }
+}

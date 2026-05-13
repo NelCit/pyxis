@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden mat_openpbr_param_showcase — UsdPreviewSurface with many params set simultaneously (diffuseColor + metallic 0.65 + rough 0.22 + clearcoat 1.0 + clearcoatRoughness 0.04 + emissiveColor + ior 1.55) plus Dome + Distant. Cross-channel regression: any single-term breakage that doesn't reduce one isolated knob to default still drifts here." }

@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden instancer_with_orientations — PointInstancer.orientations quat array. Three cubes rotated 0°/30°/60° about Y. Different silhouettes from the corner-vertex projection prove the per-instance quat composes into the world transform." }

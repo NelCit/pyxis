@@ -1,0 +1,43 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden geom_displaycolor_per_vertex — quad with primvars:displayColor authored per-vertex (interpolation = `vertex`). The closesthit must barycentrically interpolate the four corner colors → smooth gradient across the surface. Existing mat_displaycolor_per_face uses `uniform`/`faceVarying`; this exercises the `vertex` interp branch."
+)
+
+def Xform "World"
+{
+    def Mesh "Quad"
+    {
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [3, 3]
+        int[] faceVertexIndices = [0, 1, 2, 0, 2, 3]
+        point3f[] points = [(-1, 0, -1), (1, 0, -1), (1, 0, 1), (-1, 0, 1)]
+        color3f[] primvars:displayColor = [
+            (1.0, 0.2, 0.2),     # bl — red
+            (0.2, 1.0, 0.2),     # br — green
+            (0.2, 0.2, 1.0),     # tr — blue
+            (1.0, 1.0, 0.2)      # tl — yellow
+        ] (
+            interpolation = "vertex"
+        )
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 2.5, 3)
+        float xformOp:rotateX = -45
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.0
+    }
+}

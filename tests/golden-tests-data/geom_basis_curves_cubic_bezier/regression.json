@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden geom_basis_curves_cubic_bezier — type=cubic + basis=bezier (existing geom_basis_curves is linear). Smooth Bezier curve must differ visibly from the linear ribbon. Catches regressions where the curve type is treated as linear universally." }

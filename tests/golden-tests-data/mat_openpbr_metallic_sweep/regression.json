@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden mat_openpbr_metallic_sweep — UsdPreviewSurface.metallic at 0.0/0.5/1.0 with everything else fixed. Three spheres must look visibly distinct (matte/mixed/reflective). Catches mistakes where metallic is binarized or where the dielectric branch never fires." }

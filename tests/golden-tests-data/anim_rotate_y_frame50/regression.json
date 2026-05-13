@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden anim_rotate_y_frame50 — rotateY animated 0→180°, rendered at frame 50 (90° midpoint). Tests that rotateY timeSamples are sampled like translate timeSamples.", "frame": 50 }

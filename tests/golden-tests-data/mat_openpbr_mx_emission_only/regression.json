@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden mat_openpbr_mx_emission_only — emission-only material, no scene lights. Sphere must self-illuminate at the tinted color; the rest of the image must be black. Catches regressions where emission is multiplied by direct light, where the camera ray's miss is non-zero (rogue ambient), or where emission_luminance is silently clamped." }

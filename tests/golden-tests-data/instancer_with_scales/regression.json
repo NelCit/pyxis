@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden instancer_with_scales — PointInstancer.scales array. Four cubes at progressively larger uniform scales prove StageWalker::EmitPointInstancer composes scales into the per-instance world transform. Orthogonal to instancer_basic (scales unauthored)." }

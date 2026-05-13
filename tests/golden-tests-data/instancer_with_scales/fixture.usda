@@ -1,0 +1,65 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden instancer_with_scales — UsdGeomPointInstancer + per-instance `scales` array. Four cubes at the corners of an XZ quad, each authored at a progressively larger uniform scale (0.3, 0.6, 0.9, 1.2). M6 / V2.A.x — exercises StageWalker::EmitPointInstancer's optional scales pathway (orthogonal to instancer_basic, which leaves scales unauthored)."
+)
+
+def Xform "World"
+{
+    def PointInstancer "Instancer"
+    {
+        rel prototypes = [</World/Instancer/Prototypes/Cube>]
+        int[] protoIndices = [0, 0, 0, 0]
+        point3f[] positions = [
+            (-1.2, 0.3, -1.2), ( 1.2, 0.3, -1.2),
+            (-1.2, 0.3,  1.2), ( 1.2, 0.3,  1.2)
+        ]
+        float3[] scales = [
+            (0.3, 0.3, 0.3), (0.6, 0.6, 0.6),
+            (0.9, 0.9, 0.9), (1.2, 1.2, 1.2)
+        ]
+
+        def Scope "Prototypes"
+        {
+            def Mesh "Cube"
+            {
+                uniform token subdivisionScheme = "none"
+                int[] faceVertexCounts = [3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3]
+                int[] faceVertexIndices = [
+                    0, 1, 2,  0, 2, 3,
+                    4, 6, 5,  4, 7, 6,
+                    0, 4, 5,  0, 5, 1,
+                    1, 5, 6,  1, 6, 2,
+                    2, 6, 7,  2, 7, 3,
+                    3, 7, 4,  3, 4, 0
+                ]
+                point3f[] points = [
+                    (-0.35, -0.35,  0.35), ( 0.35, -0.35,  0.35),
+                    ( 0.35, -0.35, -0.35), (-0.35, -0.35, -0.35),
+                    (-0.35,  0.35,  0.35), ( 0.35,  0.35,  0.35),
+                    ( 0.35,  0.35, -0.35), (-0.35,  0.35, -0.35)
+                ]
+                color3f[] primvars:displayColor = [(0.55, 0.75, 0.40)]
+            }
+        }
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 4, 4)
+        float xformOp:rotateX = -45
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.0
+    }
+}

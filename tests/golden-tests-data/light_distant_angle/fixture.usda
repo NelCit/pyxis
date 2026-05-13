@@ -1,0 +1,37 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden light_distant_angle — DistantLight with inputs:angle = 5° (vs the default ~0.53° solar). Wider angular diameter spreads the light direction; for the simple Lambert path this should not change the average shading (mean direction unchanged) but the integrator-side handling of `angle` must at least not break. For NEE wired post-v1 this is where soft shadows kick in. Orthogonal to light_distant_lambert (default angle)."
+)
+
+def Xform "World"
+{
+    def Sphere "Sphere"
+    {
+        double radius = 0.7
+        color3f[] primvars:displayColor = [(0.85, 0.85, 0.85)]
+        double3 xformOp:translate = (0, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DistantLight "Sun"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 6
+        float inputs:angle = 5.0
+        float xformOp:rotateX = -35
+        uniform token[] xformOpOrder = ["xformOp:rotateX"]
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 1.4, 3)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}

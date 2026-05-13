@@ -1,0 +1,36 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden light_distant_colored — Sphere lit by a cool-tinted DistantLight (color = (0.40, 0.65, 1.0)). M7 — proves DistantLight.color flows through EmitLight into the closesthit's NdotL Lambert term. Orthogonal to light_distant_lambert (white)."
+)
+
+def Xform "World"
+{
+    def Sphere "Sphere"
+    {
+        double radius = 0.7
+        color3f[] primvars:displayColor = [(0.85, 0.85, 0.85)]
+        double3 xformOp:translate = (0, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DistantLight "Sun"
+    {
+        color3f inputs:color = (0.40, 0.65, 1.0)
+        float inputs:intensity = 6
+        float xformOp:rotateX = -35
+        uniform token[] xformOpOrder = ["xformOp:rotateX"]
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 1.4, 3)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}

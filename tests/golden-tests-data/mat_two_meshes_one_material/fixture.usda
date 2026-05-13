@@ -1,0 +1,61 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden mat_two_meshes_one_material — two distinct Mesh prims (positioned apart, distinct points / topology) sharing one material:binding to the same Material. Tests that material handle interning works: the UsdShadeToOpenPBR path must dedupe the binding into one MaterialHandle (XXH3_64 hash per §11). Catches regressions where each binding allocates a separate material slot, inflating slot consumption AND silently breaking the OpenPBRMaterialGPU table dedupe."
+)
+
+def Xform "World"
+{
+    def Cube "CubeA" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double size = 0.9
+        double3 xformOp:translate = (-0.9, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        rel material:binding = </World/Materials/Shared>
+    }
+    def Sphere "SphereB" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double radius = 0.5
+        double3 xformOp:translate = (0.9, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        rel material:binding = </World/Materials/Shared>
+    }
+
+    def Scope "Materials"
+    {
+        def Material "Shared"
+        {
+            token outputs:surface.connect = </World/Materials/Shared/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.20, 0.70, 0.85)
+                float inputs:metallic = 0.4
+                float inputs:roughness = 0.3
+                token outputs:surface
+            }
+        }
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 1.4, 3)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.2
+    }
+}

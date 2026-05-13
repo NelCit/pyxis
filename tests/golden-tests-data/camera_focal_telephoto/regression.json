@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden camera_focal_telephoto — focalLength = 100mm (telephoto). Cube must appear with the compressed-perspective characteristic of long lenses. Catches regressions where focalLength is clamped or where aperture/focal aren't both consumed when building the projection." }

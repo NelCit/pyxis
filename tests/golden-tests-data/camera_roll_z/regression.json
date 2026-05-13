@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden camera_roll_z — camera with xformOp:rotateZ = 30°. Cube must appear tilted in screen space. Catches regressions where the camera transform drops the roll component or recomputes basis vectors with an implicit up-vector lock." }

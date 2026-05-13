@@ -1,0 +1,37 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden geom_points_widths — UsdGeomPoints with per-vertex widths array varying 5x across the row. Each Point splats as a screen-aligned disc whose radius is the authored width. Existing geom_points uses a constant width; this exercises the per-vertex widths path through AnalyticGeom's TessellatePoints."
+)
+
+def Xform "World"
+{
+    def Points "Splats"
+    {
+        int[] curveVertexCounts = []
+        point3f[] points = [
+            (-1.8, 1, 0), (-1.0, 1, 0), (-0.3, 1, 0),
+            ( 0.4, 1, 0), ( 1.1, 1, 0), ( 1.8, 1, 0)
+        ]
+        float[] widths = [0.10, 0.18, 0.26, 0.34, 0.42, 0.50]
+        color3f[] primvars:displayColor = [(0.85, 0.55, 0.20)]
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 1, 4)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.0
+    }
+}

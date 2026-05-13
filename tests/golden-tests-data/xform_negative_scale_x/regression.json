@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden xform_negative_scale_x — Cube with xformOp:scale = (-1, 1, 1). Cube must shade correctly (not inside-out). Catches regressions where a negative-determinant world matrix flips the closesthit's geometric normal." }

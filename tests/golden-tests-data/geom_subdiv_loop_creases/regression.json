@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden geom_subdiv_loop_creases — Loop scheme + creases + corner sharpness. Closes the diagonal of the V2.A.1 subdiv matrix (catmullClark+creases ✓, loop alone ✓, loop+creases was the empty cell)." }

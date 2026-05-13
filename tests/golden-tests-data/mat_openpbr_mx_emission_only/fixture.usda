@@ -1,0 +1,49 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden mat_openpbr_mx_emission_only — MaterialX open_pbr_surface with strong emission_luminance + tinted emission_color, base/specular weights zeroed, *no scene lights at all*. The sphere must self-illuminate; the unhit pixels stay black (no ambient/dome contribution). M9 / §11 — proves the emission term is an independent additive write to the radiance accumulator, not gated by a scene light count > 0."
+)
+
+def Xform "World"
+{
+    def Sphere "Sphere" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double radius = 0.7
+        double3 xformOp:translate = (0, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        rel material:binding = </World/Materials/LavaCore>
+    }
+
+    def Scope "Materials"
+    {
+        def Material "LavaCore"
+        {
+            token outputs:surface.connect = </World/Materials/LavaCore/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "ND_open_pbr_surface_surfaceshader"
+                color3f inputs:base_color = (0, 0, 0)
+                float inputs:base_weight = 0.0
+                float inputs:specular_weight = 0.0
+                color3f inputs:emission_color = (1.0, 0.45, 0.10)
+                float inputs:emission_luminance = 2500.0
+                token outputs:surface
+            }
+        }
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 1.4, 3)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}

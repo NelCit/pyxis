@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden anim_xform_subframe — same animated cube, evaluated at frame 50 (midpoint between time samples). Catches regressions where --frame is snapped to the nearest authored sample instead of linearly interpolated.", "frame": 50 }

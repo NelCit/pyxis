@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden scene_empty_dome_only — no geometry, only Camera + DomeLight. Every ray must miss → all pixels get the dome's lat-long sample (uniform blue here). Catches regressions where the miss shader emits black or where an empty TLAS crashes." }

@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden mat_openpbr_roughness_sweep — UsdPreviewSurface.roughness at 0.05/0.35/0.85, metallic=1 fixed. Three spheres must show a clear sharp→glossy→diffuse transition. Catches regressions where GGX alpha is mis-squared, where roughness saturates at one end, or where the microfacet sampler always picks the mirror direction." }

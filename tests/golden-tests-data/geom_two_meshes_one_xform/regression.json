@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden geom_two_meshes_one_xform — two Mesh siblings under one Xform. Both must render with the parent's translate applied AND with their own distinct displayColor. Catches StageWalker bugs where sibling traversal stops at the first Mesh under a parent or shares a single color slot." }

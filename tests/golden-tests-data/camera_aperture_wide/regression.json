@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden camera_aperture_wide — Camera with horizontalAperture = 55mm (default 36mm). Wider FoV → smaller cube. Catches regressions where the aperture inputs are silently replaced by a constant in the projection matrix build." }

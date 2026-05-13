@@ -1,0 +1,50 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden mat_constant_color_only — minimal UsdPreviewSurface authoring only diffuseColor. Every other field falls back to the documented default (metallic=0, roughness=0.5, opacity=1, etc.). Sanity that the per-field defaults are applied uniformly across the per-field setters in UsdShadeToOpenPBR. Catches regressions where unset shader inputs leak a previous-material residue or hit an uninitialized field."
+)
+
+def Xform "World"
+{
+    def Sphere "Sphere" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double radius = 0.7
+        double3 xformOp:translate = (0, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        rel material:binding = </World/Materials/Minimal>
+    }
+
+    def Scope "Materials"
+    {
+        def Material "Minimal"
+        {
+            token outputs:surface.connect = </World/Materials/Minimal/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.50, 0.85, 0.40)
+                token outputs:surface
+            }
+        }
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 1.4, 3)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.2
+    }
+}

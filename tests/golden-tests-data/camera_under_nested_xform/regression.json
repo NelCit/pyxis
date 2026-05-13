@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden camera_under_nested_xform — Camera under World/CameraRig/Mount with composed translate+rotateY. Catches regressions where camera world transform is read from prim-local instead of composing through Xform parents." }

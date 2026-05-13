@@ -1,0 +1,55 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden geom_two_meshes_one_xform — two distinct Mesh prims (one tri, one quad) sharing a single Xform parent. Sanity check that StageWalker emits both meshes (no shadowing on prim count under one parent) and that they end up with the parent's composed world transform. Each mesh authors a different displayColor so the test catches material-binding mix-ups."
+)
+
+def Xform "World"
+{
+    def Xform "Group"
+    {
+        double3 xformOp:translate = (0, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def Mesh "TriMesh"
+        {
+            uniform token subdivisionScheme = "none"
+            int[] faceVertexCounts = [3]
+            int[] faceVertexIndices = [0, 1, 2]
+            point3f[] points = [
+                (-1.0, -0.5, 0), ( 0.0, -0.5, 0), (-0.5,  0.5, 0)
+            ]
+            color3f[] primvars:displayColor = [(0.85, 0.25, 0.25)]
+        }
+
+        def Mesh "QuadMesh"
+        {
+            uniform token subdivisionScheme = "none"
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            point3f[] points = [
+                ( 0.2, -0.5, 0), ( 1.0, -0.5, 0),
+                ( 1.0,  0.5, 0), ( 0.2,  0.5, 0)
+            ]
+            color3f[] primvars:displayColor = [(0.25, 0.55, 0.85)]
+        }
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 1, 2.5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.2
+    }
+}

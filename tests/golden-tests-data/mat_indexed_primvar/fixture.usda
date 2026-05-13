@@ -1,0 +1,55 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden mat_indexed_primvar — Mesh with an indexed primvars:displayColor (a colors[] palette + a separate indices[] referencing into it). Used in production exports to keep large color tables compact. The renderer must respect both the palette and the indices, not just inline-broadcast the first palette entry. Catches regressions where indexed primvars are read as if non-indexed."
+)
+
+def Xform "World"
+{
+    def Mesh "Quad"
+    {
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [3, 3, 3, 3]
+        # 4 triangles forming a 2x2 grid.
+        int[] faceVertexIndices = [
+            0, 1, 4,    # tri 0 → palette idx 0 (red)
+            1, 2, 5,    # tri 1 → palette idx 1 (green)
+            3, 4, 7,    # tri 2 → palette idx 2 (blue)
+            4, 5, 8     # tri 3 → palette idx 3 (yellow)
+        ]
+        point3f[] points = [
+            (-1, 0, -1), (0, 0, -1), (1, 0, -1),
+            (-1, 0,  0), (0, 0,  0), (1, 0,  0),
+            (-1, 0,  1), (0, 0,  1), (1, 0,  1)
+        ]
+        # 4-entry palette, indexed once per face (interp = uniform).
+        color3f[] primvars:displayColor = [
+            (0.90, 0.20, 0.20),    # 0 red
+            (0.20, 0.85, 0.20),    # 1 green
+            (0.20, 0.30, 0.90),    # 2 blue
+            (0.90, 0.85, 0.10)     # 3 yellow
+        ] (
+            interpolation = "uniform"
+        )
+        int[] primvars:displayColor:indices = [0, 1, 2, 3]
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 2.5, 3)
+        float xformOp:rotateX = -45
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.0
+    }
+}

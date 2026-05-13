@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden mat_constant_color_only — UsdPreviewSurface authoring ONLY diffuseColor. Tests the per-field default-fallback path. Catches regressions where unset shader inputs leak a previous-material residue (run order dependency) or read uninitialized memory." }

@@ -1,0 +1,63 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden mat_openpbr_mx_geometry_thin_walled — MaterialX open_pbr_surface with geometry_thin_walled = 1 on a thin double-sided plane. §11 OpenPBR — thin_walled is the canonical flag for paper/leaves/cloth: the back-side hit must shade the same as the front-side rather than absorbing through the body. Pairs with doubleSided plumbing (V2.A.x). Catches regressions where geometry_thin_walled is ignored, leaving the back face dark."
+)
+
+def Xform "World"
+{
+    def Mesh "Sheet" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        uniform token subdivisionScheme = "none"
+        uniform bool doubleSided = true
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        # Tilted plane facing the camera at an angle.
+        point3f[] points = [
+            (-0.8, 0.2, 0.4), ( 0.8, 0.2, 0.4),
+            ( 0.8, 1.6, -0.4), (-0.8, 1.6, -0.4)
+        ]
+        rel material:binding = </World/Materials/Paper>
+    }
+
+    def Scope "Materials"
+    {
+        def Material "Paper"
+        {
+            token outputs:surface.connect = </World/Materials/Paper/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "ND_open_pbr_surface_surfaceshader"
+                color3f inputs:base_color = (0.92, 0.88, 0.78)
+                float inputs:base_weight = 1.0
+                float inputs:base_metalness = 0.0
+                float inputs:specular_roughness = 0.55
+                float inputs:specular_weight = 0.3
+                float inputs:specular_ior = 1.45
+                bool inputs:geometry_thin_walled = 1
+                token outputs:surface
+            }
+        }
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 1, 2.6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.5
+    }
+}

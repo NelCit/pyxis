@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden light_rect_colored — saturated-green RectLight (0.15, 0.95, 0.30). Sphere must shade with a green-dominant tint vs light_rect (white). Catches regressions where RectLight.color is ignored." }

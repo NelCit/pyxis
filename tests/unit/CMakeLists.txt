@@ -49,6 +49,8 @@ target_sources(pyxis_unit_tests PRIVATE
     VolumeLoaderFixture.cpp
     SubdivCreaseFixture.cpp
     InstanceDoubleSided.cpp
+    RenderSettingsLayout.cpp
+    LightDescExtendedDefaults.cpp
 
     # V2.A.1 follow-up — SubdivRefine.cpp lives in pyxis_usd_ingest
     # Private. The fixture compiles it directly.

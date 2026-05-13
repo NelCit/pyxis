@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden camera_aperture_offset — horizontalApertureOffset = 8mm. Cube must shift in screen space. Catches regressions where aperture offsets are silently zeroed during projection matrix build." }

@@ -1,0 +1,53 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden mat_openpbr_specular_workflow — UsdPreviewSurface with useSpecularWorkflow=1, authored specularColor, no metallic. Common in legacy USD assets exported from older DCCs. §11 / UsdShadeToOpenPBR — the conversion path must remap (diffuseColor, specularColor, roughness) into OpenPBR's metal/dielectric form so the closesthit still produces a plausible image. Catches regressions where useSpecularWorkflow=1 silently drops back to the metallic branch with metallic=0."
+)
+
+def Xform "World"
+{
+    def Sphere "Sphere" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double radius = 0.7
+        double3 xformOp:translate = (0, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        rel material:binding = </World/Materials/LegacySpec>
+    }
+
+    def Scope "Materials"
+    {
+        def Material "LegacySpec"
+        {
+            token outputs:surface.connect = </World/Materials/LegacySpec/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                int inputs:useSpecularWorkflow = 1
+                color3f inputs:diffuseColor = (0.20, 0.35, 0.65)
+                color3f inputs:specularColor = (0.85, 0.85, 0.95)
+                float inputs:roughness = 0.30
+                token outputs:surface
+            }
+        }
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 1.4, 3)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.5
+    }
+}

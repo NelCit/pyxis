@@ -1,0 +1,45 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden geom_basis_curves_periodic — UsdGeomBasisCurves with wrap=periodic. 6 CVs forming a closed loop (no duplicated start/end). The periodic wrap rule must close the curve continuously through the first segment. Existing geom_basis_curves uses wrap=nonperiodic. V2.A.3 / M13."
+)
+
+def Xform "World"
+{
+    def BasisCurves "Curves"
+    {
+        uniform token type = "linear"
+        uniform token wrap = "periodic"
+        int[] curveVertexCounts = [6]
+        # Hexagonal loop in the XZ plane at y=1.
+        point3f[] points = [
+            ( 1.0, 1.0,  0.0),
+            ( 0.5, 1.0,  0.866),
+            (-0.5, 1.0,  0.866),
+            (-1.0, 1.0,  0.0),
+            (-0.5, 1.0, -0.866),
+            ( 0.5, 1.0, -0.866)
+        ]
+        float[] widths = [0.10, 0.10, 0.10, 0.10, 0.10, 0.10]
+        color3f[] primvars:displayColor = [(0.20, 0.65, 0.85)]
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 3, 2.5)
+        float xformOp:rotateX = -55
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.0
+    }
+}

@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden anim_visibility_toggle — two cubes whose visibility flips at frame 50. Rendered at frame 60: only the blue cube (B) should be visible. Catches regressions where visibility is evaluated at load time instead of per-frame.", "frame": 60 }

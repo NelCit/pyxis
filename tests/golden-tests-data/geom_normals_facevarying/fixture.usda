@@ -1,0 +1,51 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden geom_normals_facevarying — two-tri quad with face-varying normals (one normal per face-corner, 6 entries). Each triangle authors normals tilted in opposite directions so the two halves shade visibly differently. Existing geom_with_normals uses interpolation=vertex; this exercises the face-varying branch through PrepareMesh."
+)
+
+def Xform "World"
+{
+    def Mesh "Quad"
+    {
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [3, 3]
+        int[] faceVertexIndices = [0, 1, 2, 0, 2, 3]
+        point3f[] points = [(-1, 0, -1), (1, 0, -1), (1, 0, 1), (-1, 0, 1)]
+        # Per face-corner (6 entries). Tri 0 normals lean +X; tri 1 lean -X.
+        normal3f[] normals = [
+            ( 0.6, 0.8,  0), ( 0.6, 0.8,  0), ( 0.6, 0.8,  0),    # tri 0
+            (-0.6, 0.8,  0), (-0.6, 0.8,  0), (-0.6, 0.8,  0)     # tri 1
+        ] (
+            interpolation = "faceVarying"
+        )
+        color3f[] primvars:displayColor = [(0.85, 0.85, 0.85)]
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 2.5, 3)
+        float xformOp:rotateX = -45
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+
+    def DistantLight "Sun"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 6
+        float xformOp:rotateX = -40
+        uniform token[] xformOpOrder = ["xformOp:rotateX"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 0.6
+    }
+}

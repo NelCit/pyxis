@@ -1,0 +1,48 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden xform_non_uniform_scale — Cube with xformOp:scale = (2.0, 0.5, 1.0). Non-uniform scaling distorts normals — the rendered shading must use the inverse-transpose to renormalize, not the world matrix directly. Catches regressions where normals are transformed by the world matrix (visibly stretched shading) instead of the inverse-transpose."
+)
+
+def Xform "World"
+{
+    def Cube "StretchedCube"
+    {
+        double size = 1.0
+        color3f[] primvars:displayColor = [(0.85, 0.45, 0.85)]
+        # Author per-vertex normals so the renderer must transform them
+        # (rather than relying on geometric flat normals which are immune
+        # to the bug this test catches).
+        double3 xformOp:translate = (0, 1, 0)
+        float3 xformOp:scale = (2.0, 0.5, 1.0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (1.6, 1.8, 4.0)
+        float xformOp:rotateX = -20
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+
+    def DistantLight "Sun"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 6
+        float xformOp:rotateX = -35
+        float xformOp:rotateY = 25
+        uniform token[] xformOpOrder = ["xformOp:rotateX", "xformOp:rotateY"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 0.4
+    }
+}

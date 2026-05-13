@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden anim_camera_dolly — animated camera xform; rendered at frame 50 (midpoint of a dolly-in). Cube must appear at the middle dolly distance, not the start or end. Catches regressions where Camera time-sampled xformOps are ignored.", "frame": 50 }

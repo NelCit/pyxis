@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden mat_openpbr_mx_specular_color_tint — dielectric with strongly-tinted specular_color = (0.4, 1.0, 0.55). Specular highlight must skew green-dominant while the diffuse base stays red. Catches regressions where the OpenPBR mapping drops specular_color when base_metalness=0." }

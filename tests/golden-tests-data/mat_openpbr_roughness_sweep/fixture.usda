@@ -1,0 +1,94 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden mat_openpbr_roughness_sweep — three spheres in a row at roughness = (0.05, 0.35, 0.85), fixed metallic=1.0 and same diffuseColor. M30/§11 — exercises GGX-VNDF microfacet width across the full roughness range. The left sphere reflects a sharp dome highlight; the middle one a wider glossy cone; the right one is near-diffuse. Catches regressions where roughness saturates at one of the ends or where alpha = roughness² is replaced by alpha = roughness."
+)
+
+def Xform "World"
+{
+    def Sphere "SphereSharp" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double radius = 0.55
+        double3 xformOp:translate = (-1.4, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        rel material:binding = </World/Materials/M_R005>
+    }
+    def Sphere "SphereMid" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double radius = 0.55
+        double3 xformOp:translate = (0, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        rel material:binding = </World/Materials/M_R035>
+    }
+    def Sphere "SphereDiffuse" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double radius = 0.55
+        double3 xformOp:translate = (1.4, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        rel material:binding = </World/Materials/M_R085>
+    }
+
+    def Scope "Materials"
+    {
+        def Material "M_R005"
+        {
+            token outputs:surface.connect = </World/Materials/M_R005/S.outputs:surface>
+            def Shader "S"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.85, 0.85, 0.85)
+                float inputs:metallic = 1.0
+                float inputs:roughness = 0.05
+                token outputs:surface
+            }
+        }
+        def Material "M_R035"
+        {
+            token outputs:surface.connect = </World/Materials/M_R035/S.outputs:surface>
+            def Shader "S"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.85, 0.85, 0.85)
+                float inputs:metallic = 1.0
+                float inputs:roughness = 0.35
+                token outputs:surface
+            }
+        }
+        def Material "M_R085"
+        {
+            token outputs:surface.connect = </World/Materials/M_R085/S.outputs:surface>
+            def Shader "S"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.85, 0.85, 0.85)
+                float inputs:metallic = 1.0
+                float inputs:roughness = 0.85
+                token outputs:surface
+            }
+        }
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 1.3, 4.2)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.5
+    }
+}

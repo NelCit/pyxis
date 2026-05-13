@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden instancer_two_prototypes_mixed — PointInstancer with two prototypes (orange cube + blue octahedron) and protoIndices = [0,1,0,1]. Must render alternating cube/octa with their respective colors. Catches regressions where protoIndices is treated as a single broadcast value." }

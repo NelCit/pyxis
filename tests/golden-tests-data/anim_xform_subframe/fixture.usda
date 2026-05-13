@@ -1,0 +1,41 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    startTimeCode = 0
+    endTimeCode = 100
+    timeCodesPerSecond = 24
+    doc = "Pyxis golden anim_xform_subframe — same animated xform fixture as anim_xform_frame0 / anim_xform_frame100, evaluated at the midpoint frame 50. Tests the interpolation path between time samples (USD linear lerp). The cube must sit at the midpoint translation (2.5, 1, 0). V2.A.13."
+)
+
+def Xform "World"
+{
+    def Cube "AnimatedCube"
+    {
+        double size = 1.0
+        color3f[] primvars:displayColor = [(0.8, 0.3, 0.3)]
+        double3 xformOp:translate.timeSamples = {
+            0:   (0, 1, 0),
+            50:  (2.5, 1, 0),
+            100: (5, 1, 0),
+        }
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (2.5, 1.5, 6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.0
+    }
+}

@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden mat_two_meshes_one_material — Cube + Sphere bound to the same Material. Both must shade with the same diffuse/metal/rough. Catches dedup regressions where one prim sees the right material and the other falls back to default." }

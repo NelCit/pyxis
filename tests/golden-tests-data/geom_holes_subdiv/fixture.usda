@@ -1,0 +1,50 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden geom_holes_subdiv — catmullClark cage with `holeIndices` removing two specific faces. Tests the intersection of two paths: hole-face filtering AND subdivision refinement. Existing geom_holes is on a non-subdiv mesh; existing subdiv goldens have no holes. V2.A.1 + V2.A — closes the diagonal."
+)
+
+def Xform "World"
+{
+    def Mesh "HoleyCage"
+    {
+        uniform token subdivisionScheme = "catmullClark"
+        uniform token interpolateBoundary = "edgeAndCorner"
+        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+        int[] faceVertexIndices = [
+            0, 1, 2, 3,        # face 0 bottom
+            4, 7, 6, 5,        # face 1 top
+            0, 4, 5, 1,        # face 2 front
+            1, 5, 6, 2,        # face 3 right
+            2, 6, 7, 3,        # face 4 back
+            3, 7, 4, 0         # face 5 left
+        ]
+        # Drop faces 1 (top) and 3 (right) — leaves an open-corner cage.
+        int[] holeIndices = [1, 3]
+        point3f[] points = [
+            (-0.7, -0.7, -0.7), ( 0.7, -0.7, -0.7),
+            ( 0.7, -0.7,  0.7), (-0.7, -0.7,  0.7),
+            (-0.7,  0.7, -0.7), ( 0.7,  0.7, -0.7),
+            ( 0.7,  0.7,  0.7), (-0.7,  0.7,  0.7)
+        ]
+        color3f[] primvars:displayColor = [(0.85, 0.45, 0.15)]
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (1.6, 1.4, 2.6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.2
+    }
+}

@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden mat_binding_purpose — Cube authors both material:binding:preview (red) and material:binding:full (blue). Pyxis must select the `full` purpose for real-time render. If the test bakes red, the purpose selection regressed (preview won)." }

@@ -1,0 +1,49 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden geom_subdiv_boundary_none — open-boundary catmullClark cage (top face deleted) with interpolateBoundary = `none`. The boundary edges must shrink under refinement instead of being held in place (which is what `edgeAndCorner` does — the mode every other subdiv golden uses). V2.A.1 — exercises the boundary-rule branch of OpenSubdiv's PatchTableFactory."
+)
+
+def Xform "World"
+{
+    def Mesh "OpenCage"
+    {
+        uniform token subdivisionScheme = "catmullClark"
+        uniform token interpolateBoundary = "none"
+        # Cube with the top face removed — 5 faces, 4 boundary edges around
+        # the top opening.
+        int[] faceVertexCounts = [4, 4, 4, 4, 4]
+        int[] faceVertexIndices = [
+            0, 1, 2, 3,        # bottom
+            0, 4, 5, 1,        # front
+            1, 5, 6, 2,        # right
+            2, 6, 7, 3,        # back
+            3, 7, 4, 0         # left
+        ]
+        point3f[] points = [
+            (-0.7, -0.7, -0.7), ( 0.7, -0.7, -0.7),
+            ( 0.7, -0.7,  0.7), (-0.7, -0.7,  0.7),
+            (-0.7,  0.7, -0.7), ( 0.7,  0.7, -0.7),
+            ( 0.7,  0.7,  0.7), (-0.7,  0.7,  0.7)
+        ]
+        color3f[] primvars:displayColor = [(0.55, 0.75, 0.40)]
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (1.6, 1.4, 2.6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.2
+    }
+}

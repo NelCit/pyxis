@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden geom_extent_authored — Mesh with authored `extent` that's looser than points. Geometry must render normally (the extent is a hint, not a renderable bound). Catches regressions where the authored extent is used as the BLAS bound and clips visible geometry." }

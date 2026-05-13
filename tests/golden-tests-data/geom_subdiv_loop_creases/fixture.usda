@@ -1,0 +1,54 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden geom_subdiv_loop_creases — Loop-scheme triangle cage with creases on the top edge loop + sharp corners at the bottom. V2.A.1 follow-up — exercises OpenSubdiv's Far layer with subdivisionScheme=loop AND crease tagging. Existing geom_subdiv_creases is catmullClark-only; existing geom_subdiv_loop has no creases. This is the corner case where the two paths meet."
+)
+
+def Xform "World"
+{
+    def Mesh "Cage"
+    {
+        uniform token subdivisionScheme = "loop"
+        uniform token interpolateBoundary = "edgeAndCorner"
+        # Loop refinement requires pure triangles.
+        int[] faceVertexCounts = [3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3]
+        int[] faceVertexIndices = [
+            0, 1, 2,  0, 2, 3,        # bottom
+            4, 6, 5,  4, 7, 6,        # top
+            0, 4, 5,  0, 5, 1,        # front
+            1, 5, 6,  1, 6, 2,        # right
+            2, 6, 7,  2, 7, 3,        # back
+            3, 7, 4,  3, 4, 0         # left
+        ]
+        point3f[] points = [
+            (-0.7, -0.7, -0.7), ( 0.7, -0.7, -0.7),
+            ( 0.7, -0.7,  0.7), (-0.7, -0.7,  0.7),
+            (-0.7,  0.7, -0.7), ( 0.7,  0.7, -0.7),
+            ( 0.7,  0.7,  0.7), (-0.7,  0.7,  0.7)
+        ]
+        int[] creaseIndices = [4, 5, 6, 7, 4]
+        int[] creaseLengths = [5]
+        float[] creaseSharpnesses = [10]
+        int[] cornerIndices = [0, 1, 2, 3]
+        float[] cornerSharpnesses = [10, 10, 10, 10]
+        color3f[] primvars:displayColor = [(0.85, 0.55, 0.15)]
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (1.6, 1.4, 2.6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.2
+    }
+}

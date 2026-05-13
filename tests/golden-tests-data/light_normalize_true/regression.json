@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden light_normalize_true — RectLight with inputs:normalize=true. Intensity is interpreted as TOTAL power, not per-area; the rendered illumination at the target must differ from light_rect (normalize default false). Catches regressions where the normalize token is dropped during ingest." }

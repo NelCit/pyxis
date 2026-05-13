@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden light_distant_colored — cool-tinted DistantLight (0.40, 0.65, 1.0). Pixels must skew cool vs light_distant_lambert (white). Catches regressions where DistantLight.color collapses to white." }

@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden mat_usdpreview_ior_sweep — UsdPreviewSurface.ior at 1.05 / 1.50 / 2.40, dielectric (metallic=0). Specular reflectance must grow with ior. Catches regressions where ior is hardcoded to 1.5 or where the Schlick F0 mapping is wrong." }

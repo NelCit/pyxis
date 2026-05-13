@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden geom_points_widths — UsdGeomPoints with per-vertex widths varying 5x across the row. Each splat must scale individually. Catches regressions where widths[] collapses to a single value." }

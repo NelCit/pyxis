@@ -1,0 +1,37 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden camera_focal_telephoto — focalLength = 100mm with standard 36mm aperture (FoV ~20°). Camera positioned far back to keep the Cube framed. Tests the long-focal end of the FoV range, orthogonal to camera_aperture_wide (which varies aperture, not focal). Catches regressions where focal length is clipped to a default."
+)
+
+def Xform "World"
+{
+    def Cube "Cube"
+    {
+        double size = 1.2
+        color3f[] primvars:displayColor = [(0.85, 0.45, 0.55)]
+        double3 xformOp:translate = (0, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Camera "Camera"
+    {
+        # 100mm focal — telephoto. Same aperture as the default 35mm test so
+        # the comparison is purely a focal-length variation.
+        float focalLength = 100.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        # Push back to keep the cube framed at the narrower FoV.
+        double3 xformOp:translate = (0, 1, 9)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.0
+    }
+}

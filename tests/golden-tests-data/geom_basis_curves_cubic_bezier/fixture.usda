@@ -1,0 +1,46 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden geom_basis_curves_cubic_bezier — UsdGeomBasisCurves with type=cubic, basis=bezier, wrap=nonperiodic. 7 CVs = 1 cubic Bezier segment (4 CVs) + continuation. Existing geom_basis_curves uses type=linear; this exercises the cubic Bernstein evaluator in TessellateBasisCurves. V2.A.3 / M13."
+)
+
+def Xform "World"
+{
+    def BasisCurves "Curves"
+    {
+        uniform token type = "cubic"
+        uniform token basis = "bezier"
+        uniform token wrap = "nonperiodic"
+        # Bezier cubic: 4 CVs per segment; 7 CVs = 2 segments (CV3 shared).
+        int[] curveVertexCounts = [7]
+        point3f[] points = [
+            (-1.8, 0.0, 0),
+            (-1.2, 1.4, 0),
+            (-0.4, 1.4, 0),
+            ( 0.0, 0.4, 0),
+            ( 0.4, -0.6, 0),
+            ( 1.2, -0.6, 0),
+            ( 1.8, 0.4, 0)
+        ]
+        float[] widths = [0.12, 0.12, 0.12, 0.12, 0.12, 0.12, 0.12]
+        color3f[] primvars:displayColor = [(0.80, 0.50, 0.20)]
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 0.4, 5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.0
+    }
+}

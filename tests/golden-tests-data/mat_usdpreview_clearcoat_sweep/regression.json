@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden mat_usdpreview_clearcoat_sweep — UsdPreviewSurface.clearcoat at 0.0/0.5/1.0. Three spheres must show monotonically-stronger glossy lobe layered over the same red diffuse. Catches regressions where clearcoat is binarized." }

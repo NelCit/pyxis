@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden geom_doubleSided_quad — V2.A.x doubleSided plumbing. Pairs with the InstanceDoubleSided unit test. Quad's geometric normal is +Z and the camera sits at +Z, so without doubleSided the closesthit would miss." }

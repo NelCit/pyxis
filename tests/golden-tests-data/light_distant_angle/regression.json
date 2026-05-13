@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden light_distant_angle — DistantLight inputs:angle = 5°. Catches regressions where the angle attribute isn't read off the prim. NEE/MIS post-v1 will activate soft-shadow content here; for now the byte-equal baseline pins the value-passthrough." }

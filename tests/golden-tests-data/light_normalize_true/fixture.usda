@@ -1,0 +1,40 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden light_normalize_true — RectLight with `inputs:normalize = true`. Per UsdLuxLightAPI + LightDesc.h §18.4, normalize=true means the authored intensity is TOTAL power (not per-area), so a 2x2 rect with intensity=80 emits the same total flux as a 1x1 rect with intensity=80. Catches regressions where the `normalize` token is dropped during ingest (both `normalize=true` and the default `normalize=false` would render the same intensity)."
+)
+
+def Xform "World"
+{
+    def Sphere "Target"
+    {
+        double radius = 0.7
+        color3f[] primvars:displayColor = [(0.85, 0.85, 0.85)]
+        double3 xformOp:translate = (0, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def RectLight "Normalized"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 80
+        float inputs:width  = 2
+        float inputs:height = 2
+        bool inputs:normalize = true
+        double3 xformOp:translate = (0, 3, 0)
+        float xformOp:rotateX = -90
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 1.4, 3)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}

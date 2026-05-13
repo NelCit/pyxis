@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden instancer_inactive_filter — PointInstancer with inactiveIds=[1, 3] culling 2 of 6 instances. Catches regressions where inactiveIds is ignored (all 6 cubes render) or confused with invisibleIds (different mechanism, persistent vs per-frame)." }

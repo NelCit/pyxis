@@ -1,0 +1,97 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden mat_usdpreview_ior_sweep — three dielectric spheres at ior = (1.05, 1.50, 2.40). Fixed diffuseColor (mid-grey), metallic=0, roughness=0.20. M30 — proves the dielectric Fresnel reflectance scales with ior: at 1.05 it's near-zero (the sphere reads mostly diffuse), at 1.50 it's the classic 4% glass case, at 2.40 it pushes diamond-like. Catches regressions where ior is hardcoded to 1.5 or where the Schlick F0 = ((ior-1)/(ior+1))² mapping is wrong."
+)
+
+def Xform "World"
+{
+    def Sphere "SphereIor105" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double radius = 0.55
+        double3 xformOp:translate = (-1.4, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        rel material:binding = </World/Materials/M_Ior105>
+    }
+    def Sphere "SphereIor150" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double radius = 0.55
+        double3 xformOp:translate = (0, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        rel material:binding = </World/Materials/M_Ior150>
+    }
+    def Sphere "SphereIor240" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double radius = 0.55
+        double3 xformOp:translate = (1.4, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        rel material:binding = </World/Materials/M_Ior240>
+    }
+
+    def Scope "Materials"
+    {
+        def Material "M_Ior105"
+        {
+            token outputs:surface.connect = </World/Materials/M_Ior105/S.outputs:surface>
+            def Shader "S"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.55, 0.55, 0.55)
+                float inputs:metallic = 0.0
+                float inputs:roughness = 0.20
+                float inputs:ior = 1.05
+                token outputs:surface
+            }
+        }
+        def Material "M_Ior150"
+        {
+            token outputs:surface.connect = </World/Materials/M_Ior150/S.outputs:surface>
+            def Shader "S"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.55, 0.55, 0.55)
+                float inputs:metallic = 0.0
+                float inputs:roughness = 0.20
+                float inputs:ior = 1.50
+                token outputs:surface
+            }
+        }
+        def Material "M_Ior240"
+        {
+            token outputs:surface.connect = </World/Materials/M_Ior240/S.outputs:surface>
+            def Shader "S"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.55, 0.55, 0.55)
+                float inputs:metallic = 0.0
+                float inputs:roughness = 0.20
+                float inputs:ior = 2.40
+                token outputs:surface
+            }
+        }
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 1.3, 4.2)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.5
+    }
+}

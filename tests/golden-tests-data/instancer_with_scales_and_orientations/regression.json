@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden instancer_with_scales_and_orientations — PointInstancer with BOTH scales[] and orientations[] arrays composed into the per-instance world transform. Catches order-of-composition regressions." }

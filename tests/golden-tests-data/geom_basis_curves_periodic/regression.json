@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden geom_basis_curves_periodic — wrap=periodic on a hexagonal loop. The closing segment between CV[5] and CV[0] must render continuously. Catches regressions where periodic is treated as nonperiodic (leaves a gap)." }

@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden geom_subdiv_boundary_none — open-top cage with interpolateBoundary=none. Boundary contracts under refinement. Catches regressions where the boundary mode token is dropped and the StageWalker defaults to edgeAndCorner." }

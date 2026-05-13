@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden geom_normals_facevarying — two-tri quad with face-varying normals tilted in opposite directions. The two triangles must shade differently under the same Distant light. Catches regressions where the normals attribute is read with the wrong interpolation rule." }

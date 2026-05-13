@@ -1,0 +1,60 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden geom_subdiv_facevarying_uv — catmullClark cage with a face-varying primvars:displayColor (one color per face-corner, refined by OpenSubdiv's face-varying topology). The faceVaryingLinearInterpolation = `cornersPlus1` rule keeps the seams sharp through refinement. V2.A.1 — exercises Far::PrimvarRefiner on a face-varying channel (per-vertex coverage by other goldens, face-varying gap)."
+)
+
+def Xform "World"
+{
+    def Mesh "Cage"
+    {
+        uniform token subdivisionScheme = "catmullClark"
+        uniform token interpolateBoundary = "edgeAndCorner"
+        uniform token faceVaryingLinearInterpolation = "cornersPlus1"
+        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+        int[] faceVertexIndices = [
+            0, 1, 2, 3,        # bottom
+            4, 7, 6, 5,        # top
+            0, 4, 5, 1,        # front
+            1, 5, 6, 2,        # right
+            2, 6, 7, 3,        # back
+            3, 7, 4, 0         # left
+        ]
+        point3f[] points = [
+            (-0.7, -0.7, -0.7), ( 0.7, -0.7, -0.7),
+            ( 0.7, -0.7,  0.7), (-0.7, -0.7,  0.7),
+            (-0.7,  0.7, -0.7), ( 0.7,  0.7, -0.7),
+            ( 0.7,  0.7,  0.7), (-0.7,  0.7,  0.7)
+        ]
+        # 24 face-corners (6 faces × 4 corners). Each face authors its own
+        # color block — the boundaries between faces are face-varying seams.
+        color3f[] primvars:displayColor = [
+            (1.0, 0.2, 0.2), (1.0, 0.2, 0.2), (1.0, 0.2, 0.2), (1.0, 0.2, 0.2),   # bottom red
+            (0.2, 1.0, 0.2), (0.2, 1.0, 0.2), (0.2, 1.0, 0.2), (0.2, 1.0, 0.2),   # top green
+            (0.2, 0.2, 1.0), (0.2, 0.2, 1.0), (0.2, 0.2, 1.0), (0.2, 0.2, 1.0),   # front blue
+            (1.0, 1.0, 0.2), (1.0, 1.0, 0.2), (1.0, 1.0, 0.2), (1.0, 1.0, 0.2),   # right yellow
+            (1.0, 0.2, 1.0), (1.0, 0.2, 1.0), (1.0, 0.2, 1.0), (1.0, 0.2, 1.0),   # back magenta
+            (0.2, 1.0, 1.0), (0.2, 1.0, 1.0), (0.2, 1.0, 1.0), (0.2, 1.0, 1.0)    # left cyan
+        ] (
+            interpolation = "faceVarying"
+        )
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (1.6, 1.4, 2.6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.2
+    }
+}

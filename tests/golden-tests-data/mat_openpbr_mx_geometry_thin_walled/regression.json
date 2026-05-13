@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden mat_openpbr_mx_geometry_thin_walled — MaterialX open_pbr_surface with geometry_thin_walled=1 on a doubleSided plane. Back-side hit must shade light, not absorb. Pairs with the V2.A.x doubleSided plumbing." }

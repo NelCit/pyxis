@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden geom_subdiv_facevarying_uv — face-varying primvars:displayColor on a catmullClark cage with faceVaryingLinearInterpolation=cornersPlus1. Each face-block keeps its own color through refinement. Catches regressions where face-varying primvars collapse to per-vertex or where the seam rule is dropped." }

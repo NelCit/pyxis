@@ -1,0 +1,94 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden mat_openpbr_metallic_sweep — three spheres in a row at metallic = (0.0, 0.5, 1.0), fixed roughness=0.30 and same diffuseColor. M5/M30/§11 — proves the metallic axis of UsdShadeToOpenPBR + closesthit's metal/dielectric blend produces a visibly monotonic transition (matte → mixed → reflective). Catches regressions where metallic is clamped to 0 or 1, or where the dielectric Fresnel contribution falls out of the mix."
+)
+
+def Xform "World"
+{
+    def Sphere "SphereDielectric" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double radius = 0.55
+        double3 xformOp:translate = (-1.4, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        rel material:binding = </World/Materials/M_Metal0>
+    }
+    def Sphere "SphereMid" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double radius = 0.55
+        double3 xformOp:translate = (0, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        rel material:binding = </World/Materials/M_Metal05>
+    }
+    def Sphere "SphereMetal" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double radius = 0.55
+        double3 xformOp:translate = (1.4, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        rel material:binding = </World/Materials/M_Metal1>
+    }
+
+    def Scope "Materials"
+    {
+        def Material "M_Metal0"
+        {
+            token outputs:surface.connect = </World/Materials/M_Metal0/S.outputs:surface>
+            def Shader "S"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.80, 0.55, 0.30)
+                float inputs:metallic = 0.0
+                float inputs:roughness = 0.30
+                token outputs:surface
+            }
+        }
+        def Material "M_Metal05"
+        {
+            token outputs:surface.connect = </World/Materials/M_Metal05/S.outputs:surface>
+            def Shader "S"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.80, 0.55, 0.30)
+                float inputs:metallic = 0.5
+                float inputs:roughness = 0.30
+                token outputs:surface
+            }
+        }
+        def Material "M_Metal1"
+        {
+            token outputs:surface.connect = </World/Materials/M_Metal1/S.outputs:surface>
+            def Shader "S"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.80, 0.55, 0.30)
+                float inputs:metallic = 1.0
+                float inputs:roughness = 0.30
+                token outputs:surface
+            }
+        }
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 1.3, 4.2)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.5
+    }
+}

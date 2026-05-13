@@ -1,0 +1,63 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden mat_binding_purpose — Mesh authors two material:binding rels with different purposes: `preview` (red UsdPreviewSurface) and `full` (blue UsdPreviewSurface). Pyxis is a real-time renderer; per §1 / §11 the canonical purpose is `full` (preview is the cheap one for viewport gizmos). Test asserts the renderer selects the `full` binding. Catches regressions where the purpose token is dropped and the wrong binding wins."
+)
+
+def Xform "World"
+{
+    def Cube "Cube" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double size = 1.2
+        double3 xformOp:translate = (0, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        rel material:binding:preview = </World/Materials/RedPreview>
+        rel material:binding:full    = </World/Materials/BluePbr>
+    }
+
+    def Scope "Materials"
+    {
+        def Material "RedPreview"
+        {
+            token outputs:surface.connect = </World/Materials/RedPreview/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.85, 0.15, 0.15)
+                token outputs:surface
+            }
+        }
+        def Material "BluePbr"
+        {
+            token outputs:surface.connect = </World/Materials/BluePbr/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.15, 0.40, 0.85)
+                float inputs:metallic = 0.0
+                float inputs:roughness = 0.30
+                token outputs:surface
+            }
+        }
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (1.6, 1.4, 2.6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.2
+    }
+}

@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden light_rect_aspect_nonsquare — RectLight width=3, height=0.5 (strip light). Catches regressions where width or height is dropped and the rect becomes a square." }
