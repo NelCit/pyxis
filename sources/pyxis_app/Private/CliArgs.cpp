@@ -297,6 +297,20 @@ CliArgs Parse(int argc, char** argv) noexcept {
         return out;
       }
     }
+    else if (Equals(arg, "--variant"))
+    {
+      // V2.A.2 (M12). Comma-separated <primPath>:<setName>=<value>
+      // triples applied to the stage's session layer post Open.
+      // Parsing of the spec into structured records lives in
+      // VariantParser.{h,cpp} so the unit test can exercise it
+      // without dragging USD into the test TU.
+      if (!TakeValue(argc, argv, i, out.variantSelections))
+      {
+        out.invalid = true;
+        out.invalidArg = arg;
+        return out;
+      }
+    }
     else
     {
       out.invalid = true;
@@ -354,12 +368,17 @@ void PrintUsage() noexcept {
       "                          render for frames B, B+S, ..., <= E and writes one\n"
       "                          numbered EXR per frame (out.0000.exr, out.0001.exr,\n"
       "                          ...). Ignores --frame. Step defaults to 1.\n"
-      "  --load-mode <mode>      USD composition load mode: none / metadata / all (default).\n"
-      "                          M21 stub: parsed and logged; UsdStage::OpenMasked plumbing\n"
-      "                          is a follow-up milestone (V2.A.15).\n"
+      "  --load-mode <mode>      USD composition load mode (V2.A.15):\n"
+      "                            all       UsdStage::InitialLoadSet::LoadAll (default).\n"
+      "                            none      LoadNone — open with all payloads unloaded.\n"
+      "                            metadata  alias for 'none'.\n"
+      "                          Unknown values warn + fall back to all.\n"
       "  --population-mask <p>   Comma-separated SdfPath prefixes for partial-stage load.\n"
-      "                          M21 stub: parsed and logged; full UsdStagePopulationMask\n"
-      "                          plumbing is a follow-up milestone (V2.A.15).\n"
+      "                          Triggers UsdStage::OpenMasked instead of Open.\n"
+      "  --variant <spec>        Comma-separated <primPath>:<setName>=<value> triples\n"
+      "                          applied via the stage's session layer after Open,\n"
+      "                          overriding any authored variantSelection (V2.A.2).\n"
+      "                          Example: --variant /World/Hero:lod=high,/World/Cup:season=winter\n"
       "\n"
       "Viewer extras:\n"
       "  --screenshot <path>     Run viewer briefly; write a PNG of the backbuffer.\n"

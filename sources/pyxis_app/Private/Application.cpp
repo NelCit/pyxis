@@ -162,16 +162,31 @@ int Run(int argc, char** argv) noexcept {
             + " honoured (V2.A.13). Stage will evaluate at this time-code.");
   }
 
-  // V2.A.15 — composition load mode. --load-mode is still a follow-up
-  // (UsdStage::Load{Payload|All} per prim); --population-mask is wired
-  // here through to IngestUsd via RunHeadless.
+  // V2.A.15 — composition load mode. `all` (default) / `none` /
+  // `metadata` translate to UsdStage::InitialLoadSet inside IngestUsd;
+  // `--population-mask` continues to drive UsdStage::OpenMasked. Anything
+  // unrecognised falls back to LoadAll with a warning (see IngestUsd).
   if (!cli.loadMode.empty())
   {
-    Logging::Get().Warn(
+    Logging::Get().Info(
         log::APP,
         "--load-mode " + std::string{cli.loadMode}
-            + " accepted but not yet honoured; per-prim payload-load "
-              "policy is a follow-up. Stage loads with full payloads.");
+            + " honoured (V2.A.15 — payload-load policy applied at "
+              "UsdStage::Open).");
+  }
+
+  // V2.A.2 — variant overrides flow through CLI -> IngestUsd, which
+  // authors them on the stage's session layer before WalkStage. Log
+  // here so the operator sees the request was received independent of
+  // whether each prim path resolves (per-entry warnings fire in
+  // IngestUsd).
+  if (!cli.variantSelections.empty())
+  {
+    Logging::Get().Info(
+        log::APP,
+        "--variant " + std::string{cli.variantSelections}
+            + " honoured (V2.A.2 — variant selections applied to "
+              "session layer post-Open).");
   }
 
   if (cli.headless)
@@ -204,7 +219,12 @@ int Run(int argc, char** argv) noexcept {
         const int frameRc = RunHeadless(perFrameConfig, scene, cli.saveAov,
                                         cli.benchFrames, cli.profilePath,
                                         cli.populationMask,
-                                        static_cast<double>(frame));
+                                        static_cast<double>(frame),
+                                        /*frameRangeBegin*/ -1,
+                                        /*frameRangeEnd*/   -1,
+                                        /*frameRangeStep*/   1,
+                                        cli.loadMode,
+                                        cli.variantSelections);
         if (frameRc != 0)
           return frameRc;
       }
@@ -214,9 +234,15 @@ int Run(int argc, char** argv) noexcept {
                        cli.populationMask,
                        (cli.frameNumber >= 0)
                            ? static_cast<double>(cli.frameNumber)
-                           : -1.0);
+                           : -1.0,
+                       /*frameRangeBegin*/ -1,
+                       /*frameRangeEnd*/   -1,
+                       /*frameRangeStep*/   1,
+                       cli.loadMode,
+                       cli.variantSelections);
   }
-  return RunViewer(config, scene, cli.screenshotPath, cli.shaderRebuildDir);
+  return RunViewer(config, scene, cli.screenshotPath, cli.shaderRebuildDir,
+                   cli.loadMode, cli.variantSelections);
 }
 
 }  // namespace pyxis::app

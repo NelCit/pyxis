@@ -34,19 +34,35 @@ namespace pyxis::app {
 // timings + opaque camera list); on a missing / unloadable path
 // every counter is zero and the caller should fall back to the
 // hardcoded cube.
+//
 // `populationMask` (V2.A.15): comma-separated list of SdfPath prefixes
 // that scope the load. Empty = `UsdStage::Open` (full stage). Non-empty
 // = `UsdStage::OpenMasked` so we only realise prims under those paths.
-// Composition-fine-points like `--load-mode=none|metadata` aren't yet
-// honoured (the StageWalker always traverses); they live on
-// `loadMode` so the surface is open for the follow-up.
+//
 // `frameNumber` (V2.A.13): time-code at which to evaluate the stage.
 // Negative = `UsdTimeCode::Default()` (no animation, default-time
 // fallthrough). Animated xform / camera attrs respect this value.
+//
+// `loadMode` (V2.A.15): payload-load policy passed to UsdStage::Open
+// / OpenMasked. Recognised values:
+//   - "" / "all"            → InitialLoadSet::LoadAll (default).
+//   - "none" / "metadata"   → InitialLoadSet::LoadNone — open with all
+//                              payloads unloaded; intended for slicing
+//                              huge stages via `populationMask`.
+// Unknown values log a warning + fall back to LoadAll.
+//
+// `variantSelections` (V2.A.2): comma-separated
+// `<primPath>:<setName>=<value>` triples authored into the stage's
+// session layer after Open (so the override is transient and never
+// touches the root layer on disk). The stage recomposes automatically;
+// WalkStage observes the chosen variants. Empty = honour authored
+// variantSelection.
 pyxis::usd_ingest::IngestResult IngestUsd(std::string_view adapter,
                                           std::string_view usdPath,
                                           GpuScene& scene,
                                           std::string_view populationMask = {},
-                                          double frameNumber = -1.0);
+                                          double frameNumber = -1.0,
+                                          std::string_view loadMode = {},
+                                          std::string_view variantSelections = {});
 
 }  // namespace pyxis::app

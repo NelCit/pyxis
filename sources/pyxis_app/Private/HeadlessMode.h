@@ -44,6 +44,13 @@ struct ResolvedScene;
 // the harness runs the full render path once per frame in the range
 // (step = max(1, frameRangeStep)) and writes a numbered EXR per
 // frame. Single-frame behavior preserved when frameRangeEnd < 0.
+//
+// `loadMode` (V2.A.15): `all` / `none` / `metadata` payload-load policy
+// passed through to IngestUsd → UsdStage::Open's InitialLoadSet.
+//
+// `variantSelections` (V2.A.2): comma-separated
+// `<primPath>:<setName>=<value>` triples applied to the session layer
+// post stage open, overriding authored variantSelection.
 int RunHeadless(const Configuration& config, const ResolvedScene& scene,
                 std::string_view saveAovList = {},
                 uint32_t benchFrames = 0,
@@ -52,7 +59,9 @@ int RunHeadless(const Configuration& config, const ResolvedScene& scene,
                 double frameNumber = -1.0,
                 int frameRangeBegin = -1,
                 int frameRangeEnd = -1,
-                int frameRangeStep = 1) noexcept;
+                int frameRangeStep = 1,
+                std::string_view loadMode = {},
+                std::string_view variantSelections = {}) noexcept;
 
 // Viewer mode. screenshotPath is the M1 --screenshot debug capture
 // (non-empty -> render a few warmup frames, write a PNG, exit 0).
@@ -64,6 +73,8 @@ int RunHeadless(const Configuration& config, const ResolvedScene& scene,
 // outside the build tree (packaged install, demo launcher, etc.).
 int RunViewer(const Configuration& config, const ResolvedScene& scene,
               std::string_view screenshotPath,
-              std::string_view shaderRebuildDir = {}) noexcept;
+              std::string_view shaderRebuildDir = {},
+              std::string_view loadMode = {},
+              std::string_view variantSelections = {}) noexcept;
 
 }  // namespace pyxis::app

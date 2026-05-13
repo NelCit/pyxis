@@ -372,7 +372,9 @@ void HandleSaveAovLatch(ImGuiHost& imguiHost,
 
 int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScene,
                   std::string_view screenshotPath,
-                  std::string_view shaderRebuildDirOverride) noexcept {
+                  std::string_view shaderRebuildDirOverride,
+                  std::string_view loadMode,
+                  std::string_view variantSelections) noexcept {
   auto& log = Logging::Get();
 
   // ShaderMake rebuild latch + state machine. Click handler in
@@ -543,11 +545,20 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
   // ingest profile + source label feed the Loading panel.
   std::vector<ImGuiHost::SceneCameraEntry> pendingSceneCameras;
   int                                      pendingActiveCameraIdx = -1;
+  // V2.A.15 + V2.A.2 — capture the load-mode / variant overrides by
+  // value so the editor's "Open scene…" reload path (which re-invokes
+  // this lambda with a user-picked path) preserves the original CLI
+  // selections. The editor doesn't yet expose a UI to change these
+  // mid-session; that lands with the inspector panel.
+  const std::string loadModeForSession{loadMode};
+  const std::string variantsForSession{variantSelections};
   auto loadScene = [&](std::string_view             path,
                        std::string_view             adapterLabel,
                        ImGuiHost::IngestProfile&    outProfile) -> bool {
     const pyxis::usd_ingest::IngestResult result =
-        IngestUsd(adapterLabel, path, gpuScene);
+        IngestUsd(adapterLabel, path, gpuScene,
+                  /*populationMask*/ {}, /*frameNumber*/ -1.0,
+                  loadModeForSession, variantsForSession);
     const pyxis::usd_ingest::IngestStats& stats = result.Stats();
     outProfile.totalMs           = stats.timings.totalMs;
     outProfile.stageOpenMs       = stats.timings.stageOpenMs;

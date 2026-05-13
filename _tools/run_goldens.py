@@ -27,7 +27,9 @@ subdir must exist and is where the baseline lives.
 regression.json minimal schema:
     {
         "$comment": "...",
-        "frame":     -1   // optional --frame argument; -1 = default time
+        "frame":     -1,              // optional --frame argument; -1 = default time
+        "variant":   "/path:set=val", // optional --variant (V2.A.2)
+        "load_mode": "all"            // optional --load-mode (V2.A.15)
     }
 
 Shared 256x256 render config: `tests/golden-tests-data/_shared/config.json`.
@@ -60,7 +62,9 @@ def discover_tests() -> List[Path]:
 
 
 def run_pyxis(pyxis_exe: Path, config: Path, scene: Path,
-              output: Path, frame: Optional[int], cwd: Path) -> int:
+              output: Path, frame: Optional[int], cwd: Path,
+              variant: Optional[str] = None,
+              load_mode: Optional[str] = None) -> int:
     """Invoke pyxis --headless. Returns the exit code."""
     args = [
         str(pyxis_exe), "--headless",
@@ -70,6 +74,13 @@ def run_pyxis(pyxis_exe: Path, config: Path, scene: Path,
     ]
     if frame is not None and frame >= 0:
         args.extend(["--frame", str(frame)])
+    if variant:
+        # V2.A.2 — override authored variantSelection on the stage's
+        # session layer. Spec format documented in CliArgs.h.
+        args.extend(["--variant", variant])
+    if load_mode:
+        # V2.A.15 — payload-load policy {all,none,metadata}.
+        args.extend(["--load-mode", load_mode])
     proc = subprocess.run(args, cwd=str(cwd), capture_output=True, text=True)
     if proc.returncode != 0:
         sys.stderr.write(proc.stdout)
@@ -104,17 +115,24 @@ def run_test(pyxis_exe: Path, test_dir: Path, rebake: bool,
 
     regression_path = test_dir / "regression.json"
     frame = None
+    variant: Optional[str] = None
+    load_mode: Optional[str] = None
     if regression_path.exists():
         regression = json.loads(regression_path.read_text(encoding="utf-8"))
         if "frame" in regression and regression["frame"] >= 0:
             frame = regression["frame"]
+        if regression.get("variant"):
+            variant = str(regression["variant"])
+        if regression.get("load_mode"):
+            load_mode = str(regression["load_mode"])
 
     work_dir = output_root / name
     work_dir.mkdir(parents=True, exist_ok=True)
     produced = work_dir / "produced.png"
 
     print(f"[{name}] rendering ...")
-    rc = run_pyxis(pyxis_exe, config, fixture, produced, frame, work_dir)
+    rc = run_pyxis(pyxis_exe, config, fixture, produced, frame, work_dir,
+                   variant=variant, load_mode=load_mode)
     if rc != 0:
         print(f"[{name}] FAIL (pyxis exited rc={rc})")
         return False
