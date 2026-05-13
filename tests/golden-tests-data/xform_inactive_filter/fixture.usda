@@ -1,0 +1,46 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden xform_inactive_filter — one active Cube + one Cube authored as `active = false` at the same XY footprint. V2.A.17 / M14 — PrepareMesh / PrepareAnalyticGeom skip the inactive prim; only the active Cube renders."
+)
+
+def Xform "World"
+{
+    def Cube "ActiveCube"
+    {
+        double size = 0.9
+        color3f[] primvars:displayColor = [(0.20, 0.65, 0.85)]
+        double3 xformOp:translate = (0, 0.45, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Cube "InactiveCube" (
+        active = false
+    )
+    {
+        double size = 0.9
+        # Pure white so a regression in the IsActive filter would
+        # visibly overwhelm the blue active cube.
+        color3f[] primvars:displayColor = [(1, 1, 1)]
+        double3 xformOp:translate = (0, 0.45, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 1.5, 3.5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.0
+    }
+}

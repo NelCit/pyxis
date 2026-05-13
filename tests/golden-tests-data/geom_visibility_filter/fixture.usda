@@ -1,0 +1,51 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden geom_visibility_filter — three cubes side-by-side; the middle cube has visibility=invisible. M12 / V2.A.2 — only left + right cubes appear in the render."
+)
+
+def Xform "World"
+{
+    def Cube "LeftCube"
+    {
+        double size = 1.0
+        color3f[] primvars:displayColor = [(0.85, 0.25, 0.25)]
+        double3 xformOp:translate = (-1.6, 0.5, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Cube "InvisibleCube"
+    {
+        double size = 1.0
+        color3f[] primvars:displayColor = [(0.95, 0.95, 0.95)]
+        token visibility = "invisible"
+        double3 xformOp:translate = (0, 0.5, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Cube "RightCube"
+    {
+        double size = 1.0
+        color3f[] primvars:displayColor = [(0.25, 0.65, 0.85)]
+        double3 xformOp:translate = (1.6, 0.5, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 1.5, 6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.0
+    }
+}

@@ -1,0 +1,72 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden xform_advanced_ops — one Cube transformed with the four advanced xformOp variants: full matrix, Maya rotateXYZ, quaternion orient, and an !invert!ed translate. V2.A.6 / M14 — UsdGeomXformCache::GetLocalToWorldTransform walks the chain."
+)
+
+def Xform "World"
+{
+    def Cube "TransformOpCube"
+    {
+        double size = 0.9
+        color3f[] primvars:displayColor = [(0.9, 0.3, 0.3)]
+        matrix4d xformOp:transform = ( (1, 0, 0, 0),
+                                       (0, 1, 0, 0),
+                                       (0, 0, 1, 0),
+                                       (-2.0, 0.45, 0, 1) )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+    }
+
+    def Cube "RotateXyzCube"
+    {
+        double size = 0.9
+        color3f[] primvars:displayColor = [(0.3, 0.9, 0.3)]
+        double3 xformOp:translate = (-0.7, 0.45, 0)
+        float3 xformOp:rotateXYZ = (30, 25, 10)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+
+    def Cube "OrientCube"
+    {
+        double size = 0.9
+        color3f[] primvars:displayColor = [(0.3, 0.3, 0.9)]
+        double3 xformOp:translate = (0.7, 0.45, 0)
+        # 45° around Y: (cos(22.5°), 0, sin(22.5°), 0).
+        quatf xformOp:orient = (0.9238795, 0, 0.3826834, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient"]
+    }
+
+    def Cube "InvertedCube"
+    {
+        double size = 0.9
+        color3f[] primvars:displayColor = [(0.9, 0.9, 0.3)]
+        # Translate +5 along X then translate(-5) via !invert!. Net 0.
+        # Then a final translate of (+2.0, 0.45, 0) so it ends up
+        # mirror-positioned with TransformOpCube.
+        double3 xformOp:translate:firstStep = (5, 0, 0)
+        double3 xformOp:translate:secondStep = (2.0, 0.45, 0)
+        uniform token[] xformOpOrder = [
+            "xformOp:translate:firstStep",
+            "!invert!xformOp:translate:firstStep",
+            "xformOp:translate:secondStep"
+        ]
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 1.5, 5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.0
+    }
+}

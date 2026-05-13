@@ -1,0 +1,58 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden mat_mdl_omnipbr — one Sphere bound to an MDL Omniverse OmniPBR shader. V2.A.23 — `mdl::OmniPBR` info:id routes through the FromUsdShade MDL branch and maps diffuse_color_constant / metallic_constant / reflection_roughness_constant to OpenPBR."
+)
+
+def Xform "World"
+{
+    def Sphere "Sphere" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double radius = 0.7
+        double3 xformOp:translate = (0, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        rel material:binding = </World/Materials/Steel>
+    }
+
+    def Scope "Materials"
+    {
+        def Material "Steel"
+        {
+            token outputs:surface.connect = </World/Materials/Steel/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "mdl::OmniPBR"
+                color3f inputs:diffuse_color_constant = (0.60, 0.62, 0.65)
+                float inputs:metallic_constant = 0.9
+                float inputs:reflection_roughness_constant = 0.30
+                float inputs:opacity_constant = 1.0
+                color3f inputs:emissive_color = (0, 0, 0)
+                float inputs:emissive_intensity = 0.0
+                float inputs:enable_emission = 0.0
+                float inputs:ior_constant = 1.50
+                token outputs:surface
+            }
+        }
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 1.4, 3)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.2
+    }
+}

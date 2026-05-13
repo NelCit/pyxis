@@ -1,0 +1,47 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden mat_displaycolor_per_face — single mesh with displayColor authored via UsdGeomSubset routing per-face. The displayColor-fallback synthesises a separate OpenPBR per subset, so a single mesh ends up rendering two colours."
+)
+def Xform "World"
+{
+    def Mesh "Stripes"
+    {
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [3, 3, 3, 3, 3, 3]
+        int[] faceVertexIndices = [
+            0, 1, 4, 0, 4, 3,
+            1, 2, 5, 1, 5, 4,
+            3, 4, 7, 3, 7, 6
+        ]
+        point3f[] points = [
+            (-1.5, 0, -1), ( 0, 0, -1), ( 1.5, 0, -1),
+            (-1.5, 0,  0), ( 0, 0,  0), ( 1.5, 0,  0),
+            (-1.5, 0,  1), ( 0, 0,  1)
+        ]
+        color3f[] primvars:displayColor = [(0.85, 0.30, 0.20)]
+        def GeomSubset "Yellow"
+        {
+            uniform token elementType = "face"
+            uniform token familyName = "materialBind"
+            int[] indices = [1]
+        }
+    }
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 2.5, 3)
+        float xformOp:rotateX = -45
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.0
+    }
+}

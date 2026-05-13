@@ -1,0 +1,43 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden geom_basis_curves — a UsdGeomBasisCurves with 5 CVs tessellates to a ribbon strip. V2.A.3 / M13 — AnalyticGeom's TessellateBasisCurves emits one quad per segment, world-axis-aligned at ingest."
+)
+
+def Xform "World"
+{
+    def BasisCurves "Curves"
+    {
+        uniform token type = "linear"
+        uniform token basis = "bezier"
+        uniform token wrap = "nonperiodic"
+        int[] curveVertexCounts = [5]
+        point3f[] points = [
+            (-1.5, 0.0, 0),
+            (-0.8, 0.6, 0),
+            ( 0.0, 1.0, 0),
+            ( 0.8, 0.6, 0),
+            ( 1.5, 0.0, 0)
+        ]
+        float[] widths = [0.15, 0.15, 0.15, 0.15, 0.15]
+        color3f[] primvars:displayColor = [(0.25, 0.80, 0.65)]
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 0.6, 5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.0
+    }
+}

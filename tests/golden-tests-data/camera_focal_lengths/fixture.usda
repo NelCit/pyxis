@@ -1,0 +1,45 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden camera_focal_lengths — long focal length (85mm) tight on a cube. M5 / M7 — CameraDesc::focalLengthMm propagates into the projection matrix via GfFrustum."
+)
+def Xform "World"
+{
+    def Cube "Subject"
+    {
+        double size = 1.0
+        color3f[] primvars:displayColor = [(0.85, 0.45, 0.30)]
+        double3 xformOp:translate = (0, 0.5, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def Cube "BgLeft"
+    {
+        double size = 1.0
+        color3f[] primvars:displayColor = [(0.20, 0.20, 0.60)]
+        double3 xformOp:translate = (-2.5, 0.5, -1.5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def Cube "BgRight"
+    {
+        double size = 1.0
+        color3f[] primvars:displayColor = [(0.20, 0.60, 0.20)]
+        double3 xformOp:translate = (2.5, 0.5, -1.5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def Camera "Camera"
+    {
+        float focalLength = 85.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 1.4, 5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.0
+    }
+}

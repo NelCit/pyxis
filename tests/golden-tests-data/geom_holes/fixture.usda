@@ -1,0 +1,46 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden geom_holes — a 2x2 quad grid with holeIndices=[1] knocking out the top-right cell. M12 / V2.A.26 — face is dropped from triangulation, leaving a visible hole in the rendered surface."
+)
+
+def Xform "World"
+{
+    def Mesh "GridWithHole"
+    {
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4, 4, 4, 4]
+        int[] faceVertexIndices = [
+            0, 1, 4, 3,    # face 0 — bottom-left
+            1, 2, 5, 4,    # face 1 — bottom-right (HOLE)
+            3, 4, 7, 6,    # face 2 — top-left
+            4, 5, 8, 7     # face 3 — top-right
+        ]
+        int[] holeIndices = [1]
+        point3f[] points = [
+            (-1, 0, -1), ( 0, 0, -1), ( 1, 0, -1),
+            (-1, 0,  0), ( 0, 0,  0), ( 1, 0,  0),
+            (-1, 0,  1), ( 0, 0,  1), ( 1, 0,  1)
+        ]
+        color3f[] primvars:displayColor = [(0.4, 0.7, 0.5)]
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 2.5, 3)
+        float xformOp:rotateX = -45
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.2
+    }
+}
