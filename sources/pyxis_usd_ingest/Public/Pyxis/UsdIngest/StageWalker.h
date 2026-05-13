@@ -64,7 +64,8 @@ struct PYXIS_USD_INGEST_API IngestStats {
   uint32_t      lightsEmitted     = 0;
   uint32_t      materialsEmitted  = 0;
   uint32_t      camerasEmitted    = 0;
-  uint32_t      skipped           = 0;  // unsupported prim types
+  uint32_t      volumesEmitted    = 0;  // V2.A.5: UsdVolVolume + .vdb grids actually loaded
+  uint32_t      skipped           = 0;  // unsupported prim types (incl. failed volume loads)
   int           activeCameraIndex = -1; // index into the result's camera list, -1 if none
   IngestTimings timings           = {};
 };
