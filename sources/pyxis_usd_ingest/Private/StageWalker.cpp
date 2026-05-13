@@ -66,6 +66,7 @@
 #include <pxr/usd/usdGeom/imageable.h>
 #include <pxr/usd/usdShade/material.h>
 #include <pxr/usd/usdShade/materialBindingAPI.h>
+#include <pxr/usd/usdShade/tokens.h>
 #include <pxr/usd/usdGeom/nurbsCurves.h>
 #include <pxr/usd/usdGeom/nurbsPatch.h>
 #include <pxr/usd/usdRender/product.h>
@@ -464,13 +465,37 @@ struct ProtoMeshBuffers {
 // (e.g. a different render context than the one we walked), or the
 // caller passed an empty map. Lookup is by SdfPath string so the
 // key matches whatever the first pass populated.
+//
+// V2.A.18 — binding-strength + collection-binding resolution.
+// `ComputeBoundMaterial(materialPurpose)` is the canonical USD entry
+// point: it considers both direct relationships (`material:binding`,
+// `material:binding:full`, `material:binding:preview`) and collection-
+// based bindings (`material:binding:collection:<name>` on ancestors),
+// then resolves strength via `bindingStrength` metadata. Asking for
+// `full` lets a `material:binding:full` win over the universal
+// `material:binding` per the OpenPBR-final-quality preference (§V2.A.18);
+// USD's resolver internally falls back to all-purpose when no full
+// binding is authored, so one call covers the universal case too.
 MaterialHandle ResolveBoundMaterial(const pxr::UsdPrim& meshPrim,
                                     const MaterialHandleByPath& materialsByPath) noexcept
 {
   if (materialsByPath.empty())
     return MaterialHandle::Invalid;
   const pxr::UsdShadeMaterialBindingAPI bindingApi(meshPrim);
-  const pxr::UsdShadeMaterial bound = bindingApi.ComputeBoundMaterial();
+  // `full` purpose — final-quality binding wins over all-purpose; the
+  // resolver still considers all-purpose as a fallback within the
+  // strength walk, so this single call covers both authoring styles.
+  pxr::UsdShadeMaterial bound =
+      bindingApi.ComputeBoundMaterial(pxr::UsdShadeTokens->full);
+  if (!bound.GetPrim().IsValid())
+  {
+    // Some pipelines author only `material:binding` (no purpose). The
+    // `full` query above returns invalid in that case (it considers
+    // full + allPurpose, but if neither is authored on this prim and
+    // no inherited binding matches, it returns invalid). Fall back to
+    // an explicit allPurpose query for completeness.
+    bound = bindingApi.ComputeBoundMaterial();
+  }
   if (!bound.GetPrim().IsValid())
     return MaterialHandle::Invalid;
   const std::string boundPath = bound.GetPrim().GetPath().GetString();
