@@ -187,6 +187,16 @@ public:
   [[nodiscard]] MaterialHandle           GetMaterialHandleAt(uint32_t liveIndex) const noexcept;
   [[nodiscard]] OpenPBRMaterialDesc      GetMaterialDescAt(uint32_t liveIndex) const noexcept;
 
+  // Editor-side texture introspection. Returns the resolved file path
+  // that was supplied to `AcquireTexture` for the given handle, or an
+  // empty view for `TextureHandle::Invalid` / out-of-range / dead
+  // handles. The returned view aliases an internal `std::string` and
+  // is valid until the next mutation on the same thread (the render
+  // thread per §31 single-writer rule); copy if you need to outlive
+  // that. Used by the ImGui Material panel to display what's bound on
+  // each `OpenPBRMaterialDesc` texture slot.
+  [[nodiscard]] std::string_view         GetTexturePath(TextureHandle textureHandle) const noexcept;
+
   // Click-to-select helper (M7 follow-up). The picker AOV writes the
   // raw §15 instance-slot integer (24-bit `instanceCustomIndex`); the
   // viewer takes that on click and asks the scene for the bound

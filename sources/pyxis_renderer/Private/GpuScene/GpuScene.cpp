@@ -425,6 +425,16 @@ OpenPBRMaterialDesc GpuScene::GetMaterialDescAt(uint32_t liveIndex) const noexce
   return OpenPBRMaterialDesc{};
 }
 
+std::string_view GpuScene::GetTexturePath(TextureHandle textureHandle) const noexcept {
+  // Editor-side path lookup. Returns the owned `resolvedPath` string
+  // backing the texture entry's `keyCopy.resolvedPath` view. Empty
+  // when the handle is Invalid / out-of-range / dead / quarantined.
+  const Impl::TextureEntry* entry = _impl->LookupTexture(textureHandle);
+  if (entry == nullptr || !entry->live || entry->quarantined)
+    return {};
+  return entry->resolvedPath;
+}
+
 MaterialHandle GpuScene::LookupInstanceMaterialBySlot(uint32_t instanceSlot) const noexcept {
   // Slot 0 is the §15 sentinel; the picker writes 0 when no instance
   // was hit OR for a degenerate primitive that maps back to the

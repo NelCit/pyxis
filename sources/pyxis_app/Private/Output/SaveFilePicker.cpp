@@ -93,9 +93,69 @@ std::string SaveFilePickerDialog(const SaveFilePickerSpec& spec) noexcept {
   return result;
 }
 
+std::string OpenFilePickerDialog(const OpenFilePickerSpec& spec) noexcept {
+  const HRESULT initResult =
+      CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+  const bool weInitedCom = SUCCEEDED(initResult);
+
+  IFileOpenDialog* dialog = nullptr;
+  HRESULT comResult = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_ALL,
+                                       IID_IFileOpenDialog,
+                                       reinterpret_cast<void**>(&dialog));
+  if (FAILED(comResult) || !dialog)
+  {
+    if (weInitedCom)
+      CoUninitialize();
+    return {};
+  }
+
+  const std::wstring labelOwned{spec.filterLabel};
+  const std::wstring globOwned{spec.filterGlob};
+  const COMDLG_FILTERSPEC filterSpec[] = {{labelOwned.c_str(), globOwned.c_str()}};
+  dialog->SetFileTypes(static_cast<UINT>(std::size(filterSpec)), filterSpec);
+
+  if (!spec.title.empty())
+  {
+    const std::wstring titleOwned{spec.title};
+    dialog->SetTitle(titleOwned.c_str());
+  }
+
+  comResult = dialog->Show(nullptr);
+  std::string result;
+  if (SUCCEEDED(comResult))
+  {
+    IShellItem* item = nullptr;
+    if (SUCCEEDED(dialog->GetResult(&item)) && item)
+    {
+      PWSTR widePath = nullptr;
+      if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &widePath)) && widePath)
+      {
+        const int byteCount =
+            WideCharToMultiByte(CP_UTF8, 0, widePath, -1, nullptr, 0, nullptr, nullptr);
+        if (byteCount > 1)
+        {
+          result.resize(static_cast<std::size_t>(byteCount - 1));
+          WideCharToMultiByte(CP_UTF8, 0, widePath, -1, result.data(), byteCount, nullptr,
+                              nullptr);
+        }
+        CoTaskMemFree(widePath);
+      }
+      item->Release();
+    }
+  }
+  dialog->Release();
+  if (weInitedCom)
+    CoUninitialize();
+  return result;
+}
+
 #else  // !_WIN32
 
 std::string SaveFilePickerDialog(const SaveFilePickerSpec& /*spec*/) noexcept {
+  return {};
+}
+
+std::string OpenFilePickerDialog(const OpenFilePickerSpec& /*spec*/) noexcept {
   return {};
 }
 
