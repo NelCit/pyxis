@@ -105,14 +105,16 @@ void LogDeterminismPin(const Configuration& config, uint32_t framesInFlight) noe
                                        std::string_view populationMask = {},
                                        double frameNumber = -1.0,
                                        std::string_view loadMode = {},
-                                       std::string_view variantSelections = {}) noexcept
+                                       std::string_view variantSelections = {},
+                                       std::string_view renderPurpose = {}) noexcept
 {
   bool sceneLoaded = false;
   if (!resolvedScene.path.empty())
   {
     const pyxis::usd_ingest::IngestResult result =
         IngestUsd(config.app.ingest, resolvedScene.path, gpuScene,
-                  populationMask, frameNumber, loadMode, variantSelections);
+                  populationMask, frameNumber, loadMode, variantSelections,
+                  renderPurpose);
     const pyxis::usd_ingest::IngestStats& stats = result.Stats();
     sceneLoaded = stats.meshesEmitted > 0 || stats.camerasEmitted > 0;
     if (outStats != nullptr)
@@ -368,7 +370,8 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
                 int /*frameRangeEnd*/,
                 int /*frameRangeStep*/,
                 std::string_view loadMode,
-                std::string_view variantSelections) noexcept {
+                std::string_view variantSelections,
+                std::string_view renderPurpose) noexcept {
   // V2.A.4 — the multi-frame loop lives in Application::Run (it
   // overrides config.output.image per frame and re-enters here). The
   // frameRangeBegin/End/Step params are accepted on the signature so
@@ -461,7 +464,7 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
   const auto loadStartNs = std::chrono::steady_clock::now();
   if (!LoadSceneOrFallback(config, resolvedScene, gpuScene, &ingestStats,
                            populationMask, frameNumber,
-                           loadMode, variantSelections))
+                           loadMode, variantSelections, renderPurpose))
   {
     scene.Shutdown();
     return EXIT_RUNTIME_FAIL;
@@ -910,14 +913,15 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
 int RunViewer(const Configuration& config, const ResolvedScene& resolvedScene,
               std::string_view screenshotPath, std::string_view shaderRebuildDir,
               std::string_view loadMode,
-              std::string_view variantSelections) noexcept {
+              std::string_view variantSelections,
+              std::string_view renderPurpose) noexcept {
   // Viewer keeps the M1 entrypoint shape; M4 P5d/P5e wires
   // resolvedScene through to the engine dispatch inside
   // RunViewerLoop. shaderRebuildDir overrides the cwd walk-up
   // heuristic for the editor's Reload Shaders button (see
   // ViewerMode.cpp's FindCMakeBuildDir).
   return RunViewerLoop(config, resolvedScene, screenshotPath, shaderRebuildDir,
-                       loadMode, variantSelections);
+                       loadMode, variantSelections, renderPurpose);
 }
 
 }  // namespace pyxis::app

@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden purpose_lod_default — PR6: default --render-purpose (= default,render). Only the orange `render` Cube emits; the proxy + guide cubes filter out at ingest." }

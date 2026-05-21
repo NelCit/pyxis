@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden geom_tetmesh_skipped — PR6: UsdGeomTetMesh is explicitly skipped (logged + counted), not silently dropped. The rest of the scene renders normally." }

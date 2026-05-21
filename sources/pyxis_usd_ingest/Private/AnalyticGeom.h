@@ -33,6 +33,7 @@
 #include <pxr/usd/usdGeom/cone.h>
 #include <pxr/usd/usdGeom/cube.h>
 #include <pxr/usd/usdGeom/cylinder.h>
+#include <pxr/usd/usdGeom/nurbsCurves.h>
 #include <pxr/usd/usdGeom/nurbsPatch.h>
 #include <pxr/usd/usdGeom/points.h>
 #include <pxr/usd/usdGeom/sphere.h>
@@ -94,5 +95,17 @@ struct AnalyticGeomResult {
 // at 16x16 quads per patch.
 [[nodiscard]] AnalyticGeomResult TessellateNurbsPatch(
     const pxr::UsdGeomNurbsPatch& patch) noexcept;
+
+// PR6 / V2.A.4 — NURBS curves: per the plan §V2.A.4, "same as
+// UsdGeomBasisCurves post-tessellation." v2.0 approximates the
+// curve by treating control points as a polyline (the de Boor
+// algorithm proper requires knot-vector evaluation; for v2's
+// pre-tessellate-at-ingest model the polyline approximation is
+// visually acceptable for the production scenes that author NURBS
+// curves — Maya output, vegetation generators, hair systems).
+// Width semantics + ribbon orientation mirror TessellateBasisCurves.
+[[nodiscard]] AnalyticGeomResult TessellateNurbsCurves(
+    const pxr::UsdGeomNurbsCurves& curves,
+    const pxr::GfVec3f& worldUp) noexcept;
 
 }  // namespace pyxis::usd_ingest

@@ -1,0 +1,48 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden purpose_lod_default — PR6: scene authors three cubes with different `purpose` tokens (render = orange, proxy = blue, guide = green). At the default --render-purpose (= default,render), only the orange `render` cube emits; proxy + guide are filtered out at ingest. Companion fixture `purpose_lod_proxy_only` re-runs the same scene with --render-purpose=default,proxy and renders the BLUE cube instead. Pins the purpose-LOD filter at both call sites (PrepareMesh + the analytic-prim prep path)."
+)
+def Xform "World"
+{
+    def Cube "RenderCube"
+    {
+        uniform token purpose = "render"
+        double size = 0.8
+        color3f[] primvars:displayColor = [(0.85, 0.55, 0.30)]
+        double3 xformOp:translate = (-1.3, 0.5, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def Cube "ProxyCube"
+    {
+        uniform token purpose = "proxy"
+        double size = 0.8
+        color3f[] primvars:displayColor = [(0.30, 0.55, 0.85)]
+        double3 xformOp:translate = (0.0, 0.5, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def Cube "GuideCube"
+    {
+        uniform token purpose = "guide"
+        double size = 0.8
+        color3f[] primvars:displayColor = [(0.30, 0.85, 0.30)]
+        double3 xformOp:translate = (1.3, 0.5, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 1.0, 4)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.2
+    }
+}

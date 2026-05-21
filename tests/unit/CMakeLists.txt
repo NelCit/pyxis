@@ -43,6 +43,7 @@ target_sources(pyxis_unit_tests PRIVATE
     MaterialNetworkV2A18.cpp
     MaterialBindingResolutionV2A18.cpp
     AnimatedAttributesV2A13.cpp
+    PurposeFilterSpecParsing.cpp
     MaterialCoverageFields.cpp
     MdlTranslation.cpp
     UdimMultiTile.cpp
@@ -103,6 +104,9 @@ target_include_directories(pyxis_unit_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/sources/pyxis_renderer/Private
     ${CMAKE_SOURCE_DIR}/sources/pyxis_app/Private
     ${CMAKE_SOURCE_DIR}/sources/pyxis_usd_ingest/Private
+    # PR6 — PurposeFilterSpecParsing.cpp + future ingest unit tests
+    # include the public UsdIngest header directly.
+    ${CMAKE_SOURCE_DIR}/sources/pyxis_usd_ingest/Public
 )
 
 # pyxis_unit_tests is the one place we *do* allow exceptions — gtest
@@ -120,6 +124,10 @@ target_link_libraries(pyxis_unit_tests
         Pyxis::Platform
         Pyxis::Renderer
         Pyxis::MaterialTranslation
+        # PR6 — PurposeFilterSpecParsing links against the public
+        # `ParsePurposeFilterSpec` symbol shipped from the
+        # pyxis_usd_ingest DLL.
+        Pyxis::UsdIngest
         usd
         usdGeom
         usdShade

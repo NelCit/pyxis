@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden geom_hermite_curves_skipped — PR6: UsdGeomHermiteCurves is explicitly skipped (logged + counted), not silently dropped. The rest of the scene renders normally." }

@@ -64,7 +64,8 @@ def discover_tests() -> List[Path]:
 def run_pyxis(pyxis_exe: Path, config: Path, scene: Path,
               output: Path, frame: Optional[int], cwd: Path,
               variant: Optional[str] = None,
-              load_mode: Optional[str] = None) -> int:
+              load_mode: Optional[str] = None,
+              render_purpose: Optional[str] = None) -> int:
     """Invoke pyxis --headless. Returns the exit code."""
     args = [
         str(pyxis_exe), "--headless",
@@ -81,6 +82,9 @@ def run_pyxis(pyxis_exe: Path, config: Path, scene: Path,
     if load_mode:
         # V2.A.15 — payload-load policy {all,none,metadata}.
         args.extend(["--load-mode", load_mode])
+    if render_purpose:
+        # PR6 — UsdGeomImageable purpose-LOD filter.
+        args.extend(["--render-purpose", render_purpose])
     proc = subprocess.run(args, cwd=str(cwd), capture_output=True, text=True)
     if proc.returncode != 0:
         sys.stderr.write(proc.stdout)
@@ -117,6 +121,7 @@ def run_test(pyxis_exe: Path, test_dir: Path, rebake: bool,
     frame = None
     variant: Optional[str] = None
     load_mode: Optional[str] = None
+    render_purpose: Optional[str] = None
     if regression_path.exists():
         regression = json.loads(regression_path.read_text(encoding="utf-8"))
         if "frame" in regression and regression["frame"] >= 0:
@@ -125,6 +130,8 @@ def run_test(pyxis_exe: Path, test_dir: Path, rebake: bool,
             variant = str(regression["variant"])
         if regression.get("load_mode"):
             load_mode = str(regression["load_mode"])
+        if regression.get("render_purpose"):
+            render_purpose = str(regression["render_purpose"])
 
     work_dir = output_root / name
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -132,7 +139,8 @@ def run_test(pyxis_exe: Path, test_dir: Path, rebake: bool,
 
     print(f"[{name}] rendering ...")
     rc = run_pyxis(pyxis_exe, config, fixture, produced, frame, work_dir,
-                   variant=variant, load_mode=load_mode)
+                   variant=variant, load_mode=load_mode,
+                   render_purpose=render_purpose)
     if rc != 0:
         print(f"[{name}] FAIL (pyxis exited rc={rc})")
         return False

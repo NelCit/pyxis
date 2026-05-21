@@ -571,6 +571,103 @@ AnalyticGeomResult TessellateBasisCurves(const pxr::UsdGeomBasisCurves& curves,
 }
 
 // ============================================================================
+// NurbsCurves — PR6 / V2.A.4. Tessellate as ribbon strips using the
+// CV polyline as the curve sample sequence. Identical structure to
+// `TessellateBasisCurves`; the difference is that the source attrs
+// live on UsdGeomNurbsCurves (which also authors `order` + `knots`
+// but those are spec-level structural info we ignore at v2 — the
+// ribbon's visual quality from polyline-CV-sampling is acceptable
+// for the production scenes that author NURBS curves).
+// ============================================================================
+AnalyticGeomResult TessellateNurbsCurves(const pxr::UsdGeomNurbsCurves& curves,
+                                          const pxr::GfVec3f& worldUp) noexcept
+{
+  AnalyticGeomResult out;
+
+  pxr::VtArray<pxr::GfVec3f> srcPoints;
+  pxr::VtArray<int>          curveVertexCounts;
+  pxr::VtArray<float>        widths;
+  curves.GetPointsAttr().Get(&srcPoints);
+  curves.GetCurveVertexCountsAttr().Get(&curveVertexCounts);
+  curves.GetWidthsAttr().Get(&widths);
+  if (srcPoints.empty() || curveVertexCounts.empty())
+    return out;
+
+  // Same width-primvar interpretation as BasisCurves. Per
+  // UsdGeomCurves, widths may be constant / uniform / varying /
+  // vertex; we accept empty (= 1.0 fallback), size 1 (= constant),
+  // or size == srcPoints (= per-vertex). Other sizes collapse to
+  // the first authored value.
+  const auto widthAt = [&](std::size_t globalVtxIdx) -> float
+  {
+    if (widths.empty())
+      return 1.0f;
+    if (widths.size() == srcPoints.size())
+      return widths[globalVtxIdx];
+    return widths[0];
+  };
+
+  const pxr::GfVec3f worldUpNorm = SafeNormalise(worldUp);
+  out.points.reserve(srcPoints.size() * 2u);
+  out.normals.reserve(srcPoints.size() * 2u);
+  out.uvs.reserve(srcPoints.size() * 2u);
+
+  std::size_t cvOffset = 0;
+  for (const int curveLen : curveVertexCounts)
+  {
+    if (curveLen < 2)
+    {
+      cvOffset += static_cast<std::size_t>(curveLen);
+      continue;
+    }
+    const auto ribbonStart = static_cast<std::uint32_t>(out.points.size());
+    for (int i = 0; i < curveLen; ++i)
+    {
+      const std::size_t globalIdx = cvOffset + static_cast<std::size_t>(i);
+      const pxr::GfVec3f vertexPos = srcPoints[globalIdx];
+
+      pxr::GfVec3f tangent;
+      if (i == 0)
+        tangent = srcPoints[globalIdx + 1u] - vertexPos;
+      else if (i == curveLen - 1)
+        tangent = vertexPos - srcPoints[globalIdx - 1u];
+      else
+        tangent = srcPoints[globalIdx + 1u] - srcPoints[globalIdx - 1u];
+      tangent = SafeNormalise(tangent);
+
+      pxr::GfVec3f side = pxr::GfCross(tangent, worldUpNorm);
+      if (side.GetLengthSq() < 1e-6f)
+        side = pxr::GfCross(tangent, pxr::GfVec3f{1.0f, 0.0f, 0.0f});
+      side = SafeNormalise(side);
+      const pxr::GfVec3f normal = SafeNormalise(pxr::GfCross(side, tangent));
+
+      const float halfWidth = widthAt(globalIdx) * 0.5f;
+      out.points.push_back(vertexPos - side * halfWidth);
+      out.points.push_back(vertexPos + side * halfWidth);
+      out.normals.push_back(normal);
+      out.normals.push_back(normal);
+      const float vCoord = static_cast<float>(i) / static_cast<float>(curveLen - 1);
+      out.uvs.emplace_back(0.0f, vCoord);
+      out.uvs.emplace_back(1.0f, vCoord);
+    }
+    for (int i = 0; i < curveLen - 1; ++i)
+    {
+      const auto v00 = ribbonStart + static_cast<std::uint32_t>(i * 2);
+      const auto v10 = ribbonStart + static_cast<std::uint32_t>(i * 2 + 1);
+      const auto v01 = ribbonStart + static_cast<std::uint32_t>((i + 1) * 2);
+      const auto v11 = ribbonStart + static_cast<std::uint32_t>((i + 1) * 2 + 1);
+      AppendQuad(out, v00, v10, v11, v01);
+    }
+    cvOffset += static_cast<std::size_t>(curveLen);
+  }
+
+  if (out.points.empty())
+    return out;
+  out.success = true;
+  return out;
+}
+
+// ============================================================================
 // Points — billboard quad per point in the worldUp plane.
 // ============================================================================
 AnalyticGeomResult TessellatePoints(const pxr::UsdGeomPoints& points,

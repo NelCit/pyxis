@@ -97,6 +97,16 @@ struct CliArgs {
   // Empty = honour the stage's authored variant selections.
   std::string_view variantSelections;  // --variant <spec>
 
+  // PR6 / V2.A.2 — purpose-LOD filter. Comma-separated list of
+  // UsdGeomImageable purpose tokens whose prims to emit:
+  //   --render-purpose default,render        (production default)
+  //   --render-purpose default,render,proxy  (fast preview)
+  //   --render-purpose guide                 (visualisation only)
+  // Empty = honour the production default (default + render). Unknown
+  // tokens are dropped; if the resulting mask is empty the default
+  // mask is used. Parsed in ParsePurposeFilterSpec (StageWalker.h).
+  std::string_view renderPurpose;      // --render-purpose <list>
+
   // ---- M7 follow-up: AOV save -----------------------------------------
   // --save-aov <list>  Comma-separated list of raw AOVs to dump
   // alongside the regular `--output` BGRA8 EXR. The path stem of
