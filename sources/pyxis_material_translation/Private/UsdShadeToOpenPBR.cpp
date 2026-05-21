@@ -735,12 +735,47 @@ void TranslateMdl(const pxr::UsdShadeShader& shader,
   desc.normalMap      = ReadMdlTextureInput(shader, pxr::TfToken("normalmap_texture"),
                                              acquire, userData,
                                              TextureKey::Role::NormalMap, TextureKey::Color::Linear);
-  desc.roughnessMap   = ReadMdlTextureInput(shader, pxr::TfToken("reflectionroughness_texture"),
-                                             acquire, userData,
-                                             TextureKey::Role::RoughnessMetallic, TextureKey::Color::Linear);
-  desc.metallicMap    = ReadMdlTextureInput(shader, pxr::TfToken("metallic_texture"),
-                                             acquire, userData,
-                                             TextureKey::Role::RoughnessMetallic, TextureKey::Color::Linear);
+
+  // V2.A.23 follow-up — OmniPBR packs Occlusion-Roughness-Metallic
+  // into a single `ORM_texture` (R = AO, G = roughness, B = metallic;
+  // the glTF / OpenPBR ORM convention) and gates it with the
+  // `enable_ORM_texture` bool. This is the dominant packing in
+  // production Omniverse content (the World Lobby authors *only* ORM,
+  // never the separate reflectionroughness/metallic textures). The
+  // closesthit samples roughness from `.g` of `roughnessTex` and
+  // metallic from `.b` of `metallicTex`, so binding the SAME ORM
+  // texture to both slots lines up channel-for-channel — no shader
+  // change needed.
+  //
+  // Fallback chain: explicit per-lobe textures
+  // (reflectionroughness_texture / metallic_texture) win when
+  // authored; otherwise ORM fills both. enable_ORM_texture defaults
+  // false in the MDL, but a material that authored an ORM asset path
+  // without the flag clearly intends to use it, so we also accept a
+  // bound ORM path as implicit-enable.
+  const TextureHandle ormTex =
+      ReadMdlTextureInput(shader, pxr::TfToken("ORM_texture"), acquire, userData,
+                          TextureKey::Role::RoughnessMetallic, TextureKey::Color::Linear);
+  const bool ormEnabled =
+      ReadBoolish(shader, pxr::TfToken("enable_ORM_texture"), false, timeCode)
+      || (ormTex != TextureHandle::Invalid);
+
+  const TextureHandle roughnessTex =
+      ReadMdlTextureInput(shader, pxr::TfToken("reflectionroughness_texture"),
+                          acquire, userData,
+                          TextureKey::Role::RoughnessMetallic, TextureKey::Color::Linear);
+  const TextureHandle metallicTex =
+      ReadMdlTextureInput(shader, pxr::TfToken("metallic_texture"),
+                          acquire, userData,
+                          TextureKey::Role::RoughnessMetallic, TextureKey::Color::Linear);
+
+  desc.roughnessMap = (roughnessTex != TextureHandle::Invalid)
+                          ? roughnessTex
+                          : (ormEnabled ? ormTex : TextureHandle::Invalid);
+  desc.metallicMap  = (metallicTex != TextureHandle::Invalid)
+                          ? metallicTex
+                          : (ormEnabled ? ormTex : TextureHandle::Invalid);
+
   desc.emissionMap    = ReadMdlTextureInput(shader, pxr::TfToken("emissive_mask_texture"),
                                              acquire, userData,
                                              TextureKey::Role::Emission, TextureKey::Color::SRgb);
