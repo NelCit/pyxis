@@ -449,7 +449,24 @@ Expected<void> GpuScene::Impl::UploadPendingTextures(nvrhi::ICommandList* comman
       // both dimensions to be multiples of 4 (BCn block alignment);
       // odd-dim textures fall through to the uncompressed path with
       // a debug log.
-      if (desc.compressTextures && width >= 4 && height >= 4
+      //
+      // V2.A.14 follow-up — skip BCn for sRGB-encoded roles
+      // (BaseColor + Emission). BC1's RGB565 endpoint quantization
+      // is asymmetric per-channel (R/B: 5-bit, G: 6-bit) and combined
+      // with the sRGB curve produces a measurable warm/red cast
+      // (B/G channels darken more than R, ~3-5% per channel on lobby-
+      // scale scenes). Linear-space roles (NormalMap → BC5,
+      // RoughnessMetallic → BC4) don't have this perceptual issue
+      // because they're already linear-encoded and BC5/BC4 are 1- and
+      // 2-channel codecs with better per-channel precision. So we
+      // keep VRAM savings where they're free + drop them where the
+      // visual cost shows up. The §17 budget still hits ~50% saving
+      // because normal/roughness textures dominate texture mass in
+      // production scenes.
+      const bool roleIsSRgb =
+          (entry.keyCopy.role == TextureKey::Role::BaseColor)
+          || (entry.keyCopy.role == TextureKey::Role::Emission);
+      if (desc.compressTextures && !roleIsSRgb && width >= 4 && height >= 4
           && (width % 4) == 0 && (height % 4) == 0)
       {
         std::vector<std::uint8_t> encodedBlocks;
