@@ -1,0 +1,55 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    startTimeCode = 0
+    endTimeCode = 100
+    timeCodesPerSecond = 24
+    doc = "Pyxis golden anim_material_diffusecolor — V2.A.13: UsdPreviewSurface inputs:diffuseColor time-sampled (red at frame 0 -> blue at frame 100). Rendered at frame 50 (midpoint) — cube should be magenta. Catches regressions where material scalar/color reads bypass the time-code threading inside FromUsdShade."
+)
+def Xform "World"
+{
+    def Scope "Looks"
+    {
+        def Material "AnimatedMat"
+        {
+            token outputs:surface.connect = </World/Looks/AnimatedMat/Shader.outputs:surface>
+
+            def Shader "Shader"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor.timeSamples = {
+                    0:   (1.0, 0.0, 0.0),
+                    100: (0.0, 0.0, 1.0),
+                }
+                float inputs:metallic = 0.0
+                float inputs:roughness = 0.5
+                token outputs:surface
+            }
+        }
+    }
+    def Cube "Subject" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </World/Looks/AnimatedMat>
+        double size = 1.2
+        double3 xformOp:translate = (0, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 1.5, 4)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.2
+    }
+}

@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden anim_layeroffset — V2.A.13: SdfLayerOffset(offset=50) on a sublayer. Sublayer authors cube translate samples at (frame 0 = far left, frame 100 = far right). Stage frame 50 -> sublayer frame 0 via the offset -> cube at FAR LEFT. Pins USD's composition-time LayerOffset re-mapping.", "frame": 50 }

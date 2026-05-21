@@ -1,0 +1,38 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    startTimeCode = 0
+    endTimeCode = 100
+    timeCodesPerSecond = 24
+    doc = "Pyxis golden anim_camera_exposure — V2.A.13: UsdGeomCamera.exposure (in stops) animated. exposure = -2 at frame 0 (1/4× brightness), +2 at frame 100 (4× brightness). Rendered at frame 100 (over-exposed). Catches regressions where camera.exposure reads at default time instead of the requested frame."
+)
+def Xform "World"
+{
+    def Cube "Subject"
+    {
+        double size = 1.2
+        color3f[] primvars:displayColor = [(0.50, 0.50, 0.50)]
+        double3 xformOp:translate = (0, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        float exposure.timeSamples = {
+            0:   -2.0,
+            100:  2.0,
+        }
+        double3 xformOp:translate = (0, 1.5, 4)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.0
+    }
+}

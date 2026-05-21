@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden anim_material_diffusecolor — V2.A.13: material diffuseColor time-sampled (red -> blue). Rendered at frame 50 (midpoint = magenta). Pins the time-code threading through FromUsdShade -> ReadColor -> attr.Get(timeCode).", "frame": 50 }

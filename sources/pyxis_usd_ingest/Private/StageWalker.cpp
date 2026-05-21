@@ -78,6 +78,8 @@
 #include <pxr/usd/usdVol/openVDBAsset.h>
 #include <pxr/usd/usdVol/tokens.h>
 #include <pxr/usd/ar/resolver.h>
+#include <pxr/usd/sdf/layer.h>
+#include <pxr/usd/sdf/layerOffset.h>
 #include <pxr/usd/sdf/path.h>
 #include <pxr/base/gf/matrix4d.h>
 
@@ -592,36 +594,42 @@ void EmitLight(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCache,
   // `inputs:<name>` namespace. UsdLuxLightAPI exposes typed accessors
   // but pulling the attr by name is simpler + avoids the API churn
   // between USD versions.
-  auto readFloat = [&](const char* name, float fallback) {
+  //
+  // V2.A.13 — every attr is read at `timeCode` so animated light
+  // intensity / color / radius / shaping cone / etc. all track the
+  // requested frame. USD composes any `SdfLayerOffset` on the
+  // referencing arc transparently in this call.
+  const pxr::UsdTimeCode timeCode = xformCache.GetTime();
+  auto readFloat = [&, timeCode](const char* name, float fallback) {
     const pxr::UsdAttribute attr = prim.GetAttribute(pxr::TfToken(std::string("inputs:") + name));
     if (!attr)
       return fallback;
     float value = fallback;
-    attr.Get(&value);
+    attr.Get(&value, timeCode);
     return value;
   };
-  auto readColor = [&](const char* name, hlslpp::float3 fallback) {
+  auto readColor = [&, timeCode](const char* name, hlslpp::float3 fallback) {
     const pxr::UsdAttribute attr = prim.GetAttribute(pxr::TfToken(std::string("inputs:") + name));
     if (!attr)
       return fallback;
     pxr::GfVec3f value(fallback.x, fallback.y, fallback.z);
-    attr.Get(&value);
+    attr.Get(&value, timeCode);
     return hlslpp::float3{value[0], value[1], value[2]};
   };
-  auto readBool = [&](const char* name, bool fallback) {
+  auto readBool = [&, timeCode](const char* name, bool fallback) {
     const pxr::UsdAttribute attr = prim.GetAttribute(pxr::TfToken(std::string("inputs:") + name));
     if (!attr)
       return fallback;
     bool value = fallback;
-    attr.Get(&value);
+    attr.Get(&value, timeCode);
     return value;
   };
-  auto readToken = [&](const char* name, const pxr::TfToken& fallback) {
+  auto readToken = [&, timeCode](const char* name, const pxr::TfToken& fallback) {
     const pxr::UsdAttribute attr = prim.GetAttribute(pxr::TfToken(std::string("inputs:") + name));
     if (!attr)
       return fallback;
     pxr::TfToken value = fallback;
-    attr.Get(&value);
+    attr.Get(&value, timeCode);
     return value;
   };
 
@@ -1079,23 +1087,52 @@ void EmitPointInstancer(const pxr::UsdPrim& instancerPrim,
     ++stats.meshesEmitted;
   }
 
-  // Per-instance transforms.
+  // Per-instance transforms. V2.A.9 / V2.A.13 — every per-instance attr
+  // here can be time-sampled, so we evaluate at the xform cache's time
+  // (= the `--frame` CLI value, or Default when not authored). USD's
+  // composition engine threads `SdfLayerOffset` from sublayer / reference
+  // arcs through this same time-code, so an instancer authored in a
+  // sublayer with `(offset = 50, scale = 2)` correctly maps the asked-
+  // for stage time onto the layer-local timeline before sampling.
+  const pxr::UsdTimeCode timeCode = xformCache.GetTime();
   pxr::VtArray<int> protoIndices;
   pxr::VtArray<pxr::GfVec3f> positions;
   pxr::VtArray<pxr::GfQuath> orientations;
   pxr::VtArray<pxr::GfVec3f> scales;
-  instancer.GetProtoIndicesAttr().Get(&protoIndices);
-  instancer.GetPositionsAttr().Get(&positions);
-  instancer.GetOrientationsAttr().Get(&orientations);
-  instancer.GetScalesAttr().Get(&scales);
+  instancer.GetProtoIndicesAttr().Get(&protoIndices, timeCode);
+  instancer.GetPositionsAttr().Get(&positions, timeCode);
+  instancer.GetOrientationsAttr().Get(&orientations, timeCode);
+  instancer.GetScalesAttr().Get(&scales, timeCode);
+
+  // V2.A.9 — velocities + accelerations are loaded into Pyxis-side
+  // state per Pillar A's "load everything" doctrine. v2.0's TLAS is
+  // static (no motion blur dispatch), so the closesthit never reads
+  // them; they're surfaced via the per-instancer log diagnostic so
+  // operators can confirm the data round-tripped from USD. Pillar B's
+  // §43.2 motion-blur reservation consumes them.
+  pxr::VtArray<pxr::GfVec3f> velocities;
+  pxr::VtArray<pxr::GfVec3f> accelerations;
+  instancer.GetVelocitiesAttr().Get(&velocities, timeCode);
+  instancer.GetAccelerationsAttr().Get(&accelerations, timeCode);
+  if (!velocities.empty() || !accelerations.empty())
+  {
+    log.Info(log::APP,
+             "StageWalker: PointInstancer "
+                 + instancerPrim.GetPath().GetString()
+                 + " carries " + std::to_string(velocities.size())
+                 + " velocities + " + std::to_string(accelerations.size())
+                 + " accelerations (loaded; closesthit ignores until §43.2 "
+                   "motion-blur ships).");
+  }
 
   // M14b / V2.A.9 — invisibleIds masking. The PointInstancer can mark
   // arbitrary instance IDs as invisible via `invisibleIds`; production
   // scenes use this to hide instances at specific frames without
   // re-authoring the full positions array. Resolve once into a sorted
-  // set + skip matching `instIdx` values in the loop below.
+  // set + skip matching `instIdx` values in the loop below. Read at
+  // `timeCode` so the per-frame hide list is honoured.
   pxr::VtArray<std::int64_t> invisibleIdsArr;
-  instancer.GetInvisibleIdsAttr().Get(&invisibleIdsArr);
+  instancer.GetInvisibleIdsAttr().Get(&invisibleIdsArr, timeCode);
   std::unordered_set<std::int64_t> invisibleIds;
   invisibleIds.reserve(invisibleIdsArr.size());
   for (const std::int64_t identifier : invisibleIdsArr)
@@ -2138,7 +2175,10 @@ std::optional<CameraDesc> BuildCameraDesc(const pxr::UsdPrim& prim,
   if (const pxr::UsdAttribute exposureAttr = cameraPrim.GetExposureAttr())
   {
     float exposure = 0.0f;
-    if (exposureAttr.Get(&exposure))
+    // V2.A.13 — read exposure at the camera's evaluation time so an
+    // animated `exposure` curve tracks the same frame as the camera's
+    // intrinsics (focalLength / fStop / clippingRange) above.
+    if (exposureAttr.Get(&exposure, xformCache.GetTime()))
       desc.exposure = exposure;
   }
   return desc;
@@ -2290,6 +2330,38 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
   const SkelSkinnedPointsByPath skinnedPoints =
       ComputeSkelSkinnedPoints(stage, timeCode);
 
+  // V2.A.13 — sublayer offset / scale diagnostic. `SdfLayerOffset` on a
+  // sublayer or reference maps the asked-for stage time onto the layer-
+  // local timeline before any per-attr `.Get(time)` call. USD's
+  // composition engine applies it transparently; we just log the
+  // authored offsets at ingest so an operator can see the time
+  // re-mapping at a glance. Non-identity offsets are uncommon but real
+  // (e.g. a 24fps animation sublayered into a 30fps stage with
+  // `scale = 1.25`). The check stops at depth 1 (immediate sublayers
+  // of the root) — deeper layer stacks recurse transitively and
+  // logging every level would spam.
+  if (stage->GetRootLayer())
+  {
+    const auto rootLayer = stage->GetRootLayer();
+    const pxr::SdfSubLayerProxy sublayerPaths = rootLayer->GetSubLayerPaths();
+    for (std::size_t idx = 0; idx < sublayerPaths.size(); ++idx)
+    {
+      const pxr::SdfLayerOffset offset = rootLayer->GetSubLayerOffset(static_cast<int>(idx));
+      if (offset.GetOffset() != 0.0 || offset.GetScale() != 1.0)
+      {
+        char buf[200];
+        std::snprintf(buf, sizeof(buf),
+                      "StageWalker: sublayer '%s' carries SdfLayerOffset "
+                      "(offset=%.3f, scale=%.3f) — USD applies it transparently "
+                      "in per-attr Get(timeCode) calls (V2.A.13).",
+                      sublayerPaths[idx].c_str(),
+                      offset.GetOffset(),
+                      offset.GetScale());
+        Logging::Get().Info(log::APP, std::string{buf});
+      }
+    }
+  }
+
   // Read the optional `boundCamera` hint from the root layer's
   // customLayerData (Omniverse + DCC convention). Empty string =
   // no hint; we'll fall back to first-camera-in-SdfPath-order.
@@ -2408,7 +2480,8 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
       }
     }
     OpenPBRMaterialDesc materialDesc =
-        material_translation::FromUsdShade(materialPrim, ACQUIRE_TEXTURE, &scene);
+        material_translation::FromUsdShade(materialPrim, ACQUIRE_TEXTURE, &scene,
+                                           timeCode);
     materialDesc.sourcePrim = primPath;
     const MaterialHandle handle = scene.AcquireMaterial(materialDesc);
     materialsByPath.emplace(primPath, handle);

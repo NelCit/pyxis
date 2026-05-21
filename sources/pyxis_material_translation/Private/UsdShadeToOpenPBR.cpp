@@ -139,14 +139,17 @@ struct SurfaceMatch {
 
 // Read a scalar float input. Returns `fallback` if the input isn't
 // authored, has the wrong type, or is connected to something we
-// don't follow at M4.
+// don't follow at M4. V2.A.13 — sampled at `timeCode` so animated
+// scalar inputs track the requested frame; default-time is the
+// no-animation baseline.
 float ReadFloat(const pxr::UsdShadeShader& shader, const pxr::TfToken& name,
-                float fallback) noexcept {
+                float fallback,
+                pxr::UsdTimeCode timeCode = pxr::UsdTimeCode::Default()) noexcept {
   const pxr::UsdShadeInput input = shader.GetInput(name);
   if (!input)
     return fallback;
   pxr::VtValue value;
-  if (!input.Get(&value))
+  if (!input.Get(&value, timeCode))
     return fallback;
   if (!value.IsHolding<float>())
     return fallback;
@@ -157,14 +160,15 @@ float ReadFloat(const pxr::UsdShadeShader& shader, const pxr::TfToken& name,
 // type. Texture connections (the common case for baseColor) read as
 // "no value authored" which falls back to the scalar default — the
 // closesthit shader uses the flag-bit + texture handle to know to
-// sample instead.
+// sample instead. V2.A.13 — sampled at `timeCode`.
 hlslpp::float3 ReadColor(const pxr::UsdShadeShader& shader, const pxr::TfToken& name,
-                         const hlslpp::float3& fallback) noexcept {
+                         const hlslpp::float3& fallback,
+                         pxr::UsdTimeCode timeCode = pxr::UsdTimeCode::Default()) noexcept {
   const pxr::UsdShadeInput input = shader.GetInput(name);
   if (!input)
     return fallback;
   pxr::VtValue value;
-  if (!input.Get(&value))
+  if (!input.Get(&value, timeCode))
     return fallback;
   if (!value.IsHolding<pxr::GfVec3f>())
     return fallback;
@@ -508,24 +512,26 @@ bool ResolveUVTextureBinding(const pxr::UsdShadeShader& shader,
 
 // V2.A.18 — MaterialX OpenPBR (`open_pbr_surface`) translator. Pyxis's
 // canonical target; the OpenPBRMaterialDesc IS the MTLX OpenPBR model
-// post-translation, so field-for-field mapping.
+// post-translation, so field-for-field mapping. V2.A.13 — every
+// scalar / color input sampled at `timeCode`.
 void TranslateMaterialXOpenPBR(const pxr::UsdShadeShader& shader,
-                                OpenPBRMaterialDesc&       desc) noexcept
+                                OpenPBRMaterialDesc&       desc,
+                                pxr::UsdTimeCode           timeCode) noexcept
 {
   desc.baseColor      = ReadColor(shader, pxr::TfToken("base_color"),
-                                   hlslpp::float3{0.18f, 0.18f, 0.18f});
-  desc.baseWeight     = ReadFloat(shader, pxr::TfToken("base_weight"), 1.0f);
-  desc.metalness      = ReadFloat(shader, pxr::TfToken("base_metalness"), 0.0f);
-  desc.roughness      = ReadFloat(shader, pxr::TfToken("specular_roughness"), 0.5f);
-  desc.specularWeight = ReadFloat(shader, pxr::TfToken("specular_weight"), 1.0f);
-  desc.specularIor    = ReadFloat(shader, pxr::TfToken("specular_ior"), 1.5f);
-  desc.opacity        = ReadFloat(shader, pxr::TfToken("geometry_opacity"), 1.0f);
-  desc.coatWeight     = ReadFloat(shader, pxr::TfToken("coat_weight"), 0.0f);
-  desc.coatRoughness  = ReadFloat(shader, pxr::TfToken("coat_roughness"), 0.0f);
-  desc.transmissionWeight = ReadFloat(shader, pxr::TfToken("transmission_weight"), 0.0f);
+                                   hlslpp::float3{0.18f, 0.18f, 0.18f}, timeCode);
+  desc.baseWeight     = ReadFloat(shader, pxr::TfToken("base_weight"), 1.0f, timeCode);
+  desc.metalness      = ReadFloat(shader, pxr::TfToken("base_metalness"), 0.0f, timeCode);
+  desc.roughness      = ReadFloat(shader, pxr::TfToken("specular_roughness"), 0.5f, timeCode);
+  desc.specularWeight = ReadFloat(shader, pxr::TfToken("specular_weight"), 1.0f, timeCode);
+  desc.specularIor    = ReadFloat(shader, pxr::TfToken("specular_ior"), 1.5f, timeCode);
+  desc.opacity        = ReadFloat(shader, pxr::TfToken("geometry_opacity"), 1.0f, timeCode);
+  desc.coatWeight     = ReadFloat(shader, pxr::TfToken("coat_weight"), 0.0f, timeCode);
+  desc.coatRoughness  = ReadFloat(shader, pxr::TfToken("coat_roughness"), 0.0f, timeCode);
+  desc.transmissionWeight = ReadFloat(shader, pxr::TfToken("transmission_weight"), 0.0f, timeCode);
   desc.emissionColor  = ReadColor(shader, pxr::TfToken("emission_color"),
-                                   hlslpp::float3{0.0f, 0.0f, 0.0f});
-  desc.emissionLuminance = ReadFloat(shader, pxr::TfToken("emission_luminance"), 0.0f);
+                                   hlslpp::float3{0.0f, 0.0f, 0.0f}, timeCode);
+  desc.emissionLuminance = ReadFloat(shader, pxr::TfToken("emission_luminance"), 0.0f, timeCode);
   desc.source = OpenPBRMaterialDesc::Source::MaterialX;
 }
 
@@ -534,21 +540,22 @@ void TranslateMaterialXOpenPBR(const pxr::UsdShadeShader& shader,
 // collapses the (float emission weight, color3 emission color) pair
 // into Pyxis's `emissionLuminance + emissionColor` fields.
 void TranslateMaterialXStandardSurface(const pxr::UsdShadeShader& shader,
-                                        OpenPBRMaterialDesc&       desc) noexcept
+                                        OpenPBRMaterialDesc&       desc,
+                                        pxr::UsdTimeCode           timeCode) noexcept
 {
   desc.baseColor      = ReadColor(shader, pxr::TfToken("base_color"),
-                                   hlslpp::float3{0.18f, 0.18f, 0.18f});
-  desc.baseWeight     = ReadFloat(shader, pxr::TfToken("base"), 1.0f);
-  desc.metalness      = ReadFloat(shader, pxr::TfToken("metalness"), 0.0f);
-  desc.roughness      = ReadFloat(shader, pxr::TfToken("specular_roughness"), 0.5f);
-  desc.specularWeight = ReadFloat(shader, pxr::TfToken("specular"), 1.0f);
-  desc.specularIor    = ReadFloat(shader, pxr::TfToken("specular_IOR"), 1.5f);
-  desc.coatWeight     = ReadFloat(shader, pxr::TfToken("coat"), 0.0f);
-  desc.coatRoughness  = ReadFloat(shader, pxr::TfToken("coat_roughness"), 0.0f);
-  desc.transmissionWeight = ReadFloat(shader, pxr::TfToken("transmission"), 0.0f);
+                                   hlslpp::float3{0.18f, 0.18f, 0.18f}, timeCode);
+  desc.baseWeight     = ReadFloat(shader, pxr::TfToken("base"), 1.0f, timeCode);
+  desc.metalness      = ReadFloat(shader, pxr::TfToken("metalness"), 0.0f, timeCode);
+  desc.roughness      = ReadFloat(shader, pxr::TfToken("specular_roughness"), 0.5f, timeCode);
+  desc.specularWeight = ReadFloat(shader, pxr::TfToken("specular"), 1.0f, timeCode);
+  desc.specularIor    = ReadFloat(shader, pxr::TfToken("specular_IOR"), 1.5f, timeCode);
+  desc.coatWeight     = ReadFloat(shader, pxr::TfToken("coat"), 0.0f, timeCode);
+  desc.coatRoughness  = ReadFloat(shader, pxr::TfToken("coat_roughness"), 0.0f, timeCode);
+  desc.transmissionWeight = ReadFloat(shader, pxr::TfToken("transmission"), 0.0f, timeCode);
   desc.emissionColor  = ReadColor(shader, pxr::TfToken("emission_color"),
-                                   hlslpp::float3{0.0f, 0.0f, 0.0f});
-  desc.emissionLuminance = ReadFloat(shader, pxr::TfToken("emission"), 0.0f);
+                                   hlslpp::float3{0.0f, 0.0f, 0.0f}, timeCode);
+  desc.emissionLuminance = ReadFloat(shader, pxr::TfToken("emission"), 0.0f, timeCode);
   desc.source = OpenPBRMaterialDesc::Source::MaterialX;
 }
 
@@ -556,22 +563,24 @@ void TranslateMaterialXStandardSurface(const pxr::UsdShadeShader& shader,
 // Omniverse's OmniPBR.mdl shader. Inputs missing on a given variant
 // fall through to the OpenPBR scalar defaults.
 void TranslateMdl(const pxr::UsdShadeShader& shader,
-                   OpenPBRMaterialDesc&       desc) noexcept
+                   OpenPBRMaterialDesc&      desc,
+                   pxr::UsdTimeCode          timeCode) noexcept
 {
   desc.baseColor = ReadColor(shader, pxr::TfToken("diffuse_color_constant"),
-                              hlslpp::float3{0.18f, 0.18f, 0.18f});
-  desc.metalness = ReadFloat(shader, pxr::TfToken("metallic_constant"), 0.0f);
+                              hlslpp::float3{0.18f, 0.18f, 0.18f}, timeCode);
+  desc.metalness = ReadFloat(shader, pxr::TfToken("metallic_constant"), 0.0f, timeCode);
   desc.roughness = ReadFloat(shader, pxr::TfToken("reflection_roughness_constant"),
-                              ReadFloat(shader, pxr::TfToken("roughness_constant"), 0.5f));
-  desc.opacity   = ReadFloat(shader, pxr::TfToken("opacity_constant"), 1.0f);
+                              ReadFloat(shader, pxr::TfToken("roughness_constant"), 0.5f, timeCode),
+                              timeCode);
+  desc.opacity   = ReadFloat(shader, pxr::TfToken("opacity_constant"), 1.0f, timeCode);
   desc.emissionColor = ReadColor(shader, pxr::TfToken("emissive_color"),
-                                  hlslpp::float3{0.0f, 0.0f, 0.0f});
-  desc.emissionLuminance = ReadFloat(shader, pxr::TfToken("emissive_intensity"), 0.0f);
-  desc.specularIor = ReadFloat(shader, pxr::TfToken("ior_constant"), 1.5f);
+                                  hlslpp::float3{0.0f, 0.0f, 0.0f}, timeCode);
+  desc.emissionLuminance = ReadFloat(shader, pxr::TfToken("emissive_intensity"), 0.0f, timeCode);
+  desc.specularIor = ReadFloat(shader, pxr::TfToken("ior_constant"), 1.5f, timeCode);
   // Emission gate: OmniPBR's `enable_emission` flag — when off, the
   // intensity / colour are honoured but the material won't light a
   // surface. Reflect that by zeroing emissionLuminance.
-  if (ReadFloat(shader, pxr::TfToken("enable_emission"), 1.0f) <= 0.0f)
+  if (ReadFloat(shader, pxr::TfToken("enable_emission"), 1.0f, timeCode) <= 0.0f)
     desc.emissionLuminance = 0.0f;
   desc.source = OpenPBRMaterialDesc::Source::MaterialX;  // groups with non-UsdPreviewSurface
 }
@@ -580,7 +589,8 @@ void TranslateMdl(const pxr::UsdShadeShader& shader,
 
 OpenPBRMaterialDesc FromUsdShade(const pxr::UsdShadeMaterial& material,
                                  AcquireTextureFn acquire,
-                                 void* userData) noexcept {
+                                 void* userData,
+                                 pxr::UsdTimeCode timeCode) noexcept {
   OpenPBRMaterialDesc desc;
 
   if (!material.GetPrim().IsValid())
@@ -593,17 +603,20 @@ OpenPBRMaterialDesc FromUsdShade(const pxr::UsdShadeMaterial& material,
   // universal) in priority order so production scenes that author
   // multiple surfaces side-by-side resolve to the highest-fidelity
   // form. The matched `kind` drives the dispatch below.
+  // V2.A.13 — `timeCode` threads through every per-translator scalar
+  // / color read so an animated material attribute (e.g. animated
+  // `diffuseColor`) tracks the requested frame.
   const SurfaceMatch match = ResolveSurface(material);
   switch (match.kind)
   {
     case SurfaceMatch::Kind::Mdl:
-      TranslateMdl(match.shader, desc);
+      TranslateMdl(match.shader, desc, timeCode);
       return desc;
     case SurfaceMatch::Kind::MaterialXOpenPBR:
-      TranslateMaterialXOpenPBR(match.shader, desc);
+      TranslateMaterialXOpenPBR(match.shader, desc, timeCode);
       return desc;
     case SurfaceMatch::Kind::MaterialXStandardSurface:
-      TranslateMaterialXStandardSurface(match.shader, desc);
+      TranslateMaterialXStandardSurface(match.shader, desc, timeCode);
       return desc;
     case SurfaceMatch::Kind::UsdPreviewSurface:
       // UsdPreviewSurface path falls through to the texture-aware
@@ -617,15 +630,15 @@ OpenPBRMaterialDesc FromUsdShade(const pxr::UsdShadeMaterial& material,
 
   // ---- Scalars + colors (UsdPreviewSurface input names). ----------
   desc.baseColor =
-      ReadColor(surface, pxr::TfToken("diffuseColor"), hlslpp::float3{0.18f, 0.18f, 0.18f});
-  desc.metalness = ReadFloat(surface, pxr::TfToken("metallic"), 0.0f);
-  desc.roughness = ReadFloat(surface, pxr::TfToken("roughness"), 0.5f);
-  desc.opacity = ReadFloat(surface, pxr::TfToken("opacity"), 1.0f);
-  desc.specularIor = ReadFloat(surface, pxr::TfToken("ior"), 1.5f);
-  desc.coatWeight = ReadFloat(surface, pxr::TfToken("clearcoat"), 0.0f);
-  desc.coatRoughness = ReadFloat(surface, pxr::TfToken("clearcoatRoughness"), 0.01f);
+      ReadColor(surface, pxr::TfToken("diffuseColor"), hlslpp::float3{0.18f, 0.18f, 0.18f}, timeCode);
+  desc.metalness = ReadFloat(surface, pxr::TfToken("metallic"), 0.0f, timeCode);
+  desc.roughness = ReadFloat(surface, pxr::TfToken("roughness"), 0.5f, timeCode);
+  desc.opacity = ReadFloat(surface, pxr::TfToken("opacity"), 1.0f, timeCode);
+  desc.specularIor = ReadFloat(surface, pxr::TfToken("ior"), 1.5f, timeCode);
+  desc.coatWeight = ReadFloat(surface, pxr::TfToken("clearcoat"), 0.0f, timeCode);
+  desc.coatRoughness = ReadFloat(surface, pxr::TfToken("clearcoatRoughness"), 0.01f, timeCode);
   desc.emissionColor =
-      ReadColor(surface, pxr::TfToken("emissiveColor"), hlslpp::float3{0.0f, 0.0f, 0.0f});
+      ReadColor(surface, pxr::TfToken("emissiveColor"), hlslpp::float3{0.0f, 0.0f, 0.0f}, timeCode);
   // UsdPreviewSurface authors emissive as a color3f only — there's no
   // separate luminance multiplier. Set emissionLuminance = 1 when the
   // tint is non-zero so the closesthit's `emissionColor × luminance`
