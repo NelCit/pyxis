@@ -36,6 +36,14 @@ pxr::UsdShadeMaterial BuildMdlMaterial(const pxr::UsdStageRefPtr& stage)
   shader.CreateInput(pxr::TfToken("reflection_roughness_constant"),
                      pxr::SdfValueTypeNames->Float)
       .Set(0.2f);
+  // V2.A.23 follow-up — MDL's `enable_emission` defaults to FALSE, and
+  // the translator now honours that (a missing input = disabled).
+  // Author it true here so the emissive_color / emissive_intensity
+  // values flow through to the desc; the "off" case is covered by the
+  // EnableEmissionOffSuppressesLuminance test below.
+  shader.CreateInput(pxr::TfToken("enable_emission"),
+                     pxr::SdfValueTypeNames->Bool)
+      .Set(true);
   shader.CreateInput(pxr::TfToken("emissive_color"),
                      pxr::SdfValueTypeNames->Color3f)
       .Set(pxr::GfVec3f(0.0f, 1.0f, 0.5f));
@@ -87,14 +95,19 @@ TEST(MdlTranslation, EnableEmissionOffSuppressesLuminance)
   // NOLINTNEXTLINE(misc-const-correctness) — CreateInput mutates.
   pxr::UsdShadeShader shader{stage->GetPrimAtPath(pxr::SdfPath("/Mat/MdlSurface"))};
   ASSERT_TRUE(shader);
+  // Override the BuildMdlMaterial default (enable_emission = true)
+  // back to false. Bool to match the input's authored type.
   shader.CreateInput(pxr::TfToken("enable_emission"),
-                     pxr::SdfValueTypeNames->Float)
-      .Set(0.0f);
+                     pxr::SdfValueTypeNames->Bool)
+      .Set(false);
 
   const pyxis::OpenPBRMaterialDesc desc =
       pyxis::material_translation::FromUsdShade(material);
 
-  // enable_emission off → emissionLuminance zeroed regardless of
-  // emissive_intensity.
+  // enable_emission off → emissionLuminance + color zeroed regardless
+  // of authored emissive_intensity / emissive_color.
   EXPECT_FLOAT_EQ(desc.emissionLuminance, 0.0f);
+  EXPECT_FLOAT_EQ(desc.emissionColor.x, 0.0f);
+  EXPECT_FLOAT_EQ(desc.emissionColor.y, 0.0f);
+  EXPECT_FLOAT_EQ(desc.emissionColor.z, 0.0f);
 }

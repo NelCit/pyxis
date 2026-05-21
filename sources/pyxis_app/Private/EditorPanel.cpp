@@ -812,110 +812,101 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
             TextureKey::Color colorspace;
           };
           const TextureSlotSpec textureSlots[] = {
-              {"Base color",         &desc.baseColorMap,       TextureKey::Role::BaseColor,         TextureKey::Color::SRgb},
-              {"Metallic",           &desc.metallicMap,        TextureKey::Role::RoughnessMetallic, TextureKey::Color::Linear},
-              {"Roughness",          &desc.roughnessMap,       TextureKey::Role::RoughnessMetallic, TextureKey::Color::Linear},
-              {"Normal map",         &desc.normalMap,          TextureKey::Role::NormalMap,         TextureKey::Color::Linear},
-              {"Emission",           &desc.emissionMap,        TextureKey::Role::Emission,          TextureKey::Color::SRgb},
-              {"Opacity",            &desc.opacityMap,         TextureKey::Role::Opacity,           TextureKey::Color::Linear},
-              {"Transmission",      &desc.transmissionMap,    TextureKey::Role::BaseColor,         TextureKey::Color::Linear},
-              {"Coat roughness",     &desc.coatRoughnessMap,   TextureKey::Role::RoughnessMetallic, TextureKey::Color::Linear},
+              {"Base color",     &desc.baseColorMap,     TextureKey::Role::BaseColor,         TextureKey::Color::SRgb},
+              {"Metallic",       &desc.metallicMap,      TextureKey::Role::RoughnessMetallic, TextureKey::Color::Linear},
+              {"Roughness",      &desc.roughnessMap,     TextureKey::Role::RoughnessMetallic, TextureKey::Color::Linear},
+              {"Normal map",     &desc.normalMap,        TextureKey::Role::NormalMap,         TextureKey::Color::Linear},
+              {"Emission",       &desc.emissionMap,      TextureKey::Role::Emission,          TextureKey::Color::SRgb},
+              {"Opacity",        &desc.opacityMap,       TextureKey::Role::Opacity,           TextureKey::Color::Linear},
+              {"Transmission",   &desc.transmissionMap,  TextureKey::Role::RoughnessMetallic, TextureKey::Color::Linear},
+              {"Coat roughness", &desc.coatRoughnessMap, TextureKey::Role::RoughnessMetallic, TextureKey::Color::Linear},
           };
-          // Table layout for the 8 texture slots: a fixed-width label
-          // column, a stretching path column with horizontal clipping
-          // (`SameLineHidden` / `Selectable` truncates with the
-          // standard "..." behavior when the column shrinks), and a
-          // fixed-width actions column for the two compact buttons.
-          // Prior layout used SameLine + hard-coded x=140 + small
-          // buttons floating after the leaf filename; long leaf names
-          // (e.g. `Oak_Lobby_BaseColor_4k.png`) pushed the buttons
-          // off-screen and made the column unreadable. The table fixes
-          // alignment + makes the path clip cleanly instead of overflowing.
-          const ImGuiTableFlags tableFlags = ImGuiTableFlags_SizingFixedFit
-                                              | ImGuiTableFlags_BordersInnerH
-                                              | ImGuiTableFlags_PadOuterX;
-          if (ImGui::BeginTable("MatTextures", 3, tableFlags))
+          // Two-line layout per slot — guarantees the path text can
+          // never overlap the action buttons regardless of filename
+          // length (the prior table / SameLine layouts both let long
+          // leaf names collide with the buttons):
+          //   Line 1: "<label>" .................... [Set...] [Clear]
+          //   Line 2:   <leaf filename, or (none)>
+          // Every slot always shows [Set...] so any lobe can be
+          // overridden even when currently unbound. [Clear] only
+          // appears when something is bound. Full resolved path is on
+          // the hover tooltip of the line-2 text.
+          for (const TextureSlotSpec& slot : textureSlots)
           {
-            ImGui::TableSetupColumn("Slot",   ImGuiTableColumnFlags_WidthFixed,   100.0f);
-            ImGui::TableSetupColumn("Path",   ImGuiTableColumnFlags_WidthStretch, 1.0f);
-            ImGui::TableSetupColumn("##Acts", ImGuiTableColumnFlags_WidthFixed,   90.0f);
+            ImGui::PushID(slot.label);
+            const bool bound = (*slot.handlePtr != TextureHandle::Invalid);
 
-            for (const TextureSlotSpec& slot : textureSlots)
+            // ---- Line 1: label (left) + buttons (right-aligned) ----
+            ImGui::TextUnformatted(slot.label);
+
+            // Reserve the right edge for the buttons. "Clear" only
+            // exists when bound, so compute the combined width
+            // accordingly and right-align.
+            const float setW = ImGui::CalcTextSize("Set...").x
+                               + ImGui::GetStyle().FramePadding.x * 2.0f;
+            const float clearW = ImGui::CalcTextSize("Clear").x
+                                 + ImGui::GetStyle().FramePadding.x * 2.0f;
+            const float spacing = ImGui::GetStyle().ItemSpacing.x;
+            const float buttonsW = bound ? (setW + spacing + clearW) : setW;
+            const float avail = ImGui::GetContentRegionAvail().x;
+            ImGui::SameLine(0.0f, 0.0f);
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX()
+                                 + (avail - buttonsW > 0.0f ? avail - buttonsW : 0.0f));
+
+            if (ImGui::SmallButton("Set..."))
             {
-              ImGui::PushID(slot.label);
-              ImGui::TableNextRow();
-              // ---- Column 0: slot label
-              ImGui::TableSetColumnIndex(0);
-              ImGui::TextUnformatted(slot.label);
-
-              // ---- Column 1: bound texture path (leaf filename only,
-              //               with the full path on hover-tooltip)
-              ImGui::TableSetColumnIndex(1);
-              const std::string_view boundPath = scene.GetTexturePath(*slot.handlePtr);
-              if (boundPath.empty())
+              OpenFilePickerSpec spec{};
+              spec.title       = L"Pick texture";
+              spec.filterLabel = L"Images (*.png;*.jpg;*.jpeg;*.exr;*.tga;*.dds)";
+              spec.filterGlob  = L"*.png;*.jpg;*.jpeg;*.exr;*.tga;*.dds";
+              const std::string picked = OpenFilePickerDialog(spec);
+              if (!picked.empty())
               {
-                ImGui::TextDisabled("(unbound)");
-              }
-              else
-              {
-                const auto lastSlash = boundPath.find_last_of("/\\");
-                const std::string_view leaf =
-                    (lastSlash == std::string_view::npos)
-                        ? boundPath
-                        : boundPath.substr(lastSlash + 1);
-                // PushTextWrapPos with the column's right edge clips
-                // overflow to "..." instead of bleeding into the next
-                // column. Tooltip on hover surfaces the full path.
-                ImGui::PushTextWrapPos(ImGui::GetCursorPosX()
-                                       + ImGui::GetContentRegionAvail().x);
-                ImGui::TextUnformatted(leaf.data(), leaf.data() + leaf.size());
-                ImGui::PopTextWrapPos();
-                if (ImGui::IsItemHovered())
+                TextureKey key;
+                key.resolvedPath = picked;
+                key.role         = slot.role;
+                key.colorspace   = slot.colorspace;
+                const TextureHandle newHandle = scene.AcquireTexture(key);
+                if (newHandle != TextureHandle::Invalid)
                 {
-                  ImGui::SetTooltip("%.*s", static_cast<int>(boundPath.size()),
-                                     boundPath.data());
-                }
-              }
-
-              // ---- Column 2: actions (Browse + Clear in a compact pair)
-              ImGui::TableSetColumnIndex(2);
-              if (ImGui::SmallButton("..."))
-              {
-                OpenFilePickerSpec spec{};
-                spec.title       = L"Pick texture";
-                spec.filterLabel = L"Images (*.png;*.jpg;*.jpeg;*.exr;*.tga;*.dds)";
-                spec.filterGlob  = L"*.png;*.jpg;*.jpeg;*.exr;*.tga;*.dds";
-                const std::string picked = OpenFilePickerDialog(spec);
-                if (!picked.empty())
-                {
-                  TextureKey key;
-                  key.resolvedPath = picked;
-                  key.role         = slot.role;
-                  key.colorspace   = slot.colorspace;
-                  const TextureHandle newHandle = scene.AcquireTexture(key);
-                  if (newHandle != TextureHandle::Invalid)
-                  {
-                    *slot.handlePtr = newHandle;
-                    matEdited = true;
-                  }
-                }
-              }
-              if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Browse for a texture file");
-              ImGui::SameLine();
-              if (*slot.handlePtr != TextureHandle::Invalid)
-              {
-                if (ImGui::SmallButton("x"))
-                {
-                  *slot.handlePtr = TextureHandle::Invalid;
+                  *slot.handlePtr = newHandle;
                   matEdited = true;
                 }
-                if (ImGui::IsItemHovered())
-                  ImGui::SetTooltip("Clear binding (revert to scalar value)");
               }
-              ImGui::PopID();
             }
-            ImGui::EndTable();
+            if (bound)
+            {
+              ImGui::SameLine();
+              if (ImGui::SmallButton("Clear"))
+              {
+                *slot.handlePtr = TextureHandle::Invalid;
+                matEdited = true;
+              }
+            }
+
+            // ---- Line 2: bound path (indented, leaf only) ----
+            ImGui::Indent(12.0f);
+            const std::string_view boundPath = scene.GetTexturePath(*slot.handlePtr);
+            if (boundPath.empty())
+            {
+              ImGui::TextDisabled("(none)");
+            }
+            else
+            {
+              const auto lastSlash = boundPath.find_last_of("/\\");
+              const std::string_view leaf =
+                  (lastSlash == std::string_view::npos)
+                      ? boundPath
+                      : boundPath.substr(lastSlash + 1);
+              ImGui::TextDisabled("%.*s", static_cast<int>(leaf.size()), leaf.data());
+              if (ImGui::IsItemHovered())
+              {
+                ImGui::SetTooltip("%.*s", static_cast<int>(boundPath.size()),
+                                   boundPath.data());
+              }
+            }
+            ImGui::Unindent(12.0f);
+            ImGui::PopID();
           }
           ImGui::TreePop();
         }
