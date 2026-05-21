@@ -1,0 +1,19 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+over "World"
+{
+    def Cube "AnimatedCube"
+    {
+        double size = 1.0
+        color3f[] primvars:displayColor = [(0.85, 0.55, 0.30)]
+        double3 xformOp:translate.timeSamples = {
+            0:   (-2.0, 1.0, 0.0),
+            100: ( 2.0, 1.0, 0.0),
+        }
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}

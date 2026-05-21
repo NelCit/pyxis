@@ -21,6 +21,7 @@
 // real-deal definition has to come from USD's header, so we
 // transitively pull it in. Consumers of this lib (pyxis_hydra,
 // pyxis_usd_ingest) already need USD anyway.
+#include <pxr/usd/usd/timeCode.h>
 #include <pxr/usd/usdShade/material.h>
 
 #include <string_view>
@@ -60,8 +61,17 @@ using AcquireTextureFn = TextureHandle (*)(std::string_view resolvedPath,
 // Pass `nullptr` to skip texture resolution (legacy callers + the
 // scalar-only M4 contract). `userData` is forwarded unchanged on
 // every callback invocation.
-[[nodiscard]] OpenPBRMaterialDesc FromUsdShade(const pxr::UsdShadeMaterial& material,
-                                               AcquireTextureFn acquire = nullptr,
-                                               void* userData = nullptr) noexcept;
+//
+// `timeCode` (V2.A.13): when set to a non-Default value, scalar /
+// color inputs (`diffuseColor`, `roughness`, `metallic`, `emissive*`,
+// etc.) are sampled at that frame. Asset references (file paths on
+// UsdUVTexture) and shader-graph topology are time-invariant — only
+// the per-input scalar values respect the time-code. USD composes
+// any `SdfLayerOffset` from referencing arcs transparently.
+[[nodiscard]] OpenPBRMaterialDesc FromUsdShade(
+    const pxr::UsdShadeMaterial& material,
+    AcquireTextureFn             acquire   = nullptr,
+    void*                        userData  = nullptr,
+    pxr::UsdTimeCode             timeCode  = pxr::UsdTimeCode::Default()) noexcept;
 
 }  // namespace pyxis::material_translation

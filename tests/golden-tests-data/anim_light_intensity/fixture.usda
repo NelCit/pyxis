@@ -1,0 +1,37 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    startTimeCode = 0
+    endTimeCode = 100
+    timeCodesPerSecond = 24
+    doc = "Pyxis golden anim_light_intensity — V2.A.13: DomeLight inputs:intensity animated. Intensity = 0.2 at frame 0, 2.0 at frame 100. Rendered at frame 100 (peak brightness). Catches regressions where light input attrs read at default time instead of the requested frame."
+)
+def Xform "World"
+{
+    def Cube "Subject"
+    {
+        double size = 1.2
+        color3f[] primvars:displayColor = [(0.85, 0.55, 0.30)]
+        double3 xformOp:translate = (0, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 1.5, 4)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity.timeSamples = {
+            0:   0.2,
+            100: 2.0,
+        }
+    }
+}
