@@ -2754,6 +2754,25 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
         material_translation::FromUsdShade(materialPrim, ACQUIRE_TEXTURE, &scene,
                                            timeCode);
     materialDesc.sourcePrim = primPath;
+
+    // V2.A.23 follow-up — per-material texture-binding diagnostic.
+    // Logs which lobes resolved to a texture handle vs fell back to
+    // the scalar value, so operators can see at ingest time whether a
+    // material's maps were actually fetched (the "is normal even
+    // loading?" question). Debug level — one line per material, only
+    // surfaced when the operator turns the category up.
+    {
+      auto bound = [](TextureHandle tex) { return tex != TextureHandle::Invalid ? "Y" : "-"; };
+      Logging::Get().Debug(log::APP,
+          "StageWalker material textures " + primPath
+          + ": base=" + bound(materialDesc.baseColorMap)
+          + " normal=" + bound(materialDesc.normalMap)
+          + " rough=" + bound(materialDesc.roughnessMap)
+          + " metal=" + bound(materialDesc.metallicMap)
+          + " emit=" + bound(materialDesc.emissionMap)
+          + " opacity=" + bound(materialDesc.opacityMap));
+    }
+
     const MaterialHandle handle = scene.AcquireMaterial(materialDesc);
     materialsByPath.emplace(primPath, handle);
     // Track which materials carry a normal map so the mesh pass can

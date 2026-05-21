@@ -836,22 +836,13 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
             ImGui::PushID(slot.label);
             const bool bound = (*slot.handlePtr != TextureHandle::Invalid);
 
-            // ---- Line 1: label (left) + buttons (right-aligned) ----
+            // ---- Line 1: label + buttons, left-to-right ----
+            // Plain SameLine (no manual right-alignment cursor math —
+            // that overshot the window's right edge on narrow panels
+            // and forced a horizontal scrollbar / viewport overflow).
+            // The label + two short buttons always fit the panel width.
             ImGui::TextUnformatted(slot.label);
-
-            // Reserve the right edge for the buttons. "Clear" only
-            // exists when bound, so compute the combined width
-            // accordingly and right-align.
-            const float setW = ImGui::CalcTextSize("Set...").x
-                               + ImGui::GetStyle().FramePadding.x * 2.0f;
-            const float clearW = ImGui::CalcTextSize("Clear").x
-                                 + ImGui::GetStyle().FramePadding.x * 2.0f;
-            const float spacing = ImGui::GetStyle().ItemSpacing.x;
-            const float buttonsW = bound ? (setW + spacing + clearW) : setW;
-            const float avail = ImGui::GetContentRegionAvail().x;
-            ImGui::SameLine(0.0f, 0.0f);
-            ImGui::SetCursorPosX(ImGui::GetCursorPosX()
-                                 + (avail - buttonsW > 0.0f ? avail - buttonsW : 0.0f));
+            ImGui::SameLine();
 
             if (ImGui::SmallButton("Set..."))
             {
