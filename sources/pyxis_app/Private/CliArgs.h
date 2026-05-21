@@ -113,12 +113,14 @@ struct CliArgs {
   // first-by-SdfPath wins (the production default).
   std::string_view renderProduct;      // --render-product <name>
 
-  // V2.A.14 — opt-in BCn texture compression. When set, the GpuScene
-  // texture decoder runs stb_dxt over each stbi_load-decoded RGBA8
-  // buffer before GPU upload (BC1 for baseColor/emission, BC5 for
-  // normal maps, BC4 for roughness/metallic). Off by default to
-  // preserve M3-M9 golden byte-stability.
-  bool compressTextures = false;       // --compress-textures
+  // V2.A.14 — CPU-side BCn texture compression. The GpuScene texture
+  // decoder runs stb_dxt over each stbi_load-decoded RGBA8 buffer
+  // before GPU upload (BC1 for baseColor/emission, BC5 for normal
+  // maps, BC4 for roughness/metallic) — saves ~6× VRAM on the lobby
+  // texture set. **On by default** since the V2.A.14 follow-up;
+  // `--no-compress-textures` opts out for diagnostic builds that need
+  // pixel-equal output against the uncompressed path.
+  bool compressTextures = true;        // --no-compress-textures opts out
 
   // ---- M7 follow-up: AOV save -----------------------------------------
   // --save-aov <list>  Comma-separated list of raw AOVs to dump
