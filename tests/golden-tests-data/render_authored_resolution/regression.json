@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden render_authored_resolution — V2.A.27: UsdRenderSettings.resolution = (200, 150) overlays the goldens-harness shared 256x256 since neither --width nor --height is on the CLI. Produced PNG should be 200x150." }

@@ -297,6 +297,18 @@ CliArgs Parse(int argc, char** argv) noexcept {
         return out;
       }
     }
+    else if (Equals(arg, "--render-product"))
+    {
+      // V2.A.27 — pick a specific UsdRenderProduct from a stage that
+      // authors multiple. Matched on the product prim's leaf name
+      // (the pre-scan in pyxis_usd_ingest does the SdfPath lookup).
+      if (!TakeValue(argc, argv, i, out.renderProduct))
+      {
+        out.invalid = true;
+        out.invalidArg = arg;
+        return out;
+      }
+    }
     else if (Equals(arg, "--render-purpose"))
     {
       // PR6 / V2.A.2. Comma-separated UsdGeomImageable purpose tokens
@@ -397,6 +409,10 @@ void PrintUsage() noexcept {
       "                          prims emit. Recognised: default / render / proxy / guide.\n"
       "                          Default = default,render (matches Storm / Karma).\n"
       "                          Example: --render-purpose default,render,proxy (PR6).\n"
+      "  --render-product <name> Pick which UsdRenderProduct to use when the stage\n"
+      "                          authors multiple. Matches the product prim's leaf name\n"
+      "                          (case-sensitive). Empty / unmatched = first by SdfPath\n"
+      "                          (V2.A.27).\n"
       "\n"
       "Viewer extras:\n"
       "  --screenshot <path>     Run viewer briefly; write a PNG of the backbuffer.\n"
