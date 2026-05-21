@@ -302,6 +302,23 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
     }
     float3 nWorld = normalize(mul(worldFromObject3x3, nLocal));
 
+    // Face-forward the shading normal: flip it to the side the ray
+    // arrived from. Interior environments (a room / lobby modeled as a
+    // box) author OUTWARD-pointing wall normals, so the visible inner
+    // face — the one a primary ray hits from inside the room — has a
+    // normal pointing AWAY from the eye. Without this flip, every
+    // light's NdotL goes negative → clamps to 0 → the wall renders
+    // black despite a perfectly-loaded baseColor texture. (This was the
+    // "black Oak paneling" symptom: the baseColor AOV showed correct
+    // wood grain, but the lit pass zeroed it because the wall normals
+    // pointed into the wall.) Standard ray-tracer "facing normal"
+    // convention — correct for single-sided geometry viewed from either
+    // side and for double-sided materials alike. WorldRayDirection()
+    // points FROM eye TO surface, so a positive dot means the normal
+    // shares the ray's direction (faces away from the eye) → flip.
+    if (dot(nWorld, WorldRayDirection()) > 0.0)
+        nWorld = -nWorld;
+
     // M9 normal mapping. When the material binds a normal texture,
     // sample it in tangent space and transform to world via the TBN
     // matrix built from the per-vertex tangent (MikkTSpace) + the
