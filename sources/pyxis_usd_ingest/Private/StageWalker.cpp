@@ -65,8 +65,10 @@
 #include <pxr/usd/usdLux/shapingAPI.h>
 #include <pxr/usd/usdLux/sphereLight.h>
 #include <pxr/usd/usdGeom/imageable.h>
+#include <pxr/usd/usdShade/connectableAPI.h>
 #include <pxr/usd/usdShade/material.h>
 #include <pxr/usd/usdShade/materialBindingAPI.h>
+#include <pxr/usd/usdShade/shader.h>
 #include <pxr/usd/usdShade/tokens.h>
 #include <pxr/usd/usdGeom/hermiteCurves.h>
 #include <pxr/usd/usdGeom/nurbsCurves.h>
@@ -100,6 +102,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <array>
 #include <cstring>
 #include <execution>
 #include <limits>
@@ -2743,7 +2746,76 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
       case OpenPBRMaterialDesc::Source::UsdPreviewSurface: ++srcCountUsdPreview; break;
       case OpenPBRMaterialDesc::Source::MaterialX:        ++srcCountMaterialX;   break;
       case OpenPBRMaterialDesc::Source::RenderManFallback:++srcCountRenderMan;   break;
-      case OpenPBRMaterialDesc::Source::Default:          ++srcCountDefault;     break;
+      case OpenPBRMaterialDesc::Source::Default:
+      {
+        ++srcCountDefault;
+        // V2.A.8 / V2.A.23 / V2.A.24 follow-up — per-material
+        // diagnostic when the translator fell back to grey. Re-walks
+        // the material's surface outputs across (mdl → mtlx →
+        // universal) and reports which channel was missing /
+        // unconnected and which `info:id` the connected shader carries.
+        // Operators use this to pick the right V2.A.X remediation
+        // (.8 MaterialX node not implemented / .23 MDL OmniSurface
+        // variant / unsupported RenderMan PxrSurface / etc.). Lives
+        // here rather than inside `material_translation` because the
+        // translator stays log-free + noexcept; we already have the
+        // material prim in hand at this point.
+        static const pxr::TfToken mdlContext("mdl");          // NOLINT
+        static const pxr::TfToken mtlxContext("mtlx");        // NOLINT
+        static const pxr::TfToken universalContext{};         // NOLINT
+        const std::array<std::pair<pxr::TfToken, const char*>, 3> contexts{{
+            {mdlContext, "mdl"},
+            {mtlxContext, "mtlx"},
+            {universalContext, "universal"},
+        }};
+        std::string reasonChain;
+        for (const auto& [ctx, label] : contexts)
+        {
+          const pxr::UsdShadeOutput out = ctx.IsEmpty()
+                                              ? materialPrim.GetSurfaceOutput()
+                                              : materialPrim.GetSurfaceOutput(ctx);
+          reasonChain += " [";
+          reasonChain += label;
+          if (!out)
+          {
+            reasonChain += ":no-output]";
+            continue;
+          }
+          if (!out.HasConnectedSource())
+          {
+            reasonChain += ":unconnected]";
+            continue;
+          }
+          pxr::UsdShadeConnectableAPI src;
+          pxr::TfToken                sourceOutputName;
+          pxr::UsdShadeAttributeType  sourceType;
+          out.GetConnectedSource(&src, &sourceOutputName, &sourceType);
+          const pxr::UsdShadeShader shader{src.GetPrim()};
+          if (!shader)
+          {
+            reasonChain += ":non-shader-source]";
+            continue;
+          }
+          pxr::TfToken shaderId;
+          if (!shader.GetShaderId(&shaderId))
+          {
+            reasonChain += ":no-info:id]";
+            continue;
+          }
+          reasonChain += ":info:id=";
+          reasonChain += shaderId.GetString();
+          reasonChain += "]";
+        }
+        std::string warnMsg;
+        warnMsg.reserve(96 + primPath.size() + reasonChain.size());
+        warnMsg.append("StageWalker material fallback-grey: ");
+        warnMsg.append(primPath);
+        warnMsg.append(" —");
+        warnMsg.append(reasonChain);
+        warnMsg.append(" (V2.A.8 / V2.A.23 / V2.A.24 follow-up)");
+        Logging::Get().Warn(log::APP, warnMsg);
+        break;
+      }
     }
     ++stats.materialsEmitted;
   }
