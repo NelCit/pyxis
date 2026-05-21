@@ -3,7 +3,7 @@
     "$comment": "Pyxis M10 image-regression fixture for the World Lobby hero camera. Consumed by _tools/run_regression.py. Plan §35.",
 
     "name":        "M10.WorldLobbyRegression",
-    "description": "Lobby hero camera, M9-fidelity stable baseline. Standin until World Lobby lands; same harness will retarget World Lobby by editing the config + scene fields below.",
+    "description": "World Lobby hero camera. Baseline refreshed against current main once it had drifted ~14× over the RMSE tolerance through accumulated PRs (deterministic mirror PR #57, material network V2.A.18, BCn default-on V2.A.14 follow-up, etc.). Refresh cadence: re-bake whenever a visible-change PR ships through review; the regression's job is to catch *accidental* drift between bakes, not enforce the look against an arbitrary frozen point.",
 
     "config":   "tests/fixtures/m8_world_lobby.json",
     "scene":    "resources/scenes/world_lobby/World_Lobby.usd",
