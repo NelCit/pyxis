@@ -57,6 +57,19 @@ target_sources(pyxis_unit_tests PRIVATE
     InstanceDoubleSided.cpp
     RenderSettingsLayout.cpp
     LightDescExtendedDefaults.cpp
+    OrthographicCameraV2A20.cpp
+    BcEncoderV2A14.cpp
+
+    # V2.A.14 — BCn encoder helper. Recompiled here so the test exe
+    # exercises the real helper directly instead of going through the
+    # pyxis_renderer DLL boundary (which would require widening the
+    # §18.1 public surface).
+    ${CMAKE_SOURCE_DIR}/sources/pyxis_renderer/Private/GpuScene/BcEncoder.cpp
+    # stb_dxt.h's STB_DXT_IMPLEMENTATION lives in a dedicated TU
+    # (mirrors the StbImageWrite.cpp pattern). Compiled here so the
+    # test exe owns its own copy of the implementation symbols
+    # without trying to import them from pyxis_renderer.dll.
+    ${CMAKE_SOURCE_DIR}/sources/pyxis_renderer/Private/GpuScene/StbDxt.cpp
 
     # V2.A.1 follow-up — SubdivRefine.cpp lives in pyxis_usd_ingest
     # Private. The fixture compiles it directly.
@@ -158,6 +171,22 @@ target_link_libraries(pyxis_unit_tests
 set_source_files_properties(
     ${CMAKE_SOURCE_DIR}/sources/pyxis_usd_ingest/Private/VolumeLoader.cpp
     PROPERTIES SKIP_LINTING ON)
+
+# V2.A.14 — stb_dxt's STB_DXT_IMPLEMENTATION sentinel is a third-
+# party macro name that clang-tidy's readability-identifier-naming
+# trips on; same SKIP_LINTING escape the production renderer target
+# uses.
+set_source_files_properties(
+    ${CMAKE_SOURCE_DIR}/sources/pyxis_renderer/Private/GpuScene/StbDxt.cpp
+    PROPERTIES SKIP_LINTING ON)
+
+# V2.A.14 — BcEncoder.cpp and the test sibling both #include <stb_dxt.h>.
+# vcpkg's `Stb` config exports the include dir as Stb_INCLUDE_DIR (no
+# link target). pyxis_renderer already pulls this in its own scope;
+# the test exe needs it too because the recompiled BcEncoder.cpp lives
+# here.
+find_package(Stb REQUIRED)
+target_include_directories(pyxis_unit_tests PRIVATE ${Stb_INCLUDE_DIR})
 
 # UsdShadeToOpenPBR.cpp pulls USD's headers which trip C++20's
 # is_pod deprecation; same silence the ingest libs use.

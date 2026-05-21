@@ -309,7 +309,8 @@ int Run(int argc, char** argv) noexcept {
                                         /*frameRangeStep*/   1,
                                         cli.loadMode,
                                         cli.variantSelections,
-                                        cli.renderPurpose);
+                                        cli.renderPurpose,
+                                        cli.compressTextures);
         if (frameRc != 0)
           return frameRc;
       }
@@ -325,10 +326,12 @@ int Run(int argc, char** argv) noexcept {
                        /*frameRangeStep*/   1,
                        cli.loadMode,
                        cli.variantSelections,
-                       cli.renderPurpose);
+                       cli.renderPurpose,
+                       cli.compressTextures);
   }
   return RunViewer(config, scene, cli.screenshotPath, cli.shaderRebuildDir,
-                   cli.loadMode, cli.variantSelections, cli.renderPurpose);
+                   cli.loadMode, cli.variantSelections, cli.renderPurpose,
+                   cli.compressTextures);
 }
 
 }  // namespace pyxis::app

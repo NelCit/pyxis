@@ -371,7 +371,8 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
                 int /*frameRangeStep*/,
                 std::string_view loadMode,
                 std::string_view variantSelections,
-                std::string_view renderPurpose) noexcept {
+                std::string_view renderPurpose,
+                bool compressTextures) noexcept {
   // V2.A.4 — the multi-frame loop lives in Application::Run (it
   // overrides config.output.image per frame and re-enters here). The
   // frameRangeBegin/End/Step params are accepted on the signature so
@@ -451,7 +452,11 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
   }
   Profiler profiler{device};
   GpuSceneCreateDesc gpuSceneDesc{};
-  gpuSceneDesc.framesInFlight = HEADLESS_FRAMES_IN_FLIGHT;
+  gpuSceneDesc.framesInFlight    = HEADLESS_FRAMES_IN_FLIGHT;
+  // V2.A.14 — pass the --compress-textures flag through from
+  // RunHeadless's `compressTextures` param so stb_dxt fires inside
+  // the GpuScene texture-decode path.
+  gpuSceneDesc.compressTextures  = compressTextures;
   GpuScene gpuScene{device, profiler, gpuSceneDesc};
 
   // M4 ingest with cube fallback so pyxis.exe always produces a
@@ -914,14 +919,16 @@ int RunViewer(const Configuration& config, const ResolvedScene& resolvedScene,
               std::string_view screenshotPath, std::string_view shaderRebuildDir,
               std::string_view loadMode,
               std::string_view variantSelections,
-              std::string_view renderPurpose) noexcept {
+              std::string_view renderPurpose,
+              bool compressTextures) noexcept {
   // Viewer keeps the M1 entrypoint shape; M4 P5d/P5e wires
   // resolvedScene through to the engine dispatch inside
   // RunViewerLoop. shaderRebuildDir overrides the cwd walk-up
   // heuristic for the editor's Reload Shaders button (see
   // ViewerMode.cpp's FindCMakeBuildDir).
   return RunViewerLoop(config, resolvedScene, screenshotPath, shaderRebuildDir,
-                       loadMode, variantSelections, renderPurpose);
+                       loadMode, variantSelections, renderPurpose,
+                       compressTextures);
 }
 
 }  // namespace pyxis::app

@@ -123,7 +123,13 @@ struct CameraUniforms {
     //   pixelSpreadRadians = 2 × atan(0.5 / focalLengthInPixels)
     // ≈ 2 × tan(fovY / 2) / imageHeight for a standard pinhole.
     float pixelSpreadRadians;
-    float _camPad0;
+    // V2.A.20 — UsdGeomCamera.projection. 0 = perspective (default;
+    // raygen builds rays from origin through NDC), 1 = orthographic
+    // (raygen takes the inverse-clip-projected NDC point as the
+    // per-pixel ray ORIGIN in view space + a constant -Z direction).
+    // The cbuffer is uint-friendly: HLSL's `uint`-via-`asuint`
+    // pattern reads a float slot as a uint without packing trouble.
+    uint  projectionMode;
     float _camPad1;
 };
 

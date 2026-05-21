@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden camera_orthographic — V2.A.20. Two equally-sized cubes at z=0 vs z=-4 render at identical screen-space size under the orthographic primary-ray branch in raygen.slang (the perspective foreshortening collapse). Catches regressions where UsdGeomCamera.projection=orthographic is silently ignored." }

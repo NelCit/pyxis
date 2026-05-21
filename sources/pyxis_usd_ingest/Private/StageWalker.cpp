@@ -2351,6 +2351,23 @@ std::optional<CameraDesc> BuildCameraDesc(const pxr::UsdPrim& prim,
     if (exposureAttr.Get(&exposure, xformCache.GetTime()))
       desc.exposure = exposure;
   }
+  // V2.A.20 — UsdGeomCamera.projection. Default UsdGeomTokens value
+  // is `perspective`; `orthographic` flips the raygen primary-ray
+  // construction. Reads at the same time-code as the other camera
+  // intrinsics so an animated `projection` (rare but legal) tracks
+  // the requested frame.
+  if (const pxr::UsdAttribute projectionAttr = cameraPrim.GetProjectionAttr())
+  {
+    pxr::TfToken projection;
+    if (projectionAttr.Get(&projection, xformCache.GetTime())
+        && projection == pxr::UsdGeomTokens->orthographic)
+    {
+      desc.projectionMode = 1u;
+      Logging::Get().Info(log::APP,
+          "StageWalker: UsdGeomCamera " + prim.GetPath().GetString()
+              + " uses orthographic projection (V2.A.20 raygen path).");
+    }
+  }
   return desc;
 }
 

@@ -375,7 +375,8 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
                   std::string_view shaderRebuildDirOverride,
                   std::string_view loadMode,
                   std::string_view variantSelections,
-                  std::string_view renderPurpose) noexcept {
+                  std::string_view renderPurpose,
+                  bool compressTextures) noexcept {
   auto& log = Logging::Get();
 
   // ShaderMake rebuild latch + state machine. Click handler in
@@ -530,7 +531,12 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
   // PyxisRenderer's ctor takes it by reference per §18.6 and
   // PathTracePass binds its TLAS + camera every frame.
   Profiler profiler{device};
-  GpuScene gpuScene{device, profiler, GpuSceneCreateDesc{}};
+  // V2.A.14 — opt-in BCn encoding for the viewer's texture decode
+  // path. Default off so viewer-mode renders byte-equal to the
+  // headless ones (golden contract).
+  GpuSceneCreateDesc viewerSceneDesc{};
+  viewerSceneDesc.compressTextures = compressTextures;
+  GpuScene gpuScene{device, profiler, viewerSceneDesc};
 
   // M4 ingest. Both adapters share the unified IngestUsd entry
   // point today (StageWalker covers both, satisfying §25.O.3 byte-

@@ -35,12 +35,23 @@ struct CameraDesc {
   // EMITTED radiance separately. 0.0 = ×1 = no adjustment.
   float exposure = 0.0f;
 
+  // V2.A.20 — projection mode. 0 = perspective (the v1 default;
+  // raygen builds rays from camera origin through clip-space NDC),
+  // 1 = orthographic (raygen treats clip-space xy as the per-pixel
+  // ray origin in view space + uses (0,0,-1) as the view-space ray
+  // direction). Mirrors UsdGeomCamera.projection. Consumes one of
+  // the `_reserved` floats by reinterpreting it as uint32 — float
+  // + uint32 share alignment (4 bytes) so the layout stays
+  // byte-stable per §22.3.
+  uint32_t projectionMode = 0u;  // 0 = perspective, 1 = orthographic
+
   // §22.3 reserved padding. §43.2 reserves shutterOpen / shutterClose
   // for motion blur (M11), §43.3 reserves room for DoF tuning. Naming
   // is §22.3 / §43 convention; see OpenPBRMaterialDesc.h for the
-  // §30.2 NOLINT rationale. One slot consumed by `exposure` above.
+  // §30.2 NOLINT rationale. Two slots consumed by `exposure` +
+  // `projectionMode`; six remain.
   // NOLINTNEXTLINE(readability-identifier-naming)
-  float _reserved[7] = {};
+  float _reserved[6] = {};
 };
 
 }  // namespace pyxis

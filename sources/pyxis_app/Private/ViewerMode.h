@@ -42,6 +42,7 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
                   std::string_view shaderRebuildDirOverride = {},
                   std::string_view loadMode = {},
                   std::string_view variantSelections = {},
-                  std::string_view renderPurpose = {}) noexcept;
+                  std::string_view renderPurpose = {},
+                  bool compressTextures = false) noexcept;
 
 }  // namespace pyxis::app

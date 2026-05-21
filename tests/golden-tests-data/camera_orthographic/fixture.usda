@@ -1,0 +1,46 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden camera_orthographic — V2.A.20. UsdGeomCamera.projection=orthographic exercises the raygen primary-ray branch: per-pixel ray ORIGIN inverse-projected onto the near plane + uniform (0,0,-1) direction in view space. Two cubes at different z positions render at identical projected size (the perspective foreshortening collapse is the visual signature of the ortho path). Companion to the OrthographicCameraV2A20 unit test."
+)
+
+def Xform "World"
+{
+    def Cube "CubeNear"
+    {
+        double size = 0.8
+        color3f[] primvars:displayColor = [(0.85, 0.45, 0.35)]
+        double3 xformOp:translate = (-0.7, 0.7, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Cube "CubeFar"
+    {
+        double size = 0.8
+        color3f[] primvars:displayColor = [(0.35, 0.55, 0.85)]
+        # Pushed back along -Z; in perspective this would shrink, in
+        # orthographic it stays the same projected size.
+        double3 xformOp:translate = (0.7, -0.7, -4)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Camera "Camera"
+    {
+        token projection = "orthographic"
+        # UsdGeomCamera ortho aperture is in tenths-of-scene-units
+        # (USD's documented convention). 30 → ortho frustum spans 3 m.
+        float horizontalAperture = 30.0
+        float verticalAperture = 30.0
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 0, 5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.0
+    }
+}
