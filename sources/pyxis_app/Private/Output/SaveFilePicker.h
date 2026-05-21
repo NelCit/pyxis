@@ -32,4 +32,20 @@ struct SaveFilePickerSpec {
 // empty on cancel / error / non-Windows.
 [[nodiscard]] std::string SaveFilePickerDialog(const SaveFilePickerSpec& spec) noexcept;
 
+// ---- Open-file picker (M22 ImGui Material editor) ----------------------
+// Mirror of SaveFilePickerSpec for read-side flows (material-editor
+// texture browse, future "Load reference image" buttons). Same single
+// filter pair as the save side; multi-extension filters splice the
+// globs with a semicolon (Windows convention) inside `filterGlob`,
+// e.g. L"*.png;*.jpg;*.exr".
+struct OpenFilePickerSpec {
+  std::wstring_view title;
+  std::wstring_view filterLabel;
+  std::wstring_view filterGlob;
+};
+
+// Modal open-file picker. Returns the UTF-8 path the user picked,
+// empty on cancel / error / non-Windows.
+[[nodiscard]] std::string OpenFilePickerDialog(const OpenFilePickerSpec& spec) noexcept;
+
 }  // namespace pyxis::app

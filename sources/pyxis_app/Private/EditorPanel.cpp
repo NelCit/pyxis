@@ -693,22 +693,186 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
         OpenPBRMaterialDesc desc = scene.GetMaterialDescAt(_editorMaterialIndex);
         bool matEdited = false;
 
-        float baseColor[3] = {static_cast<float>(desc.baseColor.x),
-                              static_cast<float>(desc.baseColor.y),
-                              static_cast<float>(desc.baseColor.z)};
-        if (ImGui::ColorEdit3("Base color", baseColor, ImGuiColorEditFlags_NoInputs))
+        // Surface the material's source classification + sourcePrim so
+        // the operator knows whether they're editing a UsdPreviewSurface
+        // / MaterialX / MDL / RenderMan-fallback / grey-default
+        // material before they start sliding values.
+        const char* sourceLabel = "Unknown";
+        switch (desc.source)
         {
-          desc.baseColor = hlslpp::float3{baseColor[0], baseColor[1], baseColor[2]};
-          matEdited = true;
+          case OpenPBRMaterialDesc::Source::UsdPreviewSurface: sourceLabel = "UsdPreviewSurface"; break;
+          case OpenPBRMaterialDesc::Source::MaterialX:        sourceLabel = "MaterialX";         break;
+          case OpenPBRMaterialDesc::Source::Mdl:              sourceLabel = "MDL";               break;
+          case OpenPBRMaterialDesc::Source::RenderManFallback:sourceLabel = "RenderMan (fallback)"; break;
+          case OpenPBRMaterialDesc::Source::Default:          sourceLabel = "Default (fallback-grey)"; break;
         }
-        if (ImGui::SliderFloat("Roughness", &desc.roughness, 0.0f, 1.0f, "%.3f"))
-          matEdited = true;
-        if (ImGui::SliderFloat("Metalness", &desc.metalness, 0.0f, 1.0f, "%.3f"))
-          matEdited = true;
-        if (ImGui::SliderFloat("Opacity",   &desc.opacity,   0.0f, 1.0f, "%.3f"))
-          matEdited = true;
-        if (ImGui::SliderFloat("Specular IoR", &desc.specularIor, 1.0f, 3.0f, "%.3f"))
-          matEdited = true;
+        ImGui::TextDisabled("Source:  %s", sourceLabel);
+        if (!desc.sourcePrim.empty())
+        {
+          ImGui::TextDisabled("SdfPath: %.*s",
+                              static_cast<int>(desc.sourcePrim.size()),
+                              desc.sourcePrim.data());
+        }
+        ImGui::Separator();
+
+        // M22 ImGui material editor — full scalar/color surface of the
+        // public OpenPBRMaterialDesc POD. Per-block grouping mirrors
+        // the OpenPBR spec sections so artists / tech-artists who know
+        // OpenPBR can navigate by feel. Texture rows live below.
+        if (ImGui::TreeNodeEx("Base layer", ImGuiTreeNodeFlags_DefaultOpen))
+        {
+          float baseColor[3] = {static_cast<float>(desc.baseColor.x),
+                                static_cast<float>(desc.baseColor.y),
+                                static_cast<float>(desc.baseColor.z)};
+          if (ImGui::ColorEdit3("Base color", baseColor, ImGuiColorEditFlags_NoInputs))
+          {
+            desc.baseColor = hlslpp::float3{baseColor[0], baseColor[1], baseColor[2]};
+            matEdited = true;
+          }
+          if (ImGui::SliderFloat("Base weight", &desc.baseWeight, 0.0f, 1.0f, "%.3f"))
+            matEdited = true;
+          if (ImGui::SliderFloat("Metalness",   &desc.metalness,  0.0f, 1.0f, "%.3f"))
+            matEdited = true;
+          if (ImGui::SliderFloat("Roughness",   &desc.roughness,  0.0f, 1.0f, "%.3f"))
+            matEdited = true;
+          if (ImGui::SliderFloat("Opacity",     &desc.opacity,    0.0f, 1.0f, "%.3f"))
+            matEdited = true;
+          ImGui::TreePop();
+        }
+
+        if (ImGui::TreeNode("Specular"))
+        {
+          if (ImGui::SliderFloat("Specular weight", &desc.specularWeight, 0.0f, 1.0f, "%.3f"))
+            matEdited = true;
+          if (ImGui::SliderFloat("Specular IoR",    &desc.specularIor,    1.0f, 3.0f, "%.3f"))
+            matEdited = true;
+          ImGui::TreePop();
+        }
+
+        if (ImGui::TreeNode("Coat"))
+        {
+          if (ImGui::SliderFloat("Coat weight",    &desc.coatWeight,    0.0f, 1.0f, "%.3f"))
+            matEdited = true;
+          if (ImGui::SliderFloat("Coat roughness", &desc.coatRoughness, 0.0f, 1.0f, "%.3f"))
+            matEdited = true;
+          ImGui::TreePop();
+        }
+
+        if (ImGui::TreeNode("Transmission"))
+        {
+          if (ImGui::SliderFloat("Transmission weight", &desc.transmissionWeight,
+                                  0.0f, 1.0f, "%.3f"))
+            matEdited = true;
+          ImGui::TreePop();
+        }
+
+        if (ImGui::TreeNode("Emission"))
+        {
+          float emissionColor[3] = {static_cast<float>(desc.emissionColor.x),
+                                    static_cast<float>(desc.emissionColor.y),
+                                    static_cast<float>(desc.emissionColor.z)};
+          if (ImGui::ColorEdit3("Emission color", emissionColor,
+                                 ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_HDR))
+          {
+            desc.emissionColor = hlslpp::float3{emissionColor[0], emissionColor[1],
+                                                 emissionColor[2]};
+            matEdited = true;
+          }
+          if (ImGui::DragFloat("Emission luminance", &desc.emissionLuminance, 0.5f,
+                                0.0f, 100000.0f, "%.2f"))
+            matEdited = true;
+          ImGui::TreePop();
+        }
+
+        // Texture rows — one per OpenPBRMaterialDesc texture slot. The
+        // editor shows the bound resolvedPath (via GpuScene::
+        // GetTexturePath), with [Browse...] to swap in a different
+        // file and [Clear] to revert to the scalar value above. The
+        // mapping `OpenPBRMaterialDesc::*Map` ↔ `TextureKey::Role` is
+        // baked in here because TextureKey is the renderer's contract;
+        // the editor knows which slot maps to which role.
+        if (ImGui::TreeNode("Textures"))
+        {
+          struct TextureSlotSpec {
+            const char*       label;
+            TextureHandle*    handlePtr;
+            TextureKey::Role  role;
+            TextureKey::Color colorspace;
+          };
+          const TextureSlotSpec textureSlots[] = {
+              {"Base color",         &desc.baseColorMap,       TextureKey::Role::BaseColor,         TextureKey::Color::SRgb},
+              {"Metallic",           &desc.metallicMap,        TextureKey::Role::RoughnessMetallic, TextureKey::Color::Linear},
+              {"Roughness",          &desc.roughnessMap,       TextureKey::Role::RoughnessMetallic, TextureKey::Color::Linear},
+              {"Normal map",         &desc.normalMap,          TextureKey::Role::NormalMap,         TextureKey::Color::Linear},
+              {"Emission",           &desc.emissionMap,        TextureKey::Role::Emission,          TextureKey::Color::SRgb},
+              {"Opacity",            &desc.opacityMap,         TextureKey::Role::Opacity,           TextureKey::Color::Linear},
+              {"Transmission",      &desc.transmissionMap,    TextureKey::Role::BaseColor,         TextureKey::Color::Linear},
+              {"Coat roughness",     &desc.coatRoughnessMap,   TextureKey::Role::RoughnessMetallic, TextureKey::Color::Linear},
+          };
+          for (const TextureSlotSpec& slot : textureSlots)
+          {
+            ImGui::PushID(slot.label);
+            ImGui::TextUnformatted(slot.label);
+            ImGui::SameLine(140.0f);
+            const std::string_view boundPath = scene.GetTexturePath(*slot.handlePtr);
+            if (boundPath.empty())
+            {
+              ImGui::TextDisabled("(unbound)");
+            }
+            else
+            {
+              // Show the leaf filename — full paths trash the layout
+              // and the operator usually knows the directory.
+              const auto lastSlash = boundPath.find_last_of("/\\");
+              const std::string_view leaf =
+                  (lastSlash == std::string_view::npos)
+                      ? boundPath
+                      : boundPath.substr(lastSlash + 1);
+              ImGui::TextUnformatted(leaf.data(),
+                                      leaf.data() + leaf.size());
+              if (ImGui::IsItemHovered())
+              {
+                ImGui::SetTooltip("%.*s", static_cast<int>(boundPath.size()),
+                                   boundPath.data());
+              }
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Browse..."))
+            {
+              OpenFilePickerSpec spec{};
+              spec.title       = L"Pick texture";
+              spec.filterLabel = L"Images (*.png;*.jpg;*.jpeg;*.exr;*.tga;*.dds)";
+              spec.filterGlob  = L"*.png;*.jpg;*.jpeg;*.exr;*.tga;*.dds";
+              const std::string picked = OpenFilePickerDialog(spec);
+              if (!picked.empty())
+              {
+                TextureKey key;
+                key.resolvedPath = picked;  // borrowed; AcquireTexture copies internally
+                key.role         = slot.role;
+                key.colorspace   = slot.colorspace;
+                const TextureHandle newHandle = scene.AcquireTexture(key);
+                if (newHandle != TextureHandle::Invalid)
+                {
+                  *slot.handlePtr = newHandle;
+                  matEdited = true;
+                }
+              }
+            }
+            ImGui::SameLine();
+            // Only show Clear when something is bound — avoids visual
+            // noise on unbound slots.
+            if (*slot.handlePtr != TextureHandle::Invalid)
+            {
+              if (ImGui::SmallButton("Clear"))
+              {
+                *slot.handlePtr = TextureHandle::Invalid;
+                matEdited = true;
+              }
+            }
+            ImGui::PopID();
+          }
+          ImGui::TreePop();
+        }
 
         if (matEdited && handle != MaterialHandle::Invalid)
           scene.UpdateMaterial(handle, desc);
