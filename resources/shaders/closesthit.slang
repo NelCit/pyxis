@@ -402,7 +402,17 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
         }
         float3 lightDir;
         float falloff = 1.0;  // Distant defaults to no attenuation
-        if (L.kind == LIGHT_KIND_RECT) {
+        if (L.kind == LIGHT_KIND_DISTANT) {
+            // Parallel rays from an infinitely-far source — no falloff.
+            lightDir = -float3(L.dirX, L.dirY, L.dirZ);
+        } else {
+            // PR5 — every position-based kind (Rect, Cylinder, Geometry,
+            // Portal + future Disk / Sphere when added) shares this path:
+            // point at `L.position` with 1/r² falloff. Per-shape area
+            // sampling is M7-full NEE; v2.0 treats area lights as a
+            // point at their centroid (for GeometryLight this is the
+            // emitter's AABB centroid resolved at ingest — see
+            // EmitLight's V2.A.19 / PR5 branch).
             const float3 toLight = float3(L.posX, L.posY, L.posZ) - hitWorld;
             const float  distSq  = dot(toLight, toLight);
             // Soft minimum on r² avoids the 1/0 singularity for
@@ -410,9 +420,6 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
             // that, the falloff caps at 100×.
             falloff  = 1.0 / max(distSq, 0.01);
             lightDir = toLight * rsqrt(max(distSq, 1e-12));
-        } else {
-            // Distant: no falloff
-            lightDir = -float3(L.dirX, L.dirY, L.dirZ);
         }
         const float NdotL = max(0.0, dot(nWorld, lightDir));
 
@@ -428,18 +435,26 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
         if (L.shapingConeCosOuter > 1e-4) {
             float3 coneAxis;
             if (L.kind == LIGHT_KIND_RECT) {
+                // Rects "face" their plane normal = cross(U, V).
                 const float3 axisU = float3(L.axisUx, L.axisUy, L.axisUz);
                 const float3 axisV = float3(L.axisVx, L.axisVy, L.axisVz);
                 coneAxis = normalize(cross(axisU, axisV));
             } else {
+                // Distant + the other position-based kinds (Cylinder,
+                // Geometry, Portal) all carry their direction in L.dir.
+                // GeometryLight's dir stays at the LightDesc default
+                // (0,-1,0) so the cone gate is effectively a no-op
+                // there — fine, since v2.0 GeometryLight doesn't
+                // author UsdLuxShapingAPI on the typical fixture.
                 coneAxis = float3(L.dirX, L.dirY, L.dirZ);
             }
-            // Vector FROM light TO surface (Distant has implicit
-            // direction = +L.dir; Rect uses -toLight). Compare to
-            // cone axis via cosine.
-            const float3 lightToSurface = (L.kind == LIGHT_KIND_RECT)
-                                              ? -lightDir
-                                              : float3(L.dirX, L.dirY, L.dirZ);
+            // Vector FROM light TO surface. Distant treats L.dir as the
+            // axis it's projecting along; the position-based kinds
+            // derive it from -lightDir (lightDir points FROM surface TO
+            // light, so its negation points FROM light TO surface).
+            const float3 lightToSurface = (L.kind == LIGHT_KIND_DISTANT)
+                                              ? float3(L.dirX, L.dirY, L.dirZ)
+                                              : -lightDir;
             const float cosAngle = dot(normalize(lightToSurface), coneAxis);
             coneAttenuation = smoothstep(L.shapingConeCosOuter,
                                          L.shapingConeCosInner,
@@ -471,7 +486,11 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
         float visibility = 1.0;
         if (NdotL > 0.0 && coneAttenuation > 0.0) {
             float lightDist = 1e30;
-            if (L.kind == LIGHT_KIND_RECT) {
+            // Position-based kinds cap the shadow ray at the distance
+            // to the light's centre. Distant lights stay at 1e30
+            // (effectively infinite). Symmetric with the falloff
+            // branch above — both gates fire on `kind != DISTANT`.
+            if (L.kind != LIGHT_KIND_DISTANT) {
                 const float3 toLight = float3(L.posX, L.posY, L.posZ) - hitWorld;
                 lightDist = length(toLight);
             }

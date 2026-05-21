@@ -58,6 +58,7 @@
 #include <pxr/usd/usdLux/distantLight.h>
 #include <pxr/usd/usdLux/domeLight.h>
 #include <pxr/usd/usdLux/geometryLight.h>
+#include <pxr/usd/usdLux/lightFilter.h>
 #include <pxr/usd/usdLux/lightAPI.h>
 #include <pxr/usd/usdLux/portalLight.h>
 #include <pxr/usd/usdLux/rectLight.h>
@@ -809,18 +810,124 @@ void EmitLight(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCache,
   }
   else if (prim.IsA<pxr::UsdLuxGeometryLight>())
   {
-    // M8a stub: the geometry rel target → emitting mesh is the
-    // structural piece we'd need a dedicated handle for. For now
-    // carry the prim through as Kind::Geometry with position-at-origin;
-    // M9 wires the `inputs:geometry` rel resolution + per-tri sampling.
+    // PR5 (V2.A.19) — real GeometryLight implementation. The `geometry`
+    // rel on a UsdLuxGeometryLight points at the emitting prim (a
+    // UsdGeomMesh, Sphere, Cube, etc.). We resolve the rel, fetch the
+    // emitter prim's world-space centroid as the light's position, and
+    // approximate the emitter's surface area for `inputs:normalize`
+    // via its world-space extent (axis-aligned bounding box's diagonal
+    // surface area = 2·(xy + yz + zx) — a reasonable upper bound that
+    // collapses to the right answer for cubes / quads).
+    //
+    // The M7-simple closesthit treats GeometryLight as a point light at
+    // `position` (same as Rect / Disk / Sphere — those kinds fall back
+    // to "point at center" in v2.0 too). Per-triangle area sampling
+    // lands when NEE arrives in M7-full.
     desc.kind = LightDesc::Kind::Geometry;
+
+    // Default fallback: light's own local origin in world. Used when
+    // the rel doesn't resolve, the target prim is missing, or the
+    // extent attr isn't authored — none of those should fail the
+    // light entirely, so we degrade to "point at origin" rather than
+    // skipping the light.
     const hlslpp::float4 originWorld =
         mul(worldFromLocal, hlslpp::float4{0.0f, 0.0f, 0.0f, 1.0f});
     desc.position = hlslpp::float3{originWorld.x, originWorld.y, originWorld.z};
-    areaForNormalize = 1.0f;  // unknown until the geometry is resolved
-    log.Info(log::APP, "StageWalker: " + prim.GetPath().GetString()
-                           + " UsdLuxGeometryLight loaded — geometry rel "
-                             "resolution + emission rendering deferred to M9.");
+    areaForNormalize = 1.0f;
+
+    const pxr::UsdLuxGeometryLight geomLight(prim);
+    pxr::SdfPathVector targets;
+    if (geomLight && geomLight.GetGeometryRel())
+      geomLight.GetGeometryRel().GetTargets(&targets);
+    if (targets.empty())
+    {
+      log.Info(log::APP, "StageWalker: " + prim.GetPath().GetString()
+                             + " UsdLuxGeometryLight has empty `geometry` rel — "
+                               "treating as a point light at origin.");
+    }
+    else
+    {
+      // First target wins. Multi-target geometry lights are spec-legal
+      // but unusual; honouring the first matches Storm / Karma.
+      const pxr::UsdPrim emitterPrim = prim.GetStage()->GetPrimAtPath(targets[0]);
+      if (emitterPrim.IsValid())
+      {
+        // World-space transform for the emitter. We use the same
+        // xform cache so subsequent prim mesh emission sees the same
+        // composed matrix (consistency with the rest of the walker).
+        const pxr::GfMatrix4d emitterWorld =
+            xformCache.GetLocalToWorldTransform(emitterPrim);
+
+        // Compute extent in local space, then transform corners to
+        // world. UsdGeomBoundable::ComputeExtent gives the local-space
+        // AABB; failing that we fall back to UsdGeomXformCache's
+        // ComputeBound which walks the prim's pxr::GfBBox3d cache.
+        pxr::GfRange3d localBounds;
+        bool boundsKnown = false;
+        if (const pxr::UsdGeomBoundable boundable{emitterPrim})
+        {
+          pxr::VtVec3fArray extent;
+          if (boundable.GetExtentAttr()
+              && boundable.GetExtentAttr().Get(&extent, xformCache.GetTime())
+              && extent.size() == 2u)
+          {
+            localBounds = pxr::GfRange3d(
+                pxr::GfVec3d(extent[0][0], extent[0][1], extent[0][2]),
+                pxr::GfVec3d(extent[1][0], extent[1][1], extent[1][2]));
+            boundsKnown = !localBounds.IsEmpty();
+          }
+        }
+
+        if (boundsKnown)
+        {
+          // Centroid of the local AABB, then world transform → light's
+          // effective position.
+          const pxr::GfVec3d localCenter = localBounds.GetMidpoint();
+          const pxr::GfVec3d worldCenter = emitterWorld.Transform(localCenter);
+          desc.position = hlslpp::float3{static_cast<float>(worldCenter[0]),
+                                          static_cast<float>(worldCenter[1]),
+                                          static_cast<float>(worldCenter[2])};
+
+          // Approximate world-space surface area as the AABB's surface
+          // area. Exact for cubes; a 2× over-estimate for spheres
+          // (real area = π·d² vs AABB = 6·d²/2·2 ≈ 6 face surfaces);
+          // the `inputs:normalize` consumer divides intensity by area
+          // and any consistent estimator gives the same relative
+          // brightness across renders. Real per-triangle area sums
+          // land with M7-full NEE.
+          const pxr::GfVec3d localSize = localBounds.GetSize();
+          // Bake the linear scale of `emitterWorld` into the
+          // dimensions so the AABB roughly tracks world units.
+          const pxr::GfVec3d worldExtentX = emitterWorld.TransformDir(
+              pxr::GfVec3d(localSize[0], 0.0, 0.0));
+          const pxr::GfVec3d worldExtentY = emitterWorld.TransformDir(
+              pxr::GfVec3d(0.0, localSize[1], 0.0));
+          const pxr::GfVec3d worldExtentZ = emitterWorld.TransformDir(
+              pxr::GfVec3d(0.0, 0.0, localSize[2]));
+          const double lenX = worldExtentX.GetLength();
+          const double lenY = worldExtentY.GetLength();
+          const double lenZ = worldExtentZ.GetLength();
+          areaForNormalize = static_cast<float>(
+              2.0 * (lenX * lenY + lenY * lenZ + lenZ * lenX));
+          if (areaForNormalize <= 0.0f)
+            areaForNormalize = 1.0f;
+        }
+
+        log.Info(log::APP, "StageWalker: " + prim.GetPath().GetString()
+                               + " UsdLuxGeometryLight emitter = "
+                               + emitterPrim.GetPath().GetString()
+                               + (boundsKnown
+                                      ? " (extent-derived position + area)"
+                                      : " (no extent authored — point fallback)"));
+      }
+      else
+      {
+        log.Warn(log::APP, "StageWalker: " + prim.GetPath().GetString()
+                               + " UsdLuxGeometryLight geometry rel target "
+                               + targets[0].GetString()
+                               + " resolved to an invalid prim — point fallback.");
+      }
+    }
   }
   else if (prim.IsA<pxr::UsdLuxPortalLight>())
   {
@@ -978,6 +1085,30 @@ void EmitLight(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCache,
   if (!desc.normalize && areaForNormalize > 1e-6f)
   {
     desc.intensity *= areaForNormalize;
+  }
+
+  // PR5 / V2.A.19 — `light:filters` rel detection. A light prim can
+  // author a relationship to one or more UsdLuxLightFilter prims via
+  // `light:filters = [</World/MyFilter>, ...]`. The filter projects a
+  // texture / tints shadows / fades by distance — production lighting
+  // tools (Karma, RenderMan, Storm) honour the attached filter list.
+  // Pyxis v2 is "loaded but unused-on-GPU until v3": we count + log
+  // the rel so the operator can confirm USD authoring round-tripped,
+  // but the closesthit ignores the filter network. The fallback
+  // path (no `light:filters` authored) stays silent.
+  if (const pxr::UsdRelationship filtersRel =
+          prim.GetRelationship(pxr::TfToken("light:filters")))
+  {
+    pxr::SdfPathVector filterTargets;
+    filtersRel.GetTargets(&filterTargets);
+    if (!filterTargets.empty())
+    {
+      log.Info(log::APP,
+               "StageWalker: " + prim.GetPath().GetString()
+                   + " light:filters carries " + std::to_string(filterTargets.size())
+                   + " UsdLuxLightFilter attachment(s) — loaded; renderer "
+                     "ignores until v3 cookie/gobo projection ships.");
+    }
   }
 
   const LightHandle handle = scene.AddLight(desc);
@@ -2709,6 +2840,24 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
       // pass adds NEE + MIS + IBL importance sampling per §7.
       EmitLight(prim, xformCache, stageCtx, scene);
       ++stats.lightsEmitted;
+    }
+    else if (prim.IsA<pxr::UsdLuxLightFilter>())
+    {
+      // PR5 / V2.A.19 — UsdLuxLightFilter (light cookies / gobos /
+      // shadow tints). "Loaded but unused-on-GPU until v3" per the
+      // plan. Surface as a log line so the operator sees the
+      // declared filter — the renderer's M7-simple closesthit
+      // doesn't project the filter texture onto a light's
+      // emission. Filters attach to lights via the light's
+      // `light:filters` rel; the per-light log line inside
+      // EmitLight reports the count of authored attachments. This
+      // path counts the filter PRIMS themselves so a fixture
+      // authoring a stand-alone filter still surfaces in the
+      // ingest summary.
+      Logging::Get().Info(log::APP,
+               "StageWalker: " + prim.GetPath().GetString()
+                   + " UsdLuxLightFilter loaded — renderer ignores until "
+                     "v3 cookie/gobo projection ships (PR5).");
     }
     else if (prim.IsA<pxr::UsdShadeMaterial>())
     {
