@@ -236,12 +236,19 @@ inline shaderinterop::LightGpu PackLightGpu(const LightDesc& desc,
   gpu.colorR = static_cast<float>(desc.color.x);
   gpu.colorG = static_cast<float>(desc.color.y);
   gpu.colorB = static_cast<float>(desc.color.z);
-  // Force-disable kinds the closesthit doesn't render. Stays in
-  // lockstep with the LIGHT_KIND_* mirror in ShaderInterop.slang
-  // (Distant=0, Dome=1, Rect=2).
+  // PR5 — position-based kinds now all route through the same
+  // closesthit code path: point at `L.position` with 1/r² falloff
+  // (proper per-shape area sampling lands with M7-full NEE).
+  // Stays in lockstep with the LIGHT_KIND_* mirror in
+  // ShaderInterop.slang. Only the Sphere / Disk kinds remain
+  // unsupported on the GPU side (they still pack their Kind so
+  // a future closesthit upgrade can drop the gate).
   const bool kindIsRenderable = (desc.kind == LightDesc::Kind::Distant
                                  || desc.kind == LightDesc::Kind::Dome
-                                 || desc.kind == LightDesc::Kind::Rect);
+                                 || desc.kind == LightDesc::Kind::Rect
+                                 || desc.kind == LightDesc::Kind::Cylinder
+                                 || desc.kind == LightDesc::Kind::Geometry
+                                 || desc.kind == LightDesc::Kind::Portal);
   gpu.intensity = kindIsRenderable ? desc.intensity : 0.0f;
   // Normalise direction defensively — USD's UsdLuxDistantLight
   // authoring conventions sometimes ship un-normalised vectors;

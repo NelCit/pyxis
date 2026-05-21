@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden skel_blendshapes — V2.A.4 / PR5: UsdSkelBlendShape deformation. Rendered at frame 100 (blendShapeWeights = 1.0) — top of the tall box should be squashed downward by 0.8 along Y. Pins the BlendShapeQuery pipeline (anim-weight remap → sub-shape weights → ComputeDeformedPoints) running BEFORE the joint skinning.", "frame": 100 }

@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden light_filter_attached — V2.A.19 / PR5: DistantLight with a UsdLuxLightFilter rel attachment. Filter is loaded but ignored on GPU per the plan; render should be byte-identical to the same light without the rel." }

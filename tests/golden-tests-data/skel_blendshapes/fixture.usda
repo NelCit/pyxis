@@ -1,0 +1,109 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    startTimeCode = 0
+    endTimeCode = 100
+    timeCodesPerSecond = 24
+    doc = "Pyxis golden skel_blendshapes — V2.A.4 / PR5: UsdSkelBlendShape deformation. Skel rig with a rest-pose tall box; one BlendShape called `Squash` offsets the top 4 vertices toward the centre, and the SkelAnimation drives blendShapeWeights from 0 (frame 0) to 1 (frame 100). Rendered at frame 100 (full squash) — top of the box should be visibly pinched compared to the rest pose. Catches regressions where blend-shape deltas don't apply or apply with the wrong weight."
+)
+def Xform "World"
+{
+    def SkelRoot "Skel"
+    {
+        def Skeleton "Skeleton" (
+            prepend apiSchemas = ["SkelBindingAPI"]
+        )
+        {
+            uniform token[] joints = ["root"]
+            uniform matrix4d[] bindTransforms = [
+                ((1,0,0,0), (0,1,0,0), (0,0,1,0), (0,0,0,1))
+            ]
+            uniform matrix4d[] restTransforms = [
+                ((1,0,0,0), (0,1,0,0), (0,0,1,0), (0,0,0,1))
+            ]
+            rel skel:animationSource = </World/Skel/Anim>
+        }
+
+        def SkelAnimation "Anim"
+        {
+            uniform token[] joints = ["root"]
+            float3[] translations = [(0, 0, 0)]
+            quatf[]  rotations    = [(1, 0, 0, 0)]
+            half3[]  scales       = [(1, 1, 1)]
+
+            # PR5: animated blend-shape weight from 0 (frame 0) to 1 (frame 100).
+            uniform token[] blendShapes = ["Squash"]
+            float[] blendShapeWeights.timeSamples = {
+                0:   [0.0],
+                100: [1.0],
+            }
+        }
+
+        def BlendShape "Squash"
+        {
+            # Pull the 4 top verts (indices 4,5,6,7) toward the centre
+            # vertically — they slide down by 0.8 when weight=1.
+            uniform vector3f[] offsets = [
+                (0, -0.8, 0), (0, -0.8, 0), (0, -0.8, 0), (0, -0.8, 0)
+            ]
+            uniform int[] pointIndices = [4, 5, 6, 7]
+        }
+
+        def Mesh "TallBox" (
+            prepend apiSchemas = ["SkelBindingAPI"]
+        )
+        {
+            uniform token subdivisionScheme = "none"
+            int[] faceVertexCounts = [3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3]
+            int[] faceVertexIndices = [
+                0, 1, 2,  0, 2, 3,
+                4, 6, 5,  4, 7, 6,
+                0, 4, 5,  0, 5, 1,
+                3, 2, 6,  3, 6, 7,
+                0, 3, 7,  0, 7, 4,
+                1, 5, 6,  1, 6, 2,
+            ]
+            point3f[] points = [
+                (-0.3, 0,   0.3), ( 0.3, 0,   0.3),
+                ( 0.3, 0,  -0.3), (-0.3, 0,  -0.3),
+                (-0.3, 2,   0.3), ( 0.3, 2,   0.3),
+                ( 0.3, 2,  -0.3), (-0.3, 2,  -0.3),
+            ]
+            color3f[] primvars:displayColor = [(0.5, 0.7, 0.9)]
+
+            # All verts weighted to the single root joint (rigid skeleton).
+            int[] primvars:skel:jointIndices = [0, 0, 0, 0, 0, 0, 0, 0] (
+                elementSize = 1
+                interpolation = "vertex"
+            )
+            float[] primvars:skel:jointWeights = [1, 1, 1, 1, 1, 1, 1, 1] (
+                elementSize = 1
+                interpolation = "vertex"
+            )
+
+            # PR5: bind the BlendShape to this mesh + name it.
+            uniform token[] skel:blendShapes = ["Squash"]
+            prepend rel skel:blendShapeTargets = [</World/Skel/Squash>]
+
+            rel skel:skeleton = </World/Skel/Skeleton>
+        }
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 1.0, 5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.2
+    }
+}

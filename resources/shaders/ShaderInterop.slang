@@ -364,10 +364,17 @@ struct LightGpu {
 };
 
 // Light kind enum mirroring pyxis::LightDesc::Kind. Closesthit
-// branches on this for the M7-simple per-kind weighting.
-static const uint LIGHT_KIND_DISTANT = 0;
-static const uint LIGHT_KIND_DOME    = 1;
-static const uint LIGHT_KIND_RECT    = 2;
+// branches on this for the M7-simple per-kind weighting. The
+// position-based kinds (Rect / Cylinder / Geometry / Portal +
+// any future area light) all share the same closesthit path:
+// "point light at L.position with 1/r² falloff." Distant uses
+// parallel rays; Dome contributes uniform ambient.
+static const uint LIGHT_KIND_DISTANT  = 0;
+static const uint LIGHT_KIND_DOME     = 1;
+static const uint LIGHT_KIND_RECT     = 2;
+static const uint LIGHT_KIND_CYLINDER = 3;  // §22 MINOR-additive — UsdLuxCylinderLight
+static const uint LIGHT_KIND_GEOMETRY = 4;  // §22 MINOR-additive — UsdLuxGeometryLight
+static const uint LIGHT_KIND_PORTAL   = 5;  // §22 MINOR-additive — UsdLuxPortalLight
 
 // MaterialFlag bitmask mirror — sources/pyxis_renderer/Private/Materials/
 // MaterialFlag.h is the C++ source of truth; the closesthit reads

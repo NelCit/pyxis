@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden light_geometry_real — V2.A.19 / PR5: UsdLuxGeometryLight with `geometry` rel pointing at an emitting Mesh. Light position derives from the emitter's extent centroid (NOT the light prim's local origin)." }
