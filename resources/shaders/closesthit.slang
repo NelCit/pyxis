@@ -64,6 +64,19 @@
 
 #include "ShaderInterop.slang"
 
+// V2.B follow-up — bind the dome HDRI + its sampler so the closesthit
+// can evaluate dome irradiance per-surface (the "fast diffuse IBL"
+// trick: sample the HDRI at the surface normal direction with a high
+// mip bias to approximate the cosine-weighted hemisphere convolution).
+// Replaces the M7-simple Lambert-vs-world-up approximation that gave
+// vertical surfaces zero dome contribution. Bindings match the miss
+// shader's layout (binding 9 + sampler 33) — descriptor-set 0 is
+// pipeline-wide, so the existing PathTracePass binding fills both
+// shaders. Deterministic by construction (single texture sample, no
+// RNG, no Monte Carlo).
+[[vk::binding(9, 0)]]  Texture2D<float4>                   gDomeEnvMap;
+[[vk::binding(33, 0)]] SamplerState                        gDomeSampler;
+
 [[vk::binding(0, 0)]]  ConstantBuffer<CameraUniforms>      gCamera;
 // M9-fidelity shadow rays: closesthit re-uses the same TLAS the
 // raygen launched into to TraceRay shadow rays per direct light.
@@ -112,6 +125,9 @@ float4 SampleByConeRGBA(uint texIdx, float2 uv, float coneRadius) {
 }
 
 static const float PYXIS_PI_SAFE = 3.14159265358979323846;
+static const float PYXIS_PI       = 3.14159265358979323846;
+static const float PYXIS_TWO_PI   = 6.28318530717958647692;
+static const float PYXIS_INV_PI   = 0.31830988618379067154;
 
 // M9-fidelity Schlick Fresnel. F0 derives per-material:
 //   dielectrics: F0 = ((ior - 1) / (ior + 1))² — typically ~0.04
@@ -384,20 +400,54 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
         if (L.intensity <= 0.0) continue;  // sentinel / disabled
         const float3 Lcol = float3(L.colorR, L.colorG, L.colorB) * L.intensity;
         if (L.kind == LIGHT_KIND_DOME) {
-            // Dome ambient with NdotL against the world up axis.
-            // The proper hemispheric integral
-            //   ∫ radiance(ω) · max(0, dot(N, ω)) dω
-            // is what the M7-full alias-table importance sampler
-            // (§7) computes; the simplest approximation that
-            // responds to surface orientation is Lambert against the
-            // up axis: surfaces facing up get full dome, surfaces
-            // facing horizontally get zero, surfaces facing down get
-            // zero. Half-strength scale matches the M7-simple
-            // "ambient is half-bright" convention so a single dome
-            // doesn't out-bright a single sun.
-            const float NdotUp = max(0.0, dot(nWorld, float3(0.0, 1.0, 0.0)));
-            ambientSum += Lcol * 0.5 * NdotUp;
-            totalContribution += L.intensity * 0.5;
+            // V2.B follow-up — deterministic dome irradiance via the
+            // "fast diffuse IBL" trick: sample the dome HDRI at the
+            // surface normal direction with a high mip bias. Mip 6 of
+            // an 8K HDRI ≈ 128×64 — heavily box-filtered, approximates
+            // the cosine-weighted hemisphere convolution the proper
+            // irradiance integral
+            //   E(N) = ∫_hemisphere(N) radiance(ω) · max(0, N·ω) dω
+            // computes exactly. Trades exactness for one texture
+            // sample per pixel, no RNG, no noise — fits the
+            // deterministic-raytracer doctrine. Captures the dome
+            // HDRI's directional structure (warm at horizon, cool at
+            // zenith, etc.) so vertical surfaces get the side of the
+            // dome they're facing instead of the previous zero
+            // contribution from `dot(N, up)`.
+            //
+            // The 1/π factor is the Lambertian BRDF normalization:
+            // the final composition at line ~574 multiplies
+            // `ambientSum` by `baseColor`, which together form the
+            // diffuse BRDF `baseColor / π` × irradiance.
+            //
+            // Dome rotation: mirror the miss shader's inverse Y-rot
+            // so a tinted/rotated dome's structure lines up between
+            // the background pixels and the lit-surface samples.
+            float3 sampleDir = nWorld;
+            if (abs(L.domeRotationYRadians) > 1e-4) {
+                const float cosR = cos(-L.domeRotationYRadians);
+                const float sinR = sin(-L.domeRotationYRadians);
+                sampleDir = float3(cosR * nWorld.x + sinR * nWorld.z,
+                                    nWorld.y,
+                                    -sinR * nWorld.x + cosR * nWorld.z);
+            }
+            const float u = atan2(sampleDir.x, sampleDir.z) / PYXIS_TWO_PI + 0.5;
+            const float v = acos(clamp(sampleDir.y, -1.0, 1.0)) / PYXIS_PI;
+            // Mip-bias for the diffuse-IBL approximation. We'd like
+            // mip 6 (~128×64 for an 8K HDRI), but the 1×1 fallback
+            // texture only has mip 0 — sampling beyond the last mip
+            // level is undefined behavior in Vulkan (different bytes
+            // per frame, breaks the deterministic-raytracer contract).
+            // Query the texture's actual mip count and clamp.
+            float domeWidth;
+            float domeHeight;
+            float domeMipLevels;
+            gDomeEnvMap.GetDimensions(0, domeWidth, domeHeight, domeMipLevels);
+            const float targetMip = min(6.0, max(0.0, domeMipLevels - 1.0));
+            const float3 domeRadiance =
+                gDomeEnvMap.SampleLevel(gDomeSampler, float2(u, v), targetMip).rgb;
+            ambientSum += Lcol * domeRadiance * PYXIS_INV_PI;
+            totalContribution += L.intensity;
             continue;
         }
         float3 lightDir;
