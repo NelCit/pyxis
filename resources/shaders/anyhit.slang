@@ -30,14 +30,23 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
     const uint materialId = gInstanceMaterial[instanceId];
     const OpenPBRMaterialGPU mat = gMaterials[materialId];
 
-    // 0.999 threshold (rather than strict < 1.0) absorbs the
-    // float-precision noise from UsdPreviewSurface scalar reads.
-    const bool translucent = (mat.opacity < 0.999)
-        || ((mat.flags & MATERIAL_FLAG_TRANSMISSION_ENABLED) != 0u)
-        || ((mat.flags & MATERIAL_FLAG_ALPHA_TESTED) != 0u);
-    if (translucent) {
+    // V2.B follow-up — only IgnoreHit for true alpha cutout
+    // (`MATERIAL_FLAG_ALPHA_TESTED`). Translucent + transmission
+    // materials are accepted by the anyhit so the closesthit can
+    // shade them with proper alpha continuation (opacity < 1) and
+    // Snell refraction (TRANSMISSION_ENABLED). Without accepting,
+    // those materials were rendering as completely invisible — the
+    // ray would skip them and shade whatever opaque surface was
+    // behind, indistinguishable from a hole in the model.
+    //
+    // Side-effect: shadow rays now block on translucent geometry
+    // too. Physically light should pass through glass; we accept
+    // that minor wrong-ness here to keep the anyhit independent of
+    // ray context. The §V2.B refraction follow-up's separate ray
+    // path through glass will compensate visually.
+    if ((mat.flags & MATERIAL_FLAG_ALPHA_TESTED) != 0u) {
         IgnoreHit();
     }
-    // Opaque materials: return without action — the hit is accepted
-    // and the closesthit fires next on the closest accepted hit.
+    // All other hits — including opacity < 1 and transmission — are
+    // accepted; the closesthit decides how to shade them.
 }

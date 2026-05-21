@@ -446,7 +446,50 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
             const float targetMip = min(6.0, max(0.0, domeMipLevels - 1.0));
             const float3 domeRadiance =
                 gDomeEnvMap.SampleLevel(gDomeSampler, float2(u, v), targetMip).rgb;
-            ambientSum += Lcol * domeRadiance * PYXIS_INV_PI;
+
+            // Dome shadow + ambient occlusion. Shadow ray in the
+            // surface's "up" direction (the normal) with a short TMax
+            // (2 m world-space, matching the renderer's metres
+            // convention): nearby occluders darken the dome
+            // contribution; distant ceilings don't (so an indoor lobby
+            // doesn't go uniformly black under a high ceiling). The
+            // single ray gives a one-tap hemispheric occlusion estimate
+            // — darkens corners and surfaces tucked under furniture,
+            // standard "deterministic AO from sky" Whitted-style.
+            // Shadow_miss writes payload.color = 1 when the ray
+            // misses (sky visible); the pre-trace color stays 0 if it
+            // hits (occluded). All deterministic — no RNG, fixed
+            // direction per pixel.
+            float aoVisibility = 1.0;
+            {
+                RayDesc aoRay;
+                aoRay.Origin    = hitWorld + nWorld * 1e-3;
+                aoRay.Direction = nWorld;
+                aoRay.TMin      = 1e-3;
+                aoRay.TMax      = 2.0;  // 2 m AO range
+                HitInfo aoPayload;
+                aoPayload.color           = float3(0.0, 0.0, 0.0);
+                aoPayload.hitT            = -1.0;
+                aoPayload.normalWorld     = float3(0.0, 0.0, 0.0);
+                aoPayload.instanceId      = 0xFFFFFFFFu;
+                aoPayload.baseColor       = float3(0.0, 0.0, 0.0);
+                aoPayload.materialId      = 0xFFFFFFFFu;
+                aoPayload.worldHit        = float3(0.0, 0.0, 0.0);
+                aoPayload.elementId       = 0xFFFFFFFFu;
+                aoPayload.recursionDepth  = payload.recursionDepth + 1u;
+                TraceRay(gTlas,
+                         RAY_FLAG_SKIP_CLOSEST_HIT_SHADER
+                           | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH,
+                         0xFFu,
+                         /*RayContributionToHitGroupIndex*/ 0,
+                         /*MultiplierForGeometryContributionToHitGroupIndex*/ 0,
+                         /*MissShaderIndex*/ 1,
+                         aoRay,
+                         aoPayload);
+                aoVisibility = aoPayload.color.x;
+            }
+
+            ambientSum += Lcol * domeRadiance * PYXIS_INV_PI * aoVisibility;
             totalContribution += L.intensity;
             continue;
         }
@@ -694,7 +737,61 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
         lit = lit + reflPayload.color * reflWeight;
     }
 
-    payload.color = lit + emission;
+    float3 outColor = lit + emission;
+
+    // V2.B follow-up — translucent material rendering. When opacity
+    // is authored < 1, the surface's lit shading covers only `opacity`
+    // worth of the pixel; the remaining `(1 - opacity)` shows whatever
+    // is BEHIND. Trace a continuation ray straight through the surface
+    // (same world-space direction as the incoming ray) and alpha-blend
+    // with the surface result. Anyhit accepts opacity-translucent
+    // hits so the closesthit fires — without the alpha-blend step
+    // here those surfaces would render fully opaque despite the
+    // authored translucency.
+    //
+    // Recursion gate mirrors the mirror branch below: keep depth
+    // under the §M29 pipeline maxRecursionDepth=3 cap. Deep stacks
+    // of translucent surfaces past the cap silently truncate (the
+    // far translucent appears fully opaque to the parent ray) — a
+    // bounded but visually-meaningful approximation.
+    //
+    // 0.999 threshold matches the anyhit gate so float-precision
+    // noise on UsdPreviewSurface scalar reads doesn't pop opaque
+    // surfaces through this path.
+    if (mat.opacity < 0.999 && payload.recursionDepth + 1u < 3u)
+    {
+        HitInfo contPayload;
+        contPayload.color           = float3(0.0, 0.0, 0.0);
+        contPayload.hitT            = -1.0;
+        contPayload.normalWorld     = float3(0.0, 0.0, 0.0);
+        contPayload.instanceId      = 0xFFFFFFFFu;
+        contPayload.baseColor       = float3(0.0, 0.0, 0.0);
+        contPayload.materialId      = 0xFFFFFFFFu;
+        contPayload.worldHit        = float3(0.0, 0.0, 0.0);
+        contPayload.elementId       = 0xFFFFFFFFu;
+        contPayload.recursionDepth  = payload.recursionDepth + 1u;
+
+        RayDesc contRay;
+        // Push the origin slightly along the incoming ray direction
+        // (NOT along the normal — we want to advance through the
+        // surface, not bounce off it) to avoid self-intersection
+        // with the just-shaded triangle.
+        const float3 rayDir = WorldRayDirection();
+        contRay.Origin    = hitWorld + rayDir * 1e-3;
+        contRay.Direction = rayDir;
+        contRay.TMin      = 1e-3;
+        contRay.TMax      = 10000.0;
+        TraceRay(gTlas, RAY_FLAG_NONE, 0xFFu, 0, 0, 0, contRay, contPayload);
+
+        // Alpha blend: surface contribution × opacity + behind × (1 - opacity).
+        // Tint the behind-color by `baseColor` for materials that act
+        // as colored filters (stained glass, tinted plastic). When
+        // baseColor = (1,1,1) this is pure straight-through.
+        outColor = outColor * mat.opacity
+                 + contPayload.color * (1.0 - mat.opacity) * baseColor;
+    }
+
+    payload.color = outColor;
     payload.hitT  = RayTCurrent();
     // M7 follow-up — fields the raygen-side AOV inspector reads.
     // Normal is the world-space face normal we already computed for
