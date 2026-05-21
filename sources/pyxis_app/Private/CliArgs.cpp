@@ -297,6 +297,14 @@ CliArgs Parse(int argc, char** argv) noexcept {
         return out;
       }
     }
+    else if (Equals(arg, "--compress-textures"))
+    {
+      // V2.A.14 — boolean flag (no value). Sets GpuSceneCreateDesc::
+      // compressTextures on the HeadlessMode / ViewerMode path so
+      // the texture decoder routes stbi_load-decoded RGBA8 through
+      // stb_dxt before GPU upload.
+      out.compressTextures = true;
+    }
     else if (Equals(arg, "--render-product"))
     {
       // V2.A.27 — pick a specific UsdRenderProduct from a stage that
@@ -413,6 +421,14 @@ void PrintUsage() noexcept {
       "                          authors multiple. Matches the product prim's leaf name\n"
       "                          (case-sensitive). Empty / unmatched = first by SdfPath\n"
       "                          (V2.A.27).\n"
+      "  --compress-textures     Encode each stbi_load-decoded RGBA8 texture to its\n"
+      "                          role-appropriate BCn variant (BC1 for baseColor /\n"
+      "                          emission, BC5 for normal maps, BC4 for roughness /\n"
+      "                          metallic) before GPU upload. ~6× VRAM reduction for\n"
+      "                          lobby-scale scenes; texture quality drops slightly\n"
+      "                          (BC1's 4-color palette + 1-bit alpha). Off by default;\n"
+      "                          textures with non-4-aligned dims fall through to\n"
+      "                          uncompressed (V2.A.14).\n"
       "\n"
       "Viewer extras:\n"
       "  --screenshot <path>     Run viewer briefly; write a PNG of the backbuffer.\n"

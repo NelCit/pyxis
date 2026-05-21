@@ -1036,8 +1036,13 @@ void PathTracePass::Execute(nvrhi::ICommandList* commandList, const PassContext&
   cameraUniforms.pixelSpreadRadians = (outputHeight > 0.0f && tanHalfFov > 0.0f)
                                           ? (2.0f * tanHalfFov / outputHeight)
                                           : 0.0f;
-  cameraUniforms._camPad0  = 0.0f;
-  cameraUniforms._camPad1  = 0.0f;
+  // V2.A.20 — projection mode (0 = perspective, 1 = orthographic).
+  // Raygen branches on this to choose between the
+  // ray-from-origin-through-NDC (perspective) and
+  // per-pixel-origin-with-constant-direction (orthographic) primary
+  // ray constructions.
+  cameraUniforms.projectionMode = camera.projectionMode;
+  cameraUniforms._camPad1 = 0.0f;
   commandList->writeBuffer(_cameraUniformsBuffer.Get(), &cameraUniforms, sizeof(cameraUniforms));
 
   // ---- Upload viewer-only per-frame UI state -------------------------

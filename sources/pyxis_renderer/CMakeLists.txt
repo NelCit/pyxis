@@ -78,6 +78,14 @@ target_sources(pyxis_renderer PRIVATE
     Private/GpuScene/Commit.cpp
     Private/GpuScene/DdsParser.h
     Private/GpuScene/DdsParser.cpp
+    # V2.A.14 — opt-in BCn (BC1/BC4/BC5) encoder. Split out of Commit.cpp
+    # so the unit-test harness can call the helper without dragging in
+    # stb_image / tinyexr / GpuScene::Impl.
+    Private/GpuScene/BcEncoder.h
+    Private/GpuScene/BcEncoder.cpp
+    # V2.A.14 — single-TU home for stb_dxt's STB_DXT_IMPLEMENTATION.
+    # SKIP_LINTING below (mirrors pyxis_app/Private/StbImageWrite.cpp).
+    Private/GpuScene/StbDxt.cpp
 
     # M1 — RenderGraph + Passes + Profiler + Renderer.
     Private/Diagnostics/CommandListMarker.h
@@ -195,6 +203,14 @@ endif()
 set_source_files_properties(Private/Materials/StbImageRead.cpp PROPERTIES
     COMPILE_OPTIONS    "-Wno-missing-field-initializers"
     SKIP_LINTING       ON)
+
+# V2.A.14 — stb_dxt's STB_DXT_IMPLEMENTATION sentinel is a
+# third-party macro name (not the §30.2 PYXIS_SCREAM convention)
+# that clang-tidy's readability-identifier-naming check trips on
+# even with NOLINTNEXTLINE. SKIP_LINTING on the dedicated single-TU
+# home keeps the check enabled everywhere else.
+set_source_files_properties(Private/GpuScene/StbDxt.cpp PROPERTIES
+    SKIP_LINTING ON)
 
 target_link_libraries(pyxis_renderer
     PUBLIC

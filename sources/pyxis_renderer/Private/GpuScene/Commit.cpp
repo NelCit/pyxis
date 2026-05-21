@@ -16,6 +16,7 @@
 
 #include "GpuScene/Internal.h"
 
+#include "GpuScene/BcEncoder.h"
 #include "GpuScene/DdsParser.h"
 #include "Materials/MaterialFlag.h"
 
@@ -441,6 +442,46 @@ Expected<void> GpuScene::Impl::UploadPendingTextures(nvrhi::ICommandList* comman
                         ? nvrhi::Format::SRGBA8_UNORM
                         : nvrhi::Format::RGBA8_UNORM;
       rowPitchBytes = static_cast<std::size_t>(width) * 4u;
+
+      // V2.A.14 — opt-in BCn encoding. Replaces the uncompressed
+      // RGBA8 with a BC1 / BC4 / BC5 block stream chosen by role
+      // (see `gpuscene_detail::EncodeBCn` in BcEncoder.h). Requires
+      // both dimensions to be multiples of 4 (BCn block alignment);
+      // odd-dim textures fall through to the uncompressed path with
+      // a debug log.
+      if (desc.compressTextures && width >= 4 && height >= 4
+          && (width % 4) == 0 && (height % 4) == 0)
+      {
+        std::vector<std::uint8_t> encodedBlocks;
+        nvrhi::Format             bcFormat       = nvrhi::Format::UNKNOWN;
+        std::size_t               bcBlockBytes   = 0;
+        gpuscene_detail::EncodeBCn(decodedPixels.data(),
+                  static_cast<std::uint32_t>(width),
+                  static_cast<std::uint32_t>(height),
+                  entry.keyCopy.role,
+                  encodedBlocks, bcFormat, bcBlockBytes);
+        if (bcFormat != nvrhi::Format::UNKNOWN && !encodedBlocks.empty())
+        {
+          const std::size_t uncompressed = decodedPixels.size();
+          decodedPixels = std::move(encodedBlocks);
+          pixelFormat   = bcFormat;
+          rowPitchBytes = static_cast<std::size_t>(width / 4u) * bcBlockBytes;
+          Logging::Get().Debug(log::RENDER,
+                               "TextureCache: BCn-encoded " + path + " ("
+                                   + std::to_string(width) + "×"
+                                   + std::to_string(height) + ", "
+                                   + std::to_string(uncompressed) + " B → "
+                                   + std::to_string(decodedPixels.size()) + " B).");
+        }
+      }
+      else if (desc.compressTextures)
+      {
+        Logging::Get().Debug(log::RENDER,
+                             "TextureCache: " + path + " skipped BCn ("
+                                 + std::to_string(width) + "×"
+                                 + std::to_string(height)
+                                 + ", non-4×4-aligned dims).");
+      }
     }
 
     entry.pixelData = std::move(decodedPixels);
