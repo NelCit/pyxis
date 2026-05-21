@@ -768,6 +768,18 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
 
         if (ImGui::TreeNode("Emission"))
         {
+          // Disabled hint: when luminance is 0 the closesthit's
+          // emission term is gated off (MATERIAL_FLAG_EMISSIVE is
+          // unset) regardless of what color is stored. MDL materials
+          // commonly stash a sentinel color (e.g. Oak.mdl stores
+          // emissive_color=(1.0, 0.1, 0.1) red even though
+          // enable_emission=false), which would otherwise look like
+          // a bug to operators staring at the editor.
+          if (desc.emissionLuminance <= 0.0f)
+          {
+            ImGui::TextDisabled("(disabled — luminance is 0; stored "
+                                "color shown for reference only)");
+          }
           float emissionColor[3] = {static_cast<float>(desc.emissionColor.x),
                                     static_cast<float>(desc.emissionColor.y),
                                     static_cast<float>(desc.emissionColor.z)};
