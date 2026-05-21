@@ -1,0 +1,38 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden geom_tetmesh_skipped — PR6: UsdGeomTetMesh is explicitly skipped per v2-skipped-schemas.md. The tet-mesh emits a log line + bumps stats.skipped; the rest of the scene renders normally. Pins the 'no silent drops' invariant for the second of v2's explicit-skip schemas (companion to geom_hermite_curves_skipped)."
+)
+def Xform "World"
+{
+    def TetMesh "Volume"
+    {
+        # Minimal authored tet — 4 points + 1 tetrahedron. The
+        # renderer drops the prim entirely per the explicit-skip path.
+        point3f[] points = [(-0.5, 0.0, 0.0), (0.5, 0.0, 0.0), (0.0, 0.5, 0.0), (0.0, 0.0, 0.5)]
+        int4[] tetVertexIndices = [(0, 1, 2, 3)]
+    }
+    def Cube "Subject"
+    {
+        double size = 1.2
+        color3f[] primvars:displayColor = [(0.85, 0.55, 0.30)]
+        double3 xformOp:translate = (0, 0.6, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 1.0, 4)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.2
+    }
+}

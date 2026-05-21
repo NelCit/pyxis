@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden purpose_lod_proxy_only — PR6: same scene as purpose_lod_default; --render-purpose=default,proxy makes the BLUE proxy cube emit instead of the orange render one. Pins the purpose-LOD filter switching different LODs at ingest time.", "render_purpose": "default,proxy" }

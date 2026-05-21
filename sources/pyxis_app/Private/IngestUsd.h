@@ -63,6 +63,7 @@ pyxis::usd_ingest::IngestResult IngestUsd(std::string_view adapter,
                                           std::string_view populationMask = {},
                                           double frameNumber = -1.0,
                                           std::string_view loadMode = {},
-                                          std::string_view variantSelections = {});
+                                          std::string_view variantSelections = {},
+                                          std::string_view renderPurpose = {});
 
 }  // namespace pyxis::app

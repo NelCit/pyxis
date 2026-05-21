@@ -102,6 +102,22 @@ class PYXIS_USD_INGEST_API IngestResult final {
   std::unique_ptr<Impl> _impl;
 };
 
+// PR6 / V2.A.2 — purpose-LOD bitmask. Production USD scenes author
+// multiple LODs at different `purpose` tokens — `proxy` for fast
+// preview, `render` for final-quality, `guide` for visualisation /
+// debug aids. v2.0's default is "default + render emit, proxy + guide
+// skip" which matches Storm / Karma / RenderMan defaults. Operators
+// can opt into any combination via WalkStage's `purposeFilter` param.
+// Powers of 2 so the four bits compose with OR.
+constexpr uint32_t PURPOSE_FILTER_DEFAULT = 1u;  // UsdGeomTokens->default_
+constexpr uint32_t PURPOSE_FILTER_RENDER  = 2u;  // UsdGeomTokens->render
+constexpr uint32_t PURPOSE_FILTER_PROXY   = 4u;  // UsdGeomTokens->proxy
+constexpr uint32_t PURPOSE_FILTER_GUIDE   = 8u;  // UsdGeomTokens->guide
+// Default mask used when callers don't override. Renders "default" +
+// "render" — production-default behaviour.
+constexpr uint32_t PURPOSE_FILTER_DEFAULT_MASK =
+    PURPOSE_FILTER_DEFAULT | PURPOSE_FILTER_RENDER;
+
 class PYXIS_USD_INGEST_API StageWalker final {
  public:
   StageWalker() = default;
@@ -121,15 +137,30 @@ class PYXIS_USD_INGEST_API StageWalker final {
   // points, and primvars all read at that time. The closesthit
   // shader is time-agnostic — animation drives the load-time state
   // only in v2 (per-frame re-walk is the operator's responsibility).
+  //
+  // PR6 — `purposeFilter` is a bitmask of `PURPOSE_FILTER_*` flags
+  // controlling which UsdGeomImageable `purpose` LODs emit. Default
+  // = default + render. Pass `PURPOSE_FILTER_DEFAULT | PURPOSE_FILTER_PROXY`
+  // for fast-preview proxy-only renders, etc.
   IngestResult WalkFile(std::string_view usdPath, GpuScene& scene,
-                        double frameNumber = -1.0);
+                        double frameNumber = -1.0,
+                        uint32_t purposeFilter = PURPOSE_FILTER_DEFAULT_MASK);
 
   // Variant taking an already-opened stage. Used by the cross-adapter
   // regression harness so both paths share a single stage open. The
   // pxr::UsdStageRefPtr argument is USD's reference-counted handle —
   // the renderer never persists it past `Walk` (§25.O.2 contract).
   IngestResult WalkStage(const pxr::UsdStageRefPtr& stage, GpuScene& scene,
-                         double frameNumber = -1.0);
+                         double frameNumber = -1.0,
+                         uint32_t purposeFilter = PURPOSE_FILTER_DEFAULT_MASK);
 };
+
+// PR6 — parse a comma-separated purpose list ("default,render",
+// "proxy", "default,render,proxy,guide") into the bitmask above.
+// Empty input → PURPOSE_FILTER_DEFAULT_MASK. Unknown tokens are
+// silently dropped (caller-side log surfaces the typo). Pure stdlib
+// so the unit test can exercise it without bringing USD in.
+[[nodiscard]] PYXIS_USD_INGEST_API uint32_t ParsePurposeFilterSpec(
+    std::string_view spec) noexcept;
 
 }  // namespace pyxis::usd_ingest

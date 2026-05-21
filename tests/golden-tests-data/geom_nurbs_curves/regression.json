@@ -1,0 +1,1 @@
+{ "$comment": "Pyxis golden geom_nurbs_curves — PR6: UsdGeomNurbsCurves now tessellated to ribbon strips via polyline-CV approximation (TessellateNurbsCurves)." }

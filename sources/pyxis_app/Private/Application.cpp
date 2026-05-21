@@ -189,6 +189,18 @@ int Run(int argc, char** argv) noexcept {
               "session layer post-Open).");
   }
 
+  // PR6 — `--render-purpose` knob. Default mask matches Storm / Karma
+  // (default + render emit; proxy + guide skip); the operator can
+  // opt into proxy-only or guide-only for fast preview / debug.
+  if (!cli.renderPurpose.empty())
+  {
+    Logging::Get().Info(
+        log::APP,
+        "--render-purpose " + std::string{cli.renderPurpose}
+            + " honoured (PR6 — UsdGeomImageable purpose-LOD filter "
+              "applied during ingest).");
+  }
+
   if (cli.headless)
   {
     // V2.A.4 multi-frame headless. When `--frame-range B..E[:S]` is
@@ -224,7 +236,8 @@ int Run(int argc, char** argv) noexcept {
                                         /*frameRangeEnd*/   -1,
                                         /*frameRangeStep*/   1,
                                         cli.loadMode,
-                                        cli.variantSelections);
+                                        cli.variantSelections,
+                                        cli.renderPurpose);
         if (frameRc != 0)
           return frameRc;
       }
@@ -239,10 +252,11 @@ int Run(int argc, char** argv) noexcept {
                        /*frameRangeEnd*/   -1,
                        /*frameRangeStep*/   1,
                        cli.loadMode,
-                       cli.variantSelections);
+                       cli.variantSelections,
+                       cli.renderPurpose);
   }
   return RunViewer(config, scene, cli.screenshotPath, cli.shaderRebuildDir,
-                   cli.loadMode, cli.variantSelections);
+                   cli.loadMode, cli.variantSelections, cli.renderPurpose);
 }
 
 }  // namespace pyxis::app

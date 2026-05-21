@@ -1,0 +1,39 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden geom_hermite_curves_skipped — PR6: UsdGeomHermiteCurves is explicitly skipped per v2-skipped-schemas.md. The Hermite curve emits a log line + bumps stats.skipped; the rest of the scene (the cube + dome) renders normally. Pins the 'no silent drops' invariant: the catch-all 'unknown prim type' branch must NOT swallow Hermite curves."
+)
+def Xform "World"
+{
+    def HermiteCurves "Whiskers"
+    {
+        int[] curveVertexCounts = [3]
+        point3f[] points = [(-1.0, 0.5, 0.0), (0.0, 1.0, 0.0), (1.0, 0.5, 0.0)]
+        # Per-vertex tangents — what makes a HermiteCurve distinct.
+        vector3f[] tangents = [(1.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 0.0, 0.0)]
+        float[] widths = [0.1]
+    }
+    def Cube "Subject"
+    {
+        double size = 1.2
+        color3f[] primvars:displayColor = [(0.85, 0.55, 0.30)]
+        double3 xformOp:translate = (0, 0.6, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 1.0, 4)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.2
+    }
+}

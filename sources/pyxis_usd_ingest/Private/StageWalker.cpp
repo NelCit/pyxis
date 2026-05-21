@@ -68,8 +68,10 @@
 #include <pxr/usd/usdShade/material.h>
 #include <pxr/usd/usdShade/materialBindingAPI.h>
 #include <pxr/usd/usdShade/tokens.h>
+#include <pxr/usd/usdGeom/hermiteCurves.h>
 #include <pxr/usd/usdGeom/nurbsCurves.h>
 #include <pxr/usd/usdGeom/nurbsPatch.h>
+#include <pxr/usd/usdGeom/tetMesh.h>
 #include <pxr/usd/usdRender/product.h>
 #include <pxr/usd/usdRender/settings.h>
 #include <pxr/usd/usdRender/var.h>
@@ -130,6 +132,46 @@ IngestResult::IngestResult() : _impl(std::make_unique<Impl>()) {}
 IngestResult::~IngestResult() = default;
 IngestResult::IngestResult(IngestResult&&) noexcept            = default;
 IngestResult& IngestResult::operator=(IngestResult&&) noexcept = default;
+
+// PR6 — purpose-LOD mask shared between WalkStage's setup + the per-
+// prim filter call sites in PrepareMesh / the analytic-prim prep
+// path. WalkStage is the single-threaded outer entry that sets this
+// once before the OMP pass3b worker fan-out kicks in. `static` (not
+// `thread_local`) so OMP workers see the value the outer caller set
+// — a previous draft used `thread_local` and silently broke the
+// filter on every parallel mesh, the workers reading the default
+// mask instead of the operator's request.
+//
+// Default = PURPOSE_FILTER_DEFAULT_MASK so a caller invoking
+// PrepareMesh / the analytic prep path *before* WalkStage (e.g. via
+// a future direct test entry) still sees the production behaviour.
+namespace { uint32_t s_activePurposeFilter = PURPOSE_FILTER_DEFAULT_MASK; }
+
+// Translate a USD `purpose` token into the matching bit in the
+// PR6 PURPOSE_FILTER_* bitmask. Returns DEFAULT for the empty /
+// unrecognised case so an unset `purpose` (effectively "inherit")
+// stays in the default-mask emit set.
+[[nodiscard]] uint32_t PurposeTokenToFilterBit(const pxr::TfToken& purpose) noexcept
+{
+  if (purpose == pxr::UsdGeomTokens->render) return PURPOSE_FILTER_RENDER;
+  if (purpose == pxr::UsdGeomTokens->proxy)  return PURPOSE_FILTER_PROXY;
+  if (purpose == pxr::UsdGeomTokens->guide)  return PURPOSE_FILTER_GUIDE;
+  return PURPOSE_FILTER_DEFAULT;  // `default_` or unauthored
+}
+
+// PR6 — purpose-filter check used at every per-prim emission site.
+// Returns true iff the prim's computed purpose (resolving inherited
+// values via UsdGeomImageable::ComputePurpose) is in the active
+// mask. Centralised so a future filter-extension RFC has one
+// branch to change.
+[[nodiscard]] bool ShouldEmitForActivePurpose(const pxr::UsdGeomImageable& imageable) noexcept
+{
+  if (!imageable)
+    return true;  // non-imageable prims (lights, materials, …) skip the gate
+  const pxr::TfToken purpose = imageable.ComputePurpose();
+  const uint32_t bit = PurposeTokenToFilterBit(purpose);
+  return (s_activePurposeFilter & bit) != 0u;
+}
 
 const IngestStats& IngestResult::Stats() const noexcept { return _impl->stats; }
 
@@ -1423,15 +1465,13 @@ PreparedMesh PrepareMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xform
   {
     return prepared;
   }
-  if (imageable)
-  {
-    const pxr::TfToken purpose = imageable.ComputePurpose();
-    if (purpose == pxr::UsdGeomTokens->proxy
-        || purpose == pxr::UsdGeomTokens->guide)
-    {
-      return prepared;
-    }
-  }
+  // PR6 — purpose-LOD filter. Default mask emits `default` + `render`;
+  // operators can include / exclude `proxy` + `guide` via the
+  // PURPOSE_FILTER_* bits on WalkFile / WalkStage. The check fires
+  // identically across PrepareMesh + the analytic-prim prep path
+  // (sister site below).
+  if (!ShouldEmitForActivePurpose(imageable))
+    return prepared;
 
   pxr::VtArray<pxr::GfVec3f> usdPoints;
   pxr::VtArray<int> usdCounts;
@@ -2090,12 +2130,8 @@ PreparedMesh PrepareMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xform
       && imageable.ComputeVisibility(pxr::UsdTimeCode::Default())
              == pxr::UsdGeomTokens->invisible)
     return prepared;
-  if (imageable)
-  {
-    const pxr::TfToken purpose = imageable.ComputePurpose();
-    if (purpose == pxr::UsdGeomTokens->proxy || purpose == pxr::UsdGeomTokens->guide)
-      return prepared;
-  }
+  if (!ShouldEmitForActivePurpose(imageable))
+    return prepared;
 
   // Tessellate by type. The per-type helpers read all the USD-side
   // attrs themselves; we only inject worldUp for curves/points which
@@ -2122,6 +2158,8 @@ PreparedMesh PrepareMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xform
     result = TessellatePoints(pxr::UsdGeomPoints(prim), worldUp);
   else if (prim.IsA<pxr::UsdGeomNurbsPatch>())
     result = TessellateNurbsPatch(pxr::UsdGeomNurbsPatch(prim));
+  else if (prim.IsA<pxr::UsdGeomNurbsCurves>())
+    result = TessellateNurbsCurves(pxr::UsdGeomNurbsCurves(prim), worldUp);
   else
     return prepared;  // unrecognised — caller already filtered, defensive only
 
@@ -2183,7 +2221,8 @@ PreparedMesh PrepareMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xform
       || prim.IsA<pxr::UsdGeomCapsule>()
       || prim.IsA<pxr::UsdGeomBasisCurves>()
       || prim.IsA<pxr::UsdGeomPoints>()
-      || prim.IsA<pxr::UsdGeomNurbsPatch>();  // V2.A.4 — cubic Bezier path
+      || prim.IsA<pxr::UsdGeomNurbsPatch>()       // V2.A.4 — cubic Bezier path
+      || prim.IsA<pxr::UsdGeomNurbsCurves>();      // PR6 — polyline-CV ribbon path
 }
 
 // EmitPreparedMesh pushes a PreparedMesh into GpuScene — the
@@ -2317,8 +2356,53 @@ std::optional<CameraDesc> BuildCameraDesc(const pxr::UsdPrim& prim,
 
 }  // namespace
 
+// PR6 — purpose-LOD spec parser. Pure stdlib (no USD types). Lives at
+// namespace pyxis::usd_ingest so it's reachable from the public
+// header's `[[nodiscard]] uint32_t ParsePurposeFilterSpec(...)`
+// declaration. Token matching is case-sensitive against USD's
+// canonical lowercase names (`default`, `render`, `proxy`, `guide`).
+uint32_t ParsePurposeFilterSpec(std::string_view spec) noexcept
+{
+  // Skip whitespace + commas to find the next token boundary.
+  auto skipDelims = [&spec](std::size_t cursor) -> std::size_t {
+    while (cursor < spec.size()
+           && (spec[cursor] == ' ' || spec[cursor] == ','
+               || spec[cursor] == '\t'))
+      ++cursor;
+    return cursor;
+  };
+  auto findEnd = [&spec](std::size_t cursor) -> std::size_t {
+    while (cursor < spec.size()
+           && spec[cursor] != ' ' && spec[cursor] != ','
+           && spec[cursor] != '\t')
+      ++cursor;
+    return cursor;
+  };
+
+  uint32_t mask = 0u;
+  std::size_t cursor = 0;
+  while (cursor < spec.size())
+  {
+    cursor = skipDelims(cursor);
+    if (cursor >= spec.size())
+      break;
+    const std::size_t end = findEnd(cursor);
+    const std::string_view token = spec.substr(cursor, end - cursor);
+    if (token == "default")      mask |= PURPOSE_FILTER_DEFAULT;
+    else if (token == "render")  mask |= PURPOSE_FILTER_RENDER;
+    else if (token == "proxy")   mask |= PURPOSE_FILTER_PROXY;
+    else if (token == "guide")   mask |= PURPOSE_FILTER_GUIDE;
+    // Unknown tokens silently dropped; the operator-side log line
+    // surfaces the spec verbatim so a typo is obvious in the
+    // ingest-summary block.
+    cursor = end;
+  }
+  return mask == 0u ? PURPOSE_FILTER_DEFAULT_MASK : mask;
+}
+
 IngestResult StageWalker::WalkFile(std::string_view usdPath, GpuScene& scene,
-                                   double frameNumber) {
+                                   double frameNumber,
+                                   uint32_t purposeFilter) {
   auto& log = Logging::Get();
   const std::string pathString{usdPath};
 
@@ -2364,7 +2448,7 @@ IngestResult StageWalker::WalkFile(std::string_view usdPath, GpuScene& scene,
     failed.GetImpl().stats.timings.totalMs = failed.GetImpl().stats.timings.stageOpenMs;
     return failed;
   }
-  IngestResult result = WalkStage(stage, scene, frameNumber);
+  IngestResult result = WalkStage(stage, scene, frameNumber, purposeFilter);
   const auto walkEnd = Clock::now();
   // stageOpenMs is local to WalkFile (WalkStage didn't open the
   // stage); fold it in + recompute totalMs to include it.
@@ -2400,12 +2484,27 @@ IngestResult StageWalker::WalkFile(std::string_view usdPath, GpuScene& scene,
 
 IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
                                     GpuScene& scene,
-                                    double frameNumber) {
+                                    double frameNumber,
+                                    uint32_t purposeFilter) {
   IngestResult result;
   if (!stage)
     return result;
   IngestStats& stats = result.GetImpl().stats;
   auto& cameras = result.GetImpl().cameras;
+
+  // PR6 — purpose-LOD bitmask plumbed to the per-prim filter sites
+  // below via the TU-scope thread_local. Threading: WalkStage runs on
+  // a single thread per `pyxis::usd_ingest` contract, so no race here.
+  // Defaults to `default + render` per the M7-default policy.
+  s_activePurposeFilter = purposeFilter ? purposeFilter
+                                        : PURPOSE_FILTER_DEFAULT_MASK;
+  if (s_activePurposeFilter != PURPOSE_FILTER_DEFAULT_MASK)
+  {
+    Logging::Get().Info(log::APP,
+        "StageWalker: purposeFilter mask = "
+            + std::to_string(s_activePurposeFilter)
+            + " (non-default — proxy/guide emission gated).");
+  }
 
   // V2.A.13 — evaluation time. Negative frame = Default (no animation);
   // any non-negative value drives the per-attr `.Get(timeCode)` calls
@@ -2863,16 +2962,34 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
     {
       // Already translated + counted in pass 1.
     }
-    else if (prim.IsA<pxr::UsdGeomNurbsCurves>())
+    else if (prim.IsA<pxr::UsdGeomHermiteCurves>())
     {
-      // M20 / V2.A.4 — NURBS curves still detect/warn/skip; full
-      // curve tessellation lands when we extend the BasisCurves
-      // ribbon path to NURBS knots. UsdGeomNurbsPatch is fully
-      // handled by `TessellateNurbsPatch` via the geom-dispatch loop
-      // above (counted as a regular mesh prim, not skipped here).
-      Logging::Get().Warn(log::APP,
-          "StageWalker: NURBS curves " + prim.GetPath().GetString()
-              + " detected but not yet tessellated. Skipping.");
+      // PR6 — UsdGeomHermiteCurves explicit skip. Hermite curves
+      // author per-vertex tangents alongside positions; proper
+      // tessellation needs a cubic Hermite eval that v2.0 doesn't
+      // ship. Documented under `_documentation/v2-skipped-schemas.md`;
+      // future v3 work picks up if production scenes start authoring
+      // them in volume (rare today — Maya / Houdini default to
+      // BasisCurves for hair / foliage).
+      Logging::Get().Info(log::APP,
+          "StageWalker: UsdGeomHermiteCurves " + prim.GetPath().GetString()
+              + " detected — v2 explicitly skips (cubic Hermite "
+                "evaluation deferred; see "
+                "_documentation/v2-skipped-schemas.md). Count: skipped.");
+      ++stats.skipped;
+    }
+    else if (prim.IsA<pxr::UsdGeomTetMesh>())
+    {
+      // PR6 — UsdGeomTetMesh explicit skip. TetMesh authors volumetric
+      // FEM-style geometry (tetrahedra rather than triangles); proper
+      // rendering needs a volumetric integrator or surface-extraction
+      // pass (marching tets, OpenVDB-like). Neither ships at v2.0.
+      // Documented under `_documentation/v2-skipped-schemas.md`.
+      Logging::Get().Info(log::APP,
+          "StageWalker: UsdGeomTetMesh " + prim.GetPath().GetString()
+              + " detected — v2 explicitly skips (no volumetric "
+                "tet-mesh path; surface extraction deferred; see "
+                "_documentation/v2-skipped-schemas.md). Count: skipped.");
       ++stats.skipped;
     }
     else if (prim.IsA<pxr::UsdSkelRoot>() || prim.IsA<pxr::UsdSkelSkeleton>())

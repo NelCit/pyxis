@@ -374,7 +374,8 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
                   std::string_view screenshotPath,
                   std::string_view shaderRebuildDirOverride,
                   std::string_view loadMode,
-                  std::string_view variantSelections) noexcept {
+                  std::string_view variantSelections,
+                  std::string_view renderPurpose) noexcept {
   auto& log = Logging::Get();
 
   // ShaderMake rebuild latch + state machine. Click handler in
@@ -552,13 +553,15 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
   // mid-session; that lands with the inspector panel.
   const std::string loadModeForSession{loadMode};
   const std::string variantsForSession{variantSelections};
+  const std::string renderPurposeForSession{renderPurpose};
   auto loadScene = [&](std::string_view             path,
                        std::string_view             adapterLabel,
                        ImGuiHost::IngestProfile&    outProfile) -> bool {
     const pyxis::usd_ingest::IngestResult result =
         IngestUsd(adapterLabel, path, gpuScene,
                   /*populationMask*/ {}, /*frameNumber*/ -1.0,
-                  loadModeForSession, variantsForSession);
+                  loadModeForSession, variantsForSession,
+                  renderPurposeForSession);
     const pyxis::usd_ingest::IngestStats& stats = result.Stats();
     outProfile.totalMs           = stats.timings.totalMs;
     outProfile.stageOpenMs       = stats.timings.stageOpenMs;

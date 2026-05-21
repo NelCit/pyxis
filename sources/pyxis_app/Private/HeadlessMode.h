@@ -61,7 +61,8 @@ int RunHeadless(const Configuration& config, const ResolvedScene& scene,
                 int frameRangeEnd = -1,
                 int frameRangeStep = 1,
                 std::string_view loadMode = {},
-                std::string_view variantSelections = {}) noexcept;
+                std::string_view variantSelections = {},
+                std::string_view renderPurpose = {}) noexcept;
 
 // Viewer mode. screenshotPath is the M1 --screenshot debug capture
 // (non-empty -> render a few warmup frames, write a PNG, exit 0).
@@ -75,6 +76,7 @@ int RunViewer(const Configuration& config, const ResolvedScene& scene,
               std::string_view screenshotPath,
               std::string_view shaderRebuildDir = {},
               std::string_view loadMode = {},
-              std::string_view variantSelections = {}) noexcept;
+              std::string_view variantSelections = {},
+              std::string_view renderPurpose = {}) noexcept;
 
 }  // namespace pyxis::app

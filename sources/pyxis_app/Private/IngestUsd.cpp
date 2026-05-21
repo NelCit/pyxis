@@ -178,7 +178,8 @@ pyxis::usd_ingest::IngestResult IngestUsd(std::string_view adapter,
                                           std::string_view populationMask,
                                           double frameNumber,
                                           std::string_view loadMode,
-                                          std::string_view variantSelections) {
+                                          std::string_view variantSelections,
+                                          std::string_view renderPurpose) {
   auto& log = Logging::Get();
 
   // Banner format: "IngestUsd[<adapter>]: loading <path>". Adapter
@@ -218,6 +219,22 @@ pyxis::usd_ingest::IngestResult IngestUsd(std::string_view adapter,
                            + " honoured (V2.A.13).");
   }
 
+  // PR6 — purpose-LOD mask. Empty spec → default mask
+  // (default + render). Anything authored gets parsed via the public
+  // StageWalker helper; the operator-facing log surfaces the raw
+  // spec so a typo (which silently drops unknown tokens) is
+  // grep-visible in the ingest summary.
+  const uint32_t purposeFilter =
+      pyxis::usd_ingest::ParsePurposeFilterSpec(renderPurpose);
+  if (!renderPurpose.empty())
+  {
+    log.Info(log::APP, std::string{"IngestUsd: --render-purpose '"}
+                           + std::string{renderPurpose}
+                           + "' -> filter mask "
+                           + std::to_string(purposeFilter)
+                           + " (PR6).");
+  }
+
   // V2.A.15 — payload-load policy. Default `LoadAll` matches v1
   // behaviour; `none`/`metadata` open the stage with payloads
   // unloaded so the operator can scope a 100 GB asset down to the
@@ -241,7 +258,7 @@ pyxis::usd_ingest::IngestResult IngestUsd(std::string_view adapter,
       || !variantSelections.empty()
       || (loadSet != pxr::UsdStage::LoadAll);
   if (!needsCustomOpen)
-    return walker.WalkFile(usdPath, scene, frameNumber);
+    return walker.WalkFile(usdPath, scene, frameNumber, purposeFilter);
 
   // Custom-open path: we open the stage ourselves so we can apply
   // variant overrides + pick the population-mask + load-set. WalkStage
@@ -295,7 +312,7 @@ pyxis::usd_ingest::IngestResult IngestUsd(std::string_view adapter,
                            + " selection(s) to session layer.");
   }
 
-  return walker.WalkStage(stage, scene, frameNumber);
+  return walker.WalkStage(stage, scene, frameNumber, purposeFilter);
 }
 
 }  // namespace pyxis::app

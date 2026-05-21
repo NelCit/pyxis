@@ -297,6 +297,20 @@ CliArgs Parse(int argc, char** argv) noexcept {
         return out;
       }
     }
+    else if (Equals(arg, "--render-purpose"))
+    {
+      // PR6 / V2.A.2. Comma-separated UsdGeomImageable purpose tokens
+      // (default / render / proxy / guide). The mask itself is built
+      // inside StageWalker via ParsePurposeFilterSpec; CliArgs just
+      // captures the raw string so the same authoring surface threads
+      // to IngestUsd → WalkStage unchanged.
+      if (!TakeValue(argc, argv, i, out.renderPurpose))
+      {
+        out.invalid = true;
+        out.invalidArg = arg;
+        return out;
+      }
+    }
     else if (Equals(arg, "--variant"))
     {
       // V2.A.2 (M12). Comma-separated <primPath>:<setName>=<value>
@@ -379,6 +393,10 @@ void PrintUsage() noexcept {
       "                          applied via the stage's session layer after Open,\n"
       "                          overriding any authored variantSelection (V2.A.2).\n"
       "                          Example: --variant /World/Hero:lod=high,/World/Cup:season=winter\n"
+      "  --render-purpose <list> Comma-separated UsdGeomImageable purpose tokens whose\n"
+      "                          prims emit. Recognised: default / render / proxy / guide.\n"
+      "                          Default = default,render (matches Storm / Karma).\n"
+      "                          Example: --render-purpose default,render,proxy (PR6).\n"
       "\n"
       "Viewer extras:\n"
       "  --screenshot <path>     Run viewer briefly; write a PNG of the backbuffer.\n"
