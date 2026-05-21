@@ -107,6 +107,12 @@ struct CliArgs {
   // mask is used. Parsed in ParsePurposeFilterSpec (StageWalker.h).
   std::string_view renderPurpose;      // --render-purpose <list>
 
+  // V2.A.27 — pick a specific UsdRenderProduct by name when the
+  // stage authors multiple. Matched against the product prim's
+  // leaf name (`/Render/Products/Beauty` → "Beauty"). Empty =
+  // first-by-SdfPath wins (the production default).
+  std::string_view renderProduct;      // --render-product <name>
+
   // ---- M7 follow-up: AOV save -----------------------------------------
   // --save-aov <list>  Comma-separated list of raw AOVs to dump
   // alongside the regular `--output` BGRA8 EXR. The path stem of

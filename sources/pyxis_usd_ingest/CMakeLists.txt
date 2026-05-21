@@ -21,10 +21,12 @@ target_sources(pyxis_usd_ingest PUBLIC
     FILES
         Public/Pyxis/UsdIngest/UsdIngestApi.h
         Public/Pyxis/UsdIngest/StageWalker.h
+        Public/Pyxis/UsdIngest/RenderSettingsAuthored.h
 )
 
 target_sources(pyxis_usd_ingest PRIVATE
     Private/StageWalker.cpp
+    Private/RenderSettingsScan.cpp
     Private/SubdivRefine.h
     Private/SubdivRefine.cpp
     Private/AnalyticGeom.h

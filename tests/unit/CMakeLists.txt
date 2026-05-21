@@ -44,6 +44,7 @@ target_sources(pyxis_unit_tests PRIVATE
     MaterialBindingResolutionV2A18.cpp
     AnimatedAttributesV2A13.cpp
     PurposeFilterSpecParsing.cpp
+    PrescanRenderSettingsV2A27.cpp
     MaterialCoverageFields.cpp
     MdlTranslation.cpp
     UdimMultiTile.cpp

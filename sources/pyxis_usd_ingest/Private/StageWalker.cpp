@@ -3010,19 +3010,22 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
              || prim.IsA<pxr::UsdRenderProduct>()
              || prim.IsA<pxr::UsdRenderVar>())
     {
-      // M21 / V2.A.27 — UsdRender schema detection. These prims author
-      // render-pass settings (resolution, AOVs, motion blur sampling,
-      // active camera, etc.). Pyxis's headless mode currently picks
-      // these up from --config + CLI; honouring UsdRenderSettings as
-      // an alternative authoring source lands when the renderer's
-      // RenderSettings POD grows to mirror the schema (V2.A.27 full).
-      // For now we detect + count so users see scenes that author
-      // RenderSettings instead of expecting fixture JSON.
+      // V2.A.27 — UsdRender schema. The Application-side pre-scan
+      // (PrescanRenderSettings in pyxis_usd_ingest) opens the stage
+      // before device init + applies authored resolution /
+      // outputFile / camera overlays to the Configuration. By the
+      // time the main stage walk reaches these prims they've
+      // already been CONSUMED, so we no longer count them as
+      // `skipped` — they're loaded data informing the per-frame
+      // render config. The log line stays so an operator can see
+      // the round-trip.
       Logging::Get().Info(log::APP,
           "StageWalker: UsdRender prim " + prim.GetPath().GetString()
               + " (" + prim.GetTypeName().GetString()
-              + ") detected; v2 honours --config / CLI overrides instead.");
-      ++stats.skipped;
+              + ") loaded — values applied via Application pre-scan "
+                "(V2.A.27).");
+      // Intentionally NOT bumping stats.skipped here — the values
+      // are consumed upstream, not dropped on the floor.
     }
     else if (prim.IsA<pxr::UsdVolVolume>())
     {

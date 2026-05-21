@@ -1,0 +1,68 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden render_authored_resolution — V2.A.27: the stage authors UsdRenderSettings.resolution = (200, 150) + a UsdRenderProduct + a couple of UsdRenderVar AOV declarations. The Application's pre-scan opens the stage before device init, reads the authored resolution, and overlays it onto Configuration (since the goldens harness doesn't pass --width/--height). The produced PNG must therefore be 200x150 rather than the shared config's 256x256. Pins the override precedence (CLI > USD > JSON > defaults) at the USD-authored tier."
+)
+
+def Scope "Render"
+{
+    def RenderSettings "Settings"
+    {
+        int2 resolution = (200, 150)
+        rel products = </Render/Products/Beauty>
+        rel orderedVars = [</Render/Vars/Color>, </Render/Vars/Normal>]
+    }
+
+    def Scope "Products"
+    {
+        def RenderProduct "Beauty"
+        {
+            token productName = "produced.png"
+            token productType = "raster"
+            rel orderedVars = [</Render/Vars/Color>, </Render/Vars/Normal>]
+        }
+    }
+
+    def Scope "Vars"
+    {
+        def RenderVar "Color"
+        {
+            token sourceName = "color"
+            token sourceType = "raw"
+            token dataType   = "color3f"
+        }
+        def RenderVar "Normal"
+        {
+            token sourceName = "normal"
+            token sourceType = "raw"
+            token dataType   = "normal3f"
+        }
+    }
+}
+
+def Xform "World"
+{
+    def Cube "Subject"
+    {
+        double size = 1.0
+        color3f[] primvars:displayColor = [(0.85, 0.55, 0.30)]
+        double3 xformOp:translate = (0, 0.5, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def Camera "Camera"
+    {
+        float focalLength = 35.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 1.2, 4)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1.2
+    }
+}

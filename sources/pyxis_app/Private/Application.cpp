@@ -17,6 +17,7 @@
 #include <Pyxis/Platform/Logging/Log.h>
 #include <Pyxis/Platform/Logging/LogCategories.h>
 #include <Pyxis/Renderer/Version.h>
+#include <Pyxis/UsdIngest/RenderSettingsAuthored.h>
 
 #include <cstdio>
 #include <cstdlib>
@@ -146,6 +147,77 @@ int Run(int argc, char** argv) noexcept {
       log::APP, std::string{"scene.resolved.source = "}
                     + std::string{SceneSourceLabel(scene.source)} + "  path = " + scene.path);
   Logging::Get().Info(log::APP, "app.ingest = " + config.app.ingest);
+
+  // V2.A.27 — UsdRenderSettings pre-scan. Production scenes
+  // (Omniverse, Maya-USD, Houdini-USD) increasingly author the
+  // render config in USD itself rather than in an out-of-band JSON.
+  // We pre-open the stage once before device init, look for
+  // UsdRenderSettings + UsdRenderProduct prims, and overlay the
+  // authored values onto Configuration. Override precedence is
+  // CLI explicit > USD authored > JSON config > built-in defaults:
+  // we only apply USD values where the CliArgs slot is empty / zero
+  // (CLI took precedence) and where the Configuration field hasn't
+  // been re-touched by the JSON overlay path.
+  //
+  // The pre-scan is intentionally a separate pxr::UsdStage::Open
+  // call from the main ingest one; USD's layer cache makes the
+  // repeat open cheap, and isolating it keeps the device-init
+  // ordering clean.
+  if (!scene.path.empty())
+  {
+    const pyxis::usd_ingest::RenderSettingsAuthored authored =
+        pyxis::usd_ingest::PrescanRenderSettings(scene.path, cli.renderProduct);
+    if (authored.hasRenderSettings || authored.renderProductCount > 0)
+    {
+      // Apply width / height when the operator didn't pass --width /
+      // --height (cli.width / cli.height stay at zero for the unset
+      // case).
+      if (cli.width == 0 && authored.resolutionWidth > 0)
+      {
+        Logging::Get().Info(log::APP,
+            "UsdRenderSettings.resolution override: render.width = "
+                + std::to_string(config.render.width)
+                + " → " + std::to_string(authored.resolutionWidth)
+                + " (V2.A.27).");
+        Configuration& mutableConfig = const_cast<Configuration&>(config);
+        mutableConfig.render.width = authored.resolutionWidth;
+      }
+      if (cli.height == 0 && authored.resolutionHeight > 0)
+      {
+        Logging::Get().Info(log::APP,
+            "UsdRenderSettings.resolution override: render.height = "
+                + std::to_string(config.render.height)
+                + " → " + std::to_string(authored.resolutionHeight)
+                + " (V2.A.27).");
+        Configuration& mutableConfig = const_cast<Configuration&>(config);
+        mutableConfig.render.height = authored.resolutionHeight;
+      }
+      // Output file: UsdRenderProduct.productName overrides
+      // config.output.image when the operator didn't pass --output.
+      if (cli.outputPath.empty() && authored.outputFile[0] != '\0')
+      {
+        Logging::Get().Info(log::APP,
+            std::string{"UsdRenderProduct.productName override: output.image = '"}
+                + config.output.image + "' → '" + authored.outputFile + "' (V2.A.27).");
+        Configuration& mutableConfig = const_cast<Configuration&>(config);
+        mutableConfig.output.image = authored.outputFile;
+      }
+      // Camera: log when authored but don't apply yet — camera
+      // selection happens inside StageWalker via the `boundCamera`
+      // hint + the SdfPath-sort fallback. Wiring the RenderSettings
+      // camera into that flow is a small follow-up: feed the
+      // UsdRenderSettings.camera rel as a third tier above the
+      // customLayerData hint.
+      if (authored.cameraSdfPath[0] != '\0')
+      {
+        Logging::Get().Info(log::APP,
+            std::string{"UsdRenderSettings.camera = '"} + authored.cameraSdfPath
+                + "' authored — Pyxis camera-selection priority "
+                  "(boundCamera > first-by-SdfPath) still applies in v2; "
+                  "RenderSettings.camera tier lands in a follow-up.");
+      }
+    }
+  }
 
   // M19 / V2.A.4 + V2.A.13 — --frame flag stub. The CLI parsing is in
   // place so future plumbing has a target; the rest of the pipeline
