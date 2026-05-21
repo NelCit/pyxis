@@ -86,6 +86,59 @@ struct SurfaceMatch {
 // explicitly asked for `mtlx`/`mdl`. Going through the named output
 // keeps each context strictly independent so the priority chain in
 // `ResolveSurface` behaves as documented.
+// V2.A.23 — MDL shaders authored against sourceAsset (the Omniverse
+// convention) carry `info:mdl:sourceAsset` (an SdfAssetPath to the
+// .mdl module) + `info:mdl:sourceAsset:subIdentifier` (a TfToken
+// naming the function within the module, e.g. "OmniPBR"). They do
+// NOT author the universal `info:id`, so `UsdShadeShader::GetShaderId()`
+// returns false. We detect this case by checking the sourceAsset
+// attribute directly and routing through `TranslateMdl` (which reads
+// OmniPBR-style input names).
+//
+// Quality gate: dual-context Omniverse Composer exports author BOTH
+// a sourceAsset-MDL surface AND a universal-context UsdPreviewSurface,
+// but the actual parameter values typically live on UsdPreviewSurface;
+// the MDL prim is a sourceAsset pointer with no input overrides
+// (values resolve inside the .mdl module at MDL-runtime, which we
+// can't read). If we let MDL win in that case, TranslateMdl reads
+// zero OmniPBR inputs and the material renders with OpenPBR defaults,
+// nuking the scene's look. So we only accept MDL when at least one
+// OmniPBR-style input is authored on the prim — otherwise the chain
+// falls through to UsdPreviewSurface where the real values are.
+[[nodiscard]] bool HasMdlSourceAssetWithAuthoredInputs(
+    const pxr::UsdShadeShader& shader) noexcept
+{
+  static const pxr::TfToken mdlSourceAssetAttr("info:mdl:sourceAsset");  // NOLINT
+  const pxr::UsdAttribute attr = shader.GetPrim().GetAttribute(mdlSourceAssetAttr);
+  if (!attr || !attr.HasAuthoredValue())
+    return false;
+  pxr::VtValue value;
+  if (!attr.Get(&value) || !value.IsHolding<pxr::SdfAssetPath>())
+    return false;
+
+  // Probe for any OmniPBR-style input that TranslateMdl actually reads.
+  // If none are authored on the prim, the .mdl module owns the values
+  // and we can't translate — defer to the next render context.
+  static const std::array<pxr::TfToken, 8> MDL_INPUT_PROBE{{
+      pxr::TfToken{"inputs:diffuse_color_constant"},
+      pxr::TfToken{"inputs:metallic_constant"},
+      pxr::TfToken{"inputs:reflection_roughness_constant"},
+      pxr::TfToken{"inputs:roughness_constant"},
+      pxr::TfToken{"inputs:emissive_color"},
+      pxr::TfToken{"inputs:emissive_intensity"},
+      pxr::TfToken{"inputs:opacity_constant"},
+      pxr::TfToken{"inputs:ior_constant"},
+  }};
+  for (const pxr::TfToken& inputName : MDL_INPUT_PROBE)
+  {
+    const pxr::UsdAttribute inputAttr =
+        shader.GetPrim().GetAttribute(inputName);
+    if (inputAttr && inputAttr.HasAuthoredValue())
+      return true;
+  }
+  return false;
+}
+
 [[nodiscard]] SurfaceMatch TryRenderContext(const pxr::UsdShadeMaterial& material,
                                              const pxr::TfToken&          contextToken) noexcept
 {
@@ -104,9 +157,22 @@ struct SurfaceMatch {
   if (!candidate.GetPrim().IsValid())
     return match;
   pxr::TfToken shaderId;
-  if (!candidate.GetShaderId(&shaderId))
-    return match;
-  match.kind = ClassifyShaderId(shaderId);
+  if (candidate.GetShaderId(&shaderId))
+  {
+    match.kind = ClassifyShaderId(shaderId);
+  }
+  // V2.A.23 — fallback for MDL shaders authored by sourceAsset rather
+  // than `info:id`. Only kicks in when we asked for the `mdl` context
+  // (so we don't misclassify e.g. a universal-context PxrSurface that
+  // happens to have a co-authored sourceAsset) AND the shader has at
+  // least one OmniPBR input authored — see
+  // `HasMdlSourceAssetWithAuthoredInputs` for the rationale.
+  static const pxr::TfToken mdlContext("mdl");  // NOLINT
+  if (match.kind == SurfaceMatch::Kind::None && contextToken == mdlContext
+      && HasMdlSourceAssetWithAuthoredInputs(candidate))
+  {
+    match.kind = SurfaceMatch::Kind::Mdl;
+  }
   if (match.kind != SurfaceMatch::Kind::None)
     match.shader = candidate;
   return match;
@@ -582,7 +648,7 @@ void TranslateMdl(const pxr::UsdShadeShader& shader,
   // surface. Reflect that by zeroing emissionLuminance.
   if (ReadFloat(shader, pxr::TfToken("enable_emission"), 1.0f, timeCode) <= 0.0f)
     desc.emissionLuminance = 0.0f;
-  desc.source = OpenPBRMaterialDesc::Source::MaterialX;  // groups with non-UsdPreviewSurface
+  desc.source = OpenPBRMaterialDesc::Source::Mdl;
 }
 
 }  // namespace

@@ -34,6 +34,10 @@ struct OpenPBRMaterialDesc {
     MaterialX,
     RenderManFallback,
     Default,
+    // V2.A.23 — MDL shaders (Omniverse OmniPBR / OmniGlass / OmniSurface).
+    // Detected either by `info:id` starting with `mdl::` OR by
+    // `info:mdl:sourceAsset` authored on the connected shader.
+    Mdl,
   };
 
   // Base layer — see §11 OpenPBR §3.1.

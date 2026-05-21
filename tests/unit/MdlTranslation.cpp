@@ -74,9 +74,10 @@ TEST(MdlTranslation, OmniPBRInputsMapToOpenPBRFields)
   EXPECT_NEAR(desc.emissionLuminance, 50.0f, 1e-6f);
   EXPECT_NEAR(desc.specularIor, 1.7f, 1e-6f);
 
-  // V2.A.23 — MDL materials report the MaterialX Source tag (groups
-  // with non-UsdPreviewSurface networks in the M18 health report).
-  EXPECT_EQ(desc.source, pyxis::OpenPBRMaterialDesc::Source::MaterialX);
+  // V2.A.23 — MDL materials report the dedicated Mdl Source tag
+  // (previously grouped under MaterialX; split out so the M18 health
+  // report shows the MDL slice separately from MaterialX).
+  EXPECT_EQ(desc.source, pyxis::OpenPBRMaterialDesc::Source::Mdl);
 }
 
 TEST(MdlTranslation, EnableEmissionOffSuppressesLuminance)

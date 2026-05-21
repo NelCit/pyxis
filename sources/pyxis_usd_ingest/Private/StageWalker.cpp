@@ -2668,6 +2668,10 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
   std::uint32_t srcCountMaterialX = 0;
   std::uint32_t srcCountRenderMan = 0;
   std::uint32_t srcCountDefault = 0;
+  // V2.A.23 — MDL (Omniverse OmniPBR / OmniGlass / OmniSurface). Was
+  // grouped into MaterialX before; tracked separately now that MDL has
+  // its own Source::Mdl enum value.
+  std::uint32_t srcCountMdl = 0;
 
   // M22 / V2.A.23 + V2.A.24 + V2.A.29 + V2.A.30 — material network
   // coverage counters. Walked alongside the existing health pass so
@@ -2700,13 +2704,30 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
       const pxr::UsdShadeShader shader(child);
       if (!shader)
         continue;
+      // V2.A.23 — detect MDL by either `info:id` starting with `mdl::`
+      // OR `info:mdl:sourceAsset` authored on the shader (the Omniverse
+      // sourceAsset convention). Mirrors the classifier in
+      // UsdShadeToOpenPBR::TryRenderContext.
       pxr::TfToken shaderId;
+      bool isMdl = false;
       if (shader.GetShaderId(&shaderId))
       {
         const std::string& idStr = shaderId.GetString();
         if (idStr.size() >= 5 && idStr.starts_with("mdl::"))
-          ++mdlNetworkCount;
+          isMdl = true;
       }
+      if (!isMdl)
+      {
+        static const pxr::TfToken mdlSourceAssetAttr("info:mdl:sourceAsset");  // NOLINT
+        if (const pxr::UsdAttribute attr =
+                shader.GetPrim().GetAttribute(mdlSourceAssetAttr);
+            attr && attr.HasAuthoredValue())
+        {
+          isMdl = true;
+        }
+      }
+      if (isMdl)
+        ++mdlNetworkCount;
       // Texture-side: wrap modes + colorspace coverage.
       if (const pxr::UsdShadeInput wrapS = shader.GetInput(pxr::TfToken("wrapS")); wrapS)
       {
@@ -2745,6 +2766,7 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
     {
       case OpenPBRMaterialDesc::Source::UsdPreviewSurface: ++srcCountUsdPreview; break;
       case OpenPBRMaterialDesc::Source::MaterialX:        ++srcCountMaterialX;   break;
+      case OpenPBRMaterialDesc::Source::Mdl:              ++srcCountMdl;         break;
       case OpenPBRMaterialDesc::Source::RenderManFallback:++srcCountRenderMan;   break;
       case OpenPBRMaterialDesc::Source::Default:
       {
@@ -2827,6 +2849,7 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
     Logging::Get().Info(log::APP,
         "StageWalker material health: UsdPreviewSurface=" + std::to_string(srcCountUsdPreview)
         + " MaterialX=" + std::to_string(srcCountMaterialX)
+        + " Mdl=" + std::to_string(srcCountMdl)
         + " RenderManFallback=" + std::to_string(srcCountRenderMan)
         + " Default(fallback-grey)=" + std::to_string(srcCountDefault)
         + " (total " + std::to_string(stats.materialsEmitted) + ")");
