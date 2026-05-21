@@ -625,11 +625,73 @@ void TranslateMaterialXStandardSurface(const pxr::UsdShadeShader& shader,
   desc.source = OpenPBRMaterialDesc::Source::MaterialX;
 }
 
+// V2.A.23 — read an authored bool/int/float input on the MDL shader
+// prim. Returns the typed value, or `fallback` when the input is
+// missing OR holds a different scalar type. USD authoring exporters
+// vary: Omniverse Composer writes `enable_emission` as a bool, some
+// pipelines write it as int, and an MDL author might write it as
+// float. Handle all three.
+[[nodiscard]] bool ReadBoolish(const pxr::UsdShadeShader& shader,
+                                const pxr::TfToken&        name,
+                                bool                       fallback,
+                                pxr::UsdTimeCode           timeCode) noexcept
+{
+  const pxr::UsdShadeInput input = shader.GetInput(name);
+  if (!input)
+    return fallback;
+  pxr::VtValue value;
+  if (!input.Get(&value, timeCode))
+    return fallback;
+  if (value.IsHolding<bool>())
+    return value.UncheckedGet<bool>();
+  if (value.IsHolding<int>())
+    return value.UncheckedGet<int>() != 0;
+  if (value.IsHolding<float>())
+    return value.UncheckedGet<float>() > 0.0f;
+  return fallback;
+}
+
+// V2.A.23 follow-up — MDL OmniPBR exposes textures via direct
+// SdfAssetPath inputs (e.g. `inputs:normalmap_texture = @./Oak_N.png@`)
+// rather than the UsdPreviewSurface `UsdUVTexture` graph. Resolve
+// the asset path and call the renderer's AcquireTexture callback.
+// Returns `TextureHandle::Invalid` when the input is missing,
+// unauthored, holds an empty path, or the callback is null.
+[[nodiscard]] TextureHandle ReadMdlTextureInput(
+    const pxr::UsdShadeShader& shader,
+    const pxr::TfToken&        name,
+    AcquireTextureFn           acquire,
+    void*                      userData,
+    TextureKey::Role           role,
+    TextureKey::Color          colorspace) noexcept
+{
+  if (acquire == nullptr)
+    return TextureHandle::Invalid;
+  const pxr::UsdShadeInput input = shader.GetInput(name);
+  if (!input)
+    return TextureHandle::Invalid;
+  pxr::VtValue value;
+  if (!input.Get(&value))
+    return TextureHandle::Invalid;
+  if (!value.IsHolding<pxr::SdfAssetPath>())
+    return TextureHandle::Invalid;
+  const pxr::SdfAssetPath assetPath = value.UncheckedGet<pxr::SdfAssetPath>();
+  const std::string& resolved = assetPath.GetResolvedPath().empty()
+                                     ? assetPath.GetAssetPath()
+                                     : assetPath.GetResolvedPath();
+  if (resolved.empty())
+    return TextureHandle::Invalid;
+  return acquire(resolved, role, userData);
+  (void)colorspace;  // role-derived sRGB/Linear is the renderer's call
+}
+
 // V2.A.23 — MDL OmniPBR / OmniGlass translator. Inputs match
 // Omniverse's OmniPBR.mdl shader. Inputs missing on a given variant
 // fall through to the OpenPBR scalar defaults.
 void TranslateMdl(const pxr::UsdShadeShader& shader,
                    OpenPBRMaterialDesc&      desc,
+                   AcquireTextureFn          acquire,
+                   void*                     userData,
                    pxr::UsdTimeCode          timeCode) noexcept
 {
   desc.baseColor = ReadColor(shader, pxr::TfToken("diffuse_color_constant"),
@@ -643,11 +705,48 @@ void TranslateMdl(const pxr::UsdShadeShader& shader,
                                   hlslpp::float3{0.0f, 0.0f, 0.0f}, timeCode);
   desc.emissionLuminance = ReadFloat(shader, pxr::TfToken("emissive_intensity"), 0.0f, timeCode);
   desc.specularIor = ReadFloat(shader, pxr::TfToken("ior_constant"), 1.5f, timeCode);
-  // Emission gate: OmniPBR's `enable_emission` flag — when off, the
-  // intensity / colour are honoured but the material won't light a
-  // surface. Reflect that by zeroing emissionLuminance.
-  if (ReadFloat(shader, pxr::TfToken("enable_emission"), 1.0f, timeCode) <= 0.0f)
+  // V2.A.23 follow-up — OmniPBR's `enable_emission` flag, when off,
+  // suppresses the surface-lighting contribution even if a non-zero
+  // emissive_color / emissive_intensity is authored (the MDL stores
+  // those as a "default off but ready to enable" stash; Oak.mdl's
+  // (1.0, 0.1, 0.1) red is the canonical example). The MDL FUNCTION
+  // default is FALSE; USD authoring only adds inputs when overridden,
+  // so a missing `enable_emission` means "use the MDL default" =
+  // disabled. Pre-fix the fallback was 1.0f (assumed enabled), which
+  // leaked the sentinel red as authored emission on every wood / floor
+  // / stucco material that authored emissive_color "just in case".
+  if (!ReadBoolish(shader, pxr::TfToken("enable_emission"),
+                    /*fallback=*/false, timeCode))
+  {
     desc.emissionLuminance = 0.0f;
+    desc.emissionColor     = hlslpp::float3{0.0f, 0.0f, 0.0f};
+  }
+  // V2.A.23 follow-up — MDL textures. OmniPBR-style assets author
+  // textures as direct SdfAssetPath inputs, not as UsdUVTexture
+  // sub-graphs. Pre-fix the translator skipped texture loading
+  // entirely for MDL materials, so wood/floor/wall surfaces fell back
+  // to their (typically grey-ish) scalar diffuse_color_constant
+  // instead of showing their baseColor texture. Role + colorspace
+  // map to TextureKey's renderer-side EOTF decision: BaseColor /
+  // Emission = sRGB; everything else = linear.
+  desc.baseColorMap   = ReadMdlTextureInput(shader, pxr::TfToken("diffuse_texture"),
+                                             acquire, userData,
+                                             TextureKey::Role::BaseColor, TextureKey::Color::SRgb);
+  desc.normalMap      = ReadMdlTextureInput(shader, pxr::TfToken("normalmap_texture"),
+                                             acquire, userData,
+                                             TextureKey::Role::NormalMap, TextureKey::Color::Linear);
+  desc.roughnessMap   = ReadMdlTextureInput(shader, pxr::TfToken("reflectionroughness_texture"),
+                                             acquire, userData,
+                                             TextureKey::Role::RoughnessMetallic, TextureKey::Color::Linear);
+  desc.metallicMap    = ReadMdlTextureInput(shader, pxr::TfToken("metallic_texture"),
+                                             acquire, userData,
+                                             TextureKey::Role::RoughnessMetallic, TextureKey::Color::Linear);
+  desc.emissionMap    = ReadMdlTextureInput(shader, pxr::TfToken("emissive_mask_texture"),
+                                             acquire, userData,
+                                             TextureKey::Role::Emission, TextureKey::Color::SRgb);
+  desc.opacityMap     = ReadMdlTextureInput(shader, pxr::TfToken("opacity_texture"),
+                                             acquire, userData,
+                                             TextureKey::Role::Opacity, TextureKey::Color::Linear);
   desc.source = OpenPBRMaterialDesc::Source::Mdl;
 }
 
@@ -676,7 +775,7 @@ OpenPBRMaterialDesc FromUsdShade(const pxr::UsdShadeMaterial& material,
   switch (match.kind)
   {
     case SurfaceMatch::Kind::Mdl:
-      TranslateMdl(match.shader, desc, timeCode);
+      TranslateMdl(match.shader, desc, acquire, userData, timeCode);
       return desc;
     case SurfaceMatch::Kind::MaterialXOpenPBR:
       TranslateMaterialXOpenPBR(match.shader, desc, timeCode);

@@ -821,67 +821,101 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
               {"Transmission",      &desc.transmissionMap,    TextureKey::Role::BaseColor,         TextureKey::Color::Linear},
               {"Coat roughness",     &desc.coatRoughnessMap,   TextureKey::Role::RoughnessMetallic, TextureKey::Color::Linear},
           };
-          for (const TextureSlotSpec& slot : textureSlots)
+          // Table layout for the 8 texture slots: a fixed-width label
+          // column, a stretching path column with horizontal clipping
+          // (`SameLineHidden` / `Selectable` truncates with the
+          // standard "..." behavior when the column shrinks), and a
+          // fixed-width actions column for the two compact buttons.
+          // Prior layout used SameLine + hard-coded x=140 + small
+          // buttons floating after the leaf filename; long leaf names
+          // (e.g. `Oak_Lobby_BaseColor_4k.png`) pushed the buttons
+          // off-screen and made the column unreadable. The table fixes
+          // alignment + makes the path clip cleanly instead of overflowing.
+          const ImGuiTableFlags tableFlags = ImGuiTableFlags_SizingFixedFit
+                                              | ImGuiTableFlags_BordersInnerH
+                                              | ImGuiTableFlags_PadOuterX;
+          if (ImGui::BeginTable("MatTextures", 3, tableFlags))
           {
-            ImGui::PushID(slot.label);
-            ImGui::TextUnformatted(slot.label);
-            ImGui::SameLine(140.0f);
-            const std::string_view boundPath = scene.GetTexturePath(*slot.handlePtr);
-            if (boundPath.empty())
+            ImGui::TableSetupColumn("Slot",   ImGuiTableColumnFlags_WidthFixed,   100.0f);
+            ImGui::TableSetupColumn("Path",   ImGuiTableColumnFlags_WidthStretch, 1.0f);
+            ImGui::TableSetupColumn("##Acts", ImGuiTableColumnFlags_WidthFixed,   90.0f);
+
+            for (const TextureSlotSpec& slot : textureSlots)
             {
-              ImGui::TextDisabled("(unbound)");
-            }
-            else
-            {
-              // Show the leaf filename — full paths trash the layout
-              // and the operator usually knows the directory.
-              const auto lastSlash = boundPath.find_last_of("/\\");
-              const std::string_view leaf =
-                  (lastSlash == std::string_view::npos)
-                      ? boundPath
-                      : boundPath.substr(lastSlash + 1);
-              ImGui::TextUnformatted(leaf.data(),
-                                      leaf.data() + leaf.size());
-              if (ImGui::IsItemHovered())
+              ImGui::PushID(slot.label);
+              ImGui::TableNextRow();
+              // ---- Column 0: slot label
+              ImGui::TableSetColumnIndex(0);
+              ImGui::TextUnformatted(slot.label);
+
+              // ---- Column 1: bound texture path (leaf filename only,
+              //               with the full path on hover-tooltip)
+              ImGui::TableSetColumnIndex(1);
+              const std::string_view boundPath = scene.GetTexturePath(*slot.handlePtr);
+              if (boundPath.empty())
               {
-                ImGui::SetTooltip("%.*s", static_cast<int>(boundPath.size()),
-                                   boundPath.data());
+                ImGui::TextDisabled("(unbound)");
               }
-            }
-            ImGui::SameLine();
-            if (ImGui::SmallButton("Browse..."))
-            {
-              OpenFilePickerSpec spec{};
-              spec.title       = L"Pick texture";
-              spec.filterLabel = L"Images (*.png;*.jpg;*.jpeg;*.exr;*.tga;*.dds)";
-              spec.filterGlob  = L"*.png;*.jpg;*.jpeg;*.exr;*.tga;*.dds";
-              const std::string picked = OpenFilePickerDialog(spec);
-              if (!picked.empty())
+              else
               {
-                TextureKey key;
-                key.resolvedPath = picked;  // borrowed; AcquireTexture copies internally
-                key.role         = slot.role;
-                key.colorspace   = slot.colorspace;
-                const TextureHandle newHandle = scene.AcquireTexture(key);
-                if (newHandle != TextureHandle::Invalid)
+                const auto lastSlash = boundPath.find_last_of("/\\");
+                const std::string_view leaf =
+                    (lastSlash == std::string_view::npos)
+                        ? boundPath
+                        : boundPath.substr(lastSlash + 1);
+                // PushTextWrapPos with the column's right edge clips
+                // overflow to "..." instead of bleeding into the next
+                // column. Tooltip on hover surfaces the full path.
+                ImGui::PushTextWrapPos(ImGui::GetCursorPosX()
+                                       + ImGui::GetContentRegionAvail().x);
+                ImGui::TextUnformatted(leaf.data(), leaf.data() + leaf.size());
+                ImGui::PopTextWrapPos();
+                if (ImGui::IsItemHovered())
                 {
-                  *slot.handlePtr = newHandle;
-                  matEdited = true;
+                  ImGui::SetTooltip("%.*s", static_cast<int>(boundPath.size()),
+                                     boundPath.data());
                 }
               }
-            }
-            ImGui::SameLine();
-            // Only show Clear when something is bound — avoids visual
-            // noise on unbound slots.
-            if (*slot.handlePtr != TextureHandle::Invalid)
-            {
-              if (ImGui::SmallButton("Clear"))
+
+              // ---- Column 2: actions (Browse + Clear in a compact pair)
+              ImGui::TableSetColumnIndex(2);
+              if (ImGui::SmallButton("..."))
               {
-                *slot.handlePtr = TextureHandle::Invalid;
-                matEdited = true;
+                OpenFilePickerSpec spec{};
+                spec.title       = L"Pick texture";
+                spec.filterLabel = L"Images (*.png;*.jpg;*.jpeg;*.exr;*.tga;*.dds)";
+                spec.filterGlob  = L"*.png;*.jpg;*.jpeg;*.exr;*.tga;*.dds";
+                const std::string picked = OpenFilePickerDialog(spec);
+                if (!picked.empty())
+                {
+                  TextureKey key;
+                  key.resolvedPath = picked;
+                  key.role         = slot.role;
+                  key.colorspace   = slot.colorspace;
+                  const TextureHandle newHandle = scene.AcquireTexture(key);
+                  if (newHandle != TextureHandle::Invalid)
+                  {
+                    *slot.handlePtr = newHandle;
+                    matEdited = true;
+                  }
+                }
               }
+              if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Browse for a texture file");
+              ImGui::SameLine();
+              if (*slot.handlePtr != TextureHandle::Invalid)
+              {
+                if (ImGui::SmallButton("x"))
+                {
+                  *slot.handlePtr = TextureHandle::Invalid;
+                  matEdited = true;
+                }
+                if (ImGui::IsItemHovered())
+                  ImGui::SetTooltip("Clear binding (revert to scalar value)");
+              }
+              ImGui::PopID();
             }
-            ImGui::PopID();
+            ImGui::EndTable();
           }
           ImGui::TreePop();
         }
