@@ -31,6 +31,12 @@ struct RenderTargets {
   // these. Color is required; everything else is optional and gated
   // on the matching RenderSettings::enabledAovs bit (§19.8).
   nvrhi::ITexture* color = nullptr;  // required (RGBA16F or swapchain-format)
+  // SSAA resolve destination (output resolution, UAV-capable). When
+  // RenderSettings::ssaaFactor > 1, `color` is the super-res render
+  // target and the renderer's SsaaResolvePass box-downsamples it into
+  // this output-resolution texture. Null (or ssaaFactor == 1) = no
+  // resolve; the caller consumes `color` directly. Caller-allocated.
+  nvrhi::ITexture* colorResolved = nullptr;
   nvrhi::ITexture* depth = nullptr;
   nvrhi::ITexture* normal = nullptr;
   nvrhi::ITexture* albedo = nullptr;

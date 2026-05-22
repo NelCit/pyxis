@@ -36,6 +36,11 @@ std::expected<AovTextures, std::string> AovTextures::Create(nvrhi::IDevice* devi
   desc.dimension = nvrhi::TextureDimension::Texture2D;
   desc.isRenderTarget = true;
   desc.isUAV = true;  // M3 PathTracePass writes via RWTexture2D<float4>.
+  // SSAA: the SsaaResolvePass binds `color` as a Texture2D SRV to
+  // box-downsample it into the resolve target, so it must be shader-
+  // resource-capable too. Additive (no effect on the UAV-write /
+  // render-target / copy paths); also lets future passes sample AOVs.
+  desc.isShaderResource = true;
   desc.debugName = "aov.color";
   desc.initialState = nvrhi::ResourceStates::RenderTarget;
   desc.keepInitialState = true;

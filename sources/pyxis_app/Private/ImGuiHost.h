@@ -186,6 +186,13 @@ class ImGuiHost {
   // pushes this into RenderSettings::worldPosPeriod each frame.
   // Default 10 m matches the pre-slider hardcoded behaviour.
   float                                 _editorWorldPosPeriod = 10.0f;
+  // SSAA (deterministic supersampling) — the editor's Anti-aliasing
+  // section. ViewerMode reads GetSsaaFactor() each frame to size its
+  // super-res render targets + drive the downsample compute pass.
+  // Off by default (1 spp, no AA — the historical viewer behaviour);
+  // factor clamped to [2,4] when enabled.
+  bool                                  _editorSsaaEnabled = false;
+  int                                   _editorSsaaFactor  = 2;
   // ShaderMake rebuild status — pushed by ViewerMode each frame.
   // True while the worker thread is spawning cmake / waiting for
   // exit; the editor's Reload Shaders button shows "Rebuilding..."
@@ -304,6 +311,14 @@ class ImGuiHost {
   // Editor's WorldPos period slider value (scene units). ViewerMode
   // pushes this into RenderSettings::worldPosPeriod each frame.
   [[nodiscard]] float GetWorldPosPeriod() const noexcept { return _editorWorldPosPeriod; }
+
+  // SSAA control — the editor's "Anti-aliasing" section. ViewerMode
+  // reads this each frame to size its super-res render targets +
+  // drive the downsample compute pass. 1 = off; 2..4 = N×N supersample.
+  // Returns the effective factor (1 when the toggle is off).
+  [[nodiscard]] uint32_t GetSsaaFactor() const noexcept {
+    return _editorSsaaEnabled ? static_cast<uint32_t>(_editorSsaaFactor) : 1u;
+  }
 
   // ViewerMode pushes the live rebuild state each frame so the
   // editor's Reload Shaders button can show "Rebuilding..." +

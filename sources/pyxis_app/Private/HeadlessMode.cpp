@@ -1018,7 +1018,8 @@ int RunViewer(const Configuration& config, const ResolvedScene& resolvedScene,
               std::string_view loadMode,
               std::string_view variantSelections,
               std::string_view renderPurpose,
-              bool compressTextures) noexcept {
+              bool compressTextures,
+              uint32_t ssaa) noexcept {
   // Viewer keeps the M1 entrypoint shape; M4 P5d/P5e wires
   // resolvedScene through to the engine dispatch inside
   // RunViewerLoop. shaderRebuildDir overrides the cwd walk-up
@@ -1026,7 +1027,7 @@ int RunViewer(const Configuration& config, const ResolvedScene& resolvedScene,
   // ViewerMode.cpp's FindCMakeBuildDir).
   return RunViewerLoop(config, resolvedScene, screenshotPath, shaderRebuildDir,
                        loadMode, variantSelections, renderPurpose,
-                       compressTextures);
+                       compressTextures, ssaa);
 }
 
 }  // namespace pyxis::app

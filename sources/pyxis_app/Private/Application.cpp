@@ -333,7 +333,7 @@ int Run(int argc, char** argv) noexcept {
   }
   return RunViewer(config, scene, cli.screenshotPath, cli.shaderRebuildDir,
                    cli.loadMode, cli.variantSelections, cli.renderPurpose,
-                   cli.compressTextures);
+                   cli.compressTextures, cli.ssaa);
 }
 
 }  // namespace pyxis::app
