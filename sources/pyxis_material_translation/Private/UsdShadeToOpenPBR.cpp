@@ -701,6 +701,11 @@ void TranslateMdl(const pxr::UsdShadeShader& shader,
                               ReadFloat(shader, pxr::TfToken("roughness_constant"), 0.5f, timeCode),
                               timeCode);
   desc.opacity   = ReadFloat(shader, pxr::TfToken("opacity_constant"), 1.0f, timeCode);
+  // V2.A.23 follow-up — OmniPBR `bump_factor` scales the normal-map
+  // strength. Default 1.0 = full authored bump. Production content
+  // authors 0.6..10; honoring it keeps polished surfaces from looking
+  // over-bumped + lets detailed-matte surfaces dial relief up.
+  desc.normalStrength = ReadFloat(shader, pxr::TfToken("bump_factor"), 1.0f, timeCode);
   desc.emissionColor = ReadColor(shader, pxr::TfToken("emissive_color"),
                                   hlslpp::float3{0.0f, 0.0f, 0.0f}, timeCode);
   desc.emissionLuminance = ReadFloat(shader, pxr::TfToken("emissive_intensity"), 0.0f, timeCode);

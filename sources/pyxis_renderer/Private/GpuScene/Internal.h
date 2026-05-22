@@ -203,7 +203,7 @@ inline shaderinterop::OpenPBRMaterialGPU PackMaterialGpu(
   gpu.opacityTex = opacitySlot;
   gpu.transmissionTex = transmissionSlot;
   gpu.coatRoughnessTex = coatRoughnessSlot;
-  gpu._reserved0 = 0;
+  gpu.normalStrength = desc.normalStrength;  // V2.A.23 (was _reserved0)
   // M9 emission RGB. UsdPreviewSurface authors emissive as a color3f
   // (`emissiveColor`); the closesthit emits emissionColor ×
   // emissionLuminance × (sampled emissionTex) when the
