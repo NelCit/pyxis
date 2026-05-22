@@ -1,0 +1,93 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Pyxis golden mat_mirror_translucent — a polished chrome floor (the World Lobby mirror case) reflects a clear glass sphere with an opaque red ball behind it. The floor's reflection bounce must run the front-to-back transmission composite (closesthit.slang), so the glass seen IN the floor shows what is behind it instead of collapsing to its near-black emitted term (glass-in-a-mirror rendered black before the fix). Opaque/miss reflected hits still break after one segment, so this golden is the dedicated guard for the translucent-reflection path."
+)
+def Xform "World"
+{
+    # Polished chrome floor, normal +Y — reflects the glass + ball above.
+    def Cube "MirrorFloor" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        double size = 2
+        double3 xformOp:translate = (0, 0, -0.5)
+        double3 xformOp:scale = (3.0, 0.04, 3.0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        rel material:binding = </World/Materials/Chrome>
+    }
+    # Clear glass sphere sitting on the floor.
+    def Sphere "Glass" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        double radius = 0.5
+        double3 xformOp:translate = (0.0, 0.6, -0.2)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        rel material:binding = </World/Materials/Glass>
+    }
+    # Opaque red ball behind the glass (toward the back), so see-through
+    # is unmistakable in both the direct view and the floor reflection.
+    def Sphere "RedBall" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        double radius = 0.34
+        double3 xformOp:translate = (0.0, 0.42, -1.05)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        rel material:binding = </World/Materials/Red>
+    }
+    # Camera pitched down ~28° to frame the floor + reflection.
+    def Camera "Camera"
+    {
+        float focalLength = 30.0
+        float horizontalAperture = 36.0
+        float verticalAperture = 20.25
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 1.7, 2.6)
+        float3 xformOp:rotateXYZ = (-26, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+    def Scope "Materials"
+    {
+        def Material "Chrome"
+        {
+            token outputs:surface.connect = </World/Materials/Chrome/S.outputs:surface>
+            def Shader "S"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (1, 1, 1)
+                float inputs:metallic = 1.0
+                float inputs:roughness = 0.04
+                token outputs:surface
+            }
+        }
+        def Material "Glass"
+        {
+            token outputs:surface.connect = </World/Materials/Glass/S.outputs:surface>
+            def Shader "S"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.85, 0.92, 1.0)
+                float inputs:metallic = 0.0
+                float inputs:roughness = 0.0
+                float inputs:opacity = 0.08
+                float inputs:ior = 1.5
+                token outputs:surface
+            }
+        }
+        def Material "Red"
+        {
+            token outputs:surface.connect = </World/Materials/Red/S.outputs:surface>
+            def Shader "S"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.9, 0.06, 0.06)
+                float inputs:metallic = 0.0
+                float inputs:roughness = 0.55
+                token outputs:surface
+            }
+        }
+    }
+    def DomeLight "DomeLight"
+    {
+        color3f inputs:color = (0.9, 0.95, 1.0)
+        float inputs:intensity = 1.5
+    }
+}

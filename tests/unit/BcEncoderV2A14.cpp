@@ -98,7 +98,13 @@ TEST(BcEncoderV2A14, NormalMapEncodesToBc5) {
   EXPECT_EQ(encoded.size(), 16u);
 }
 
-TEST(BcEncoderV2A14, RoughnessMetallicEncodesToBc4) {
+TEST(BcEncoderV2A14, RoughnessMetallicEncodesToBc1Unorm) {
+  // ORM packs ambient-occlusion / roughness / metallic in R/G/B and the
+  // closesthit reads roughness from .g and metallic from .b. BC4 is
+  // single-channel, so it would drop two of the three channels and
+  // silently zero roughness + metallic — RoughnessMetallic therefore
+  // encodes to BC1_UNORM (linear, all three channels, same 8-byte block)
+  // rather than BC4. See BcEncoder.cpp's RoughnessMetallic branch.
   const auto src = MakeRgbaGradient(4, 4);
   std::vector<std::uint8_t> encoded;
   nvrhi::Format format = nvrhi::Format::UNKNOWN;
@@ -108,7 +114,8 @@ TEST(BcEncoderV2A14, RoughnessMetallicEncodesToBc4) {
                                     pyxis::TextureKey::Role::RoughnessMetallic,
                                     encoded, format, blockBytes);
 
-  EXPECT_EQ(format, nvrhi::Format::BC4_UNORM);
+  // Linear BC1 (not _SRGB) — ORM data must not get the sRGB warm-cast.
+  EXPECT_EQ(format, nvrhi::Format::BC1_UNORM);
   EXPECT_EQ(blockBytes, 8u);
   EXPECT_EQ(encoded.size(), 8u);
 }

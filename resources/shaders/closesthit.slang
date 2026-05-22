@@ -124,10 +124,43 @@ float4 SampleByConeRGBA(uint texIdx, float2 uv, float coneRadius) {
     return gBindlessTextures[texIdx].SampleLevel(gBindlessSampler, uv, lod);
 }
 
+// Anisotropic sample via hardware SampleGrad. `ddxUv` / `ddyUv` are the
+// UV-space footprint axes (∂uv/∂screenX-equivalent, ∂uv/∂screenY-
+// equivalent) the closesthit derives from the ray-cone ellipse +
+// surface tangent frame. The HW builds the anisotropic footprint from
+// the two gradient vectors and runs N-tap anisotropic filtering — sharp
+// along the minor axis, filtered along the stretched major axis. This
+// is the NVIDIA RTX texture-LOD approach and removes grazing-angle
+// moiré/streaking that isotropic mip selection (SampleByCone) can't.
+float3 SampleByGrad(uint texIdx, float2 uv, float2 ddxUv, float2 ddyUv) {
+    return gBindlessTextures[texIdx].SampleGrad(gBindlessSampler, uv, ddxUv, ddyUv).rgb;
+}
+
+float4 SampleByGradRGBA(uint texIdx, float2 uv, float2 ddxUv, float2 ddyUv) {
+    return gBindlessTextures[texIdx].SampleGrad(gBindlessSampler, uv, ddxUv, ddyUv);
+}
+
 static const float PYXIS_PI_SAFE = 3.14159265358979323846;
 static const float PYXIS_PI       = 3.14159265358979323846;
 static const float PYXIS_TWO_PI   = 6.28318530717958647692;
 static const float PYXIS_INV_PI   = 0.31830988618379067154;
+
+// V2.B — ray recursion budget. Every secondary TraceRay (reflection,
+// AO, shadow) is gated on `payload.recursionDepth + 1u <
+// MAX_RAY_RECURSION`, and the pipeline's maxRecursionDepth
+// (PathTracePass) is set to the same value. This matches the
+// plan_for_v2.md §V2.B doctrine (direct + shadows + 1 reflection bounce
+// = depth 3) exactly.
+//
+// Note: opacity TRANSMISSION no longer spends this budget. An earlier
+// follow-up traced a recursive continuation ray straight through each
+// transparent surface, which forced the cap up to 6 (a glass pane is 2
+// surfaces; two panes = 4, plus a reflection + a shadow level). That
+// see-through is now composited FRONT-TO-BACK by raygen's transmission
+// loop at recursion depth 0 — see raygen.slang — so stacked transparent
+// layers are unbounded and free of recursion cost, and the budget is
+// back to the documented 3.
+static const uint MAX_RAY_RECURSION = 3u;
 
 // M9-fidelity Schlick Fresnel. F0 derives per-material:
 //   dielectrics: F0 = ((ior - 1) / (ior + 1))² — typically ~0.04
@@ -220,7 +253,78 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
     const float2 uv2 = gMeshUvs[uvBase + v2];
     const float2 bary = attribs.barycentrics;
     const float  w0   = 1.0 - bary.x - bary.y;
-    const float2 uv   = uv0 * w0 + uv1 * bary.x + uv2 * bary.y;
+    float2 uv   = uv0 * w0 + uv1 * bary.x + uv2 * bary.y;
+
+    // V2.A.24 — per-material UV transform (OmniPBR texture_scale /
+    // texture_rotate / texture_translate). This reproduces, verbatim,
+    // MDL base::rotation_translation_scale() composed with
+    // base::transform_coordinate() (NVIDIA/MDL-SDK base.mdl), which is
+    // what OmniPBR.mdl wires its three texture_* params through:
+    //
+    //   M = rotate * scale            (transform_coordinate does M·uv)
+    //   scale[col3] = translate - 0.5  (translate applied BEFORE rotate)
+    //   rotate[col3] = +0.5            (rotation pivots about UV centre)
+    //
+    // Expanding for the Z-only rotation OmniPBR uses (degrees→radians
+    // happens CPU-side in PackMaterialGpu):
+    //   a = scaleX*u + translateX - 0.5
+    //   b = scaleY*v + translateY - 0.5
+    //   u' =  cos*a + sin*b + 0.5
+    //   v' = -sin*a + cos*b + 0.5
+    // i.e. scale (multiply: scale↑ ⇒ more tiling) → translate → rotate
+    // about (0.5,0.5). transform_coordinate is column-vector (v'=M·v),
+    // matching Pyxis §10. Gated on the flag so identity-UV pays nothing.
+    // NOTE on handedness: Pyxis samples `st` without a V-flip whereas
+    // OmniPBR's `st` origin is bottom-left; a reflection about v=0.5
+    // conjugates rotation θ→-θ. If a non-90° rotation ever appears
+    // mirrored vs the OmniPBR reference, negating uvRotateRadians (one
+    // sign) is the fix — 90° tiling textures (the lobby oak) are
+    // grain-direction-identical under either sign.
+    // V2.B.* — OmniPBR project_uvw: world/object-space planar projection.
+    // Derive UV from the WORLD hit position instead of the mesh UVs, with
+    // the texture U axis along world-up so directional detail (wood grain)
+    // reads consistently regardless of the asset's per-mesh unwrap. The
+    // projection plane is chosen from the dominant face-normal axis
+    // (triplanar-style, single dominant axis). texture_scale tiles it;
+    // texture_rotate/translate are skipped (the projection already orients
+    // the texture). Replaces the mesh-UV transform when the flag is set.
+    // RFC 0005 — planar projection. World space projects from the world hit
+    // position; object space transforms the hit (and face normal) into the
+    // instance's local frame first, so a tiled prop placed at many
+    // transforms projects identically in each (OmniPBR world_or_object=1).
+    const bool worldProj  = (mat.flags & MATERIAL_FLAG_WORLD_PROJECTION) != 0u;
+    const bool objectProj = (mat.flags & MATERIAL_FLAG_OBJECT_PROJECTION) != 0u;
+    const bool planarProj = worldProj || objectProj;
+    if (planarProj) {
+        const float3 hitW = WorldRayOrigin() + RayTCurrent() * WorldRayDirection();
+        const float3 faceNormalLocal =
+            gMeshFaceNormals[gMeshFaceOffsets[meshSlot] + PrimitiveIndex()].xyz;
+        float3 hp;
+        float3 fnP;
+        if (objectProj) {
+            // Project in the instance's local frame: transform the hit by
+            // WorldToObject; the stored face normal is ALREADY object-space.
+            hp  = mul(WorldToObject3x4(), float4(hitW, 1.0)).xyz;
+            fnP = abs(normalize(faceNormalLocal));
+        } else {
+            const float3x4 o2wp = ObjectToWorld3x4();
+            const float3x3 w3   = float3x3(o2wp[0].xyz, o2wp[1].xyz, o2wp[2].xyz);
+            hp  = hitW;
+            fnP = abs(normalize(mul(w3, faceNormalLocal)));
+        }
+        float2 wuv;
+        if (fnP.y >= fnP.x && fnP.y >= fnP.z) wuv = float2(hp.x, hp.z);  // floor/ceiling
+        else if (fnP.x >= fnP.z)              wuv = float2(hp.y, hp.z);  // wall ⟂X: U=up
+        else                                  wuv = float2(hp.y, hp.x);  // wall ⟂Z: U=up
+        uv = wuv * float2(mat.uvScaleX, mat.uvScaleY);
+    } else if ((mat.flags & MATERIAL_FLAG_HAS_UV_TRANSFORM) != 0u) {
+        const float cosR = cos(mat.uvRotateRadians);
+        const float sinR = sin(mat.uvRotateRadians);
+        const float a = mat.uvScaleX * uv.x + mat.uvTranslateX - 0.5;
+        const float b = mat.uvScaleY * uv.y + mat.uvTranslateY - 0.5;
+        uv = float2( cosR * a + sinR * b + 0.5,
+                    -sinR * a + cosR * b + 0.5);
+    }
 
     // M9-fidelity ray-cone LOD. Per-pixel angular spread × ray
     // distance gives the cone radius at the hit; combined with the
@@ -232,16 +336,126 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
     // Akenine-Möller, Ray Tracing Gems Ch 20.
     const float coneRadius = gCamera.pixelSpreadRadians * RayTCurrent();
 
+    // V2.B.* — UV-density-aware LOD. The cone radius is a WORLD-space
+    // length; SampleByCone needs the footprint in UV space to pick the
+    // mip (uvFootprint × texSize = texel footprint). The conversion is
+    // texels-per-world = (UV-per-object-length) / (world-per-object-
+    // length): the first factor is the per-triangle texel density
+    // packed into gMeshFaceNormals[].w (sqrt(uvArea/objArea), set at
+    // CreateMesh), the second is the object→world scale read off the
+    // instance transform's first row. Without this, heavily-tiled
+    // surfaces (a World Lobby wall tiles ~2900×) select a too-low mip
+    // and alias into herringbone moiré even with a full mip chain.
+    // Density 0 (degenerate tri / no UVs) → fall back to coneRadius,
+    // i.e. the previous "1 UV unit per world unit" assumption.
+    const uint   faceDensitySlot = gMeshFaceOffsets[meshSlot] + PrimitiveIndex();
+    const float  faceTexelDensity = gMeshFaceNormals[faceDensitySlot].w;
+    const float3x4 instanceXform = ObjectToWorld3x4();
+    const float  objToWorldScale = max(length(instanceXform[0].xyz), 1e-6);
+    // The per-material UV transform (texture_scale) multiplies the UV
+    // AFTER the mesh-density was measured, so it multiplies the texel
+    // footprint too. A material that tiles its texture (e.g. felt /
+    // fabric with texture_scale = (50,50)) minifies 50× harder than the
+    // raw mesh UVs imply; without this factor the LOD picks a far-too-
+    // low mip and the texture aliases into noise/herringbone even up
+    // close. Area scale = |uvScaleX · uvScaleY|; sqrt gives the linear
+    // footprint multiplier. Rotation/translation don't change footprint.
+    float matTileScale = 1.0;
+    if ((mat.flags & MATERIAL_FLAG_HAS_UV_TRANSFORM) != 0u)
+        matTileScale = sqrt(max(abs(mat.uvScaleX * mat.uvScaleY), 1e-6));
+
+    // Grazing-angle anisotropy. At a glancing view the per-pixel texel
+    // footprint is stretched along the surface; an isotropic cone radius
+    // badly under-estimates it and the texture aliases into diagonal
+    // streaks / moiré (felt + tiled walls seen edge-on). True fix is
+    // anisotropic filtering, but a deterministic isotropic proxy is to
+    // divide the footprint by |N·V| — as the view grazes (N·V → 0) the
+    // footprint grows and a higher (blurrier) mip is selected, trading
+    // sharpness for no aliasing. Clamp to 0.1 so it boosts at most ~10×
+    // (~3.3 mip levels) and never blows up to a 1×1 mip. Uses the
+    // per-triangle face normal (already fetched for the density slot).
+    const float3x3 worldFromObj3x3 = float3x3(instanceXform[0].xyz,
+                                              instanceXform[1].xyz,
+                                              instanceXform[2].xyz);
+    const float3 faceNormalW = normalize(mul(worldFromObj3x3,
+                                             gMeshFaceNormals[faceDensitySlot].xyz));
+    const float  ndotvLod = max(abs(dot(faceNormalW, normalize(-WorldRayDirection()))), 0.1);
+    const float  uvFootprint = ((faceTexelDensity > 0.0)
+                                   ? coneRadius * faceTexelDensity / objToWorldScale
+                                   : coneRadius) * matTileScale / ndotvLod;
+
+    // V2.B.* — anisotropic texture footprint → hardware SampleGrad (the
+    // NVIDIA RTX texture-LOD approach). The ray cone is an isotropic disk
+    // of radius coneRadius ⟂ to the ray; projected onto the surface at a
+    // grazing angle it's an ELLIPSE — minor axis = coneRadius, major axis
+    // = coneRadius/|N·V| along the in-plane view direction. Converting the
+    // two ellipse axes to UV gradients (via the tangent frame + texel
+    // density) and feeding SampleGrad gives true anisotropic filtering:
+    // sharp across the minor axis, filtered along the stretched major
+    // axis → no grazing moiré WITHOUT over-blurring (which the isotropic
+    // SampleByCone / `/|N·V|` proxy can't). Falls back to a square
+    // isotropic footprint when the mesh authored no tangents.
+    float2 ddxUv;
+    float2 ddyUv;
+    if (planarProj) {
+        // World-projected UV (meters × scale): the texel footprint per
+        // pixel = cone radius (world m) × tile scale, grazing-boosted.
+        // Isotropic is fine here — world-projected surfaces are flat
+        // panels, not the grazing-critical case the tangent-frame aniso
+        // targets, and the mesh tangent frame doesn't apply to this UV.
+        const float3 vw  = normalize(-WorldRayDirection());
+        const float  nd  = max(abs(dot(faceNormalW, vw)), 0.1);
+        const float  fpw = coneRadius * max(abs(mat.uvScaleX), abs(mat.uvScaleY)) / nd;
+        ddxUv = float2(fpw, 0.0);
+        ddyUv = float2(0.0, fpw);
+    } else {
+        const uint   tanBase  = gMeshTangentOffsets[meshSlot];
+        const float4 tan0     = gMeshTangents[tanBase + v0];
+        const float3 tanLocal = tan0.xyz * w0
+                              + gMeshTangents[tanBase + v1].xyz * bary.x
+                              + gMeshTangents[tanBase + v2].xyz * bary.y;
+        if (dot(tanLocal, tanLocal) > 1e-8 && faceTexelDensity > 0.0) {
+            float3 tanW = normalize(mul(worldFromObj3x3, tanLocal));
+            tanW = normalize(tanW - faceNormalW * dot(tanW, faceNormalW));  // Gram-Schmidt
+            const float3 bitW  = cross(faceNormalW, tanW) * tan0.w;          // handedness
+            const float3 viewW = normalize(-WorldRayDirection());
+            const float  ndv   = clamp(abs(dot(faceNormalW, viewW)), 0.1, 1.0);
+            float3 majorDir = viewW - faceNormalW * dot(viewW, faceNormalW); // in-plane view
+            const float majLenSq = dot(majorDir, majorDir);
+            majorDir = (majLenSq > 1e-8) ? majorDir * rsqrt(majLenSq) : tanW;
+            const float3 minorDir = cross(faceNormalW, majorDir);
+            const float3 majorVec = majorDir * (coneRadius / ndv);  // stretched
+            const float3 minorVec = minorDir * coneRadius;
+            // world → UV gradient: project onto tangent/bitangent, scale
+            // by texels-per-world (density/objScale) and the material tile
+            // factor. (matTileScale already folds the texture_scale tiling.)
+            const float invWpu = matTileScale * faceTexelDensity / objToWorldScale;
+            ddxUv = float2(dot(majorVec, tanW), dot(majorVec, bitW)) * invWpu;
+            ddyUv = float2(dot(minorVec, tanW), dot(minorVec, bitW)) * invWpu;
+        } else {
+            ddxUv = float2(uvFootprint, 0.0);  // isotropic square footprint
+            ddyUv = float2(0.0, uvFootprint);
+        }
+    }
+
+
     // Bindless baseColor sample, gated on the §11.6 HasBaseColorMap
     // flag the C++ side sets when the material's resolved
     // baseColorTex slot is valid. LOD computed via SampleByCone
     // (M9-fidelity ray-cone footprint) so distant surfaces use mip
     // levels instead of mip 0 (LOD-0-pinned aliasing was the dominant
     // texture artefact pre-M9-fidelity).
+    // baseColor scalar carries the tint: for textured materials the C++
+    // side sets it to diffuse_tint (default white); for untextured ones
+    // it's diffuse_color_constant × diffuse_tint. The texture, when
+    // present, is the albedo and the tint MULTIPLIES it — OmniPBR/MDL
+    // convention. Without the multiply, a white felt weave texture
+    // (felt_white_diff.jpg) under a green diffuse_tint rendered white/
+    // grey instead of green.
     float3 baseColor = float3(mat.baseColorR, mat.baseColorG, mat.baseColorB);
     if ((mat.flags & MATERIAL_FLAG_HAS_BASE_COLOR_MAP) != 0u
         && mat.baseColorTex < BINDLESS_TEXTURES_CAP) {
-        baseColor = SampleByCone(mat.baseColorTex, uv, coneRadius);
+        baseColor *= SampleByGrad(mat.baseColorTex, uv, ddxUv, ddyUv);
     }
 
     // M9-fidelity: roughness + metallic from per-material textures.
@@ -257,11 +471,11 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
     float metalness = mat.metalness;
     if ((mat.flags & MATERIAL_FLAG_HAS_ROUGHNESS_MAP) != 0u
         && mat.roughnessTex < BINDLESS_TEXTURES_CAP) {
-        roughness = SampleByConeRGBA(mat.roughnessTex, uv, coneRadius).g;
+        roughness = SampleByGradRGBA(mat.roughnessTex, uv, ddxUv, ddyUv).g;
     }
     if ((mat.flags & MATERIAL_FLAG_HAS_METALLIC_MAP) != 0u
         && mat.metallicTex < BINDLESS_TEXTURES_CAP) {
-        metalness = SampleByConeRGBA(mat.metallicTex, uv, coneRadius).b;
+        metalness = SampleByGradRGBA(mat.metallicTex, uv, ddxUv, ddyUv).b;
     }
     roughness = clamp(roughness, 0.04, 1.0);  // floor avoids singular GGX
     metalness = saturate(metalness);
@@ -364,20 +578,36 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
                 normalize(tangentWorld_raw - dot(tangentWorld_raw, nWorld) * nWorld);
             const float3 bitangentWorld = cross(nWorld, tangentWorld) * handedness;
 
-            // Sample the tangent-space normal map. Convention: the
-            // texture stores [0,1]-encoded tangent-space normals;
-            // unpack to [-1,1] before transforming.
-            float3 nTangent =
-                SampleByCone(mat.normalTex, uv, coneRadius) * 2.0 - 1.0;
+            // Sample the tangent-space normal map and unpack XY to
+            // [-1,1]. **Z is reconstructed from XY**, not read from the
+            // blue channel: the normal map is BC5-compressed when
+            // texture compression is on (BC5 stores only R+G), so the
+            // sampled .b is 0 and using it would point the normal
+            // backward (z = 0*2-1 = -1) — which the shading-normal clamp
+            // then discards, making the normal map silently do NOTHING.
+            // Reconstructing z = sqrt(1 - x² - y²) is exact for unit
+            // tangent-space normals and works for BC5 + uncompressed
+            // alike. (This was the "normal map has no effect" symptom
+            // once --compress-textures defaulted on.)
+            const float3 nSample = SampleByGrad(mat.normalTex, uv, ddxUv, ddyUv);
+            float2 nXY = nSample.xy * 2.0 - 1.0;
 
-            // V2.A.23 — normal-map strength (OmniPBR bump_factor).
-            // Scale the tangent-plane deviation (XY) toward / away from
-            // flat (0,0,1); Z stays 1 so re-normalize keeps it unit.
-            // strength 0 = flat (ignore bump), 1 = authored, >1 =
-            // exaggerated. Keeps polished surfaces (Terrazzo, etc.)
-            // from reading grainier than the artist intended.
-            nTangent.xy *= mat.normalStrength;
-            nTangent = normalize(nTangent);
+            // V2.A.24 — tangent-handedness flips (OmniPBR
+            // flip_tangent_u / flip_tangent_v). The DirectX-vs-OpenGL
+            // green-channel convention; Omniverse content commonly
+            // authors flip_tangent_v = 1, so without flipping the V
+            // (green) channel the bump lighting is inverted.
+            if ((mat.flags & MATERIAL_FLAG_FLIP_TANGENT_U) != 0u)
+                nXY.x = -nXY.x;
+            if ((mat.flags & MATERIAL_FLAG_FLIP_TANGENT_V) != 0u)
+                nXY.y = -nXY.y;
+
+            // V2.A.23 — normal-map strength (OmniPBR bump_factor): scale
+            // the tangent-plane deviation, then reconstruct Z from the
+            // scaled XY so a stronger bump tilts the normal more.
+            nXY *= mat.normalStrength;
+            const float nZ = sqrt(saturate(1.0 - dot(nXY, nXY)));
+            float3 nTangent = normalize(float3(nXY, nZ));
 
             // Transform tangent-space normal to world space.
             nWorld = normalize(nTangent.x * tangentWorld
@@ -521,7 +751,16 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
             // misses (sky visible); the pre-trace color stays 0 if it
             // hits (occluded). All deterministic — no RNG, fixed
             // direction per pixel.
+            // Recursion-budget gate: this AO ray is a TraceRay, so it
+            // must respect the pipeline maxRecursionDepth (=3) just like
+            // the reflection/continuation rays. Without it, a surface
+            // already deep in the chain (e.g. seen via a glass
+            // transmission ray, then reflected) would issue a TraceRay
+            // past the cap — undefined behavior that returned garbage and
+            // made reflections vanish behind translucent surfaces. When
+            // out of budget, assume unoccluded (visibility 1).
             float aoVisibility = 1.0;
+            if (payload.recursionDepth + 1u < MAX_RAY_RECURSION)
             {
                 RayDesc aoRay;
                 aoRay.Origin    = hitWorld + nWorld * 1e-3;
@@ -538,6 +777,7 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
                 aoPayload.worldHit        = float3(0.0, 0.0, 0.0);
                 aoPayload.elementId       = 0xFFFFFFFFu;
                 aoPayload.recursionDepth  = payload.recursionDepth + 1u;
+                aoPayload.transmittance   = float3(0.0, 0.0, 0.0);
                 TraceRay(gTlas,
                          RAY_FLAG_SKIP_CLOSEST_HIT_SHADER
                            | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH,
@@ -637,8 +877,15 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
         // shadow it; Distant lights use 1e30 (effectively infinity).
         // miss-shader-index = 1 (= ShadowMissMain) writes
         // payload.color = (1,1,1) iff the path is unoccluded.
+        // The shadow ray is a TraceRay → gate on the same recursion
+        // budget as AO/reflection/continuation (pipeline maxRecursionDepth
+        // = 3). A surface reached through a glass transmission ray then
+        // reflected sits at the depth limit; firing a shadow ray there
+        // would exceed the cap (undefined behavior). Out of budget →
+        // assume lit (visibility 1).
         float visibility = 1.0;
-        if (NdotL > 0.0 && coneAttenuation > 0.0) {
+        if (NdotL > 0.0 && coneAttenuation > 0.0
+            && payload.recursionDepth + 1u < MAX_RAY_RECURSION) {
             float lightDist = 1e30;
             // Position-based kinds cap the shadow ray at the distance
             // to the light's centre. Distant lights stay at 1e30
@@ -663,6 +910,7 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
             shadowPayload.worldHit        = float3(0.0, 0.0, 0.0);
             shadowPayload.elementId       = 0xFFFFFFFFu;
             shadowPayload.recursionDepth  = payload.recursionDepth + 1;  // M29
+            shadowPayload.transmittance   = float3(0.0, 0.0, 0.0);
             TraceRay(gTlas,
                      RAY_FLAG_SKIP_CLOSEST_HIT_SHADER
                        | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH,
@@ -714,7 +962,7 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
         if ((mat.flags & MATERIAL_FLAG_HAS_EMISSION_MAP) != 0u
             && mat.emissionTex < BINDLESS_TEXTURES_CAP) {
             const float3 sampledEmission =
-                SampleByCone(mat.emissionTex, uv, coneRadius);
+                SampleByGrad(mat.emissionTex, uv, ddxUv, ddyUv);
             emission *= sampledEmission;
         }
     }
@@ -724,8 +972,14 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
     // M7-simple Lambertian-against-up approximation modulated by
     // baseColor. Specular is energy-conserving via the per-light F0
     // / metalness split inside GgxSpecular.
+    // Ambient (dome) is a LAMBERTIAN diffuse term, so it must be gated
+    // by (1 - metalness): metals have no diffuse lobe. Without this a
+    // metal (mirror, gold, steel) gets a grey Lambertian ambient wash
+    // layered over its reflection — the "washed-out mirror" symptom
+    // (the mirror is metal=1 yet read half-grey). Now metals rely on the
+    // specular reflection (handled in the layered composite below).
     float3 lit = (totalContribution > 0.0)
-        ? (directDiffuse + directSpecular + baseColor * ambientSum)
+        ? (directDiffuse + directSpecular + baseColor * ambientSum * (1.0 - metalness))
         : baseColor;
 
     // V2.B.1 — inline RT specular reflection. **Deterministic mirror
@@ -756,7 +1010,14 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
     // pipeline doctrine is "no noise, no denoiser, no accumulator";
     // mirror direction + future envmap blur is the noise-free
     // replacement.
-    if (payload.recursionDepth + 1u < 3u
+    // Reflection is captured SEPARATELY (not folded into `lit`) so the
+    // translucent composite below can layer it as a Fresnel term that
+    // survives even when opacity → 0. Folding it into `lit` and then
+    // scaling by opacity (the old code) deleted the reflection on glass
+    // and any see-through surface.
+    float3 reflColorOut  = float3(0.0, 0.0, 0.0);
+    float3 reflWeightOut = float3(0.0, 0.0, 0.0);
+    if (payload.recursionDepth + 1u < MAX_RAY_RECURSION
         && (metalness > 0.05 || roughness < 0.5))
     {
         // Geometric mirror direction. WorldRayDirection() is FROM eye
@@ -768,23 +1029,62 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
         // shading normal, same epsilon shadow rays use above.
         const float3 reflDir = normalize(reflect(WorldRayDirection(), nWorld));
 
-        HitInfo reflPayload;
-        reflPayload.color           = float3(0.0, 0.0, 0.0);
-        reflPayload.hitT            = -1.0;
-        reflPayload.normalWorld     = float3(0.0, 0.0, 0.0);
-        reflPayload.instanceId      = 0xFFFFFFFFu;
-        reflPayload.baseColor       = float3(0.0, 0.0, 0.0);
-        reflPayload.materialId      = 0xFFFFFFFFu;
-        reflPayload.worldHit        = float3(0.0, 0.0, 0.0);
-        reflPayload.elementId       = 0xFFFFFFFFu;
-        reflPayload.recursionDepth  = payload.recursionDepth + 1u;
-
         RayDesc reflRay;
         reflRay.Origin    = hitWorld + nWorld * 1e-3;
         reflRay.Direction = reflDir;
         reflRay.TMin      = 1e-3;
         reflRay.TMax      = 10000.0;
-        TraceRay(gTlas, RAY_FLAG_NONE, 0xFFu, 0, 0, 0, reflRay, reflPayload);
+
+        // Front-to-back transmission composite of the reflected ray.
+        // Without this, the reflection reads only the frontmost reflected
+        // surface's emitted radiance: a translucent surface (glass) seen
+        // IN a mirror returns its near-black emitted term and drops
+        // everything BEHIND it, so glass-in-a-mirror rendered black. This
+        // mirrors raygen's primary transmission loop (raygen.slang) but
+        // runs at the reflection ray's recursion depth. Each segment
+        // re-traces past the previous translucent hit by LOOP iteration
+        // (not hardware recursion), so the §V2.B depth cap of 3 is
+        // untouched; stacked transparent layers in a reflection composite
+        // exactly as they do for the primary ray. 0.999 / 1e-3 thresholds
+        // match the primary loop and the anyhit translucency gate.
+        const uint REFL_MAX_SEGMENTS = 16u;
+        float3 reflRadiance   = float3(0.0, 0.0, 0.0);
+        float3 reflThroughput = float3(1.0, 1.0, 1.0);
+        [loop]
+        for (uint reflSeg = 0u; reflSeg < REFL_MAX_SEGMENTS; ++reflSeg)
+        {
+            HitInfo reflPayload;
+            reflPayload.color           = float3(0.0, 0.0, 0.0);
+            reflPayload.hitT            = -1.0;
+            reflPayload.normalWorld     = float3(0.0, 0.0, 0.0);
+            reflPayload.instanceId      = 0xFFFFFFFFu;
+            reflPayload.baseColor       = float3(0.0, 0.0, 0.0);
+            reflPayload.materialId      = 0xFFFFFFFFu;
+            reflPayload.worldHit        = float3(0.0, 0.0, 0.0);
+            reflPayload.elementId       = 0xFFFFFFFFu;
+            reflPayload.recursionDepth  = payload.recursionDepth + 1u;
+            reflPayload.transmittance   = float3(0.0, 0.0, 0.0);
+
+            TraceRay(gTlas, RAY_FLAG_NONE, 0xFFu, 0, 0, 0, reflRay, reflPayload);
+
+            reflRadiance += reflThroughput * reflPayload.color;
+
+            // Miss (envmap already in color) or opaque hit: nothing more
+            // lies behind this surface in the reflection.
+            if (reflPayload.hitT < 0.0)
+                break;
+            const float3 reflT = reflPayload.transmittance;
+            if (max(max(reflT.x, reflT.y), reflT.z) < 1e-3)
+                break;
+            reflThroughput *= reflT;
+
+            // Advance just past this translucent hit and re-trace what
+            // lies behind it along the same reflected direction.
+            const float3 reflHitPos =
+                reflRay.Origin + reflRay.Direction * reflPayload.hitT;
+            reflRay.Origin = reflHitPos + reflRay.Direction * 1e-3;
+            reflRay.TMin   = 1e-3;
+        }
 
         // Schlick-Fresnel weight at the mirror direction. F0 derives
         // per-material (metals = baseColor, dielectrics = ((ior-1)/
@@ -807,65 +1107,43 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
         // stops rough surfaces from showing a crisp — and physically
         // wrong — mirror image.
         const float glossy = (1.0 - roughness) * (1.0 - roughness);
-        const float3 reflWeight = SchlickFresnel(F0, NdotV) * glossy;
-        lit = lit + reflPayload.color * reflWeight;
+        reflWeightOut = SchlickFresnel(F0, NdotV) * glossy;
+        reflColorOut  = reflRadiance;
     }
 
-    float3 outColor = lit + emission;
-
-    // V2.B follow-up — translucent material rendering. When opacity
-    // is authored < 1, the surface's lit shading covers only `opacity`
-    // worth of the pixel; the remaining `(1 - opacity)` shows whatever
-    // is BEHIND. Trace a continuation ray straight through the surface
-    // (same world-space direction as the incoming ray) and alpha-blend
-    // with the surface result. Anyhit accepts opacity-translucent
-    // hits so the closesthit fires — without the alpha-blend step
-    // here those surfaces would render fully opaque despite the
-    // authored translucency.
+    // V2.B — layered glass/translucency composite. Two transport paths
+    // stay SEPARATE so a transparent surface still reflects:
+    //   * reflection: a Fresnel-weighted term (reflWeightOut) layered ON
+    //     TOP, independent of opacity.
+    //   * transmission: the light from BEHIND that the surface lets
+    //     through. This shader does NOT trace a continuation ray for it
+    //     any more — it reports a per-channel `transmittance` and raygen
+    //     composites what's behind front-to-back (re-tracing at recursion
+    //     depth 0). That keeps stacked transparent layers free of
+    //     recursion cost and reproduces the old result exactly.
     //
-    // Recursion gate mirrors the mirror branch below: keep depth
-    // under the §M29 pipeline maxRecursionDepth=3 cap. Deep stacks
-    // of translucent surfaces past the cap silently truncate (the
-    // far translucent appears fully opaque to the parent ray) — a
-    // bounded but visually-meaningful approximation.
-    //
-    // 0.999 threshold matches the anyhit gate so float-precision
-    // noise on UsdPreviewSurface scalar reads doesn't pop opaque
-    // surfaces through this path.
-    if (mat.opacity < 0.999 && payload.recursionDepth + 1u < 3u)
-    {
-        HitInfo contPayload;
-        contPayload.color           = float3(0.0, 0.0, 0.0);
-        contPayload.hitT            = -1.0;
-        contPayload.normalWorld     = float3(0.0, 0.0, 0.0);
-        contPayload.instanceId      = 0xFFFFFFFFu;
-        contPayload.baseColor       = float3(0.0, 0.0, 0.0);
-        contPayload.materialId      = 0xFFFFFFFFu;
-        contPayload.worldHit        = float3(0.0, 0.0, 0.0);
-        contPayload.elementId       = 0xFFFFFFFFu;
-        contPayload.recursionDepth  = payload.recursionDepth + 1u;
+    // The previous single-surface composite was
+    //   out = reflWeight·refl + (1-reflWeight)·(lit·opacity + behind·(1-opacity)) + emission
+    // Split into a surface-emitted term (independent of `behind`) and a
+    // transmittance the raygen loop multiplies into `behind`:
+    //   emitted       = reflWeight·refl + (1-reflWeight)·lit·opacity + emission
+    //   transmittance = (1-reflWeight)·(1-opacity)
+    //   - Glass (opacity 0): emitted ≈ reflWeight·refl (+emission),
+    //     transmittance ≈ (1-reflWeight) → grazing reflects, head-on sees
+    //     through. Falls back to reflection (not black) past the loop cap.
+    //   - Mirror / metal: reflWeight ≈ baseColor → emitted ≈ reflection,
+    //     transmittance ≈ 0.
+    //   - Opaque diffuse: opacity 1 → transmittance 0, emitted ≈ lit.
+    // 0.999 matches the anyhit translucency gate.
+    const float3 oneMinusRefl = float3(1.0, 1.0, 1.0) - reflWeightOut;
+    const float3 emitted = reflWeightOut * reflColorOut
+                         + oneMinusRefl * lit * mat.opacity
+                         + emission;
 
-        RayDesc contRay;
-        // Push the origin slightly along the incoming ray direction
-        // (NOT along the normal — we want to advance through the
-        // surface, not bounce off it) to avoid self-intersection
-        // with the just-shaded triangle.
-        const float3 rayDir = WorldRayDirection();
-        contRay.Origin    = hitWorld + rayDir * 1e-3;
-        contRay.Direction = rayDir;
-        contRay.TMin      = 1e-3;
-        contRay.TMax      = 10000.0;
-        TraceRay(gTlas, RAY_FLAG_NONE, 0xFFu, 0, 0, 0, contRay, contPayload);
-
-        // Alpha blend: surface contribution × opacity + behind × (1 - opacity).
-        // Tint the behind-color by `baseColor` for materials that act
-        // as colored filters (stained glass, tinted plastic). When
-        // baseColor = (1,1,1) this is pure straight-through.
-        outColor = outColor * mat.opacity
-                 + contPayload.color * (1.0 - mat.opacity) * baseColor;
-    }
-
-    payload.color = outColor;
+    payload.color = emitted;
+    payload.transmittance = (mat.opacity < 0.999)
+                              ? oneMinusRefl * (1.0 - mat.opacity)
+                              : float3(0.0, 0.0, 0.0);
     payload.hitT  = RayTCurrent();
     // M7 follow-up — fields the raygen-side AOV inspector reads.
     // Normal is the world-space face normal we already computed for

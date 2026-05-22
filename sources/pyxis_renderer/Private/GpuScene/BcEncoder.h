@@ -8,7 +8,7 @@
 // Encoder selection is keyed by `TextureKey::Role`:
 //   BaseColor / Emission           → BC1_UNORM_SRGB (8 B / 4×4 block)
 //   NormalMap                       → BC5_UNORM     (16 B; RG only)
-//   RoughnessMetallic + default     → BC4_UNORM     (8 B; .g channel)
+//   RoughnessMetallic + default     → BC1_UNORM     (8 B; RGB = AO/rough/metal)
 //
 // Requires `width` and `height` both multiples of 4. Callers gate on
 // that (e.g. Commit.cpp logs + skips otherwise).
