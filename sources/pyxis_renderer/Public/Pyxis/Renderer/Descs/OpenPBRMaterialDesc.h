@@ -114,6 +114,17 @@ struct OpenPBRMaterialDesc {
   float baseColorUvScaleX        = 1.0f;  // V2.A.18 (was _reserved[8])
   float baseColorUvScaleY        = 1.0f;  // V2.A.18 (was _reserved[9])
 
+  // V2.A.23 follow-up — normal-map strength (OmniPBR `bump_factor`,
+  // UsdPreviewSurface has no direct equivalent so it stays 1.0 there).
+  // Scales the tangent-space normal's XY deviation before the TBN
+  // transform: 0 = flat (ignore the normal map), 1 = full authored
+  // bump, >1 = exaggerated. Production MDL content authors values
+  // from 0.6 (subtle) to 10 (strong relief); honoring it keeps
+  // polished surfaces (e.g. Terrazzo at 1.0) from looking grainier
+  // than intended and lets matte-but-detailed surfaces dial relief
+  // up. Default 1.0 = full strength (the pre-this-field behavior).
+  float normalStrength           = 1.0f;  // V2.A.23 (was _reserved[10])
+
   // §22.3 reserved padding: M5+ adds OpenPBR fields (sheen, coat
   // colour, displacement, transmission depth, etc.) by consuming
   // these slots one at a time, keeping the layout byte-stable
@@ -121,9 +132,9 @@ struct OpenPBRMaterialDesc {
   // major version (§22 + RFC §44.1). The `_reserved` underscore
   // prefix is the §22.3 / §43 plan convention — overrides §30.2's
   // public-POD camelCase rule for this slot purpose only.
-  // 10 slots consumed above; 6 remain.
+  // 11 slots consumed above; 5 remain.
   // NOLINTNEXTLINE(readability-identifier-naming)
-  uint32_t _reserved[6] = {};
+  uint32_t _reserved[5] = {};
 };
 
 }  // namespace pyxis

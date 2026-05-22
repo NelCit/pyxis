@@ -290,7 +290,10 @@ struct OpenPBRMaterialGPU {
     uint  opacityTex;
     uint  transmissionTex;
     uint  coatRoughnessTex;
-    uint  _reserved0;
+    // V2.A.23 follow-up — normal-map strength (OmniPBR `bump_factor`).
+    // Scales the tangent-space normal's XY before the TBN transform.
+    // 1.0 = full authored bump (default). Was `_reserved0`.
+    float normalStrength;
 
     // Row 5 — M9 emission RGB. UsdPreviewSurface authors the emissive
     // tint as a color3f (`emissiveColor`); the closesthit emits

@@ -358,8 +358,17 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
             // Sample the tangent-space normal map. Convention: the
             // texture stores [0,1]-encoded tangent-space normals;
             // unpack to [-1,1] before transforming.
-            const float3 nTangent =
+            float3 nTangent =
                 SampleByCone(mat.normalTex, uv, coneRadius) * 2.0 - 1.0;
+
+            // V2.A.23 — normal-map strength (OmniPBR bump_factor).
+            // Scale the tangent-plane deviation (XY) toward / away from
+            // flat (0,0,1); Z stays 1 so re-normalize keeps it unit.
+            // strength 0 = flat (ignore bump), 1 = authored, >1 =
+            // exaggerated. Keeps polished surfaces (Terrazzo, etc.)
+            // from reading grainier than the artist intended.
+            nTangent.xy *= mat.normalStrength;
+            nTangent = normalize(nTangent);
 
             // Transform tangent-space normal to world space.
             nWorld = normalize(nTangent.x * tangentWorld
@@ -750,7 +759,20 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
         // ones until the envmap blur lands.
         const float3 F0 = SchlickF0(baseColor, metalness, mat.specularIor);
         const float NdotV = max(0.0, dot(nWorld, viewDir));
-        const float3 reflWeight = SchlickFresnel(F0, NdotV);
+        // V2.B follow-up — roughness-aware glossy attenuation. The
+        // bounce ray is a single sharp mirror sample (no stochastic
+        // cone, per the no-noise doctrine); a rough surface should
+        // reflect a dimmer + softer image than a polished one. We
+        // can't blur the reflected geometry deterministically, so we
+        // fade the reflection's contribution as roughness climbs:
+        // (1 - roughness)² gives a perceptually-reasonable falloff
+        // (polished floor at roughness 0.12 keeps ~77% of the mirror;
+        // a half-rough surface keeps ~25%; matte surfaces approach 0).
+        // This both softens the hard `roughness < 0.5` gate edge and
+        // stops rough surfaces from showing a crisp — and physically
+        // wrong — mirror image.
+        const float glossy = (1.0 - roughness) * (1.0 - roughness);
+        const float3 reflWeight = SchlickFresnel(F0, NdotV) * glossy;
         lit = lit + reflPayload.color * reflWeight;
     }
 
