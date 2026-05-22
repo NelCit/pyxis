@@ -59,12 +59,17 @@ target_sources(pyxis_unit_tests PRIVATE
     LightDescExtendedDefaults.cpp
     OrthographicCameraV2A20.cpp
     BcEncoderV2A14.cpp
+    MeshUvPackV2.cpp
 
     # V2.A.14 — BCn encoder helper. Recompiled here so the test exe
     # exercises the real helper directly instead of going through the
     # pyxis_renderer DLL boundary (which would require widening the
     # §18.1 public surface).
     ${CMAKE_SOURCE_DIR}/sources/pyxis_renderer/Private/GpuScene/BcEncoder.cpp
+
+    # Mesh UV tight-packing helper — recompiled here for the same reason
+    # (MeshUvPackV2 pins the gMeshUvs 8-byte stride contract directly).
+    ${CMAKE_SOURCE_DIR}/sources/pyxis_renderer/Private/GpuScene/MeshUvPack.cpp
     # stb_dxt.h's STB_DXT_IMPLEMENTATION lives in a dedicated TU
     # (mirrors the StbImageWrite.cpp pattern). Compiled here so the
     # test exe owns its own copy of the implementation symbols

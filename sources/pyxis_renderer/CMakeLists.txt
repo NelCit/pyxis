@@ -83,6 +83,11 @@ target_sources(pyxis_renderer PRIVATE
     # stb_image / tinyexr / GpuScene::Impl.
     Private/GpuScene/BcEncoder.h
     Private/GpuScene/BcEncoder.cpp
+    # Mesh UV tight-packing helper. Split out of Commit.cpp so the unit
+    # test (MeshUvPackV2) can pin the gMeshUvs 8-byte stride contract
+    # directly without dragging in GpuScene::Impl.
+    Private/GpuScene/MeshUvPack.h
+    Private/GpuScene/MeshUvPack.cpp
     # V2.A.14 — single-TU home for stb_dxt's STB_DXT_IMPLEMENTATION.
     # SKIP_LINTING below (mirrors pyxis_app/Private/StbImageWrite.cpp).
     Private/GpuScene/StbDxt.cpp
