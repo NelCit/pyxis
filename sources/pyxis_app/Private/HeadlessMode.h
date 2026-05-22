@@ -63,7 +63,8 @@ int RunHeadless(const Configuration& config, const ResolvedScene& scene,
                 std::string_view loadMode = {},
                 std::string_view variantSelections = {},
                 std::string_view renderPurpose = {},
-                bool compressTextures = true) noexcept;
+                bool compressTextures = true,
+                uint32_t ssaa = 1) noexcept;
 
 // Viewer mode. screenshotPath is the M1 --screenshot debug capture
 // (non-empty -> render a few warmup frames, write a PNG, exit 0).

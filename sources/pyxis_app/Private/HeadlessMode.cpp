@@ -32,12 +32,15 @@
 
 #include <nvrhi/nvrhi.h>
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
 #include <ios>
 #include <memory>
+#include <vector>
 
 namespace pyxis::app {
 
@@ -220,10 +223,71 @@ void LogDeterminismPin(const Configuration& config, uint32_t framesInFlight) noe
 // golden-test friendly); anything else dispatches to WriteExrBgra8
 // (linear-float, HDR-friendly, the historical default).
 // Returns false on any failure.
+// Gamma-aware box downsample of a BGRA8 buffer by an integer factor.
+// Averages each `factor`×`factor` block in approximately-linear space
+// (sRGB→linear decode, average, re-encode) so the result matches what
+// a correct supersample resolve produces — naive 8-bit averaging
+// would darken edges (the sRGB curve is convex). Returns a tightly-
+// packed BGRA8 buffer at (srcW/factor)×(srcH/factor) + sets outPitch.
+[[nodiscard]] std::vector<uint8_t> BoxDownsampleBgra8(
+    const uint8_t* src, uint32_t srcW, uint32_t srcH, uint32_t srcPitch,
+    uint32_t factor, uint32_t& outW, uint32_t& outH, uint32_t& outPitch) noexcept
+{
+  outW = srcW / factor;
+  outH = srcH / factor;
+  outPitch = outW * 4u;
+  std::vector<uint8_t> dst(static_cast<std::size_t>(outPitch) * outH);
+
+  // sRGB EOTF (decode) / inverse (encode). Standard piecewise curve.
+  auto srgbToLinear = [](float val) -> float {
+    return (val <= 0.04045f) ? (val / 12.92f)
+                             : std::pow((val + 0.055f) / 1.055f, 2.4f);
+  };
+  auto linearToSrgb = [](float val) -> float {
+    return (val <= 0.0031308f) ? (val * 12.92f)
+                               : (1.055f * std::pow(val, 1.0f / 2.4f) - 0.055f);
+  };
+  const float invSamples = 1.0f / static_cast<float>(factor * factor);
+
+  for (uint32_t dstY = 0; dstY < outH; ++dstY)
+  {
+    for (uint32_t dstX = 0; dstX < outW; ++dstX)
+    {
+      float accum[3] = {0.0f, 0.0f, 0.0f};
+      uint32_t alphaAccum = 0;
+      for (uint32_t subY = 0; subY < factor; ++subY)
+      {
+        const std::size_t srcRowIdx = static_cast<std::size_t>(dstY) * factor + subY;
+        const uint8_t* row = src + srcRowIdx * srcPitch;
+        for (uint32_t subX = 0; subX < factor; ++subX)
+        {
+          const std::size_t srcColIdx = static_cast<std::size_t>(dstX) * factor + subX;
+          const uint8_t* pix = row + srcColIdx * 4u;
+          accum[0] += srgbToLinear(pix[0] / 255.0f);  // B
+          accum[1] += srgbToLinear(pix[1] / 255.0f);  // G
+          accum[2] += srgbToLinear(pix[2] / 255.0f);  // R
+          alphaAccum += pix[3];
+        }
+      }
+      uint8_t* out = dst.data() + (static_cast<std::size_t>(dstY) * outPitch)
+                     + static_cast<std::size_t>(dstX) * 4u;
+      out[0] = static_cast<uint8_t>(
+          std::lround(std::clamp(linearToSrgb(accum[0] * invSamples), 0.0f, 1.0f) * 255.0f));
+      out[1] = static_cast<uint8_t>(
+          std::lround(std::clamp(linearToSrgb(accum[1] * invSamples), 0.0f, 1.0f) * 255.0f));
+      out[2] = static_cast<uint8_t>(
+          std::lround(std::clamp(linearToSrgb(accum[2] * invSamples), 0.0f, 1.0f) * 255.0f));
+      out[3] = static_cast<uint8_t>(alphaAccum / (factor * factor));
+    }
+  }
+  return dst;
+}
+
 [[nodiscard]] bool ReadbackAndWriteExr(nvrhi::IDevice* device,
                                        nvrhi::ICommandList* commandList,
                                        nvrhi::ITexture* renderTarget,
-                                       std::string_view outputPath) noexcept
+                                       std::string_view outputPath,
+                                       uint32_t ssaaFactor) noexcept
 {
   auto& log = Logging::Get();
 
@@ -275,11 +339,26 @@ void LogDeterminismPin(const Configuration& config, uint32_t framesInFlight) noe
                          : "headless: render output is fully black — PathTracePass likely skipped");
   }
 
+  // SSAA resolve: gamma-aware box-downsample the super-resolution
+  // readback to the output dimensions before writing. ssaaFactor == 1
+  // is a no-op (write the readback directly).
+  std::vector<uint8_t> downsampled;
+  const uint8_t* writeData   = static_cast<const uint8_t*>(readback->Data());
+  uint32_t       writeWidth  = readback->Width();
+  uint32_t       writeHeight = readback->Height();
+  uint32_t       writePitch  = readback->RowPitch();
+  if (ssaaFactor > 1u)
+  {
+    downsampled = BoxDownsampleBgra8(writeData, writeWidth, writeHeight, writePitch,
+                                     ssaaFactor, writeWidth, writeHeight, writePitch);
+    writeData = downsampled.data();
+  }
+
   auto writeResult = PathHasPngExtension(outputPath)
-                         ? WritePngBgra8(outputPath, readback->Width(), readback->Height(),
-                                         readback->Data(), readback->RowPitch())
-                         : WriteExrBgra8(outputPath, readback->Width(), readback->Height(),
-                                         readback->Data(), readback->RowPitch());
+                         ? WritePngBgra8(outputPath, writeWidth, writeHeight,
+                                         writeData, writePitch)
+                         : WriteExrBgra8(outputPath, writeWidth, writeHeight,
+                                         writeData, writePitch);
   if (!writeResult)
   {
     log.Error(log::APP, "headless: " + writeResult.error());
@@ -372,7 +451,8 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
                 std::string_view loadMode,
                 std::string_view variantSelections,
                 std::string_view renderPurpose,
-                bool compressTextures) noexcept {
+                bool compressTextures,
+                uint32_t ssaa) noexcept {
   // V2.A.4 — the multi-frame loop lives in Application::Run (it
   // overrides config.output.image per frame and re-enters here). The
   // frameRangeBegin/End/Step params are accepted on the signature so
@@ -427,11 +507,29 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
     return EXIT_DEVICE_INIT_FAIL;
   }
 
+  // Deterministic SSAA: render the whole frame at `ssaaFactor`× the
+  // configured resolution per axis, then box-downsample to the output
+  // size at readback. Scaling both axes by the same factor preserves
+  // the camera aspect ratio + correctly refines the per-pixel ray-cone
+  // spread (finer pixels → smaller cones → sharper-but-AA'd texels).
+  // No jitter, no accumulation — bit-exact reproducible.
+  const uint32_t ssaaFactor = (ssaa < 1u) ? 1u : (ssaa > 4u ? 4u : ssaa);
+  const uint32_t superWidth  = config.render.width * ssaaFactor;
+  const uint32_t superHeight = config.render.height * ssaaFactor;
+  if (ssaaFactor > 1u)
+  {
+    log.Info(log::APP,
+             "headless: SSAA " + std::to_string(ssaaFactor) + "x — rendering at "
+             + std::to_string(superWidth) + "x" + std::to_string(superHeight)
+             + " → downsampling to " + std::to_string(config.render.width) + "x"
+             + std::to_string(config.render.height));
+  }
+
   // ---- AOV textures (caller-allocated per §18.4) ---------------------
   // Declared after deviceManager so RAII destroys it BEFORE the device
   // dies — NVRHI's deferred-destruction queue must drain against a
   // still-live VkDevice.
-  auto aovsResult = AovTextures::Create(device, config.render.width, config.render.height);
+  auto aovsResult = AovTextures::Create(device, superWidth, superHeight);
   if (!aovsResult)
   {
     log.Error(log::APP, "headless: " + aovsResult.error());
@@ -479,8 +577,8 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
       std::chrono::duration<double, std::milli>(loadEndNs - loadStartNs).count();
 
   RendererCreateDesc rendererDesc{};
-  rendererDesc.initialWidth = config.render.width;
-  rendererDesc.initialHeight = config.render.height;
+  rendererDesc.initialWidth = superWidth;
+  rendererDesc.initialHeight = superHeight;
   // Headless raises FIF to MAX_FRAMES_IN_FLIGHT (= 3) for §33.7
   // byte-equal EXR — propagate so the renderer's PassContext sees
   // the real value. Picker isn't driven in headless so the FIF=1
@@ -611,7 +709,7 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
   }
 
   // ---- Readback + EXR write ------------------------------------------
-  if (!ReadbackAndWriteExr(device, commandList, renderTarget, config.output.image))
+  if (!ReadbackAndWriteExr(device, commandList, renderTarget, config.output.image, ssaaFactor))
   {
     scene.Shutdown();
     return EXIT_RUNTIME_FAIL;

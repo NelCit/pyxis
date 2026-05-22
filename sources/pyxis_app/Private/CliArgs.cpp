@@ -307,6 +307,20 @@ CliArgs Parse(int argc, char** argv) noexcept {
       // uncompressed path.
       out.compressTextures = false;
     }
+    else if (Equals(arg, "--ssaa"))
+    {
+      // Deterministic supersampling factor. Renders N× per axis then
+      // box-downsamples. Clamped to [1, 4] — 4×4 = 16× pixel work.
+      if (i + 1 >= argc || !ParseUInt32(argv[i + 1], out.ssaa))
+      {
+        out.invalid = true;
+        out.invalidArg = arg;
+        return out;
+      }
+      if (out.ssaa < 1u) out.ssaa = 1u;
+      if (out.ssaa > 4u) out.ssaa = 4u;
+      ++i;
+    }
     else if (Equals(arg, "--render-product"))
     {
       // V2.A.27 — pick a specific UsdRenderProduct from a stage that
@@ -431,6 +445,11 @@ void PrintUsage() noexcept {
       "                          diagnostic builds that need pixel-equal output against\n"
       "                          the uncompressed path. Textures with non-4-aligned\n"
       "                          dims fall through to uncompressed regardless (V2.A.14).\n"
+      "  --ssaa <N>              Deterministic supersampling: render N× per axis then\n"
+      "                          gamma-aware box-downsample to the output resolution.\n"
+      "                          1 = off (default), 2 = 2x2 (4 samples/px), up to 4.\n"
+      "                          Noise-free anti-aliasing for high-frequency textures /\n"
+      "                          edges (no jitter, no accumulation). Headless only.\n"
       "\n"
       "Viewer extras:\n"
       "  --screenshot <path>     Run viewer briefly; write a PNG of the backbuffer.\n"
