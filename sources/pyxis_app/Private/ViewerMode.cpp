@@ -295,10 +295,13 @@ void ResolvePickerPixel(const ImGuiHost& imguiHost,
                         const AovTextures& aovs,
                         std::atomic<int32_t>& latestMousePixelX,
                         std::atomic<int32_t>& latestMousePixelY,
+                        uint32_t ssaaFactor,
                         RenderSettings& settings) noexcept
 {
   if (imguiHost.IsReady() && imguiHost.IsPickerPinned())
   {
+    // Pinned uses normalised UV × the (super-res) AOV dims, so it
+    // scales with SSAA automatically — no extra factor needed.
     const uint32_t pinnedX = static_cast<uint32_t>(
         imguiHost.PickerPinnedU() * static_cast<float>(aovs.width));
     const uint32_t pinnedY = static_cast<uint32_t>(
@@ -310,14 +313,21 @@ void ResolvePickerPixel(const ImGuiHost& imguiHost,
   }
   else
   {
+    // Live cursor is in window (base-resolution) space; the AOVs are
+    // base×ssaa, so scale the pixel up by the factor to index the
+    // super-res buffer the picker reads from.
+    const uint32_t factor = (ssaaFactor < 1u) ? 1u : ssaaFactor;
     const int32_t mouseX = latestMousePixelX.load();
     const int32_t mouseY = latestMousePixelY.load();
-    if (mouseX >= 0 && mouseY >= 0
-        && static_cast<uint32_t>(mouseX) < aovs.width
-        && static_cast<uint32_t>(mouseY) < aovs.height)
+    if (mouseX >= 0 && mouseY >= 0)
     {
-      settings.mousePixelX = static_cast<uint32_t>(mouseX);
-      settings.mousePixelY = static_cast<uint32_t>(mouseY);
+      const uint32_t scaledX = static_cast<uint32_t>(mouseX) * factor;
+      const uint32_t scaledY = static_cast<uint32_t>(mouseY) * factor;
+      if (scaledX < aovs.width && scaledY < aovs.height)
+      {
+        settings.mousePixelX = scaledX;
+        settings.mousePixelY = scaledY;
+      }
     }
   }
 }
@@ -376,8 +386,14 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
                   std::string_view loadMode,
                   std::string_view variantSelections,
                   std::string_view renderPurpose,
-                  bool compressTextures) noexcept {
+                  bool compressTextures,
+                  uint32_t initialSsaa) noexcept {
   auto& log = Logging::Get();
+  // CLI --ssaa seeds the viewer's SSAA factor. The ImGui Anti-aliasing
+  // control overrides it once the editor is up; in screenshot mode
+  // (ImGui off) this is the only source, so `--screenshot --ssaa N`
+  // exercises the supersampling path. Clamped to [1, 4].
+  const uint32_t cliSsaa = (initialSsaa < 1u) ? 1u : (initialSsaa > 4u ? 4u : initialSsaa);
 
   // ShaderMake rebuild latch + state machine. Click handler in
   // HandleShaderReloadStateMachine spawns a worker thread; main loop
@@ -651,6 +667,70 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
   rendererDesc.framesInFlight = deviceManager->GetFramesInFlight();
   PyxisRenderer renderer{device, gpuScene, profiler, rendererDesc};
 
+  // ---- SSAA state (ImGui-driven, deterministic supersampling) --------
+  // `aovs` are sized at base×ssaa (super-res); when ssaa > 1 the
+  // renderer's SsaaResolvePass box-downsamples aovs.color into
+  // `ssaaResolveTarget` (base-res UAV) and we copy THAT to the
+  // backbuffer. activeSsaa tracks the live factor so EnsureSsaaTargets
+  // only rebuilds on a factor / window-size change.
+  uint32_t activeSsaa = 1;
+  nvrhi::TextureHandle ssaaResolveTarget;
+  // (Re)allocate the super-res AOVs + base-res resolve target for the
+  // given backbuffer dims + factor. Returns false on allocation
+  // failure (caller keeps the prior targets). Idempotent: a no-op when
+  // already sized correctly.
+  auto ensureSsaaTargets = [&](uint32_t baseW, uint32_t baseH, uint32_t ssaa) -> bool {
+    if (baseW == 0u || baseH == 0u)
+      return true;
+    const uint32_t superW = baseW * ssaa;
+    const uint32_t superH = baseH * ssaa;
+    const bool resolveOk = (ssaa == 1u) ? !ssaaResolveTarget
+                                        : (ssaaResolveTarget
+                                           && ssaaResolveTarget->getDesc().width == baseW
+                                           && ssaaResolveTarget->getDesc().height == baseH);
+    if (aovs.width == superW && aovs.height == superH && activeSsaa == ssaa && resolveOk)
+      return true;
+    auto rebuilt = AovTextures::Create(device, superW, superH);
+    if (!rebuilt)
+    {
+      log.Error(log::APP, "ViewerMode: SSAA AOV recreate failed: " + rebuilt.error());
+      return false;
+    }
+    aovs = std::move(*rebuilt);
+    renderer.Resize(superW, superH);
+    if (ssaa > 1u)
+    {
+      nvrhi::TextureDesc resolveDesc;
+      resolveDesc.width = baseW;
+      resolveDesc.height = baseH;
+      resolveDesc.format = nvrhi::Format::BGRA8_UNORM;  // matches aovs.color + copy to backbuffer
+      resolveDesc.dimension = nvrhi::TextureDimension::Texture2D;
+      resolveDesc.isUAV = true;
+      resolveDesc.debugName = "ViewerSsaaResolveTarget";
+      resolveDesc.initialState = nvrhi::ResourceStates::UnorderedAccess;
+      resolveDesc.keepInitialState = true;
+      ssaaResolveTarget = device->createTexture(resolveDesc);
+      if (!ssaaResolveTarget)
+      {
+        log.Error(log::APP, "ViewerMode: SSAA resolve-target createTexture failed");
+        return false;
+      }
+    }
+    else
+    {
+      ssaaResolveTarget = nullptr;
+    }
+    activeSsaa = ssaa;
+    if (ssaa > 1u)
+    {
+      log.Info(log::APP,
+               "ViewerMode: SSAA " + std::to_string(ssaa) + "x — rendering at "
+               + std::to_string(superW) + "x" + std::to_string(superH)
+               + " → resolving to " + std::to_string(baseW) + "x" + std::to_string(baseH));
+    }
+    return true;
+  };
+
   // ---- Single command list --------------------------------------------
   // M1 pins framesInFlight = 1, so one command list reused across frames
   // is enough — VkDeviceManager::BeginFrame waits on its timeline so the
@@ -818,20 +898,10 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
       if (auto* freshBackbuffer = deviceManager->GetCurrentBackbuffer(); freshBackbuffer != nullptr)
       {
         const auto& bbDesc = freshBackbuffer->getDesc();
-        if (bbDesc.width != aovs.width || bbDesc.height != aovs.height)
-        {
-          auto rebuiltAovs = AovTextures::Create(device, bbDesc.width, bbDesc.height);
-          if (rebuiltAovs)
-          {
-            aovs = std::move(*rebuiltAovs);
-            renderer.Resize(bbDesc.width, bbDesc.height);
-          }
-          else
-          {
-            log.Error(log::APP,
-                      "ViewerMode: AOV recreate failed on resize: " + rebuiltAovs.error());
-          }
-        }
+        // Rebuild super-res AOVs + resolve target for the new
+        // backbuffer dims at the current SSAA factor (EnsureSsaaTargets
+        // is a no-op when already correctly sized).
+        ensureSsaaTargets(bbDesc.width, bbDesc.height, activeSsaa);
       }
       lastSeenSwapchainGeneration = currentSwapchainGeneration;
     }
@@ -916,6 +986,18 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
     nvrhi::ITexture* backbuffer = deviceManager->GetCurrentBackbuffer();
     if (backbuffer)
     {
+      // React to the ImGui SSAA toggle/factor before rendering: size
+      // the super-res AOVs + resolve target to backbuffer-dims × the
+      // requested factor. No-op when unchanged.
+      {
+        const auto& bbDesc = backbuffer->getDesc();
+        // ImGui control wins when the editor's up; otherwise the CLI
+        // --ssaa seed (so screenshot mode can exercise SSAA).
+        const uint32_t desiredSsaa =
+            imguiHost.IsReady() ? imguiHost.GetSsaaFactor() : cliSsaa;
+        ensureSsaaTargets(bbDesc.width, bbDesc.height, desiredSsaa);
+      }
+
       nvrhi::ICommandList* commandList = commandListHandle.Get();
 
       commandList->open();
@@ -937,6 +1019,10 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
       // trace finishes we copyTexture from AOV → swapchain.
       RenderTargets targets{};
       targets.color = aovs.color.Get();
+      // SSAA: when supersampling, the renderer's SsaaResolvePass
+      // box-downsamples aovs.color (super-res) into this base-res
+      // target; we copy THAT to the backbuffer below. Null at factor 1.
+      targets.colorResolved = (activeSsaa > 1u) ? ssaaResolveTarget.Get() : nullptr;
       // M7 follow-up — wire the raw AOV outputs + pick buffer pair so
       // the AOV inspector / picker / Save EXR all have data to read.
       // The pass tolerates nullptr (binds 1×1 fallbacks); we feed the
@@ -956,8 +1042,9 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
       targets.pickResultStaging = aovs.pickResultStaging.Get();
 
       RenderSettings settings{};
-      settings.width = aovs.width;
+      settings.width = aovs.width;    // super-res render dims (base × ssaa)
       settings.height = aovs.height;
+      settings.ssaaFactor = activeSsaa;  // SsaaResolvePass downsamples by this
       // Push the AOV inspector state into the renderer. The ImGui
       // Editor combo flips _editorDebugView; the cursor pump above
       // captures latestMousePixelXY from MouseMove events and we
@@ -973,7 +1060,8 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
       // (renormalised against the current AOV size each frame so a
       // resize keeps the pin at the same screen location);
       // otherwise the live cursor clamped to AOV bounds.
-      ResolvePickerPixel(imguiHost, aovs, latestMousePixelX, latestMousePixelY, settings);
+      ResolvePickerPixel(imguiHost, aovs, latestMousePixelX, latestMousePixelY,
+                         activeSsaa, settings);
 
       renderer.RenderFrame(commandList, settings, targets);
 
@@ -1014,11 +1102,26 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
         }
       }
 
-      // Copy AOV color → swapchain backbuffer. NVRHI tracks the
+      // Copy color → swapchain backbuffer. NVRHI tracks the
       // transitions for both images via `keepInitialState`, so
       // an explicit barrier isn't needed — copyTexture inserts
       // the right CopySrc/CopyDest transitions automatically.
-      commandList->copyTexture(backbuffer, nvrhi::TextureSlice{}, aovs.color.Get(),
+      // SSAA: copy the base-res resolve target (the SsaaResolvePass's
+      // downsampled output) when supersampling; else the AOV color
+      // (which is already at backbuffer res). Both are BGRA8_UNORM →
+      // BGRA8_SRGB backbuffer, the same copy the non-SSAA path uses.
+      nvrhi::ITexture* const presentSource =
+          (activeSsaa > 1u && ssaaResolveTarget) ? ssaaResolveTarget.Get() : aovs.color.Get();
+      // Explicit compute-write → copy-read barrier on the resolve
+      // target (UAV → CopySource). The auto-tracker wasn't inserting
+      // it reliably for the UAV-initial-state resolve target.
+      if (activeSsaa > 1u && ssaaResolveTarget)
+      {
+        commandList->setTextureState(presentSource, nvrhi::AllSubresources,
+                                     nvrhi::ResourceStates::CopySource);
+        commandList->commitBarriers();
+      }
+      commandList->copyTexture(backbuffer, nvrhi::TextureSlice{}, presentSource,
                                nvrhi::TextureSlice{});
 
       // ImGui submit: NVRHI just left the backbuffer in

@@ -404,6 +404,34 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
       }
     }
 
+    // ---- Anti-aliasing (SSAA) ----------------------------------------
+    // Deterministic supersampling: render the frame at N× resolution
+    // per axis, gamma-aware box-downsample to the window. Noise-free
+    // (no jitter, no accumulation) — smooths high-frequency texture
+    // speckle (Terrazzo) + geometry silhouettes. ViewerMode reads
+    // GetSsaaFactor() each frame; changing it rebuilds the super-res
+    // render targets.
+    if (ImGui::CollapsingHeader("Anti-aliasing (SSAA)"))
+    {
+      ImGui::Checkbox("Enable supersampling", &_editorSsaaEnabled);
+      ImGui::BeginDisabled(!_editorSsaaEnabled);
+      ImGui::PushItemWidth(180.0f);
+      // Factor slider: 2..4 (4×4 = 16 samples/px). Clamped on read.
+      if (ImGui::SliderInt("Factor (N x N)", &_editorSsaaFactor, 2, 4))
+      {
+        if (_editorSsaaFactor < 2) _editorSsaaFactor = 2;
+        if (_editorSsaaFactor > 4) _editorSsaaFactor = 4;
+      }
+      ImGui::PopItemWidth();
+      ImGui::EndDisabled();
+      const uint32_t samples = _editorSsaaEnabled
+          ? static_cast<uint32_t>(_editorSsaaFactor * _editorSsaaFactor)
+          : 1u;
+      ImGui::TextDisabled("%u sample%s/pixel  (%ux internal res)",
+                          samples, samples == 1u ? "" : "s",
+                          _editorSsaaEnabled ? static_cast<uint32_t>(_editorSsaaFactor) : 1u);
+    }
+
     // ---- Camera section ----------------------------------------------
     // FOV (vertical, degrees) and Focal length (mm) are linked via a
     // 24mm full-frame sensor height. Any projection-affecting slider

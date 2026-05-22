@@ -161,6 +161,16 @@ struct FrameUiUniforms {
     uint  _reservedUi3;
 };
 
+// SSAA box-downsample compute-pass uniforms (viewer mode). The pass
+// reads a `factor`×-supersampled color texture and writes the
+// backbuffer-resolution resolve. 16 bytes (one cbuffer row).
+struct SsaaDownsampleUniforms {
+    uint destWidth;    // output (backbuffer) dimensions in texels
+    uint destHeight;
+    uint factor;       // supersample factor per axis (2..4); 1 = passthrough
+    uint _ssaaPad0;
+};
+
 // Debug-view selector mirrored on both sides. The combo in ImGuiHost's
 // Editor panel writes one of these into camera.debugViewMode; raygen
 // branches on it to compute the BGRA8 display output (gOutput) from

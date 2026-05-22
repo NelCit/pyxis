@@ -80,6 +80,7 @@ int RunViewer(const Configuration& config, const ResolvedScene& scene,
               std::string_view loadMode = {},
               std::string_view variantSelections = {},
               std::string_view renderPurpose = {},
-              bool compressTextures = false) noexcept;
+              bool compressTextures = false,
+              uint32_t ssaa = 1) noexcept;
 
 }  // namespace pyxis::app

@@ -66,6 +66,16 @@ struct RenderSettings {
   // crank to ~50 m for World Lobby-scale (or down to ~0.1 m for a unit
   // cube). 0 falls through to PathTracePass's default of 10.
   float worldPosPeriod = 10.0f;
+
+  // Deterministic supersampling factor (SSAA). When > 1, the caller
+  // renders the whole frame at `ssaaFactor`× the {width, height} per
+  // axis (allocating super-res AOVs) and binds an output-resolution
+  // `RenderTargets::colorResolved`; the renderer's SsaaResolvePass
+  // box-downsamples the super-res color into it. 1 = off (no resolve;
+  // the caller uses RenderTargets::color directly). Noise-free AA —
+  // no jitter, no accumulation. Clamp to a sane ceiling (4) at the
+  // call site; the renderer honours whatever it's given.
+  uint32_t ssaaFactor = 1;
 };
 
 }  // namespace pyxis

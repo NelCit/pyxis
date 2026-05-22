@@ -6,6 +6,7 @@
 // fills in at M5+.
 
 #include "Passes/PathTracePass.h"
+#include "Passes/SsaaResolvePass.h"
 #include "RenderGraph/PassContext.h"
 #include "RenderGraph/RenderGraph.h"
 
@@ -30,7 +31,13 @@ PyxisRenderer::PyxisRenderer(nvrhi::IDevice* device, GpuScene& scene, Profiler& 
   auto pathTrace = std::make_unique<PathTracePass>(device, scene);
   _pathTracePass = pathTrace.get();
   _graph->AddPass(std::move(pathTrace));
-  Logging::Get().Info(log::RENDER, "PyxisRenderer: initialised (PathTracePass registered)");
+  // SSAA resolve runs as the next graph pass after PathTrace: it
+  // box-downsamples the super-res color AOV into the output-res
+  // colorResolved target. No-ops at ssaaFactor == 1 / when its shader
+  // failed to load (§9 linear graph — passes self-gate, no DAG cull).
+  _graph->AddPass(std::make_unique<SsaaResolvePass>(device));
+  Logging::Get().Info(log::RENDER,
+                      "PyxisRenderer: initialised (PathTrace + SsaaResolve registered)");
 }
 
 // Out-of-line dtor lives here so unique_ptr<RenderGraph>'s deleter sees
@@ -57,6 +64,9 @@ void PyxisRenderer::RenderFrame(nvrhi::ICommandList* commandList, const RenderSe
   context.framesInFlight = _framesInFlight;
 
   const Profiler::CpuScope frameScope(*_profiler, "render.frame.cpu");
+  // The graph runs PathTrace → SsaaResolve. SsaaResolve self-no-ops
+  // when settings.ssaaFactor < 2 / colorResolved is unbound, so the
+  // non-SSAA path is unaffected.
   _graph->Execute(commandList, context);
 }
 

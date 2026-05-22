@@ -26,6 +26,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <string_view>
 
 namespace pyxis::app {
@@ -43,6 +44,7 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
                   std::string_view loadMode = {},
                   std::string_view variantSelections = {},
                   std::string_view renderPurpose = {},
-                  bool compressTextures = true) noexcept;
+                  bool compressTextures = true,
+                  uint32_t initialSsaa = 1) noexcept;
 
 }  // namespace pyxis::app

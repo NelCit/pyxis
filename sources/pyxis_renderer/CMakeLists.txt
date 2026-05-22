@@ -97,6 +97,8 @@ target_sources(pyxis_renderer PRIVATE
 
     Private/Passes/PathTracePass.h
     Private/Passes/PathTracePass.cpp
+    Private/Passes/SsaaResolvePass.h
+    Private/Passes/SsaaResolvePass.cpp
 
     Private/Profiler/Profiler.cpp
 
@@ -277,4 +279,14 @@ pyxis_compile_slang_shader(
     ENTRY_POINT main
     STAGE       miss
     OUTPUT      shadow_miss.spv
+)
+# Viewer SSAA box-downsample resolve (compute). Reads the super-res
+# color AOV, writes the backbuffer-resolution resolve. Used by
+# ViewerMode when SSAA > 1 (ImGui toggle / factor).
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/ssaa_downsample.slang
+    ENTRY_POINT main
+    STAGE       compute
+    OUTPUT      ssaa_downsample.spv
 )
