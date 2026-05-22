@@ -122,6 +122,16 @@ struct CliArgs {
   // pixel-equal output against the uncompressed path.
   bool compressTextures = true;        // --no-compress-textures opts out
 
+  // Deterministic supersampling anti-aliasing (SSAA). Renders the
+  // frame at `ssaa`× the configured resolution per axis, then
+  // gamma-aware box-downsamples to the output dimensions. 1 = off
+  // (default). 2 = 2×2 = 4 samples/pixel, 3 = 3×3 = 9, 4 = 4×4 = 16.
+  // Noise-free anti-aliasing (no jitter, no accumulation) — the
+  // deterministic-renderer answer to the high-frequency texture
+  // aliasing that 1-spp-no-AA leaves on speckled materials (Terrazzo,
+  // etc.). Clamped to [1, 4] (4×4 = 16× the pixel work + VRAM).
+  uint32_t ssaa = 1;                   // --ssaa N
+
   // ---- M7 follow-up: AOV save -----------------------------------------
   // --save-aov <list>  Comma-separated list of raw AOVs to dump
   // alongside the regular `--output` BGRA8 EXR. The path stem of
