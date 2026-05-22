@@ -204,9 +204,11 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
           .setAnyHitShader(_anyHitShader),
   };
   pipelineDesc.globalBindingLayouts = {_bindingLayout};
-  // M29 / V2.B.1 — bumped 2 → 3 so closesthit can trace a reflection
-  // ray (which itself can fire its own shadow ray for direct light).
-  // Reflection branch in closesthit lands at M30.
+  // V2.B (plan §V2.B.1/B.3) — depth 3: raygen→primary closesthit (1) →
+  // reflection ray (2) → reflection's shadow/AO ray (3). Opacity
+  // transmission no longer recurses (raygen composites it front-to-back
+  // at depth 0 via its transmission loop), so stacked translucent layers
+  // don't inflate this — the cap stays at the documented 3.
   pipelineDesc.maxRecursionDepth = 3;
   _pipeline = _device->createRayTracingPipeline(pipelineDesc);
   if (!_pipeline)
@@ -631,9 +633,11 @@ bool PathTracePass::ReloadShaders() noexcept {
           .setAnyHitShader(newAnyHit),
   };
   pipelineDesc.globalBindingLayouts = {_bindingLayout};
-  // M29 / V2.B.1 — bumped 2 → 3 so closesthit can trace a reflection
-  // ray (which itself can fire its own shadow ray for direct light).
-  // Reflection branch in closesthit lands at M30.
+  // V2.B (plan §V2.B.1/B.3) — depth 3: raygen→primary closesthit (1) →
+  // reflection ray (2) → reflection's shadow/AO ray (3). Opacity
+  // transmission no longer recurses (raygen composites it front-to-back
+  // at depth 0 via its transmission loop), so stacked translucent layers
+  // don't inflate this — the cap stays at the documented 3.
   pipelineDesc.maxRecursionDepth = 3;
   nvrhi::rt::PipelineHandle newPipeline = _device->createRayTracingPipeline(pipelineDesc);
   if (!newPipeline)

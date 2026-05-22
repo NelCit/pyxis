@@ -165,35 +165,94 @@ void main() {
         worldDirXyz    = normalize(worldDir4.xyz);
     }
 
-    RayDesc ray;
-    ray.Origin    = worldOriginXyz;
-    ray.Direction = worldDirXyz;
-    ray.TMin      = 0.001f;
-    ray.TMax      = 10000.0f;
+    RayDesc segRay;
+    segRay.Origin    = worldOriginXyz;
+    segRay.Direction = worldDirXyz;
+    segRay.TMin      = 0.001f;
+    segRay.TMax      = 10000.0f;
 
-    HitInfo payload;
-    payload.color           = float3(0, 0, 0);
-    payload.hitT            = -1.0f;
-    payload.normalWorld     = float3(0, 0, 0);
-    payload.instanceId      = 0xFFFFFFFFu;
-    payload.baseColor       = float3(0, 0, 0);
-    payload.materialId      = 0xFFFFFFFFu;
-    payload.worldHit        = float3(0, 0, 0);
-    payload.elementId       = 0xFFFFFFFFu;
-    payload.recursionDepth  = 0;   // M29 / V2.B.1 — primary ray starts at depth 0
+    // V2.B transmission loop. Opacity see-through is composited
+    // FRONT-TO-BACK here as an iterative sequence of primary-depth
+    // TraceRays — NOT a recursive continuation ray inside closesthit.
+    // Each iteration re-traces from just past the previous hit at
+    // recursion depth 0, so an arbitrary stack of transparent surfaces
+    // costs cheap loop iterations instead of hardware recursion depth
+    // (capped at 3 per plan_for_v2.md §V2.B). closesthit returns this
+    // surface's emitted radiance in payload.color and the light it lets
+    // through from behind in payload.transmittance; we accumulate the
+    // former and fold the latter into a running throughput.
+    //
+    // The FIRST hit's payload feeds every AOV (frontmost surface —
+    // unchanged semantics); only the displayed/HDR colour reflects the
+    // composited stack. The loop is deterministic (no RNG, fixed
+    // iteration order, fixed cap) so the headless byte-identical-EXR
+    // contract (§33.7) holds. RAY_FLAG_NONE + instanceMask 0xFF matches
+    // GpuScene's TLAS so every instance is visible to the primary ray.
+    const uint MAX_TRANSPARENT_SEGMENTS = 16u;
+    float3  radiance   = float3(0, 0, 0);
+    float3  throughput = float3(1, 1, 1);
+    HitInfo firstHit;
+    firstHit.color           = float3(0, 0, 0);
+    firstHit.hitT            = -1.0f;
+    firstHit.normalWorld     = float3(0, 0, 0);
+    firstHit.instanceId      = 0xFFFFFFFFu;
+    firstHit.baseColor       = float3(0, 0, 0);
+    firstHit.materialId      = 0xFFFFFFFFu;
+    firstHit.worldHit        = float3(0, 0, 0);
+    firstHit.elementId       = 0xFFFFFFFFu;
+    firstHit.recursionDepth  = 0;
+    firstHit.transmittance   = float3(0, 0, 0);
 
-    // RAY_FLAG_NONE — keep the door open for future shadow/opaque-only
-    // refinements. instanceMask = 0xFF matches what GpuScene's TLAS
-    // builder writes per instance, so all of them are visible to the
-    // primary ray.
-    TraceRay(gTlas,
-             RAY_FLAG_NONE,
-             0xFFu,
-             /*RayContributionToHitGroupIndex*/ 0,
-             /*MultiplierForGeometryContributionToHitGroupIndex*/ 0,
-             /*MissShaderIndex*/ 0,
-             ray,
-             payload);
+    [loop]
+    for (uint seg = 0u; seg < MAX_TRANSPARENT_SEGMENTS; ++seg)
+    {
+        HitInfo segPayload;
+        segPayload.color           = float3(0, 0, 0);
+        segPayload.hitT            = -1.0f;
+        segPayload.normalWorld     = float3(0, 0, 0);
+        segPayload.instanceId      = 0xFFFFFFFFu;
+        segPayload.baseColor       = float3(0, 0, 0);
+        segPayload.materialId      = 0xFFFFFFFFu;
+        segPayload.worldHit        = float3(0, 0, 0);
+        segPayload.elementId       = 0xFFFFFFFFu;
+        segPayload.recursionDepth  = 0;   // M29 / V2.B.1 — primary depth
+        segPayload.transmittance   = float3(0, 0, 0);
+
+        TraceRay(gTlas,
+                 RAY_FLAG_NONE,
+                 0xFFu,
+                 /*RayContributionToHitGroupIndex*/ 0,
+                 /*MultiplierForGeometryContributionToHitGroupIndex*/ 0,
+                 /*MissShaderIndex*/ 0,
+                 segRay,
+                 segPayload);
+
+        if (seg == 0u) firstHit = segPayload;
+
+        radiance += throughput * segPayload.color;
+
+        // Miss (hitT < 0): background/envmap is already in segPayload.color
+        // and accumulated above; nothing lies behind it.
+        if (segPayload.hitT < 0.0f) break;
+
+        // Opaque (or near-opaque) surface: no light from behind.
+        const float3 t = segPayload.transmittance;
+        if (max(max(t.x, t.y), t.z) < 1e-3f) break;
+
+        throughput *= t;
+
+        // Advance just past this hit along the same direction and
+        // re-trace for what lies behind it.
+        const float3 hitPos = segRay.Origin + segRay.Direction * segPayload.hitT;
+        segRay.Origin = hitPos + segRay.Direction * 1e-3f;
+        segRay.TMin   = 1e-3f;
+    }
+
+    // Reassemble the payload the downstream AOV / picker / display code
+    // expects: structural channels from the frontmost hit, colour from
+    // the composited transparent stack.
+    HitInfo payload = firstHit;
+    payload.color = radiance;
 
     // ----- Raw AOVs -----------------------------------------------
     // Written every frame regardless of debugViewMode so the AOV

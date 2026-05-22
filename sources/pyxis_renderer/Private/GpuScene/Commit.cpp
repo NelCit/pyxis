@@ -23,6 +23,10 @@
 #include <stb_image.h>
 #include <tinyexr.h>
 
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -32,6 +36,96 @@
 namespace pyxis {
 
 using namespace gpuscene_detail;
+
+namespace {
+
+// V2.B.* — gamma-aware 2× box-downsample of an RGBA8 image, used to
+// build a CPU mip chain for uncompressed material textures. Without
+// mips, minified tiled textures (e.g. the World Lobby's tiling wood
+// walls) point-sample mip 0 and alias into herringbone/chevron moiré
+// — the ray-cone LOD helper in closesthit selects a mip level that
+// doesn't exist and clamps to 0. sRGB-encoded roles (BaseColor /
+// Emission) are averaged in LINEAR space then re-encoded; linear
+// roles average bytes directly. Alpha always averages linearly.
+// Odd dimensions floor-halve (drop the trailing texel) — standard for
+// a box mip chain.
+[[nodiscard]] std::vector<std::uint8_t> DownsampleRgba8Half(
+    const std::uint8_t* src, std::uint32_t srcW, std::uint32_t srcH, bool isSrgb,
+    std::uint32_t& outW, std::uint32_t& outH) noexcept
+{
+  outW = std::max(1u, srcW / 2u);
+  outH = std::max(1u, srcH / 2u);
+  std::vector<std::uint8_t> dst(static_cast<std::size_t>(outW) * outH * 4u);
+
+  // sRGB↔linear via precomputed lookup tables instead of std::pow per
+  // channel per pixel. The pow-based version dominated first-frame load
+  // (~57 s on the World Lobby's 8K textures: ~15 pow calls per output
+  // texel). byte→linear is an exact 256-entry table; linear→byte uses a
+  // 4097-entry table indexed by the averaged linear value (≤ 1/4096
+  // quantisation — invisible in a mip). Both built once (thread-safe
+  // function-local statics), so parallel callers share them.
+  static const std::array<float, 256> SRGB_TO_LINEAR = [] {
+    std::array<float, 256> table{};
+    for (int idx = 0; idx < 256; ++idx)
+    {
+      const float chan = static_cast<float>(idx) / 255.0f;
+      table[static_cast<std::size_t>(idx)] =
+          (chan <= 0.04045f) ? chan / 12.92f
+                             : std::pow((chan + 0.055f) / 1.055f, 2.4f);
+    }
+    return table;
+  }();
+  static const std::array<std::uint8_t, 4097> LINEAR_TO_SRGB_BYTE = [] {
+    std::array<std::uint8_t, 4097> table{};
+    for (int idx = 0; idx <= 4096; ++idx)
+    {
+      const float lin = static_cast<float>(idx) / 4096.0f;
+      const float srgb = (lin <= 0.0031308f)
+                             ? lin * 12.92f
+                             : 1.055f * std::pow(lin, 1.0f / 2.4f) - 0.055f;
+      table[static_cast<std::size_t>(idx)] =
+          static_cast<std::uint8_t>(std::lround(std::clamp(srgb, 0.0f, 1.0f) * 255.0f));
+    }
+    return table;
+  }();
+
+  for (std::uint32_t dstY = 0; dstY < outH; ++dstY)
+  {
+    const std::uint32_t srcY0 = dstY * 2u;
+    const std::uint32_t srcY1 = std::min(srcY0 + 1u, srcH - 1u);
+    for (std::uint32_t dstX = 0; dstX < outW; ++dstX)
+    {
+      const std::uint32_t srcX0 = dstX * 2u;
+      const std::uint32_t srcX1 = std::min(srcX0 + 1u, srcW - 1u);
+      const std::size_t o00 = (static_cast<std::size_t>(srcY0) * srcW + srcX0) * 4u;
+      const std::size_t o10 = (static_cast<std::size_t>(srcY0) * srcW + srcX1) * 4u;
+      const std::size_t o01 = (static_cast<std::size_t>(srcY1) * srcW + srcX0) * 4u;
+      const std::size_t o11 = (static_cast<std::size_t>(srcY1) * srcW + srcX1) * 4u;
+      std::uint8_t* outPix =
+          dst.data() + (static_cast<std::size_t>(dstY) * outW + dstX) * 4u;
+      for (std::size_t chIdx = 0; chIdx < 4u; ++chIdx)
+      {
+        if (isSrgb && chIdx < 3u)  // gamma-correct average; alpha stays linear
+        {
+          const float averaged = 0.25f
+              * (SRGB_TO_LINEAR[src[o00 + chIdx]] + SRGB_TO_LINEAR[src[o10 + chIdx]]
+                 + SRGB_TO_LINEAR[src[o01 + chIdx]] + SRGB_TO_LINEAR[src[o11 + chIdx]]);
+          outPix[chIdx] = LINEAR_TO_SRGB_BYTE[static_cast<std::size_t>(
+              std::lround(std::clamp(averaged, 0.0f, 1.0f) * 4096.0f))];
+        }
+        else
+        {
+          const std::uint32_t sum = static_cast<std::uint32_t>(src[o00 + chIdx])
+                                  + src[o10 + chIdx] + src[o01 + chIdx] + src[o11 + chIdx];
+          outPix[chIdx] = static_cast<std::uint8_t>((sum + 2u) / 4u);
+        }
+      }
+    }
+  }
+  return dst;
+}
+
+}  // namespace
 
 // ============================================================================
 // Clear
@@ -324,11 +418,46 @@ Expected<void> GpuScene::Impl::UploadPendingTextures(nvrhi::ICommandList* comman
   // HDR (.exr — added at M7 for the dome environment map) goes
   // through tinyexr as RGBA32F. Format selection happens per entry
   // based on extension.
+  //
+  // V2.B — per-phase CPU timing. This pass dominated first-frame load on
+  // the World Lobby (~57 s before the LUT mip-gen). We accumulate the
+  // three CPU phases — decode (stb/tinyexr), mip build + BCn encode, and
+  // GPU command record (createTexture + writeTexture into the staging
+  // ring) — and log the breakdown so the cost is attributable.
+  const auto texPassStart = std::chrono::steady_clock::now();
+
+  // Collect the dirty entries up front so the CPU-bound work (decode +
+  // gamma-aware mip build + BCn encode) can fan across the OpenMP pool.
+  // NVRHI device/command-list calls are NOT thread-safe and must stay on
+  // the render thread, so this pass is two-phase:
+  //   phase 1 (parallel): decode + mip + BCn into a per-entry staging POD
+  //   phase 2 (serial)  : createTexture + writeTexture from that POD
+  // Decode dominated first-frame load on the World Lobby (~16 s of the
+  // 27 s pass); spreading it over the asset-decode pool is the win.
+  std::vector<TextureEntry*> dirty;
+  dirty.reserve(textures.size());
   for (TextureEntry& entry : textures)
   {
     if (!entry.live || !entry.needsGpuUpload || entry.resolvedPath.empty())
       continue;
+    dirty.push_back(&entry);
+  }
 
+  struct PreparedTexUpload
+  {
+    std::vector<std::vector<std::uint8_t>> levelBytes;
+    std::vector<std::size_t>               levelPitch;
+    nvrhi::Format                          texFormat = nvrhi::Format::UNKNOWN;
+    bool                                   ready     = false;
+  };
+  std::vector<PreparedTexUpload> prep(dirty.size());
+
+  // Per-entry CPU preparation. Pure compute + thread-safe library calls
+  // (stb_image, tinyexr LoadEXR, EncodeBCn, DownsampleRgba8Half); each
+  // invocation owns its TextureEntry and PreparedTexUpload slot, so there
+  // is no cross-entry sharing. spdlog (Logging::Get()) is thread-safe.
+  const auto prepareEntry = [this](TextureEntry& entry, PreparedTexUpload& out)
+  {
     // Sniff extension — `.exr` → tinyexr; `.dds` → V2.A.14 BCn
     // passthrough; everything else → stb_image.
     const std::string& path = entry.resolvedPath;
@@ -358,7 +487,7 @@ Expected<void> GpuScene::Impl::UploadPendingTextures(nvrhi::ICommandList* comman
                                 + " — falling back to missing-texture (slot 0).");
         entry.needsGpuUpload = false;
         entry.bindlessSlot = 0;
-        continue;
+        return;
       }
       const auto fileSize = static_cast<std::size_t>(ddsFile.tellg());
       ddsFile.seekg(0);
@@ -375,7 +504,7 @@ Expected<void> GpuScene::Impl::UploadPendingTextures(nvrhi::ICommandList* comman
                                 + " (unsupported FourCC / DXGI / truncated).");
         entry.needsGpuUpload = false;
         entry.bindlessSlot = 0;
-        continue;
+        return;
       }
       width  = static_cast<int>(parsed.width);
       height = static_cast<int>(parsed.height);
@@ -406,7 +535,7 @@ Expected<void> GpuScene::Impl::UploadPendingTextures(nvrhi::ICommandList* comman
           std::free(exrPixels);
         entry.needsGpuUpload = false;
         entry.bindlessSlot = 0;
-        continue;
+        return;
       }
       const std::size_t pixelByteCount = static_cast<std::size_t>(width) * height * 4u
                                        * sizeof(float);
@@ -429,7 +558,7 @@ Expected<void> GpuScene::Impl::UploadPendingTextures(nvrhi::ICommandList* comman
         entry.bindlessSlot = 0;
         if (decoded)
           stbi_image_free(decoded);
-        continue;
+        return;
       }
       const auto pixelByteCount = static_cast<std::size_t>(width) * height * 4u;
       decodedPixels.assign(decoded, decoded + pixelByteCount);
@@ -442,74 +571,136 @@ Expected<void> GpuScene::Impl::UploadPendingTextures(nvrhi::ICommandList* comman
                         ? nvrhi::Format::SRGBA8_UNORM
                         : nvrhi::Format::RGBA8_UNORM;
       rowPitchBytes = static_cast<std::size_t>(width) * 4u;
+    }
 
-      // V2.A.14 — opt-in BCn encoding. Replaces the uncompressed
-      // RGBA8 with a BC1 / BC4 / BC5 block stream chosen by role
-      // (see `gpuscene_detail::EncodeBCn` in BcEncoder.h). Requires
-      // both dimensions to be multiples of 4 (BCn block alignment);
-      // odd-dim textures fall through to the uncompressed path with
-      // a debug log.
-      //
-      // V2.A.14 follow-up — skip BCn for sRGB-encoded roles
-      // (BaseColor + Emission). BC1's RGB565 endpoint quantization
-      // is asymmetric per-channel (R/B: 5-bit, G: 6-bit) and combined
-      // with the sRGB curve produces a measurable warm/red cast
-      // (B/G channels darken more than R, ~3-5% per channel on lobby-
-      // scale scenes). Linear-space roles (NormalMap → BC5,
-      // RoughnessMetallic → BC4) don't have this perceptual issue
-      // because they're already linear-encoded and BC5/BC4 are 1- and
-      // 2-channel codecs with better per-channel precision. So we
-      // keep VRAM savings where they're free + drop them where the
-      // visual cost shows up. The §17 budget still hits ~50% saving
-      // because normal/roughness textures dominate texture mass in
-      // production scenes.
-      const bool roleIsSRgb =
-          (entry.keyCopy.role == TextureKey::Role::BaseColor)
-          || (entry.keyCopy.role == TextureKey::Role::Emission);
-      if (desc.compressTextures && !roleIsSRgb && width >= 4 && height >= 4
-          && (width % 4) == 0 && (height % 4) == 0)
+    entry.width = static_cast<std::uint32_t>(width);
+    entry.height = static_cast<std::uint32_t>(height);
+
+    // Unified mip-chain build + upload. Three decode paths feed here:
+    //   * stbi 8-bit RGBA (pixelFormat RGBA8/SRGBA8): build a gamma-
+    //     aware box mip chain, then optionally BCn-encode each level.
+    //   * DDS (already block-compressed) + EXR (float env-map): a single
+    //     mip 0, uploaded as decoded.
+    // Mips are essential: closesthit's ray-cone LOD selects a mip level,
+    // and with only mip 0 present every minified tiling texture aliases
+    // into herringbone/sparkle moiré (wood walls, felt normal maps).
+    //
+    // V2.A.14 — BCn compression now runs PER MIP (BC1/BC4/BC5 by role)
+    // so compressed normal/roughness maps keep their mip chain. sRGB
+    // roles (BaseColor/Emission) skip BCn: BC1's RGB565 endpoints
+    // quantise R/B at 5 bits vs G at 6, warm-casting sRGB data. The
+    // BCn chain stops at the first mip whose dims aren't 4-divisible
+    // (BC blocks are 4×4); below that the sampler clamps to the last
+    // encoded level.
+    const bool isRgba8 = (pixelFormat == nvrhi::Format::RGBA8_UNORM
+                          || pixelFormat == nvrhi::Format::SRGBA8_UNORM);
+    const bool isSrgb  = (pixelFormat == nvrhi::Format::SRGBA8_UNORM);
+    const bool roleIsSRgb = (entry.keyCopy.role == TextureKey::Role::BaseColor)
+                            || (entry.keyCopy.role == TextureKey::Role::Emission);
+
+    std::vector<std::vector<std::uint8_t>> levelBytes;
+    std::vector<std::size_t>               levelPitch;
+    nvrhi::Format                          texFormat = pixelFormat;
+
+    if (!isRgba8)
+    {
+      // DDS / EXR: data is already final; one level.
+      levelBytes.push_back(std::move(decodedPixels));
+      levelPitch.push_back(rowPitchBytes);
+    }
+    else
+    {
+      // Build the gamma-aware RGBA8 box mip chain (down to 1×1).
+      std::vector<std::vector<std::uint8_t>> rgbaMips;
+      std::vector<std::uint32_t>             rgbaMipW;
+      std::vector<std::uint32_t>             rgbaMipH;
+      rgbaMips.push_back(std::move(decodedPixels));
+      rgbaMipW.push_back(entry.width);
+      rgbaMipH.push_back(entry.height);
+      while (rgbaMipW.back() > 1u || rgbaMipH.back() > 1u)
       {
-        std::vector<std::uint8_t> encodedBlocks;
-        nvrhi::Format             bcFormat       = nvrhi::Format::UNKNOWN;
-        std::size_t               bcBlockBytes   = 0;
-        gpuscene_detail::EncodeBCn(decodedPixels.data(),
-                  static_cast<std::uint32_t>(width),
-                  static_cast<std::uint32_t>(height),
-                  entry.keyCopy.role,
-                  encodedBlocks, bcFormat, bcBlockBytes);
-        if (bcFormat != nvrhi::Format::UNKNOWN && !encodedBlocks.empty())
+        std::uint32_t nextW = 0u;
+        std::uint32_t nextH = 0u;
+        std::vector<std::uint8_t> half =
+            DownsampleRgba8Half(rgbaMips.back().data(), rgbaMipW.back(),
+                                rgbaMipH.back(), isSrgb, nextW, nextH);
+        rgbaMips.push_back(std::move(half));
+        rgbaMipW.push_back(nextW);
+        rgbaMipH.push_back(nextH);
+      }
+
+      bool encoded = false;
+      if (desc.compressTextures && !roleIsSRgb)
+      {
+        for (std::size_t lvl = 0; lvl < rgbaMips.size(); ++lvl)
         {
-          const std::size_t uncompressed = decodedPixels.size();
-          decodedPixels = std::move(encodedBlocks);
-          pixelFormat   = bcFormat;
-          rowPitchBytes = static_cast<std::size_t>(width / 4u) * bcBlockBytes;
-          Logging::Get().Debug(log::RENDER,
-                               "TextureCache: BCn-encoded " + path + " ("
-                                   + std::to_string(width) + "×"
-                                   + std::to_string(height) + ", "
-                                   + std::to_string(uncompressed) + " B → "
-                                   + std::to_string(decodedPixels.size()) + " B).");
+          if (rgbaMipW[lvl] < 4u || rgbaMipH[lvl] < 4u
+              || (rgbaMipW[lvl] % 4u) != 0u || (rgbaMipH[lvl] % 4u) != 0u)
+            break;
+          std::vector<std::uint8_t> blocks;
+          nvrhi::Format             bcFormat     = nvrhi::Format::UNKNOWN;
+          std::size_t               bcBlockBytes = 0;
+          gpuscene_detail::EncodeBCn(rgbaMips[lvl].data(), rgbaMipW[lvl],
+                                     rgbaMipH[lvl], entry.keyCopy.role,
+                                     blocks, bcFormat, bcBlockBytes);
+          if (bcFormat == nvrhi::Format::UNKNOWN || blocks.empty())
+            break;
+          texFormat = bcFormat;
+          levelPitch.push_back(static_cast<std::size_t>(rgbaMipW[lvl] / 4u) * bcBlockBytes);
+          levelBytes.push_back(std::move(blocks));
+          encoded = true;
         }
       }
-      else if (desc.compressTextures)
+      if (!encoded)
       {
-        Logging::Get().Debug(log::RENDER,
-                             "TextureCache: " + path + " skipped BCn ("
-                                 + std::to_string(width) + "×"
-                                 + std::to_string(height)
-                                 + ", non-4×4-aligned dims).");
+        // Uncompressed (sRGB role, compression off, or BCn declined):
+        // upload every RGBA8 level.
+        texFormat = pixelFormat;
+        levelBytes.clear();
+        levelPitch.clear();
+        for (std::size_t lvl = 0; lvl < rgbaMips.size(); ++lvl)
+        {
+          levelPitch.push_back(static_cast<std::size_t>(rgbaMipW[lvl]) * 4u);
+          levelBytes.push_back(std::move(rgbaMips[lvl]));
+        }
       }
     }
 
-    entry.pixelData = std::move(decodedPixels);
-    entry.width = static_cast<std::uint32_t>(width);
-    entry.height = static_cast<std::uint32_t>(height);
-    entry.format = pixelFormat;
+    out.levelBytes = std::move(levelBytes);
+    out.levelPitch = std::move(levelPitch);
+    out.texFormat  = texFormat;
+    out.ready      = true;
+  };
+
+  // Phase 1 — fan the decode/mip/BCn work across the OpenMP pool. Each
+  // iteration owns a distinct (TextureEntry, PreparedTexUpload) pair.
+#ifdef _OPENMP
+#  pragma omp parallel for schedule(dynamic)
+#endif
+  for (int entryIdx = 0; entryIdx < static_cast<int>(dirty.size()); ++entryIdx)
+    prepareEntry(*dirty[static_cast<std::size_t>(entryIdx)],
+                 prep[static_cast<std::size_t>(entryIdx)]);
+
+  const auto   prepEnd = std::chrono::steady_clock::now();
+  const double prepMs =
+      std::chrono::duration<double, std::milli>(prepEnd - texPassStart).count();
+
+  // Phase 2 — serial GPU resource creation + upload on the render thread.
+  int texProcessed = 0;
+  for (std::size_t slotIdx = 0; slotIdx < dirty.size(); ++slotIdx)
+  {
+    TextureEntry&      entry    = *dirty[slotIdx];
+    PreparedTexUpload& prepared = prep[slotIdx];
+    if (!prepared.ready)
+      continue;
+    entry.format = prepared.texFormat;
+    const std::uint32_t mipLevels = static_cast<std::uint32_t>(prepared.levelBytes.size());
 
     nvrhi::TextureDesc texDesc;
     texDesc.width = entry.width;
     texDesc.height = entry.height;
     texDesc.format = entry.format;
+    texDesc.mipLevels = mipLevels;
     texDesc.dimension = nvrhi::TextureDimension::Texture2D;
     texDesc.debugName = entry.resolvedPath;
     texDesc.initialState = nvrhi::ResourceStates::ShaderResource;
@@ -521,11 +712,28 @@ Expected<void> GpuScene::Impl::UploadPendingTextures(nvrhi::ICommandList* comman
                                          "CommitResources: createTexture failed for '%s'",
                                          entry.resolvedPath.c_str())};
     }
-    commandList->writeTexture(entry.texture.Get(), 0, 0, entry.pixelData.data(),
-                              rowPitchBytes);
+    for (std::uint32_t level = 0; level < mipLevels; ++level)
+      commandList->writeTexture(entry.texture.Get(), 0, level,
+                                prepared.levelBytes[level].data(),
+                                prepared.levelPitch[level]);
     entry.pixelData.clear();
     entry.pixelData.shrink_to_fit();
     entry.needsGpuUpload = false;
+    ++texProcessed;
+  }
+  if (texProcessed > 0)
+  {
+    const double gpuRecordMs = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - prepEnd).count();
+    const double totalMs = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - texPassStart).count();
+    Logging::Get().Info(
+        log::RENDER,
+        "UploadPendingTextures: " + std::to_string(texProcessed) + " textures in "
+            + std::to_string(static_cast<int>(totalMs))
+            + " ms (parallel decode+mip+BCn "
+            + std::to_string(static_cast<int>(prepMs)) + " + serial GPU-record "
+            + std::to_string(static_cast<int>(gpuRecordMs)) + " ms)");
   }
   return {};
 }
@@ -572,6 +780,24 @@ Expected<void> GpuScene::Impl::UploadMaterialBuffer(nvrhi::ICommandList* command
     if (entry.descCopy.transmissionWeight > 0.0f)
       flags |= MaterialFlag::TransmissionEnabled;
     if (entry.descCopy.emissionLuminance > 0.0f) flags |= MaterialFlag::Emissive;
+    // V2.A.24 — normal-map tangent flips + non-identity UV transform.
+    if (entry.descCopy.flipTangentU != 0u) flags |= MaterialFlag::FlipTangentU;
+    if (entry.descCopy.flipTangentV != 0u) flags |= MaterialFlag::FlipTangentV;
+    {
+      const OpenPBRMaterialDesc& mdesc = entry.descCopy;
+      const bool nonIdentityUv =
+          mdesc.baseColorUvScaleX != 1.0f || mdesc.baseColorUvScaleY != 1.0f
+          || mdesc.baseColorUvRotationDeg != 0.0f
+          || mdesc.baseColorUvTranslationX != 0.0f
+          || mdesc.baseColorUvTranslationY != 0.0f;
+      if (nonIdentityUv) flags |= MaterialFlag::HasUvTransform;
+    }
+    // RFC 0005 — planar projection mode → exactly one flag bit.
+    // 1 = world-space, 2 = object-space (projection follows the instance).
+    if (entry.descCopy.projectionMode == 1u)
+      flags |= MaterialFlag::WorldProjection;
+    else if (entry.descCopy.projectionMode == 2u)
+      flags |= MaterialFlag::ObjectProjection;
 
     const std::uint32_t baseColorSlot =
         ResolveTextureBindlessSlot(entry.descCopy.baseColorMap);
@@ -808,7 +1034,19 @@ Expected<void> GpuScene::Impl::RebuildTlasIfDirty(nvrhi::ICommandList* commandLi
     // §41 M6 instanceId AOV + future picking (§19.4).
     desc.instanceID = slot;
     desc.instanceContributionToHitGroupIndex = 0;
-    desc.flags = nvrhi::rt::InstanceFlags::None;
+    // UsdGeomGprim::doubleSided → disable triangle back-face culling so
+    // rays hit the prim from either side. Essential for double-sided
+    // translucent surfaces (glass panes, fabric, foliage cards): the
+    // continuation/transmission ray spawned in the closesthit travels
+    // through the front face and must still register the BACK face, and
+    // primary rays that strike a back-facing triangle (interior of an
+    // open shell) must shade rather than pass through invisibly. The
+    // closesthit already face-forwards the shading normal, so a hit
+    // from either side shades correctly once culling is off. Single-
+    // sided prims keep default culling.
+    desc.flags = inst.doubleSided
+                     ? nvrhi::rt::InstanceFlags::TriangleCullDisable
+                     : nvrhi::rt::InstanceFlags::None;
     desc.bottomLevelAS = mesh.blas.Get();
     instanceDescs.push_back(desc);
   }

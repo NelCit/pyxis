@@ -125,6 +125,29 @@ struct OpenPBRMaterialDesc {
   // up. Default 1.0 = full strength (the pre-this-field behavior).
   float normalStrength           = 1.0f;  // V2.A.23 (was _reserved[10])
 
+  // V2.A.24 — normal-map tangent-handedness flips (OmniPBR
+  // `flip_tangent_u` / `flip_tangent_v`). The DirectX-vs-OpenGL
+  // green-channel convention; Omniverse content commonly authors
+  // flip_tangent_v = 1. 0 = no flip (default). The
+  // baseColorUv{Scale,Rotation,Translation}* fields above carry the
+  // OmniPBR texture_scale / texture_rotate / texture_translate for
+  // MDL materials (V2.A.18 originally populated them only for
+  // UsdTransform2d; V2.A.24 also fills them from MDL + the closesthit
+  // now applies them).
+  uint32_t flipTangentU          = 0;  // V2.A.24 (was _reserved[11])
+  uint32_t flipTangentV          = 0;  // V2.A.24 (was _reserved[12])
+  // RFC 0005 — planar projection mode. Generalizes the V2.B
+  // `worldProjection` (0/1) to OmniPBR's `project_uvw` × `world_or_object`:
+  //   0 = none (sample mesh UVs)
+  //   1 = world-space planar  (project_uvw=1, world_or_object=0)
+  //   2 = object-space planar (project_uvw=1, world_or_object=1)
+  // When non-zero the closesthit derives UV from the hit position (U axis
+  // along up) so directional detail reads consistently regardless of the
+  // asset's per-mesh unwrap; object space transforms the hit by
+  // WorldToObject first so the projection follows the instance. Same POD
+  // slot/offset as the former `worldProjection` (not an ABI add).
+  uint32_t projectionMode        = 0;  // RFC 0005 (was worldProjection / _reserved[13])
+
   // §22.3 reserved padding: M5+ adds OpenPBR fields (sheen, coat
   // colour, displacement, transmission depth, etc.) by consuming
   // these slots one at a time, keeping the layout byte-stable
@@ -132,9 +155,9 @@ struct OpenPBRMaterialDesc {
   // major version (§22 + RFC §44.1). The `_reserved` underscore
   // prefix is the §22.3 / §43 plan convention — overrides §30.2's
   // public-POD camelCase rule for this slot purpose only.
-  // 11 slots consumed above; 5 remain.
+  // 14 slots consumed above; 2 remain.
   // NOLINTNEXTLINE(readability-identifier-naming)
-  uint32_t _reserved[5] = {};
+  uint32_t _reserved[2] = {};
 };
 
 }  // namespace pyxis

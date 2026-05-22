@@ -41,8 +41,15 @@ void EncodeBCn(const std::uint8_t* srcRgba,
       break;
     case TextureKey::Role::RoughnessMetallic:
     default:
-      encoder       = EncoderKind::Bc4;
-      outFormat     = nvrhi::Format::BC4_UNORM;
+      // ORM packs AO/roughness/metallic in R/G/B; the closesthit reads
+      // roughness from .g and metallic from .b. BC4 is single-channel —
+      // it would drop two of the three channels, silently zeroing
+      // roughness + metallic. BC1 (linear RGB) keeps all three at the
+      // same 8-byte block size. BC1's slight per-channel quantisation is
+      // imperceptible on linear ORM data (vs the sRGB warm-cast that
+      // makes us skip BC1 for BaseColor).
+      encoder       = EncoderKind::Bc1;
+      outFormat     = nvrhi::Format::BC1_UNORM;
       outBlockBytes = 8u;
       break;
   }

@@ -10,6 +10,8 @@ README is an index of merged RFCs (one line per RFC).
 | 0001 | TLAS instance-cap of 65 536 for v1 | Accepted |
 | 0002 | Bindless texture array cap of 4 096 for v1 | Accepted |
 | 0003 | Move render-side `GpuScene` accessors to a `SceneResources` view | Accepted |
+| 0004 | Omniverse editor integration (Pyxis as authoring + viewport renderer) | Draft |
+| 0005 | Generalized planar projection + secondary UV set | Draft |
 
 ## Lifecycle (§44.4)
 

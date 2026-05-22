@@ -212,6 +212,19 @@ inline shaderinterop::OpenPBRMaterialGPU PackMaterialGpu(
   gpu.emissionG = static_cast<float>(desc.emissionColor.y);
   gpu.emissionB = static_cast<float>(desc.emissionColor.z);
   gpu._reserved1 = 0;
+  // V2.A.24 — UV transform (scale / rotate-degrees→radians /
+  // translate). The closesthit applies it before texture sampling
+  // when MATERIAL_FLAG_HAS_UV_TRANSFORM is set (computed in Commit.cpp
+  // from these same desc fields).
+  constexpr float DEG_TO_RAD = 3.14159265358979323846f / 180.0f;
+  gpu.uvScaleX        = desc.baseColorUvScaleX;
+  gpu.uvScaleY        = desc.baseColorUvScaleY;
+  gpu.uvRotateRadians = desc.baseColorUvRotationDeg * DEG_TO_RAD;
+  gpu.uvTranslateX    = desc.baseColorUvTranslationX;
+  gpu.uvTranslateY    = desc.baseColorUvTranslationY;
+  gpu._reserved2 = 0.0f;
+  gpu._reserved3 = 0.0f;
+  gpu._reserved4 = 0.0f;
   return gpu;
 }
 

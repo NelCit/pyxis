@@ -694,8 +694,39 @@ void TranslateMdl(const pxr::UsdShadeShader& shader,
                    void*                     userData,
                    pxr::UsdTimeCode          timeCode) noexcept
 {
-  desc.baseColor = ReadColor(shader, pxr::TfToken("diffuse_color_constant"),
-                              hlslpp::float3{0.18f, 0.18f, 0.18f}, timeCode);
+  // Base albedo = diffuse_color_constant × diffuse_tint, matching the
+  // MDL OmniPBR / Plain shading-graph convention. Two real authoring
+  // patterns appear in the World Lobby:
+  //   * OmniPBR (e.g. Oak, MetalFeet): authors `diffuse_color_constant`
+  //     as the albedo, with `diffuse_tint` defaulting to (1,1,1).
+  //   * Plain.mdl (e.g. Felt_Green): authors NO `diffuse_color_constant`
+  //     — the colour lives entirely in `diffuse_tint=(0.48,0.56,0.34)`.
+  //     Reading only diffuse_color_constant left felt at the 0.18 grey
+  //     fallback instead of green.
+  // So: if diffuse_color_constant is authored, it's the base; otherwise
+  // the base is white when a tint is present (Plain.mdl), or the 0.18
+  // neutral fallback when neither is authored. The tint then multiplies.
+  // `diffuseTint` multiplies the albedo (texture if present, else the
+  // constant). Kept in function scope so the texture branch below can
+  // re-set desc.baseColor = tint (the closesthit then does texture ×
+  // tint). When a diffuse_texture is bound the constant is IGNORED — the
+  // texture IS the albedo — so a green-tinted white felt weave reads
+  // green, while a tint-1 textured material (oak) is unchanged.
+  const hlslpp::float3 diffuseTint = ReadColor(shader, pxr::TfToken("diffuse_tint"),
+                                               hlslpp::float3{1.0f, 1.0f, 1.0f}, timeCode);
+  {
+    const pxr::UsdShadeInput constInput =
+        shader.GetInput(pxr::TfToken("diffuse_color_constant"));
+    const bool hasConst = constInput && constInput.GetAttr().HasAuthoredValue();
+    const pxr::UsdShadeInput tintInput = shader.GetInput(pxr::TfToken("diffuse_tint"));
+    const bool hasTint = tintInput && tintInput.GetAttr().HasAuthoredValue();
+    const hlslpp::float3 base =
+        hasConst ? ReadColor(shader, pxr::TfToken("diffuse_color_constant"),
+                             hlslpp::float3{0.18f, 0.18f, 0.18f}, timeCode)
+                 : (hasTint ? hlslpp::float3{1.0f, 1.0f, 1.0f}
+                            : hlslpp::float3{0.18f, 0.18f, 0.18f});
+    desc.baseColor = base * diffuseTint;
+  }
   desc.metalness = ReadFloat(shader, pxr::TfToken("metallic_constant"), 0.0f, timeCode);
   desc.roughness = ReadFloat(shader, pxr::TfToken("reflection_roughness_constant"),
                               ReadFloat(shader, pxr::TfToken("roughness_constant"), 0.5f, timeCode),
@@ -706,6 +737,35 @@ void TranslateMdl(const pxr::UsdShadeShader& shader,
   // authors 0.6..10; honoring it keeps polished surfaces from looking
   // over-bumped + lets detailed-matte surfaces dial relief up.
   desc.normalStrength = ReadFloat(shader, pxr::TfToken("bump_factor"), 1.0f, timeCode);
+  // V2.A.24 — UV transform (OmniPBR texture_scale / texture_rotate /
+  // texture_translate) + normal-map tangent flips. Reuses the
+  // baseColorUv* desc slots (V2.A.18) which the closesthit now applies
+  // to every texture sample. Without these the World Lobby's wood
+  // walls render at the wrong tiling (texture_scale=(1,2)), wrong
+  // grain direction (texture_rotate=90), and inverted bump
+  // (flip_tangent_v=1).
+  {
+    float scaleX = 1.0f;
+    float scaleY = 1.0f;
+    if (ReadShaderInputFloat2(shader, pxr::TfToken("texture_scale"), scaleX, scaleY))
+    {
+      desc.baseColorUvScaleX = scaleX;
+      desc.baseColorUvScaleY = scaleY;
+    }
+    desc.baseColorUvRotationDeg =
+        ReadFloat(shader, pxr::TfToken("texture_rotate"), 0.0f, timeCode);
+    float transX = 0.0f;
+    float transY = 0.0f;
+    if (ReadShaderInputFloat2(shader, pxr::TfToken("texture_translate"), transX, transY))
+    {
+      desc.baseColorUvTranslationX = transX;
+      desc.baseColorUvTranslationY = transY;
+    }
+    desc.flipTangentU =
+        ReadBoolish(shader, pxr::TfToken("flip_tangent_u"), false, timeCode) ? 1u : 0u;
+    desc.flipTangentV =
+        ReadBoolish(shader, pxr::TfToken("flip_tangent_v"), false, timeCode) ? 1u : 0u;
+  }
   desc.emissionColor = ReadColor(shader, pxr::TfToken("emissive_color"),
                                   hlslpp::float3{0.0f, 0.0f, 0.0f}, timeCode);
   desc.emissionLuminance = ReadFloat(shader, pxr::TfToken("emissive_intensity"), 0.0f, timeCode);
@@ -737,6 +797,11 @@ void TranslateMdl(const pxr::UsdShadeShader& shader,
   desc.baseColorMap   = ReadMdlTextureInput(shader, pxr::TfToken("diffuse_texture"),
                                              acquire, userData,
                                              TextureKey::Role::BaseColor, TextureKey::Color::SRgb);
+  // When a diffuse_texture is bound it provides the albedo; the constant
+  // is dropped and only the tint modulates (closesthit does texture ×
+  // baseColor). Felt's white weave × green tint → green felt.
+  if (desc.baseColorMap != TextureHandle::Invalid)
+    desc.baseColor = diffuseTint;
   desc.normalMap      = ReadMdlTextureInput(shader, pxr::TfToken("normalmap_texture"),
                                              acquire, userData,
                                              TextureKey::Role::NormalMap, TextureKey::Color::Linear);
@@ -787,6 +852,27 @@ void TranslateMdl(const pxr::UsdShadeShader& shader,
   desc.opacityMap     = ReadMdlTextureInput(shader, pxr::TfToken("opacity_texture"),
                                              acquire, userData,
                                              TextureKey::Role::Opacity, TextureKey::Color::Linear);
+  // RFC 0005 — generalized planar projection, driven purely by the
+  // material's authored OmniPBR inputs and applied to EVERY material (no
+  // wood-name special case — the prior V2.B `sourceAsset`-path sniff is
+  // removed). `project_uvw` turns projection on; `world_or_object` selects
+  // the space (0 = world, 1 = object). The closesthit derives planar UV
+  // from the hit position; object space transforms by WorldToObject first
+  // so the projection follows the instance.
+  //
+  // Measured against the World Lobby (RFC 0005 Findings): 10 materials
+  // author project_uvw=1 (tiles/stone/metal/paint), 3 of those object-space;
+  // oak authors project_uvw=0, so it samples its mesh UVs (the oak-grain
+  // question is a separate `st`/texture-transform investigation, not
+  // projection — and `uv_space_index` is never authored as the secondary
+  // set, so no UV-set path is needed here).
+  {
+    const bool projectUvw =
+        ReadBoolish(shader, pxr::TfToken("project_uvw"), false, timeCode);
+    const bool objectSpace =
+        ReadBoolish(shader, pxr::TfToken("world_or_object"), false, timeCode);
+    desc.projectionMode = projectUvw ? (objectSpace ? 2u : 1u) : 0u;
+  }
   desc.source = OpenPBRMaterialDesc::Source::Mdl;
 }
 

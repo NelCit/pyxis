@@ -79,6 +79,14 @@ struct HitInfo {
     // MAX_RECURSION_DEPTH = 3. Cheap (one uint = 4 bytes); the payload
     // is already spilled past the 32-byte register-only ceiling.
     uint   recursionDepth;  // 0 on primary; closesthit increments for traced rays
+    // V2.B transmission — the fraction of light from BEHIND this surface
+    // that reaches the eye through it, per channel. closesthit sets it to
+    // (1-reflWeight)·(1-opacity); opaque surfaces and the miss shader
+    // leave it at 0. raygen's front-to-back transmission loop folds it
+    // into a running throughput instead of tracing a recursive
+    // continuation ray, so stacked transparent layers cost loop
+    // iterations rather than hardware recursion depth. See raygen.slang.
+    float3 transmittance;   // 0 = opaque; >0 lets the surface behind show through
 };
 #endif
 
@@ -315,6 +323,21 @@ struct OpenPBRMaterialGPU {
     float emissionG;
     float emissionB;
     uint  _reserved1;
+
+    // Row 6 + 7 — V2.A.24 UV transform (OmniPBR texture_scale /
+    // texture_rotate / texture_translate). Applied to the interpolated
+    // UV before every texture sample as scale → rotate → translate
+    // (matching MaterialX / OmniPBR convention) when
+    // MATERIAL_FLAG_HAS_UV_TRANSFORM is set. Default = identity
+    // (scale 1, rotate 0, translate 0).
+    float uvScaleX;
+    float uvScaleY;
+    float uvRotateRadians;
+    float uvTranslateX;
+    float uvTranslateY;
+    float _reserved2;
+    float _reserved3;
+    float _reserved4;
 };
 
 // LightGpu — packed light entry the closesthit reads via the
@@ -412,6 +435,11 @@ static const uint MATERIAL_FLAG_ALPHA_TESTED            = 1u << 9;
 static const uint MATERIAL_FLAG_COAT_ENABLED            = 1u << 10;
 static const uint MATERIAL_FLAG_TRANSMISSION_ENABLED    = 1u << 11;
 static const uint MATERIAL_FLAG_EMISSIVE                = 1u << 12;
+static const uint MATERIAL_FLAG_FLIP_TANGENT_U          = 1u << 13;
+static const uint MATERIAL_FLAG_FLIP_TANGENT_V          = 1u << 14;
+static const uint MATERIAL_FLAG_HAS_UV_TRANSFORM        = 1u << 15;
+static const uint MATERIAL_FLAG_WORLD_PROJECTION        = 1u << 16;
+static const uint MATERIAL_FLAG_OBJECT_PROJECTION       = 1u << 17;
 
 // Bindless texture array capacity at PathTracePass binding 28.
 // Cap chosen to comfortably cover v1 production scenes (Lobby 169,
@@ -444,10 +472,10 @@ static const uint BINDLESS_TEXTURES_CAP = 4096u;
                   "See resources/shaders/ShaderInterop.slang.");
     static_assert(sizeof(PickResult) % 16 == 0,
                   "PickResult must be 16-byte aligned (structured-buffer rule).");
-    static_assert(sizeof(OpenPBRMaterialGPU) == 96,
-                  "OpenPBRMaterialGPU must be 96 bytes (6 rows of 16) — M9 added "
-                  "emissionR/G/B on row 5 alongside the existing emissionLuminance "
-                  "scalar on row 3.");
+    static_assert(sizeof(OpenPBRMaterialGPU) == 128,
+                  "OpenPBRMaterialGPU must be 128 bytes (8 rows of 16) — M9 added "
+                  "emissionR/G/B on row 5; V2.A.24 added the UV transform "
+                  "(scale/rotate/translate) on rows 6-7.");
     static_assert(sizeof(OpenPBRMaterialGPU) % 16 == 0,
                   "OpenPBRMaterialGPU must be 16-byte aligned (§23 cbuffer / "
                   "structured-buffer alignment rule).");

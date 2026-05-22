@@ -144,10 +144,37 @@ Expected<MeshHandle> GpuScene::Impl::CreateMesh(const MeshDesc& meshDesc)
     const hlslpp::float3 pos0 = entry.positions[idx0];
     const hlslpp::float3 pos1 = entry.positions[idx1];
     const hlslpp::float3 pos2 = entry.positions[idx2];
-    const hlslpp::float3 normal = hlslpp::normalize(hlslpp::cross(pos1 - pos0, pos2 - pos0));
+    const hlslpp::float3 crossEdges = hlslpp::cross(pos1 - pos0, pos2 - pos0);
+    const float          worldArea2 = static_cast<float>(hlslpp::length(crossEdges));  // 2·area
+    const hlslpp::float3 normal = hlslpp::normalize(crossEdges);
+
+    // V2.B.* — per-triangle texel density for UV-density-aware mip LOD.
+    // closesthit's ray-cone LOD only knows the cone's WORLD radius; it
+    // needs texels-per-world-unit to pick the right mip. That depends
+    // on how fast UV changes across the triangle — i.e. the ratio of
+    // the triangle's UV area to its (object-space) world area. Without
+    // it, heavily-tiled surfaces (the World Lobby has a wall tiling
+    // ~2900×) select a too-low mip and alias into moiré despite having
+    // a full mip chain. We pack sqrt(uvArea / objectArea) — UV units
+    // per object-space length — into the reserved `.w` slot of the
+    // face-normal buffer (already bound + per-triangle indexed). The
+    // shader scales it by the object→world scale to get world density.
+    // 0 means "no UV density info" (degenerate / no UVs) → LOD falls
+    // back to the old cone·texSize estimate.
+    float texelDensity = 0.0f;
+    if (idx0 < entry.uv0.size() && idx1 < entry.uv0.size() && idx2 < entry.uv0.size()
+        && worldArea2 > 1e-12f)
+    {
+      const hlslpp::float2 uvEdge1 = entry.uv0[idx1] - entry.uv0[idx0];
+      const hlslpp::float2 uvEdge2 = entry.uv0[idx2] - entry.uv0[idx0];
+      const float uvArea2 = std::abs(static_cast<float>(uvEdge1.x) * static_cast<float>(uvEdge2.y)
+                                     - static_cast<float>(uvEdge1.y) * static_cast<float>(uvEdge2.x));
+      if (uvArea2 > 0.0f)
+        texelDensity = std::sqrt(uvArea2 / worldArea2);
+    }
     entry.faceNormals.emplace_back(static_cast<float>(normal.x),
                                    static_cast<float>(normal.y),
-                                   static_cast<float>(normal.z), 0.0f);
+                                   static_cast<float>(normal.z), texelDensity);
   }
   meshFaceNormalsNeedUpload = true;
 

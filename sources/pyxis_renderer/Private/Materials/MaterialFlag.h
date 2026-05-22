@@ -27,6 +27,27 @@ enum class MaterialFlag : uint32_t {
   CoatEnabled         = 1u << 10,  // coatWeight > 0
   TransmissionEnabled = 1u << 11,  // transmissionWeight > 0
   Emissive            = 1u << 12,  // emissionLuminance > 0 OR emissionMap valid
+  // V2.A.24 — normal-map tangent-handedness flips (OmniPBR
+  // `flip_tangent_u` / `flip_tangent_v`). The DirectX-vs-OpenGL normal
+  // convention: Omniverse content commonly authors flip_tangent_v=1
+  // (green channel points down), so without flipping, bump lighting
+  // is inverted on the V axis. Closesthit negates the matching
+  // tangent-space normal component when set.
+  FlipTangentU        = 1u << 13,
+  FlipTangentV        = 1u << 14,
+  // V2.A.24 — a non-identity UV transform (scale / rotate / translate)
+  // is authored; closesthit applies it to the interpolated UV before
+  // every texture sample. Gates the transform math so identity-UV
+  // materials pay nothing.
+  HasUvTransform      = 1u << 15,
+  // RFC 0005 — planar projection: derive UV from the hit position with the
+  // texture U axis along up, so directional detail reads consistently
+  // regardless of the asset's per-mesh unwrap. WorldProjection projects in
+  // world space; ObjectProjection transforms the hit by WorldToObject first
+  // so the projection follows the instance (OmniPBR world_or_object=1). The
+  // C++ flag-packing site sets exactly one from `projectionMode`.
+  WorldProjection     = 1u << 16,
+  ObjectProjection    = 1u << 17,
 };
 
 constexpr uint32_t operator|(MaterialFlag lhs, MaterialFlag rhs) noexcept {

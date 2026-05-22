@@ -183,6 +183,34 @@ target_include_directories(pyxis_renderer PRIVATE ${Stb_INCLUDE_DIR})
 # for the input / decode side.
 find_package(tinyexr CONFIG REQUIRED)
 
+# OpenMP — fans the per-texture decode + gamma-aware mip build + BCn
+# encode across the pool in GpuScene::Impl::UploadPendingTextures
+# (Commit.cpp). That pass dominated first-frame load on the World Lobby
+# (~16 s of decode alone over 142 textures).
+#
+# Use plain `/openmp`, NOT `/openmp:llvm`. On clang-cl the OpenMP runtime
+# is *always* libomp (the LLVM 4.5+ runtime) regardless of suffix — the
+# `:llvm` / `:experimental` selectors are cl.exe-isms. Worse, clang-cl's
+# `/openmp:llvm` is a recognised-but-quirky form that does NOT define the
+# `_OPENMP` feature macro, so any `#ifdef _OPENMP`-guarded pragma compiles
+# out and the loop runs serially. `/openmp` defines `_OPENMP` and links
+# libomp — exactly what we want.
+# Compile-only: clang-cl's `/openmp` embeds a `/defaultlib:libomp`
+# directive in every object (passing `/openmp` to lld-link directly fails —
+# it is not a linker flag). lld-link still needs LLVM's lib dir on the
+# search path to resolve that directive, and the matching libomp.dll must
+# sit next to the binary at runtime. Both are derived from CMAKE_LINKER
+# (`.../LLVM/bin/lld-link.exe`).
+target_compile_options(pyxis_renderer PRIVATE /openmp)
+get_filename_component(_pyxis_llvm_bin  "${CMAKE_LINKER}"     DIRECTORY)
+get_filename_component(_pyxis_llvm_root "${_pyxis_llvm_bin}"  DIRECTORY)
+target_link_libraries(pyxis_renderer PRIVATE "${_pyxis_llvm_root}/lib/libomp.lib")
+add_custom_command(TARGET pyxis_renderer POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${_pyxis_llvm_bin}/libomp.dll" "$<TARGET_FILE_DIR:pyxis_renderer>"
+    COMMENT "Copying libomp.dll (OpenMP runtime) next to pyxis_renderer"
+    VERBATIM)
+
 # Tracy — optional CPU/GPU profiling backend. OFF by default (plan
 # §34.2: "Tracy (optional, off by default)"); enable per-build via
 # `cmake -DPYXIS_TRACY=ON`. When ON, the renderer links against the

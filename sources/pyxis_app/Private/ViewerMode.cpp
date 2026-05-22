@@ -1008,9 +1008,26 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
       // the M3 startup tick the scene is static, so all
       // subsequent frames find nothing dirty and CommitResources
       // is effectively a no-op.
+      // First-frame timing. CommitResources does ALL the GPU resource
+      // upload on frame 0 (texture decode + CPU mip generation + per-mip
+      // BCn encode + BLAS build records + TLAS build); every later frame
+      // finds nothing dirty and it's a no-op. This is the big "load"
+      // cost AFTER "entering frame loop" that was previously unlogged in
+      // the viewer (headless logs it via its load summary; the viewer
+      // didn't). Log it once so the delay is visible + attributable.
+      const auto commitStart = std::chrono::steady_clock::now();
       if (auto commitResult = gpuScene.CommitResources(commandList); !commitResult)
       {
         log.Error(log::APP, "ViewerMode: " + std::string{commitResult.error().message.View()});
+      }
+      if (frameIndex == 0)
+      {
+        const double commitMs = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - commitStart).count();
+        log.Info(log::APP,
+                 "ViewerMode: first CommitResources (CPU: texture decode + mip "
+                 "generation + BCn encode, BLAS/TLAS record) = "
+                     + std::to_string(static_cast<int>(commitMs)) + " ms");
       }
 
       // Render into the AOV color (storage-capable BGRA8_UNORM)
@@ -1163,6 +1180,23 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
       commandList->commitBarriers();
       commandList->close();
       device->executeCommandList(commandList);
+      if (frameIndex == 0)
+      {
+        // Frame-0 only: block on the GPU so we can attribute the
+        // remaining "load" stall — the actual VRAM texture upload
+        // (10 GB-class on the World Lobby), the RT pipeline state-object
+        // compile, and the first path-trace dispatch all happen here on
+        // the GPU, asynchronously after submit. Subsequent frames never
+        // wait like this; this single stall just makes the cost visible.
+        const auto gpuStart = std::chrono::steady_clock::now();
+        device->waitForIdle();
+        const double gpuMs = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - gpuStart).count();
+        log.Info(log::APP,
+                 "ViewerMode: first frame GPU work (VRAM texture upload + RT "
+                 "pipeline compile + first path-trace) = "
+                     + std::to_string(static_cast<int>(gpuMs)) + " ms");
+      }
     }
 
     {
