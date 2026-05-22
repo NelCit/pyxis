@@ -1029,24 +1029,62 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
         // shading normal, same epsilon shadow rays use above.
         const float3 reflDir = normalize(reflect(WorldRayDirection(), nWorld));
 
-        HitInfo reflPayload;
-        reflPayload.color           = float3(0.0, 0.0, 0.0);
-        reflPayload.hitT            = -1.0;
-        reflPayload.normalWorld     = float3(0.0, 0.0, 0.0);
-        reflPayload.instanceId      = 0xFFFFFFFFu;
-        reflPayload.baseColor       = float3(0.0, 0.0, 0.0);
-        reflPayload.materialId      = 0xFFFFFFFFu;
-        reflPayload.worldHit        = float3(0.0, 0.0, 0.0);
-        reflPayload.elementId       = 0xFFFFFFFFu;
-        reflPayload.recursionDepth  = payload.recursionDepth + 1u;
-        reflPayload.transmittance   = float3(0.0, 0.0, 0.0);
-
         RayDesc reflRay;
         reflRay.Origin    = hitWorld + nWorld * 1e-3;
         reflRay.Direction = reflDir;
         reflRay.TMin      = 1e-3;
         reflRay.TMax      = 10000.0;
-        TraceRay(gTlas, RAY_FLAG_NONE, 0xFFu, 0, 0, 0, reflRay, reflPayload);
+
+        // Front-to-back transmission composite of the reflected ray.
+        // Without this, the reflection reads only the frontmost reflected
+        // surface's emitted radiance: a translucent surface (glass) seen
+        // IN a mirror returns its near-black emitted term and drops
+        // everything BEHIND it, so glass-in-a-mirror rendered black. This
+        // mirrors raygen's primary transmission loop (raygen.slang) but
+        // runs at the reflection ray's recursion depth. Each segment
+        // re-traces past the previous translucent hit by LOOP iteration
+        // (not hardware recursion), so the §V2.B depth cap of 3 is
+        // untouched; stacked transparent layers in a reflection composite
+        // exactly as they do for the primary ray. 0.999 / 1e-3 thresholds
+        // match the primary loop and the anyhit translucency gate.
+        const uint REFL_MAX_SEGMENTS = 16u;
+        float3 reflRadiance   = float3(0.0, 0.0, 0.0);
+        float3 reflThroughput = float3(1.0, 1.0, 1.0);
+        [loop]
+        for (uint reflSeg = 0u; reflSeg < REFL_MAX_SEGMENTS; ++reflSeg)
+        {
+            HitInfo reflPayload;
+            reflPayload.color           = float3(0.0, 0.0, 0.0);
+            reflPayload.hitT            = -1.0;
+            reflPayload.normalWorld     = float3(0.0, 0.0, 0.0);
+            reflPayload.instanceId      = 0xFFFFFFFFu;
+            reflPayload.baseColor       = float3(0.0, 0.0, 0.0);
+            reflPayload.materialId      = 0xFFFFFFFFu;
+            reflPayload.worldHit        = float3(0.0, 0.0, 0.0);
+            reflPayload.elementId       = 0xFFFFFFFFu;
+            reflPayload.recursionDepth  = payload.recursionDepth + 1u;
+            reflPayload.transmittance   = float3(0.0, 0.0, 0.0);
+
+            TraceRay(gTlas, RAY_FLAG_NONE, 0xFFu, 0, 0, 0, reflRay, reflPayload);
+
+            reflRadiance += reflThroughput * reflPayload.color;
+
+            // Miss (envmap already in color) or opaque hit: nothing more
+            // lies behind this surface in the reflection.
+            if (reflPayload.hitT < 0.0)
+                break;
+            const float3 reflT = reflPayload.transmittance;
+            if (max(max(reflT.x, reflT.y), reflT.z) < 1e-3)
+                break;
+            reflThroughput *= reflT;
+
+            // Advance just past this translucent hit and re-trace what
+            // lies behind it along the same reflected direction.
+            const float3 reflHitPos =
+                reflRay.Origin + reflRay.Direction * reflPayload.hitT;
+            reflRay.Origin = reflHitPos + reflRay.Direction * 1e-3;
+            reflRay.TMin   = 1e-3;
+        }
 
         // Schlick-Fresnel weight at the mirror direction. F0 derives
         // per-material (metals = baseColor, dielectrics = ((ior-1)/
@@ -1070,7 +1108,7 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
         // wrong — mirror image.
         const float glossy = (1.0 - roughness) * (1.0 - roughness);
         reflWeightOut = SchlickFresnel(F0, NdotV) * glossy;
-        reflColorOut  = reflPayload.color;
+        reflColorOut  = reflRadiance;
     }
 
     // V2.B — layered glass/translucency composite. Two transport paths
