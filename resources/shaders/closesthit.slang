@@ -319,6 +319,15 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
     if (dot(nWorld, WorldRayDirection()) > 0.0)
         nWorld = -nWorld;
 
+    // Keep the face-forward GEOMETRIC normal around: the normal-mapped
+    // shading normal below can tilt past the view horizon (strong
+    // bump_factor, grazing angles), which would send the mirror-
+    // reflection bounce ray INTO the surface → the reflection reads as
+    // black. We re-clamp the shading normal against this geometric
+    // reference after normal mapping. (This was the "normal map present
+    // → no reflection, remove it → reflection returns" symptom.)
+    const float3 geoNormal = nWorld;
+
     // M9 normal mapping. When the material binds a normal texture,
     // sample it in tangent space and transform to world via the TBN
     // matrix built from the per-vertex tangent (MikkTSpace) + the
@@ -374,6 +383,32 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
             nWorld = normalize(nTangent.x * tangentWorld
                              + nTangent.y * bitangentWorld
                              + nTangent.z * nWorld);
+        }
+    }
+
+    // Shading-normal clamp against the geometric normal. A strong
+    // bump_factor (or a grazing view) can tilt the normal-mapped
+    // `nWorld` past the view horizon — i.e. it ends up pointing away
+    // from the eye. Left unclamped, the mirror reflection's
+    // `reflect(rayDir, nWorld)` then bounces INTO the surface and the
+    // reflection reads as black, which is why a glossy material showed
+    // reflections with its normal map removed but none with it on. We
+    // bend the shading normal back just enough to keep the
+    // reflected view vector on the geometric surface's visible side
+    // (Frostbite "shading normal adaptation", simplified): when the
+    // reflection would go below the geometric horizon, project the
+    // shading normal onto the safe hemisphere. Cheap + deterministic.
+    {
+        const float3 viewW = normalize(-WorldRayDirection());
+        const float vdotn = dot(viewW, nWorld);
+        if (vdotn < 1e-3) {
+            // Reflect the shading normal back across the view-aligned
+            // plane so V·N becomes non-negative, preserving the bump's
+            // tangential character while keeping the bounce above the
+            // surface. Falls back to the geometric normal if the
+            // perturbation was extreme.
+            const float3 corrected = normalize(nWorld + viewW * (1e-3 - vdotn));
+            nWorld = (dot(corrected, geoNormal) > 0.0) ? corrected : geoNormal;
         }
     }
 
