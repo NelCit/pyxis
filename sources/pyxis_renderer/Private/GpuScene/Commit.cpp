@@ -1191,7 +1191,17 @@ Expected<void> GpuScene::Impl::UploadMeshUvs(nvrhi::ICommandList* commandList)
   if (!meshUvsNeedUpload || meshes.empty())
     return {};
 
-  std::vector<hlslpp::float2> packedUvs;
+  // Pack UVs TIGHT (8 bytes/element) to match the shader's
+  // `StructuredBuffer<float2>` 8-byte stride. hlslpp::float2 is
+  // SIMD-padded to 16 bytes, so a std::vector<hlslpp::float2> write gives
+  // a 16-byte stride — the shader then reads every other element as the
+  // padding (0,0), scrambling ALL mesh UVs (manifested as diagonal /
+  // degenerate texturing on st-mapped surfaces, e.g. wood grain). The
+  // float4 mesh buffers (normals/tangents/face-normals) are unaffected
+  // because hlslpp::float4 is exactly 16 bytes.
+  struct TightUv { float u; float v; };
+  static_assert(sizeof(TightUv) == 8, "gMeshUvs stride must match shader float2");
+  std::vector<TightUv>        packedUvs;
   std::vector<std::uint32_t>  perMeshOffsets(meshes.size(), 0u);
   for (std::size_t meshSlot = 0; meshSlot < meshes.size(); ++meshSlot)
   {
@@ -1207,21 +1217,22 @@ Expected<void> GpuScene::Impl::UploadMeshUvs(nvrhi::ICommandList* commandList)
     // range — without it, the next mesh's UV data would overlap and
     // the closesthit would sample texels that don't belong to the
     // hit mesh.
-    packedUvs.insert(packedUvs.end(), mesh.uv0.begin(), mesh.uv0.end());
+    for (const hlslpp::float2& meshUv : mesh.uv0)
+      packedUvs.push_back(TightUv{static_cast<float>(meshUv.x), static_cast<float>(meshUv.y)});
     if (mesh.uv0.size() < mesh.vertexCount)
     {
       const std::size_t padCount = mesh.vertexCount - mesh.uv0.size();
-      packedUvs.insert(packedUvs.end(), padCount, hlslpp::float2{0.0f, 0.0f});
+      packedUvs.insert(packedUvs.end(), padCount, TightUv{0.0f, 0.0f});
     }
   }
   if (packedUvs.empty())
-    packedUvs.emplace_back(0.0f, 0.0f);  // 1-element fallback
+    packedUvs.push_back(TightUv{0.0f, 0.0f});  // 1-element fallback
 
-  const std::size_t uvsBytes     = packedUvs.size() * sizeof(hlslpp::float2);
+  const std::size_t uvsBytes     = packedUvs.size() * sizeof(TightUv);
   const std::size_t offsetsBytes = perMeshOffsets.size() * sizeof(std::uint32_t);
 
   PYXIS_TRY(EnsureStructuredBuffer(device, meshUvsBuffer, uvsBytes,
-                                   sizeof(hlslpp::float2),
+                                   sizeof(TightUv),
                                    "GpuScene.meshUvsBuffer",
                                    "meshUvsBuffer"));
   PYXIS_TRY(EnsureStructuredBuffer(device, meshUvOffsetsBuffer, offsetsBytes,
