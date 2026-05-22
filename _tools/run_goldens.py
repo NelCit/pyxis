@@ -165,7 +165,7 @@ def main(argv: List[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--pyxis", type=Path,
-                        help="Path to pyxis.exe. Default: build/dev/bin/Debug/pyxis.exe")
+                        help="Path to pyxis.exe. Default: build/dev/bin/Release/pyxis.exe")
     parser.add_argument("--rebake", action="store_true",
                         help="Overwrite baseline.exr instead of comparing.")
     parser.add_argument("--output-root", type=Path,
@@ -176,7 +176,7 @@ def main(argv: List[str]) -> int:
                              "contains this string.")
     args = parser.parse_args(list(argv))
 
-    pyxis = args.pyxis or (REPO_ROOT / "build" / "dev" / "bin" / "Debug" / "pyxis.exe")
+    pyxis = args.pyxis or (REPO_ROOT / "build" / "dev" / "bin" / "Release" / "pyxis.exe")
     if not pyxis.exists():
         sys.stderr.write(f"pyxis not found at {pyxis}\n")
         return 2
