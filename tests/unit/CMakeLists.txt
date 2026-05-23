@@ -60,6 +60,8 @@ target_sources(pyxis_unit_tests PRIVATE
     OrthographicCameraV2A20.cpp
     BcEncoderV2A14.cpp
     MeshUvPackV2.cpp
+    GpuInteropRoundTrip.cpp
+    PyxisRenderToExportedImage.cpp
 
     # V2.A.14 — BCn encoder helper. Recompiled here so the test exe
     # exercises the real helper directly instead of going through the
@@ -198,6 +200,15 @@ target_include_directories(pyxis_unit_tests PRIVATE ${Stb_INCLUDE_DIR})
 target_compile_definitions(pyxis_unit_tests PRIVATE
     _SILENCE_CXX20_IS_POD_DEPRECATION_WARNING=1
 )
+
+# RFC 0004 — GpuInteropRoundTrip.cpp drives raw Vulkan (Win32 external-memory
+# import) on a second logical device. It needs the Win32 platform entry points,
+# and its dense raw-Vulkan body trips clang-tidy's readability rules the same
+# way VolumeLoader does, so it takes the documented SKIP_LINTING escape.
+target_compile_definitions(pyxis_unit_tests PRIVATE VK_USE_PLATFORM_WIN32_KHR)
+set_source_files_properties(GpuInteropRoundTrip.cpp PROPERTIES SKIP_LINTING ON)
+# Half-float decode + nvrhi readback magic numbers trip tidy; same escape.
+set_source_files_properties(PyxisRenderToExportedImage.cpp PROPERTIES SKIP_LINTING ON)
 
 include(GoogleTest)
 gtest_discover_tests(pyxis_unit_tests

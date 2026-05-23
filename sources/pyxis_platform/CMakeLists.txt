@@ -29,6 +29,9 @@ target_sources(pyxis_platform PUBLIC
         Public/Pyxis/Platform/Device/Resolution.h
         Public/Pyxis/Platform/Device/VulkanContext.h
 
+        Public/Pyxis/Platform/Interop/GpuInteropExporter.h
+        Public/Pyxis/Platform/Interop/GpuInteropImporter.h
+
         Public/Pyxis/Platform/Logging/Log.h
         Public/Pyxis/Platform/Logging/LogCategories.h
         Public/Pyxis/Platform/Logging/LogConfig.h
@@ -54,6 +57,9 @@ target_sources(pyxis_platform PRIVATE
     Private/Device/VulkanFeatureCheck.h
     Private/Device/VulkanFeatureCheck.cpp
     Private/Device/VulkanHppStorage.cpp
+
+    Private/Interop/GpuInteropExporter.cpp
+    Private/Interop/GpuInteropImporter.cpp
 
     Private/Logging/SpdlogBackend.h
     Private/Logging/SpdlogBackend.cpp

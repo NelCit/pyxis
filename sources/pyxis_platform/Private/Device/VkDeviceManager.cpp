@@ -9,6 +9,7 @@
 
 #include "Device/VkDeviceManager.h"
 
+#include "Device/ExternalInterop.h"
 #include "Device/NvrhiCallback.h"
 #include "Device/VulkanFeatureCheck.h"
 
@@ -273,8 +274,7 @@ DeviceManagerCreateStatus VkDeviceManager::Bringup(const DeviceCreationParams& p
   // capability flags or skip the extension at vkCreateDevice. Storage
   // type is `const char*[]` (not `const char* const[]`) because NVRHI's
   // DeviceDesc::deviceExtensions is `const char**`.
-  // NOLINTNEXTLINE(misc-const-correctness)  -- NVRHI takes `const char**`, not `const char* const *`.
-  static const char* deviceExtensions[] = {
+  std::vector<const char*> deviceExtensions = {
       VK_KHR_SWAPCHAIN_EXTENSION_NAME,
       VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
       VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
@@ -290,6 +290,15 @@ DeviceManagerCreateStatus VkDeviceManager::Bringup(const DeviceCreationParams& p
       // enabled.
       VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME,
   };
+
+  // RFC 0004 — opt the viewer device into Win32 external-memory interop when
+  // available, so the Omniverse Kit viewport can import Pyxis's AOV images.
+  const bool externalInteropSupported =
+      AppendExternalInteropExtensionsIfAvailable(_physicalDevice, deviceExtensions);
+  Logging::Get().Info(log::PLATFORM,
+                      externalInteropSupported
+                          ? "VkDeviceManager: external-memory interop enabled (RFC 0004)"
+                          : "VkDeviceManager: external-memory interop NOT available on this adapter");
 
   // Vulkan 1.3 features chain — sync2 + dynamic rendering + timeline semaphores
   // are mandatory per §5.b.
@@ -347,8 +356,8 @@ DeviceManagerCreateStatus VkDeviceManager::Bringup(const DeviceCreationParams& p
   dInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
   dInfo.queueCreateInfoCount = 1;
   dInfo.pQueueCreateInfos = &qInfo;
-  dInfo.enabledExtensionCount = static_cast<uint32_t>(std::size(deviceExtensions));
-  dInfo.ppEnabledExtensionNames = deviceExtensions;
+  dInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
+  dInfo.ppEnabledExtensionNames = deviceExtensions.data();
   dInfo.pNext = &features2;
 
   if (vkCreateDevice(_physicalDevice, &dInfo, nullptr, &_device) != VK_SUCCESS)
@@ -372,8 +381,8 @@ DeviceManagerCreateStatus VkDeviceManager::Bringup(const DeviceCreationParams& p
   // Same `deviceExtensions` array we fed to vkCreateDevice — NVRHI walks
   // it to flip its internal capability flags (vulkan-device.cpp's
   // extensionStringMap), so the two sources MUST stay in sync.
-  nvrhiDesc.deviceExtensions = deviceExtensions;
-  nvrhiDesc.numDeviceExtensions = std::size(deviceExtensions);
+  nvrhiDesc.deviceExtensions = deviceExtensions.data();
+  nvrhiDesc.numDeviceExtensions = deviceExtensions.size();
 
   _nvrhiDevice = nvrhi::vulkan::createDevice(nvrhiDesc);
   if (!_nvrhiDevice)

@@ -1,0 +1,20 @@
+{
+    "Plugins": [
+        {
+            "Info": {
+                "Types": {
+                    "HdPyxisOmniRendererPlugin": {
+                        "bases": ["HdRendererPlugin"],
+                        "displayName": "Pyxis",
+                        "priority": 0
+                    }
+                }
+            },
+            "LibraryPath": "@PYXIS_OMNI_PLUGIN_LIBPATH@",
+            "Name": "hdPyxis",
+            "ResourcePath": "resources",
+            "Root": "..",
+            "Type": "library"
+        }
+    ]
+}

@@ -1,0 +1,29 @@
+# omni.hydra.pyxis — RFC 0004. The Pyxis Hydra render-delegate Kit extension.
+#
+# This extension ships a PREBUILT native delegate (pyxis_hydra_omni.dll, compiled
+# out-of-tree by _tools/omniverse/build.ps1 against nv-usd 25.11) plus a tiny
+# Python startup that registers its plugInfo with USD's PlugRegistry, so "Pyxis"
+# appears in the Kit viewport's Hydra-engine / renderer list.
+
+[package]
+title = "Pyxis Hydra"
+version = "0.1.0"
+description = "Pyxis real-time path tracer (NVRHI/Vulkan) as a Hydra render delegate."
+category = "Rendering"
+keywords = ["hydra", "render", "delegate", "pyxis", "pathtracer"]
+authors = ["Pyxis"]
+
+# USD must be loaded before we register a USD plugin. omni.usd.libs brings the
+# USD runtime libs into the process. (A viewport app additionally pulls the
+# Hydra-engine/viewport extensions that surface the renderer dropdown; we don't
+# depend on those here so the extension also loads in a bare kit.exe for
+# registration smoke-testing.)
+[dependencies]
+"omni.usd.libs" = {}
+
+# Python startup module that performs the PlugRegistry registration.
+[[python.module]]
+name = "omni.hydra.pyxis"
+
+[settings]
+# Nothing yet; RenderSettings (§21) surface lands with the full delegate.

@@ -50,6 +50,14 @@ class VkDeviceManagerHeadless final : public IDeviceManager {
 
   [[nodiscard]] VulkanContext GetVulkanContext() const noexcept override;
 
+  // RFC 0004: true when the device enabled Win32 external-memory +
+  // external-semaphore, i.e. GpuInteropExporter can hand AOV images to
+  // another Vulkan device (the Kit viewport). Not on the IDeviceManager
+  // interface — interop is a concrete-device capability, queried directly.
+  [[nodiscard]] bool IsExternalInteropSupported() const noexcept {
+    return _externalInteropSupported;
+  }
+
  private:
   DeviceManagerCreateStatus Bringup(const DeviceCreationParams& params,
                                     const Resolution& initialBackbuffer) noexcept;
@@ -60,6 +68,7 @@ class VkDeviceManagerHeadless final : public IDeviceManager {
   VkDevice _device = VK_NULL_HANDLE;
   VkQueue _graphicsQueue = VK_NULL_HANDLE;
   uint32_t _graphicsFamily = 0;
+  bool _externalInteropSupported = false;  // RFC 0004 — see IsExternalInteropSupported().
 
   AdapterInfo _adapter{};
   // M1 pins both viewer and headless to 1 frame in flight; M2's EXR

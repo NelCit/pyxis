@@ -2,6 +2,7 @@
 
 #include "Device/VkDeviceManagerHeadless.h"
 
+#include "Device/ExternalInterop.h"
 #include "Device/NvrhiCallback.h"
 #include "Device/VulkanFeatureCheck.h"
 
@@ -23,6 +24,17 @@ void VulkanHppInitFromDevice(VkDevice) noexcept;
 namespace {
 
 constexpr uint32_t VULKAN_API_VERSION = VK_API_VERSION_1_3;
+
+// RFC 0004 (Omniverse interop). The Kit viewport handoff exports AOV image
+// memory + a timeline semaphore to Kit's Vulkan device with zero host copy
+// (VK_KHR_external_memory_win32 / external_semaphore_win32). Spelled as string
+// literals so this TU does not have to pull <vulkan/vulkan_win32.h> (the
+// Win32-specific export *functions* live only in GpuInteropExporter.cpp, which
+// controls its own include order). Appended only when the adapter advertises
+// all four — a stripped-down headless stack (§5.c) without them still creates a
+// device, just with interop disabled.
+// External-memory enablement moved to the shared Device/ExternalInterop.h so
+// the viewer + headless managers cannot drift (RFC 0004).
 
 VkInstance CreateInstance(bool enableValidation, std::string_view appName,
                           uint32_t appVersion) noexcept {
@@ -203,8 +215,7 @@ DeviceManagerCreateStatus VkDeviceManagerHeadless::Bringup(
   // so NVRHI's capability flags stay in lockstep with what we actually
   // requested. NOLINT'd for the same reason as the windowed sibling
   // (NVRHI's deviceExtensions is `const char**`).
-  // NOLINTNEXTLINE(misc-const-correctness)  -- NVRHI takes `const char**`, not `const char* const *`.
-  static const char* deviceExtensions[] = {
+  std::vector<const char*> deviceExtensions = {
       VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
       VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
       VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
@@ -219,6 +230,17 @@ DeviceManagerCreateStatus VkDeviceManagerHeadless::Bringup(
       // pLibraryInfo-03595), so we enable it here.
       VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME,
   };
+
+  // RFC 0004: opt the headless device into Win32 external-memory interop when
+  // the adapter supports it (it is the device the renderer uses when serving
+  // the Omniverse Kit viewport). Logged either way so a missing-extension
+  // stack is diagnosable rather than silently non-interoperable.
+  _externalInteropSupported =
+      AppendExternalInteropExtensionsIfAvailable(_physicalDevice, deviceExtensions);
+  log.Info(log::PLATFORM, _externalInteropSupported
+                              ? "VkDeviceManagerHeadless: external-memory interop enabled (RFC 0004)"
+                              : "VkDeviceManagerHeadless: external-memory interop NOT available "
+                                "(adapter lacks VK_KHR_external_memory_win32); Kit handoff disabled");
 
   // Same Vulkan 1.3 feature chain as VkDeviceManager (§5.b mandatory):
   // sync2 + dynamicRendering + timelineSemaphore + bufferDeviceAddress
@@ -275,8 +297,8 @@ DeviceManagerCreateStatus VkDeviceManagerHeadless::Bringup(
   dInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
   dInfo.queueCreateInfoCount = 1;
   dInfo.pQueueCreateInfos = &qInfo;
-  dInfo.enabledExtensionCount = static_cast<uint32_t>(std::size(deviceExtensions));
-  dInfo.ppEnabledExtensionNames = deviceExtensions;
+  dInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
+  dInfo.ppEnabledExtensionNames = deviceExtensions.data();
   dInfo.pNext = &features2;
   // dInfo.pEnabledFeatures stays null — features come through the
   // VkPhysicalDeviceFeatures2 chain (Vulkan 1.1+ pattern).
@@ -301,8 +323,8 @@ DeviceManagerCreateStatus VkDeviceManagerHeadless::Bringup(
   nvrhiDesc.graphicsQueue = _graphicsQueue;
   nvrhiDesc.graphicsQueueIndex = _graphicsFamily;
   nvrhiDesc.bufferDeviceAddressSupported = true;
-  nvrhiDesc.deviceExtensions = deviceExtensions;
-  nvrhiDesc.numDeviceExtensions = std::size(deviceExtensions);
+  nvrhiDesc.deviceExtensions = deviceExtensions.data();
+  nvrhiDesc.numDeviceExtensions = deviceExtensions.size();
 
   _nvrhiDevice = nvrhi::vulkan::createDevice(nvrhiDesc);
   if (!_nvrhiDevice)
