@@ -20,10 +20,36 @@
 
 #include <nvrhi/nvrhi.h>
 
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
 #include <cstring>
 #include <memory>
 #include <string>
 #include <vector>
+
+namespace {
+// Directory containing this DLL. In Kit the host is kit.exe (not next to our
+// shaders), so PyxisRenderer's shaderSearchPath must point at <ext>/bin where
+// build.ps1 stages Resources/shaders. RFC 0004 C4-full.
+std::string ThisModuleDir() {
+  HMODULE module = nullptr;
+  ::GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       reinterpret_cast<LPCWSTR>(&ThisModuleDir), &module);
+  wchar_t wide[MAX_PATH] = {};
+  const DWORD len = ::GetModuleFileNameW(module, wide, MAX_PATH);
+  std::wstring path(wide, len);
+  const size_t slash = path.find_last_of(L"\\/");
+  if (slash != std::wstring::npos)
+    path.resize(slash);
+  const int bytes = ::WideCharToMultiByte(CP_UTF8, 0, path.c_str(), -1, nullptr, 0, nullptr, nullptr);
+  std::string utf8(bytes > 0 ? bytes - 1 : 0, '\0');
+  if (bytes > 0)
+    ::WideCharToMultiByte(CP_UTF8, 0, path.c_str(), -1, utf8.data(), bytes, nullptr, nullptr);
+  return utf8;
+}
+}  // namespace
 
 namespace pyxis_omni {
 
@@ -42,6 +68,7 @@ struct PyxisEngine::Impl {
   std::unique_ptr<pyxis::GpuInteropExporter> exporter;
   nvrhi::CommandListHandle commandList;
   nvrhi::TextureHandle displayColor;  // throwaway `color` target (no tonemap pass yet).
+  std::string shaderDir;  // backs rendererDesc.shaderSearchPath (string_view).
   pyxis::ExportedImage exportedColor{};
   pyxis::ExportedSemaphore timeline{};
   uint32_t width = 0;
@@ -87,6 +114,10 @@ bool PyxisEngine::Initialize(uint32_t width, uint32_t height) noexcept {
   rendererDesc.initialWidth = width;
   rendererDesc.initialHeight = height;
   rendererDesc.framesInFlight = 1;
+  // Find the path-tracer shaders relative to this DLL (build.ps1 stages them at
+  // <ext>/bin/Resources/shaders) — the host kit.exe is not next to them.
+  impl.shaderDir = ThisModuleDir();
+  rendererDesc.shaderSearchPath = impl.shaderDir;
   impl.renderer =
       std::make_unique<pyxis::PyxisRenderer>(device, *impl.scene, *impl.profiler, rendererDesc);
 

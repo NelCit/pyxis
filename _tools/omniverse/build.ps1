@@ -66,6 +66,10 @@ if (Test-Path $pyxisReleaseBin) {
     # vcpkg USD 26.3 DLLs (usd_*.dll) and tbb12.dll — Kit provides nv-usd 25.11 +
     # its own tbb, and shipping vcpkg's same-named usd_*.dll would shadow Kit's
     # and break the delegate (entry-point mismatch vs the 25.11 ABI it links).
+    # Scrub any stale vcpkg USD / tbb DLLs a previous (pre-fix) stage left behind
+    # — they would shadow Kit's nv-usd 25.11 and break the delegate.
+    Remove-Item (Join-Path $stageBin "usd_*.dll") -Force -ErrorAction SilentlyContinue
+    Remove-Item (Join-Path $stageBin "tbb12.dll") -Force -ErrorAction SilentlyContinue
     Get-ChildItem $pyxisReleaseBin -Filter *.dll |
         Where-Object { $_.Name -notlike 'usd_*' -and $_.Name -ne 'tbb12.dll' } |
         Copy-Item -Destination $stageBin -Force
