@@ -214,6 +214,34 @@ resize-to-viewport, and packaging the `pyxis.viewer` app (deliverable 2; the
 `repo template new` wizard is interactive). Code for the buffer aliasing can be
 written; verification needs the viewport.
 
+**UPDATE (2026-05-23): KEY FINDING — Kit 110's viewport cannot select an
+external USD Hydra delegate.** The extension loads + registers correctly in a
+live Kit editor (`type discoverable = True` confirmed in `pyxis.editor`), but
+"Pyxis" cannot be chosen as the viewport renderer because:
+- `omni.kit.viewport.menubar.render`'s `hd_renderer_list.py` **hardcodes** the
+  selectable engines to `rtx, iray, index, pxr` — no API to add a named entry.
+- The only USD-Hydra-delegate slot is the **`pxr`** engine (`omni.hydra.pxr`),
+  which is **not shipped in Kit 110** (present hydra exts: `rtx`,
+  `scene_delegate`, `usdrt_delegate`). So `pxr` is greyed out / unselectable.
+
+Registering a USD `HdRendererPlugin` (our `plugInfo.json`) makes the delegate
+discoverable to *usdview-style HdEngine hosts* (proven by `HdEngineSmoke`), but
+Kit's viewport populates its menu from Kit's own compiled engine registry
+(`rtx.hydra.dll`), not USD's plugin registry. This is a Kit-platform constraint,
+not a delegate defect.
+
+Paths to actually display Pyxis in a Kit window (pick one, post-this-RFC):
+1. **Custom viewport extension** — a Kit extension with its own viewport widget
+   that runs our HdEngine and blits the exported image into a Kit UI texture via
+   `GpuInteropImporter` (interop already proven, C3). Bypasses the renderer menu.
+   *Recommended* — tractable, reuses verified interop.
+2. **Kit C++ engine plugin** — implement Kit's internal `IHydraEngine` (as
+   `rtx.hydra.dll` does) wrapping the delegate. Proper but uses closed Kit APIs.
+3. **usdview / headless / Mode-A file workflow** — already functional.
+
+The delegate + render + ingest chain remains fully verified; only Kit's
+viewport-renderer *selection* is closed in 110.
+
 **Reproducible build (`_tools/omniverse/`).** A clean clone can't build the Kit
 deliverables alone (SDK is Packman-only), but `setup.ps1` (acquire nv-usd 25.11 +
 Python 3.12 non-interactively) then `build.ps1` (configure + compile + stage into
