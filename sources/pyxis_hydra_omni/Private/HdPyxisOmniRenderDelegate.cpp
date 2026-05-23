@@ -23,9 +23,11 @@
 #include <pxr/base/vt/value.h>
 #include <pxr/imaging/hd/bprim.h>
 #include <pxr/imaging/hd/camera.h>
+#include <pxr/imaging/hd/aov.h>
 #include <pxr/imaging/hd/instancer.h>
 #include <pxr/imaging/hd/light.h>
 #include <pxr/imaging/hd/material.h>
+#include <pxr/imaging/hd/renderPassState.h>
 #include <pxr/imaging/hd/mesh.h>
 #include <pxr/imaging/hd/meshTopology.h>
 #include <pxr/imaging/hd/renderBuffer.h>
@@ -37,8 +39,10 @@
 
 #include <hlsl++.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -312,6 +316,71 @@ class StubRenderBuffer final : public HdRenderBuffer {
   std::vector<uint8_t> _data;
 };
 
+float HalfToFloat(uint16_t half) {
+  const uint32_t sign = (half >> 15) & 0x1u, exp = (half >> 10) & 0x1Fu, mant = half & 0x3FFu;
+  uint32_t bits;
+  if (exp == 0) {
+    if (mant == 0) {
+      bits = sign << 31;
+    } else {
+      int e = -1;
+      uint32_t m = mant;
+      do {
+        ++e;
+        m <<= 1;
+      } while ((m & 0x400u) == 0);
+      bits = (sign << 31) | (static_cast<uint32_t>(127 - 15 - e) << 23) | ((m & 0x3FFu) << 13);
+    }
+  } else if (exp == 0x1F) {
+    bits = (sign << 31) | (0xFFu << 23) | (mant << 13);
+  } else {
+    bits = (sign << 31) | ((exp - 15 + 127) << 23) | (mant << 13);
+  }
+  float out;
+  std::memcpy(&out, &bits, sizeof(out));
+  return out;
+}
+
+// Composite Pyxis's rendered color (RGBA16F, from PyxisEngine readback) into the
+// host's bound color HdRenderBuffer. This is the host-facing presentation step —
+// every display path (custom panel, usdview, UsdImagingGL) reads this buffer.
+// Supports the common AOV formats; converts from RGBA16F as needed. RFC 0004.
+void WritePyxisColorToAov(pyxis_omni::PyxisEngine& engine, HdRenderBuffer* buffer) {
+  if (buffer == nullptr || buffer->GetWidth() == 0 || buffer->GetHeight() == 0)
+    return;
+  std::vector<uint8_t> src;
+  uint32_t sw = 0, sh = 0;
+  if (!engine.ReadbackColorHdr(src, sw, sh) || sw == 0 || sh == 0)
+    return;
+  const uint32_t bw = buffer->GetWidth(), bh = buffer->GetHeight();
+  const uint32_t cw = std::min(sw, bw), ch = std::min(sh, bh);
+  const HdFormat fmt = buffer->GetFormat();
+  auto* dst = static_cast<uint8_t*>(buffer->Map());
+  if (dst == nullptr)
+    return;
+  const auto* srcRowBase = reinterpret_cast<const uint16_t*>(src.data());
+  for (uint32_t y = 0; y < ch; ++y) {
+    const uint16_t* s = srcRowBase + static_cast<size_t>(y) * sw * 4;
+    if (fmt == HdFormatFloat16Vec4) {
+      std::memcpy(dst + static_cast<size_t>(y) * bw * 8, s, static_cast<size_t>(cw) * 8);
+    } else if (fmt == HdFormatUNorm8Vec4) {
+      uint8_t* d = dst + static_cast<size_t>(y) * bw * 4;
+      for (uint32_t x = 0; x < cw; ++x) {
+        for (int c = 0; c < 4; ++c) {
+          float v = HalfToFloat(s[x * 4 + c]);
+          v = v < 0.f ? 0.f : (v > 1.f ? 1.f : v);
+          d[x * 4 + c] = static_cast<uint8_t>(v * 255.f + 0.5f);
+        }
+      }
+    } else if (fmt == HdFormatFloat32Vec4) {
+      auto* d = reinterpret_cast<float*>(dst + static_cast<size_t>(y) * bw * 16);
+      for (uint32_t x = 0; x < cw * 4; ++x)
+        d[x] = HalfToFloat(s[x]);
+    }
+  }
+  buffer->Unmap();
+}
+
 }  // namespace
 
 // ---- Render pass ----------------------------------------------------------
@@ -322,12 +391,24 @@ HdPyxisOmniRenderPass::HdPyxisOmniRenderPass(HdRenderIndex* index,
 
 HdPyxisOmniRenderPass::~HdPyxisOmniRenderPass() = default;
 
-void HdPyxisOmniRenderPass::_Execute(HdRenderPassStateSharedPtr const& /*renderPassState*/,
+void HdPyxisOmniRenderPass::_Execute(HdRenderPassStateSharedPtr const& renderPassState,
                                      TfTokenVector const& /*renderTags*/) {
   // The prims have already Sync'd into the engine's GpuScene; RenderFrame
   // commits it (builds BLAS/TLAS) and renders into the exportable image.
-  if (_engine != nullptr && _engine->IsValid())
-    _engine->RenderFrame();
+  if (_engine == nullptr || !_engine->IsValid())
+    return;
+  _engine->RenderFrame();
+
+  // Present: composite Pyxis's color into the host's bound color render buffer
+  // (the AOV every Hydra host reads — custom panel / usdview / UsdImagingGL).
+  if (renderPassState) {
+    for (const HdRenderPassAovBinding& binding : renderPassState->GetAovBindings()) {
+      if (binding.aovName == HdAovTokens->color && binding.renderBuffer != nullptr) {
+        WritePyxisColorToAov(*_engine, binding.renderBuffer);
+        break;
+      }
+    }
+  }
 }
 
 // ---- Render delegate ------------------------------------------------------

@@ -13,17 +13,24 @@
 
 #include <pxr/base/gf/vec3f.h>
 #include <pxr/base/vt/array.h>
+#include <pxr/base/gf/vec4d.h>
+#include <pxr/imaging/hd/aov.h>
+#include <pxr/imaging/hd/camera.h>
 #include <pxr/imaging/hd/engine.h>
+#include <pxr/imaging/hd/renderBuffer.h>
 #include <pxr/imaging/hd/renderIndex.h>
 #include <pxr/imaging/hd/renderPass.h>
 #include <pxr/imaging/hd/renderPassState.h>
 #include <pxr/imaging/hd/rprimCollection.h>
 #include <pxr/imaging/hd/task.h>
 #include <pxr/imaging/hd/tokens.h>
+#include <pxr/imaging/hd/types.h>
 #include <pxr/usd/sdf/path.h>
 #include <pxr/usd/sdf/valueTypeName.h>
 #include <pxr/usd/usd/stage.h>
+#include <pxr/usd/usdGeom/camera.h>
 #include <pxr/usd/usdGeom/mesh.h>
+#include <pxr/usd/usdGeom/xformCommonAPI.h>
 #include <pxr/usd/usdLux/distantLight.h>
 #include <pxr/usd/usdShade/material.h>
 #include <pxr/usd/usdShade/materialBindingAPI.h>
@@ -33,7 +40,9 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <memory>
+#include <utility>
 #include <vector>
 
 PXR_NAMESPACE_USING_DIRECTIVE
@@ -44,15 +53,24 @@ namespace {
 // the rprims), Execute drives the pass (-> PyxisEngine::RenderFrame).
 class RenderTask final : public HdTask {
  public:
-  explicit RenderTask(HdRenderPassSharedPtr pass)
-      : HdTask(SdfPath::EmptyPath()), _pass(std::move(pass)) {}
+  RenderTask(HdRenderPassSharedPtr pass, HdRenderPassAovBindingVector bindings, HdCamera* camera)
+      : HdTask(SdfPath::EmptyPath()),
+        _pass(std::move(pass)),
+        _bindings(std::move(bindings)),
+        _camera(camera) {}
   void Sync(HdSceneDelegate*, HdTaskContext*, HdDirtyBits* bits) override {
     _pass->Sync();
     *bits = HdChangeTracker::Clean;
   }
   void Prepare(HdTaskContext*, HdRenderIndex*) override {}
   void Execute(HdTaskContext*) override {
-    _pass->Execute(std::make_shared<HdRenderPassState>(), GetRenderTags());
+    auto state = std::make_shared<HdRenderPassState>();
+    state->SetAovBindings(_bindings);  // host binds the color render buffer here.
+    if (_camera) {
+      state->SetCamera(_camera);  // triggers camera sync -> GpuScene::SetCamera.
+      state->SetViewport(GfVec4d(0, 0, 1280, 720));
+    }
+    _pass->Execute(state, GetRenderTags());
   }
   const TfTokenVector& GetRenderTags() const override {
     static const TfTokenVector tags = {HdRenderTagTokens->geometry};
@@ -61,7 +79,24 @@ class RenderTask final : public HdTask {
 
  private:
   HdRenderPassSharedPtr _pass;
+  HdRenderPassAovBindingVector _bindings;
+  HdCamera* _camera;
 };
+
+float HalfToFloatSmoke(uint16_t half) {
+  const uint32_t sign = (half >> 15) & 1u, exp = (half >> 10) & 0x1Fu, mant = half & 0x3FFu;
+  uint32_t bits;
+  if (exp == 0) {
+    bits = mant ? 0 : (sign << 31);  // treat denormals as ~0 for the check.
+  } else if (exp == 0x1F) {
+    bits = (sign << 31) | (0xFFu << 23) | (mant << 13);
+  } else {
+    bits = (sign << 31) | ((exp - 15 + 127) << 23) | (mant << 13);
+  }
+  float out;
+  std::memcpy(&out, &bits, sizeof(out));
+  return out;
+}
 
 }  // namespace
 
@@ -89,6 +124,10 @@ int main() {
   UsdLuxDistantLight light = UsdLuxDistantLight::Define(stage, SdfPath("/sun"));
   light.CreateIntensityAttr(VtValue(3.0f));
 
+  // A camera at z=5 looking -Z (USD default), framing the triangle at z=2.
+  UsdGeomCamera camera = UsdGeomCamera::Define(stage, SdfPath("/cam"));
+  UsdGeomXformCommonAPI(camera).SetTranslate(GfVec3d(0.3, 0.3, 5.0));
+
   // 2. Render index + the Pyxis delegate.
   auto* delegate = new HdPyxisOmniRenderDelegate();
   if (delegate->Engine() == nullptr) {
@@ -114,8 +153,25 @@ int main() {
   // 4. Drive a frame.
   HdRprimCollection collection(HdTokens->geometry, HdReprSelector(HdReprTokens->hull));
   HdRenderPassSharedPtr pass = delegate->CreateRenderPass(index, collection);
+
+  // Host-side color render buffer (RGBA16F, matches PyxisEngine's 1280x720) the
+  // delegate must composite into — exactly what a viewport / usdview binds.
+  constexpr uint32_t kRbW = 1280, kRbH = 720;
+  auto* colorBuffer = static_cast<HdRenderBuffer*>(
+      delegate->CreateBprim(HdPrimTypeTokens->renderBuffer, SdfPath("/pyxisColor")));
+  colorBuffer->Allocate(GfVec3i(kRbW, kRbH, 1), HdFormatFloat16Vec4, /*multiSampled*/ false);
+  HdRenderPassAovBinding colorBinding;
+  colorBinding.aovName = HdAovTokens->color;
+  colorBinding.renderBuffer = colorBuffer;
+
+  // The camera sprim the scene index created (drives GpuScene::SetCamera when
+  // the render-pass state references it).
+  auto* hdCamera =
+      static_cast<HdCamera*>(index->GetSprim(HdPrimTypeTokens->camera, SdfPath("/cam")));
+
   HdEngine engine;
-  HdTaskSharedPtrVector tasks = {std::make_shared<RenderTask>(pass)};
+  HdTaskSharedPtrVector tasks = {std::make_shared<RenderTask>(
+      pass, HdRenderPassAovBindingVector{colorBinding}, hdCamera)};
   engine.Execute(index, &tasks);
 
   // 5. Verify the FSD mesh adapter fed geometry through to Pyxis + it rendered.
@@ -127,13 +183,40 @@ int main() {
   uint32_t width = 0;
   uint32_t height = 0;
   const bool readback = delegate->Engine()->ReadbackColorHdr(pixels, width, height);
+  // Diagnostic: non-zero pixels in the engine's OWN render (distinguishes a
+  // black render from a broken composite).
+  uint64_t engineNonZero = 0;
+  if (readback) {
+    const auto* ep = reinterpret_cast<const uint16_t*>(pixels.data());
+    const uint64_t total = uint64_t(width) * height;
+    for (uint64_t p = 0; p < total; ++p)
+      if (ep[p * 4] || ep[p * 4 + 1] || ep[p * 4 + 2])
+        ++engineNonZero;
+  }
+  std::printf("HdEngineSmoke: engineNonZeroPixels=%llu\n",
+              static_cast<unsigned long long>(engineNonZero));
+
+  // Verify the delegate COMPOSITED Pyxis's color into the host's bound render
+  // buffer (the presentation path a viewport/usdview uses) — count non-zero px.
+  uint64_t nonZeroAovPixels = 0;
+  if (const auto* aov = static_cast<const uint16_t*>(colorBuffer->Map())) {
+    const uint64_t total = uint64_t(colorBuffer->GetWidth()) * colorBuffer->GetHeight();
+    for (uint64_t p = 0; p < total; ++p) {
+      const float r = HalfToFloatSmoke(aov[p * 4 + 0]);
+      const float g = HalfToFloatSmoke(aov[p * 4 + 1]);
+      const float b = HalfToFloatSmoke(aov[p * 4 + 2]);
+      if (r != 0.f || g != 0.f || b != 0.f)
+        ++nonZeroAovPixels;
+    }
+    colorBuffer->Unmap();
+  }
 
   std::printf(
       "HdEngineSmoke: meshCount=%llu instanceCount=%llu materialCount=%llu lightCount=%llu "
-      "readback=%d (%ux%u)\n",
+      "readback=%d (%ux%u) aovNonZeroPixels=%llu\n",
       static_cast<unsigned long long>(meshCount), static_cast<unsigned long long>(instanceCount),
       static_cast<unsigned long long>(materialCount), static_cast<unsigned long long>(lightCount),
-      readback ? 1 : 0, width, height);
+      readback ? 1 : 0, width, height, static_cast<unsigned long long>(nonZeroAovPixels));
 
   delete index;
   delete delegate;
@@ -154,6 +237,11 @@ int main() {
     std::fprintf(stderr, "FAIL: no frame read back from the engine.\n");
     return 5;
   }
-  std::printf("PASS: HdEngine drove the Pyxis delegate end-to-end.\n");
+  if (nonZeroAovPixels < 1) {
+    std::fprintf(stderr,
+                 "FAIL: delegate did not composite Pyxis color into the host render buffer.\n");
+    return 8;
+  }
+  std::printf("PASS: HdEngine drove the Pyxis delegate end-to-end + composited into the host AOV.\n");
   return 0;
 }
