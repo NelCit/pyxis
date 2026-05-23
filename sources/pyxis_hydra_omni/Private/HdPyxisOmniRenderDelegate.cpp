@@ -2,6 +2,8 @@
 
 #include "HdPyxisOmniRenderDelegate.h"
 
+#include "PyxisEngine.h"
+
 #include <pxr/imaging/hd/bprim.h>
 #include <pxr/imaging/hd/camera.h>
 #include <pxr/imaging/hd/instancer.h>
@@ -23,9 +25,19 @@ HdPyxisOmniRenderPass::~HdPyxisOmniRenderPass() = default;
 
 void HdPyxisOmniRenderPass::_Execute(HdRenderPassStateSharedPtr const& /*renderPassState*/,
                                      TfTokenVector const& /*renderTags*/) {
-  // C1: no-op. The real pass drives PyxisRenderer::RenderFrame into the
-  // imported Kit render buffer (RFC 0004 §4), waiting on the exported timeline
-  // semaphore before signalling the buffer is ready.
+  // C4: drive the Pyxis engine. The engine renders into an exportable image
+  // (proven by tests/unit/PyxisRenderToExportedImage.cpp) and signals a
+  // timeline semaphore; the C4-full step backs Kit's HdRenderBuffer with the
+  // imported image + sizes from the render-pass state's viewport. For now the
+  // engine is created lazily at a default size so the pass is fully wired.
+  if (!_engine) {
+    _engine = std::make_unique<pyxis_omni::PyxisEngine>();
+    if (!_engine->Initialize(1280, 720)) {
+      _engine.reset();
+      return;
+    }
+  }
+  _engine->RenderFrame();
 }
 
 // ---- Render delegate -----------------------------------------------------

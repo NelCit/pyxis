@@ -139,6 +139,29 @@ unit tests pass together. Remaining C4 work is Hydra-side plumbing only: the
 (mesh/camera/material → `GpuScene`), and backing Kit's `HdRenderBuffer` with the
 imported image.
 
+**UPDATE (2026-05-23): Stage 3 "C4" plumbing — renderer linked into the
+extension.** `sources/pyxis_hydra_omni/Private/PyxisEngine.{h,cpp}` is a USD-free
+render driver that owns a Pyxis Vulkan device + `GpuScene` + `PyxisRenderer` +
+`GpuInteropExporter` and runs the proven render→export→signal sequence; the
+`HdRenderPass::_Execute` drives it. `pyxis_hydra_omni.dll` now **compiles +
+links** against nv-usd 25.11 *and* the prebuilt USD-free `pyxis_renderer` /
+`pyxis_platform` (Release/MD import libs). `build.ps1` stages the 45 runtime DLLs
++ path-tracer shaders so the extension is runtime-ready. Build gotchas resolved:
+- The extension must compile at **C++23** (public headers use `std::expected` /
+  `std::span`); nv-usd 25.11 builds fine at 23.
+- Do **not** put vcpkg's bare `include/` on the path — it carries vcpkg USD 26.3,
+  which silently shadowed nv-usd 25.11 and produced a delegate vtable against
+  `pxrInternal_v0_26_3` that failed to link against the 25.11 libs. Only the
+  `include/hlslpp` subdir is added; nv-usd is the sole `pxr/` provider.
+
+Remaining for C4-full (runtime, needs the viewport app): verify the extension
+loads + `PyxisEngine::Initialize` stands up its device inside the Kit process and
+renders; back Kit's `HdRenderBuffer` with `GpuInteropImporter`; and wire the FSD
+prim adapters (`CreateRprim`/`HdMesh` Sync → `GpuScene::CreateMesh`/
+`AppendInstance`, camera → `SetCamera`) so it renders the USD scene rather than
+just the empty-scene background. The render data-path itself is already proven on
+hardware (C3 + C4 data-path).
+
 **Reproducible build (`_tools/omniverse/`).** A clean clone can't build the Kit
 deliverables alone (SDK is Packman-only), but `setup.ps1` (acquire nv-usd 25.11 +
 Python 3.12 non-interactively) then `build.ps1` (configure + compile + stage into

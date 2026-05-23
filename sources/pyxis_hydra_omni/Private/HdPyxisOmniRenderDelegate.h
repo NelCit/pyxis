@@ -15,6 +15,10 @@
 
 #include <memory>
 
+namespace pyxis_omni {
+class PyxisEngine;
+}
+
 PXR_NAMESPACE_OPEN_SCOPE
 
 // Minimal render pass — the real one drives PyxisRenderer::RenderFrame against
@@ -28,6 +32,11 @@ class HdPyxisOmniRenderPass final : public HdRenderPass {
  protected:
   void _Execute(HdRenderPassStateSharedPtr const& renderPassState,
                 TfTokenVector const& renderTags) override;
+
+ private:
+  // The Pyxis render engine (own device + renderer + exporter), created lazily
+  // on first execute. RFC 0004 C4.
+  std::unique_ptr<pyxis_omni::PyxisEngine> _engine;
 };
 
 class HdPyxisOmniRenderDelegate final : public HdRenderDelegate {

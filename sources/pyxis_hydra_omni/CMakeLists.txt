@@ -17,7 +17,7 @@
 cmake_minimum_required(VERSION 3.24)
 project(pyxis_hydra_omni LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 17)        # nv-usd 25.11 headers compile cleanly at C++17.
+set(CMAKE_CXX_STANDARD 23)        # Pyxis public headers use std::expected (C++23). nv-usd 25.11 builds at 23.
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")  # /MD to match nv-usd release.
 
@@ -37,7 +37,37 @@ endif()
 add_library(pyxis_hydra_omni SHARED
     Private/HdPyxisOmniRenderDelegate.cpp
     Private/HdPyxisOmniRendererPlugin.cpp
+    Private/PyxisEngine.cpp
 )
+
+# ----------------------------------------------------------------------------
+# Link Pyxis's prebuilt, USD-free renderer (RFC 0004 C4). pyxis_renderer /
+# pyxis_platform are built by the main vcpkg build (build/dev) — we consume
+# their public headers + Release import libs here. They never see USD (§1); only
+# this shim does. Release/MD to match both nv-usd and the vcpkg Release CRT.
+# ----------------------------------------------------------------------------
+set(PYXIS_REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." CACHE PATH "Pyxis repo root")
+set(PYXIS_BUILD_DIR "${PYXIS_REPO_ROOT}/build/dev"
+    CACHE PATH "Pyxis main build dir (prebuilt renderer libs + fetched nvrhi)")
+set(_pyxis_renderer_lib "${PYXIS_BUILD_DIR}/lib/Release/pyxis_renderer.lib")
+set(_pyxis_platform_lib "${PYXIS_BUILD_DIR}/lib/Release/pyxis_platform.lib")
+if(NOT EXISTS "${_pyxis_renderer_lib}")
+    message(FATAL_ERROR
+        "pyxis_hydra_omni: prebuilt pyxis_renderer not found at ${_pyxis_renderer_lib}.\n"
+        "Build it first: cmake --build build/dev --config Release "
+        "--target pyxis_renderer pyxis_platform")
+endif()
+target_include_directories(pyxis_hydra_omni SYSTEM PRIVATE
+    "${PYXIS_REPO_ROOT}/sources/pyxis_renderer/Public"
+    "${PYXIS_REPO_ROOT}/sources/pyxis_platform/Public"
+    "${PYXIS_BUILD_DIR}/_deps/nvrhi-src/include"
+    # ONLY the hlslpp subdir from vcpkg — NOT the bare include/, which also
+    # contains vcpkg USD 26.3 headers that would shadow Kit's nv-usd 25.11 and
+    # produce a delegate compiled against the wrong USD ABI (pxrInternal_v0_26_3
+    # vftable vs the 25.11 import libs). nv-usd must be the sole pxr/ provider.
+    "${PYXIS_BUILD_DIR}/vcpkg_installed/x64-windows/include/hlslpp")
+target_link_libraries(pyxis_hydra_omni PRIVATE
+    "${_pyxis_renderer_lib}" "${_pyxis_platform_lib}")
 target_include_directories(pyxis_hydra_omni SYSTEM PRIVATE "${PXR_USD_ROOT}/include")
 target_include_directories(pyxis_hydra_omni PRIVATE Private)
 

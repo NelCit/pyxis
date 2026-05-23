@@ -55,6 +55,24 @@ $stageRes = Join-Path $stageBin "resources"
 New-Item -ItemType Directory -Force -Path $stageRes | Out-Null
 Copy-Item (Join-Path $buildDir "pyxis_hydra_omni.dll")        $stageBin -Force
 Copy-Item (Join-Path $buildDir "resources\plugInfo.json")     $stageRes -Force
+
+# RFC 0004 C4: the delegate links the Pyxis renderer, so stage its runtime DLLs
+# (pyxis_renderer/platform + their deps: spdlog, flecs, tracy, ...) next to the
+# delegate, plus the Slang-compiled shaders the path tracer loads. Without these
+# the extension loads but PyxisEngine::Initialize fails to create the renderer.
+$pyxisReleaseBin = Join-Path $repoRoot "build\dev\bin\Release"
+if (Test-Path $pyxisReleaseBin) {
+    Copy-Item (Join-Path $pyxisReleaseBin "*.dll") $stageBin -Force
+    $shaderSrc = Join-Path $pyxisReleaseBin "Resources\shaders"
+    if (Test-Path $shaderSrc) {
+        $shaderDst = Join-Path $stageBin "Resources\shaders"
+        New-Item -ItemType Directory -Force -Path $shaderDst | Out-Null
+        Copy-Item (Join-Path $shaderSrc "*.spv") $shaderDst -Force
+    }
+    Write-Host "[build] Staged Pyxis runtime DLLs + shaders -> $stageBin"
+} else {
+    Write-Host "[build] WARN: $pyxisReleaseBin not found; build pyxis_renderer Release first." -ForegroundColor Yellow
+}
 Write-Host "[build] Assembled extension -> $extDir" -ForegroundColor Green
 
 Write-Host ""
