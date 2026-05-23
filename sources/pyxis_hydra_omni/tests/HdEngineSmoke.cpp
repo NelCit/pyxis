@@ -199,6 +199,7 @@ int main() {
   // Verify the delegate COMPOSITED Pyxis's color into the host's bound render
   // buffer (the presentation path a viewport/usdview uses) — count non-zero px.
   uint64_t nonZeroAovPixels = 0;
+  bool aovMatchesEngine = false;  // composited AOV byte-identical to engine render?
   if (const auto* aov = static_cast<const uint16_t*>(colorBuffer->Map())) {
     const uint64_t total = uint64_t(colorBuffer->GetWidth()) * colorBuffer->GetHeight();
     for (uint64_t p = 0; p < total; ++p) {
@@ -208,15 +209,20 @@ int main() {
       if (r != 0.f || g != 0.f || b != 0.f)
         ++nonZeroAovPixels;
     }
+    // The Float16Vec4 AOV (same dims/format as the engine readback) must be a
+    // faithful copy of what PyxisEngine rendered.
+    if (readback && pixels.size() == total * 8)
+      aovMatchesEngine = std::memcmp(aov, pixels.data(), pixels.size()) == 0;
     colorBuffer->Unmap();
   }
 
   std::printf(
       "HdEngineSmoke: meshCount=%llu instanceCount=%llu materialCount=%llu lightCount=%llu "
-      "readback=%d (%ux%u) aovNonZeroPixels=%llu\n",
+      "readback=%d (%ux%u) aovNonZeroPixels=%llu aovMatchesEngine=%d\n",
       static_cast<unsigned long long>(meshCount), static_cast<unsigned long long>(instanceCount),
       static_cast<unsigned long long>(materialCount), static_cast<unsigned long long>(lightCount),
-      readback ? 1 : 0, width, height, static_cast<unsigned long long>(nonZeroAovPixels));
+      readback ? 1 : 0, width, height, static_cast<unsigned long long>(nonZeroAovPixels),
+      aovMatchesEngine ? 1 : 0);
 
   delete index;
   delete delegate;
@@ -241,6 +247,10 @@ int main() {
     std::fprintf(stderr,
                  "FAIL: delegate did not composite Pyxis color into the host render buffer.\n");
     return 8;
+  }
+  if (!aovMatchesEngine) {
+    std::fprintf(stderr, "FAIL: composited AOV is not byte-identical to the engine render.\n");
+    return 9;
   }
   std::printf("PASS: HdEngine drove the Pyxis delegate end-to-end + composited into the host AOV.\n");
   return 0;

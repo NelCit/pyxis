@@ -419,3 +419,62 @@ TEST(GpuInteropExport, MultipleResourcesGetDistinctHandles) {
   ASSERT_TRUE(semB.IsValid());
   EXPECT_NE(semA.handle, semB.handle);
 }
+
+// --- GpuInteropImporter direct tests + exporter edge cases -----------------
+
+// The importer creates on a device that enabled the interop extensions.
+TEST(GpuInteropImport, CreateSucceedsOnInteropDevice) {
+  InteropHarness harness = MakeHarness();
+  if (!harness.Ready())
+    GTEST_SKIP() << "No device / external-memory interop unavailable.";
+  auto importer = GpuInteropImporter::Create(harness.dm->GetVulkanContext());
+  EXPECT_NE(importer, nullptr);
+}
+
+// Importing a bogus Win32 memory handle must fail cleanly (invalid result),
+// never crash — robustness against a stale/wrong handle from the wire.
+TEST(GpuInteropImport, RejectsInvalidMemoryHandle) {
+  InteropHarness harness = MakeHarness();
+  if (!harness.Ready())
+    GTEST_SKIP() << "No device / external-memory interop unavailable.";
+  auto importer = GpuInteropImporter::Create(harness.dm->GetVulkanContext());
+  ASSERT_NE(importer, nullptr);
+  const ImportedImage img = importer->ImportImage(reinterpret_cast<void*>(0xDEAD), 1u << 20, kWidth,
+                                                  kHeight, VK_FORMAT_R8G8B8A8_UNORM, true);
+  EXPECT_FALSE(img.IsValid());
+}
+
+// Importing a bogus semaphore handle must fail cleanly (null), not crash.
+TEST(GpuInteropImport, RejectsInvalidSemaphoreHandle) {
+  InteropHarness harness = MakeHarness();
+  if (!harness.Ready())
+    GTEST_SKIP() << "No device / external-memory interop unavailable.";
+  auto importer = GpuInteropImporter::Create(harness.dm->GetVulkanContext());
+  ASSERT_NE(importer, nullptr);
+  EXPECT_EQ(importer->ImportTimelineSemaphore(reinterpret_cast<void*>(0xBADF00D)), nullptr);
+}
+
+// Signalling the exported timeline to monotonically increasing values is safe
+// (the cross-device wait is covered by GpuInteropRoundTrip).
+TEST(GpuInteropExport, TimelineSignalIsCallableAndMonotonic) {
+  InteropHarness harness = MakeHarness();
+  if (!harness.Ready())
+    GTEST_SKIP() << "No device / external-memory interop unavailable.";
+  const ExportedSemaphore sem = harness.exporter->CreateExportableTimelineSemaphore();
+  ASSERT_TRUE(sem.IsValid());
+  for (uint64_t value = 1; value <= 4; ++value)
+    harness.exporter->SignalTimeline(sem, value);
+  harness.dm->WaitIdle();
+  SUCCEED();
+}
+
+// Signalling an unknown (not-from-this-exporter) semaphore is a no-op, not a crash.
+TEST(GpuInteropExport, SignalUnknownSemaphoreIsNoOp) {
+  InteropHarness harness = MakeHarness();
+  if (!harness.Ready())
+    GTEST_SKIP() << "No device / external-memory interop unavailable.";
+  ExportedSemaphore bogus{};
+  bogus.handle = reinterpret_cast<void*>(0x1234);
+  harness.exporter->SignalTimeline(bogus, 1);  // must not crash.
+  SUCCEED();
+}

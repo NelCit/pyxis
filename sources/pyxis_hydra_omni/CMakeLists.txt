@@ -121,6 +121,14 @@ add_executable(pyxis_hydra_omni_smoke
 )
 pyxis_omni_configure(pyxis_hydra_omni_smoke)
 
+# ctest: drive the smoke via run_smoke.ps1 (sets the nv-usd / Pyxis runtime PATH
+# + shaders, then runs the exe; exit 0 = pass). Run with: ctest --test-dir build/omni
+enable_testing()
+add_test(NAME HdEngineSmoke
+    COMMAND powershell -NoProfile -ExecutionPolicy Bypass
+            -File "${PYXIS_REPO_ROOT}/_tools/omniverse/run_smoke.ps1")
+set_tests_properties(HdEngineSmoke PROPERTIES TIMEOUT 180 LABELS "omniverse;integration")
+
 # ----------------------------------------------------------------------------
 # plugInfo.json — written next to the DLL so a Hydra host (Kit / usdview) finds
 # the delegate. LibraryPath is relative to <out>/resources/, so "../" + dll.

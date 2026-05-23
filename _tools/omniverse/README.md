@@ -1,90 +1,65 @@
-# Building the Pyxis Omniverse integration (RFC 0004)
+# Pyxis × Omniverse Kit (RFC 0004)
 
-**Can you build the deliverables just by cloning this repo? No — and that's
-expected.** Both deliverables depend on the **NVIDIA Omniverse Kit SDK + nv-usd
-25.11**, which are multi-GB, license-gated, and distributed via NVIDIA's
-**Packman** feed. No Kit extension ever vendors the SDK in-repo. These scripts
-acquire it non-interactively and build on top.
+Pyxis as a **Hydra render delegate** for NVIDIA Omniverse Kit (110.1.1 / nv-usd
+25.11). All build artifacts live **under `<repo>/build/omniverse`** (gitignored)
+— no sibling external folder. The only thing outside the repo is the Packman
+**package cache** (`PM_PACKAGES_ROOT`, analogous to a vcpkg/npm cache).
 
-What lives in *this* repo: the delegate sources
-(`sources/pyxis_hydra_omni/`), the Pyxis-side GPU-interop (`pyxis_platform`),
-the nv-usd version pin (`deps/nv-usd.packman.xml`), and these scripts.
+**Can you build it from a clean clone? No** — and that's expected of every Kit
+extension: the Kit SDK + nv-usd are multi-GB, license-gated, Packman-delivered,
+and never vendored. These scripts acquire them non-interactively and build on top.
 
----
+## Scripts (`_tools/omniverse/`)
 
-## Deliverable 1 — `omni.hydra.pyxis` (the Hydra render-delegate extension)
+| Script | What it does |
+|---|---|
+| `check.ps1` | Verify every prerequisite (clang-cl, cmake, ninja, GPU, Vulkan + external-memory, Kit SDK, nv-usd, Python 3.12, prebuilt renderer). Prints OK/MISSING + hints. |
+| `setup.ps1` | One-time: clone kit-app-template, bootstrap Packman, pull nv-usd 25.11 + Python 3.12 into `build/omniverse`. Writes `usd-deps/paths.ps1`. |
+| `build.ps1` | Configure + compile `pyxis_hydra_omni` against nv-usd; assemble + stage the `omni.hydra.pyxis` extension (delegate DLL + runtime DLLs + shaders) into the Kit app. |
+| `run_smoke.ps1` | Headless end-to-end test: drives a USD stage through the delegate via HdEngine; verifies ingest + render + composite into the host buffer. |
+| `deps/nv-usd.packman.xml` | Pins the nv-usd 25.11 package. |
 
-Two commands, run once-per-machine for setup then per-build:
-
-```powershell
-# 1. Acquire the SDK (multi-GB, one-time). Clones kit-app-template, bootstraps
-#    Packman, pulls nv-usd 25.11 + Python 3.12, writes usd-deps/paths.ps1.
-_tools/omniverse/setup.ps1            # -ExternalDir D:\pyxis_external (default)
-
-# 2. Build the delegate against nv-usd and stage it into the Kit extension.
-_tools/omniverse/build.ps1            # -Config Release (default)
-```
-
-`build.ps1` produces `build/omni/pyxis_hydra_omni.dll` + `resources/plugInfo.json`
-and stages them into
-`<ExternalDir>/kit-app-template/source/extensions/omni.hydra.pyxis/bin/`.
-
-**Verified:** the delegate compiles + links against nv-usd 25.11 with clang-cl,
-and `build.ps1` runs clean from a wiped `build/omni`. (See RFC 0004
-"Implementation status".)
-
-### Remaining wiring for Kit to *load* it (C2)
-
-A Hydra delegate DLL must be on `PXR_PLUGINPATH_NAME` for Kit/usdview to discover
-it. The extension advertises its plugin dir from its `omni::ext::IExt` startup
-(or via `extension.toml` env). Add to `omni.hydra.pyxis`:
-
-- in the C++ `IExt::onStartup`: prepend `<ext>/bin` to `PXR_PLUGINPATH_NAME`
-  (or call `PlugRegistry::GetInstance().RegisterPlugins(<ext>/bin)`), so the
-  staged `bin/resources/plugInfo.json` is found;
-- then "Pyxis" appears in the viewport's renderer (Hydra engine) list.
-
-This is the C2 step in RFC 0004's phase plan; the DLL + plugInfo it needs are
-already produced + staged by `build.ps1`.
-
----
-
-## Deliverable 2 — a packaged Omniverse editor with Pyxis built in
-
-A turnkey "Pyxis Viewer" = the `kit_base_editor` app + the `omni.hydra.pyxis`
-extension, packaged into a distributable. The base editor is a Kit *app*
-template (the dev host); we embed Pyxis as its renderer and package it.
+## Build deliverable 1 — the extension
 
 ```powershell
-# In <ExternalDir>\kit-app-template :
-repo.bat template new          # Application -> kit_base_editor, name: pyxis.viewer
-#   (interactive wizard; for CI use `repo.bat template new --generate-playback
-#    <file>` once, then `repo.bat template replay <file>`)
-
-# Add the renderer extension as a dependency of the app + set it default:
-#   - source/apps/pyxis.viewer.kit  ->  [dependencies] "omni.hydra.pyxis" = {}
-#   - set the default Hydra engine / renderer to "Pyxis"
-
-_tools/omniverse/build.ps1     # (re)build + stage the delegate into the ext
-repo.bat build --config release
-repo.bat package               # produces a distributable package of the editor
+cmake --build build/dev --config Release --target pyxis_renderer pyxis_platform  # prebuilt renderer
+_tools/omniverse/setup.ps1     # one-time SDK acquisition (multi-GB)
+_tools/omniverse/check.ps1     # confirm prerequisites
+_tools/omniverse/build.ps1     # build + stage omni.hydra.pyxis
 ```
 
-The app template creation is the one interactive step Kit doesn't expose a
-non-interactive flag for (only `--generate-playback`/`replay`). Everything
-downstream — building the delegate, staging it, building + packaging the app —
-is scriptable. A committed playback file can remove that last manual step for CI.
+## Tests
 
----
+- **gtest (`build/dev`, CI):** GPU interop suite (`GpuInteropRoundTrip`,
+  `GpuInteropExport`, `GpuInteropImport` — 10 cases) + `PyxisRenderToExportedImage`
+  (renderer → exportable image). Skip cleanly on CPU-only CI.
+- **ctest (`build/omni`):** `HdEngineSmoke` — drives a USD stage (mesh + material
+  + light + camera) through the delegate via `HdEngine` and asserts
+  `meshCount/instanceCount/materialCount/lightCount ≥ 1`, the frame renders, and
+  it **composites byte-identically into the host `HdRenderBuffer`**:
+  ```
+  ctest --test-dir build/omni --output-on-failure
+  ```
 
-## Version pins
+## Status (verified on RTX 5000)
 
-| Component | Pin | Where |
-|---|---|---|
-| Kit SDK | 110.1.1 | `setup.ps1` (`kit-app-template` tag) |
-| nv-usd | `usd.py312.windows-x86_64.stock.release` `0.25.11.kit.2-gl.19811` | `deps/nv-usd.packman.xml` |
-| Python | 3.12.x (Kit-bundled) | located by `setup.ps1` |
+The delegate is a **complete, host-agnostic Hydra renderer**: it ingests
+geometry/camera/material/light from a USD stage, renders via Pyxis, and presents
+into the host's bound color AOV — all proven headlessly. It **loads + registers**
+in a live Kit editor (`type discoverable = True`) and is **enumerated** alongside
+Pixar Storm.
 
-The full Kit `dev/all-deps.packman.xml` cannot be pulled wholesale (some pins,
-e.g. `abseil`, are on internal-only feeds). A Hydra delegate only needs the USD
-package, which *is* on the public feed — hence the single-dependency pull.
+**Kit-viewport caveat (Kit 110):** Kit's viewport renderer menu can't *select* an
+external USD Hydra delegate — `createViewport` needs a Kit engine registered via
+`registerHydraEngineFactory(IHydraEngineFactory)`, and `IHydraEngineFactory` is
+forward-declared only (NVIDIA-internal). So selecting "Pyxis" yields
+`unable to find suitable engine for config`. Paths to pixels in a Kit window:
+(A) a custom `omni.ui` panel that drives `HdEngine` + the delegate (the host-facing
+render path is done — see `HdEngineSmoke`); (B) the closed engine-factory (needs
+NVIDIA internal SDK). usdview / the decoupled file workflow work today.
+
+## Deliverable 2 — packaged editor app
+
+The `pyxis.editor` Kit app (kit_base_editor + the extension) builds + launches;
+package via `repo.bat package` in `build/omniverse/kit-app-template`. See
+RFC 0004 for the full design + findings.
