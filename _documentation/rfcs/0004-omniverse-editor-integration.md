@@ -291,6 +291,28 @@ import), the FSD prim adapters, and the reproducible build are all complete and
 hardware-verified. B reduces to (a) the engine-interface shim + (b) presenting
 into Kit's surface — both unblocked the moment the interface header arrives.
 
+**UPDATE (2026-05-23): live experiment in `pyxis.editor` confirms B's blocker +
+clarifies the ISimpleEngine role.** Forcing `--/renderer/enabled=rtx,pxr`
+(+ `autoManage.canRemove=false`) makes **"Pyxis" appear and be selectable** in
+the Render menu (alongside "Pixar Storm") — Kit enumerates it via
+`Tf.Type("HdRendererPlugin").GetAllDerivedTypes()` (probe logged
+`count=2 pyxis=True plugins=[HdStormRendererPlugin, HdPyxisOmniRendererPlugin]`).
+But selecting it fails:
+```
+UsdContext::createViewport - unable to find suitable engine for config
+```
+i.e. the viewport needs a Kit **hydra engine factory** for the `pxr` path, and
+none is registered in Kit 110 (only RTX's, in `rtx.hydra.dll`). This is exactly
+the `registerHydraEngineFactory(IHydraEngineFactory)` blocker — `IHydraEngineFactory`
+is closed. Crucially, **`ISimpleEngine` does NOT satisfy `createViewport`**: it's
+a *standalone* Hydra host (omni.core `IObject`, createable, with
+`setRendererPlugin`), not the viewport's engine-factory type. So ISimpleEngine
+does **not** unblock the menu/viewport path — it only unblocks **Option A**
+(create a SimpleEngine, `setRendererPlugin("HdPyxisOmniRendererPlugin")`, render,
+blit its AOV into a custom Kit panel). Net: enumeration + selection work; the
+*viewport render backend* is the closed piece. → Pursue B via NVIDIA's internal
+`IHydraEngineFactory`, or do A with ISimpleEngine for an in-Kit Pyxis panel.
+
 **Reproducible build (`_tools/omniverse/`).** A clean clone can't build the Kit
 deliverables alone (SDK is Packman-only), but `setup.ps1` (acquire nv-usd 25.11 +
 Python 3.12 non-interactively) then `build.ps1` (configure + compile + stage into
