@@ -313,6 +313,44 @@ blit its AOV into a custom Kit panel). Net: enumeration + selection work; the
 *viewport render backend* is the closed piece. → Pursue B via NVIDIA's internal
 `IHydraEngineFactory`, or do A with ISimpleEngine for an in-Kit Pyxis panel.
 
+**UPDATE (2026-05-23): host-facing render path complete + verified — Option A is
+unblocked.** `HdPyxisOmniRenderPass::_Execute` now reads the render-pass-state's
+AOV bindings and **composites Pyxis's rendered color into the host's bound color
+`HdRenderBuffer`** (RGBA16F memcpy; RGBA8 / Float32 conversions) — the exact
+presentation surface every Hydra host reads (usdview, `UsdImagingGL`, a custom
+Kit panel). `HdEngineSmoke` was extended to bind a color render buffer + a
+framing `UsdGeomCamera` and **passes on RTX 5000**:
+```
+engineNonZeroPixels=921600  aovNonZeroPixels=921600  (1280x720)   PASS
+```
+i.e. Pyxis renders the full frame (camera + distant light + UsdPreviewSurface
+material) AND writes every pixel into the host buffer. (The earlier black output
+was a missing camera, not the compositing — root-caused.)
+
+**Consequence:** the delegate is now a complete, host-agnostic Hydra renderer —
+geometry/camera/material/light ingest + render + present-to-AOV, all verified
+headlessly. Any Hydra host that binds a color buffer gets Pyxis pixels. **Option
+A (custom Kit panel)** reduces to: a Python `omni.ui` window that drives an
+HdEngine with the Pyxis delegate (as `HdEngineSmoke` does) + an AOV-bound
+render-pass-state, and displays the resulting `HdRenderBuffer` (CPU upload to an
+`omni.ui.ByteImageProvider`, or `GpuInteropImporter` for zero-copy). The only
+remaining closed piece is the Kit *viewport's* engine-factory (Option B).
+
+**UPDATE (2026-05-23): tooling consolidated into the repo + test coverage
+expanded.** All Omniverse build artifacts now live under `<repo>/build/omniverse`
+(gitignored) — the Kit SDK clone, nv-usd, and Packman cache; no sibling external
+folder. CMake `PXR_USD_ROOT` and all scripts are repo-relative. Added
+`_tools/omniverse/check.ps1` — a prerequisite verifier (clang-cl, cmake, ninja,
+git, vcpkg, GPU, Vulkan + `external_memory_capabilities`, Kit SDK, nv-usd 25.11
+import libs, Python 3.12, prebuilt renderer, shaders) that prints OK/MISSING +
+fix hints and exits non-zero on a missing requirement. Tests:
+- gtest (`build/dev`): GPU-interop suite now 10 cases (`GpuInteropRoundTrip` +
+  `GpuInteropExport` formats/uuid/multi-resource/timeline + `GpuInteropImport`
+  create / invalid-memory-handle / invalid-semaphore-handle) + the C4
+  `PyxisRenderToExportedImage` — all pass on RTX 5000, skip on CPU-only CI.
+- ctest (`build/omni`): `HdEngineSmoke` registered (runs via `run_smoke.ps1`),
+  asserting the composited AOV is **byte-identical** to the engine render.
+
 **Reproducible build (`_tools/omniverse/`).** A clean clone can't build the Kit
 deliverables alone (SDK is Packman-only), but `setup.ps1` (acquire nv-usd 25.11 +
 Python 3.12 non-interactively) then `build.ps1` (configure + compile + stage into
