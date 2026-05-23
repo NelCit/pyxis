@@ -26,12 +26,16 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")  # /MD to match nv-usd releas
 # the standalone package doesn't ship. The usd_*.lib are DLL import libs (their
 # Python/TBB deps are already resolved inside the USD DLLs), and every header we
 # need is bundled under include/, so direct wiring is fully self-contained.
-set(PXR_USD_ROOT "D:/pyxis_external/usd-deps/usd" CACHE PATH "Kit nv-usd 25.11 root")
+# Repo-relative omniverse working dir (gitignored). The Kit SDK + nv-usd live
+# under <repo>/build/omniverse — no sibling external folder.
+set(PYXIS_REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." CACHE PATH "Pyxis repo root")
+set(PXR_USD_ROOT "${PYXIS_REPO_ROOT}/build/omniverse/usd-deps/usd"
+    CACHE PATH "Kit nv-usd 25.11 root (default: <repo>/build/omniverse/usd-deps/usd)")
 if(NOT EXISTS "${PXR_USD_ROOT}/include/pxr/pxr.h")
     message(FATAL_ERROR
         "pyxis_hydra_omni: nv-usd not found at PXR_USD_ROOT='${PXR_USD_ROOT}'.\n"
-        "Run _tools/omniverse/fetch_nv_usd.ps1 first (it packman-pulls nv-usd 25.11),\n"
-        "or pass -DPXR_USD_ROOT=<path-to-usd-with-include/pxr/pxr.h>.")
+        "Run _tools/omniverse/setup.ps1 first (it packman-pulls nv-usd 25.11 into\n"
+        "build/omniverse/usd-deps), or pass -DPXR_USD_ROOT=<path-with-include/pxr/pxr.h>.")
 endif()
 
 # ----------------------------------------------------------------------------
@@ -40,7 +44,6 @@ endif()
 # their public headers + Release import libs here. They never see USD (§1); only
 # this shim does. Release/MD to match both nv-usd and the vcpkg Release CRT.
 # ----------------------------------------------------------------------------
-set(PYXIS_REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." CACHE PATH "Pyxis repo root")
 set(PYXIS_BUILD_DIR "${PYXIS_REPO_ROOT}/build/dev"
     CACHE PATH "Pyxis main build dir (prebuilt renderer libs + fetched nvrhi)")
 set(_pyxis_renderer_lib "${PYXIS_BUILD_DIR}/lib/Release/pyxis_renderer.lib")

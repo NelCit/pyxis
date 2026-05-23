@@ -1,23 +1,23 @@
-# RFC 0004 C4-full — run the headless HdEngine smoke for the Pyxis delegate.
+# RFC 0004 C4 — run the headless HdEngine smoke for the Pyxis delegate.
 #
-# Drives a USD stage through HdPyxisOmniRenderDelegate via HdEngine (as a Kit
-# viewport would) and verifies geometry reaches GpuScene + a frame renders, all
-# without Kit. Prereqs: setup.ps1 (nv-usd 25.11 + Python 3.12) and a build of
-# the smoke target + the Pyxis renderer Release:
+# Drives a USD stage (mesh + material + light + camera) through the delegate via
+# HdEngine (as a Kit viewport would) and verifies geometry/material/light reach
+# GpuScene, the frame renders, AND it composites into the host's bound
+# HdRenderBuffer — all without Kit. Everything resolves under build/omniverse.
+# Prereqs: setup.ps1, then a build of the smoke target + the renderer Release:
 #   cmake --build build/dev --config Release --target pyxis_renderer pyxis_platform
 #   cmake --build build/omni --target pyxis_hydra_omni_smoke
 #
-#   pwsh _tools/omniverse/run_smoke.ps1 [-ExternalDir D:\pyxis_external]
+#   pwsh _tools/omniverse/run_smoke.ps1
 
-[CmdletBinding()]
-param([string]$ExternalDir = "D:\pyxis_external")
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+$omniDir  = Join-Path $repoRoot "build\omniverse"
 
-$pathsFile = Join-Path $ExternalDir "usd-deps\paths.ps1"
+$pathsFile = Join-Path $omniDir "usd-deps\paths.ps1"
 if (Test-Path $pathsFile) { . $pathsFile } else {
-    $PXR_USD_ROOT = Join-Path $ExternalDir "usd-deps\usd"
-    $PYTHON_ROOT = (Get-ChildItem "D:\packman-repo\chk\python" -Directory |
+    $PXR_USD_ROOT = Join-Path $omniDir "usd-deps\usd"
+    $PYTHON_ROOT = (Get-ChildItem (Join-Path $omniDir "packman\chk\python") -Directory -ErrorAction SilentlyContinue |
                     Where-Object Name -like "3.12.*" | Sort-Object Name -Descending |
                     Select-Object -First 1).FullName
 }
