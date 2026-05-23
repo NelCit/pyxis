@@ -34,14 +34,8 @@ if(NOT EXISTS "${PXR_USD_ROOT}/include/pxr/pxr.h")
         "or pass -DPXR_USD_ROOT=<path-to-usd-with-include/pxr/pxr.h>.")
 endif()
 
-add_library(pyxis_hydra_omni SHARED
-    Private/HdPyxisOmniRenderDelegate.cpp
-    Private/HdPyxisOmniRendererPlugin.cpp
-    Private/PyxisEngine.cpp
-)
-
 # ----------------------------------------------------------------------------
-# Link Pyxis's prebuilt, USD-free renderer (RFC 0004 C4). pyxis_renderer /
+# Pyxis's prebuilt, USD-free renderer (RFC 0004 C4). pyxis_renderer /
 # pyxis_platform are built by the main vcpkg build (build/dev) — we consume
 # their public headers + Release import libs here. They never see USD (§1); only
 # this shim does. Release/MD to match both nv-usd and the vcpkg Release CRT.
@@ -57,19 +51,6 @@ if(NOT EXISTS "${_pyxis_renderer_lib}")
         "Build it first: cmake --build build/dev --config Release "
         "--target pyxis_renderer pyxis_platform")
 endif()
-target_include_directories(pyxis_hydra_omni SYSTEM PRIVATE
-    "${PYXIS_REPO_ROOT}/sources/pyxis_renderer/Public"
-    "${PYXIS_REPO_ROOT}/sources/pyxis_platform/Public"
-    "${PYXIS_BUILD_DIR}/_deps/nvrhi-src/include"
-    # ONLY the hlslpp subdir from vcpkg — NOT the bare include/, which also
-    # contains vcpkg USD 26.3 headers that would shadow Kit's nv-usd 25.11 and
-    # produce a delegate compiled against the wrong USD ABI (pxrInternal_v0_26_3
-    # vftable vs the 25.11 import libs). nv-usd must be the sole pxr/ provider.
-    "${PYXIS_BUILD_DIR}/vcpkg_installed/x64-windows/include/hlslpp")
-target_link_libraries(pyxis_hydra_omni PRIVATE
-    "${_pyxis_renderer_lib}" "${_pyxis_platform_lib}")
-target_include_directories(pyxis_hydra_omni SYSTEM PRIVATE "${PXR_USD_ROOT}/include")
-target_include_directories(pyxis_hydra_omni PRIVATE Private)
 
 # nv-usd is a py312 build: its headers pull <pyconfig.h> via tf/pySafePython.h,
 # and inlined Tf python glue references Python symbols. Use the SAME Python
@@ -79,35 +60,62 @@ set(PYXIS_OMNI_PYTHON_ROOT "D:/packman-repo/chk/python/3.12.13+nv1-windows-x86_6
 if(NOT EXISTS "${PYXIS_OMNI_PYTHON_ROOT}/include/pyconfig.h")
     message(FATAL_ERROR
         "pyxis_hydra_omni: Python 3.12 not found at '${PYXIS_OMNI_PYTHON_ROOT}'.\n"
-        "nv-usd 25.11 is a py312 build; pass -DPYXIS_OMNI_PYTHON_ROOT=<python3.12-root>\n"
-        "(fetch_nv_usd.ps1 records the path Kit's Packman pulled it to).")
-endif()
-target_include_directories(pyxis_hydra_omni SYSTEM PRIVATE "${PYXIS_OMNI_PYTHON_ROOT}/include")
-
-# USD throws + uses RTTI; the §30.1 exception-free perimeter is renderer/platform
-# only. This is the USD-facing shim, like pyxis_hydra.
-if(MSVC OR CMAKE_CXX_SIMULATE_ID STREQUAL "MSVC")
-    target_compile_options(pyxis_hydra_omni PRIVATE /EHsc /GR)
-    # USD's tf/type uses std::is_pod (removed-in-C++20); silence in this DLL.
-    target_compile_definitions(pyxis_hydra_omni PRIVATE
-        _SILENCE_CXX20_IS_POD_DEPRECATION_WARNING=1 NOMINMAX)
+        "nv-usd 25.11 is a py312 build; pass -DPYXIS_OMNI_PYTHON_ROOT=<python3.12-root>.")
 endif()
 
-# USD ships its libraries with a usd_ prefix (monolithic-style naming). Link the
-# import libs the delegate + plugin touch; tbb is pulled in transitively by
-# inlined Tf/Vt/Work template code so it is linked explicitly.
-# USD's lib dir on the search path so auto-referenced libs (e.g. tbb12.lib,
-# pulled in by tbb.lib's #pragma comment(lib)) resolve.
-target_link_directories(pyxis_hydra_omni PRIVATE
-    "${PXR_USD_ROOT}/lib" "${PYXIS_OMNI_PYTHON_ROOT}/libs")
-
+# usd_usdGeom is needed by the smoke harness (authors a UsdGeomMesh); harmless in
+# the DLL. tbb is linked explicitly (inlined Tf/Vt/Work template code).
+# usd_boost + usd_python: the Usd*/UsdGeom headers (used by the smoke harness)
+# instantiate pxr_boost::python converter statics for Sdf/Tf types.
 set(_usd_libs usd_hd usd_hf usd_hdsi usd_sdf usd_tf usd_vt usd_gf usd_plug
-              usd_usd usd_usdImaging tbb)
-foreach(_lib IN LISTS _usd_libs)
-    target_link_libraries(pyxis_hydra_omni PRIVATE "${PXR_USD_ROOT}/lib/${_lib}.lib")
-endforeach()
-target_link_libraries(pyxis_hydra_omni PRIVATE
-    "${PYXIS_OMNI_PYTHON_ROOT}/libs/python312.lib")
+              usd_usd usd_usdGeom usd_usdImaging usd_boost usd_python tbb)
+
+# Shared configuration applied to both the delegate DLL and the smoke harness exe.
+function(pyxis_omni_configure tgt)
+    target_include_directories(${tgt} SYSTEM PRIVATE
+        "${PXR_USD_ROOT}/include"
+        "${PYXIS_OMNI_PYTHON_ROOT}/include"
+        "${PYXIS_REPO_ROOT}/sources/pyxis_renderer/Public"
+        "${PYXIS_REPO_ROOT}/sources/pyxis_platform/Public"
+        "${PYXIS_BUILD_DIR}/_deps/nvrhi-src/include"
+        # ONLY the hlslpp subdir from vcpkg — NOT the bare include/, which also
+        # has vcpkg USD 26.3 that would shadow nv-usd 25.11 (pxrInternal_v0_26_3
+        # vtable vs the 25.11 import libs). nv-usd must be the sole pxr/ provider.
+        "${PYXIS_BUILD_DIR}/vcpkg_installed/x64-windows/include/hlslpp")
+    target_include_directories(${tgt} PRIVATE Private)
+    if(MSVC OR CMAKE_CXX_SIMULATE_ID STREQUAL "MSVC")
+        target_compile_options(${tgt} PRIVATE /EHsc /GR)
+        target_compile_definitions(${tgt} PRIVATE
+            _SILENCE_CXX20_IS_POD_DEPRECATION_WARNING=1 NOMINMAX)
+    endif()
+    # USD lib dir on the search path so auto-referenced libs (tbb12.lib via
+    # pragma) resolve.
+    target_link_directories(${tgt} PRIVATE
+        "${PXR_USD_ROOT}/lib" "${PYXIS_OMNI_PYTHON_ROOT}/libs")
+    foreach(_lib IN LISTS _usd_libs)
+        target_link_libraries(${tgt} PRIVATE "${PXR_USD_ROOT}/lib/${_lib}.lib")
+    endforeach()
+    target_link_libraries(${tgt} PRIVATE
+        "${PYXIS_OMNI_PYTHON_ROOT}/libs/python312.lib"
+        "${_pyxis_renderer_lib}" "${_pyxis_platform_lib}")
+endfunction()
+
+add_library(pyxis_hydra_omni SHARED
+    Private/HdPyxisOmniRenderDelegate.cpp
+    Private/HdPyxisOmniRendererPlugin.cpp
+    Private/PyxisEngine.cpp
+)
+pyxis_omni_configure(pyxis_hydra_omni)
+
+# Headless HdEngine smoke (RFC 0004 C4-full): drives a USD stage through the
+# delegate and verifies geometry reaches GpuScene + a frame renders. Compiles
+# the delegate + engine sources directly so it can instantiate the delegate.
+add_executable(pyxis_hydra_omni_smoke
+    tests/HdEngineSmoke.cpp
+    Private/HdPyxisOmniRenderDelegate.cpp
+    Private/PyxisEngine.cpp
+)
+pyxis_omni_configure(pyxis_hydra_omni_smoke)
 
 # ----------------------------------------------------------------------------
 # plugInfo.json — written next to the DLL so a Hydra host (Kit / usdview) finds

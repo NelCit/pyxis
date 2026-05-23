@@ -1,11 +1,10 @@
 // Pyxis Omniverse Hydra delegate — RFC 0004 Stage 3.
 //
-// Mirror of sources/pyxis_hydra (the usdview/desktop delegate) but built
-// out-of-tree against Kit's nv-usd 25.11 (Packman) instead of vcpkg USD 26.3.
-// This first cut is the "C1" toolchain-proof milestone: a real
-// HdRenderDelegate subclass + plugin registration that compiles and links
-// against nv-usd 25.11, loads in a Kit viewport, and appears in the renderer
-// list. The FSD prim adapters + GpuInteropImporter wiring land on top of this.
+// Mirror of sources/pyxis_hydra (the usdview/desktop delegate) built out-of-tree
+// against Kit's nv-usd 25.11. The delegate owns a PyxisEngine (its own Pyxis
+// Vulkan device + GpuScene + PyxisRenderer + GpuInteropExporter); prim Sync impls
+// push to the shared GpuScene via HdPyxisOmniRenderParam, and the render pass
+// drives PyxisEngine::RenderFrame.
 
 #pragma once
 
@@ -21,12 +20,14 @@ class PyxisEngine;
 
 PXR_NAMESPACE_OPEN_SCOPE
 
-// Minimal render pass — the real one drives PyxisRenderer::RenderFrame against
-// the imported Kit render buffer (RFC 0004 §4). C1: a no-op execute so the
-// delegate is loadable and selectable.
+class HdPyxisOmniRenderParam;
+
+// Drives PyxisEngine::RenderFrame (which commits the synced GpuScene + renders
+// into the exportable image + signals the timeline). RFC 0004 §4.
 class HdPyxisOmniRenderPass final : public HdRenderPass {
  public:
-  HdPyxisOmniRenderPass(HdRenderIndex* index, HdRprimCollection const& collection);
+  HdPyxisOmniRenderPass(HdRenderIndex* index, HdRprimCollection const& collection,
+                        pyxis_omni::PyxisEngine* engine);
   ~HdPyxisOmniRenderPass() override;
 
  protected:
@@ -34,9 +35,7 @@ class HdPyxisOmniRenderPass final : public HdRenderPass {
                 TfTokenVector const& renderTags) override;
 
  private:
-  // The Pyxis render engine (own device + renderer + exporter), created lazily
-  // on first execute. RFC 0004 C4.
-  std::unique_ptr<pyxis_omni::PyxisEngine> _engine;
+  pyxis_omni::PyxisEngine* _engine = nullptr;  // borrowed; owned by the delegate.
 };
 
 class HdPyxisOmniRenderDelegate final : public HdRenderDelegate {
@@ -75,6 +74,10 @@ class HdPyxisOmniRenderDelegate final : public HdRenderDelegate {
 
   void CommitResources(HdChangeTracker* tracker) override;
 
+  // Borrowed — the engine the render pass drives + prims push to. May be null
+  // if device/interop init failed.
+  [[nodiscard]] pyxis_omni::PyxisEngine* Engine() const noexcept { return _engine.get(); }
+
  private:
   void _Initialize();
 
@@ -82,6 +85,8 @@ class HdPyxisOmniRenderDelegate final : public HdRenderDelegate {
   TfTokenVector _supportedRprimTypes;
   TfTokenVector _supportedSprimTypes;
   TfTokenVector _supportedBprimTypes;
+  std::unique_ptr<pyxis_omni::PyxisEngine> _engine;
+  std::unique_ptr<HdPyxisOmniRenderParam> _renderParam;
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

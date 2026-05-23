@@ -20,7 +20,10 @@
 
 #include <nvrhi/nvrhi.h>
 
+#include <cstring>
 #include <memory>
+#include <string>
+#include <vector>
 
 namespace pyxis_omni {
 
@@ -149,11 +152,59 @@ void PyxisEngine::RenderFrame() noexcept {
   impl.exporter->SignalTimeline(impl.timeline, impl.frameValue);
 }
 
+bool PyxisEngine::ReadbackColorHdr(std::vector<uint8_t>& outRgba16f, uint32_t& outWidth,
+                                   uint32_t& outHeight) noexcept {
+  Impl& impl = *_impl;
+  if (!impl.valid || impl.exportedColor.texture == nullptr)
+    return false;
+  nvrhi::IDevice* device = impl.deviceManager->GetDevice();
+
+  nvrhi::TextureDesc stagingDesc = impl.exportedColor.texture->getDesc();
+  nvrhi::StagingTextureHandle staging =
+      device->createStagingTexture(stagingDesc, nvrhi::CpuAccessMode::Read);
+  if (!staging)
+    return false;
+
+  impl.commandList->open();
+  impl.commandList->setTextureState(impl.exportedColor.texture, nvrhi::AllSubresources,
+                                    nvrhi::ResourceStates::CopySource);
+  impl.commandList->commitBarriers();
+  impl.commandList->copyTexture(staging, nvrhi::TextureSlice(), impl.exportedColor.texture,
+                                nvrhi::TextureSlice());
+  impl.commandList->close();
+  device->executeCommandList(impl.commandList);
+  device->waitForIdle();
+  device->runGarbageCollection();
+
+  size_t rowPitch = 0;
+  const void* mapped =
+      device->mapStagingTexture(staging, nvrhi::TextureSlice(), nvrhi::CpuAccessMode::Read, &rowPitch);
+  if (mapped == nullptr)
+    return false;
+  outWidth = impl.width;
+  outHeight = impl.height;
+  outRgba16f.resize(static_cast<size_t>(impl.width) * impl.height * 8u);  // 4 halfs/pixel
+  const auto* src = static_cast<const uint8_t*>(mapped);
+  const size_t tightRow = static_cast<size_t>(impl.width) * 8u;
+  for (uint32_t y = 0; y < impl.height; ++y)
+    std::memcpy(outRgba16f.data() + y * tightRow, src + y * rowPitch, tightRow);
+  device->unmapStagingTexture(staging);
+  return true;
+}
+
 const pyxis::ExportedImage& PyxisEngine::ExportedColor() const noexcept {
   return _impl->exportedColor;
 }
 const pyxis::ExportedSemaphore& PyxisEngine::Timeline() const noexcept { return _impl->timeline; }
 uint64_t PyxisEngine::LastSignaledValue() const noexcept { return _impl->frameValue; }
 bool PyxisEngine::IsValid() const noexcept { return _impl->valid; }
+pyxis::GpuScene* PyxisEngine::Scene() const noexcept { return _impl->scene.get(); }
+pyxis::Profiler* PyxisEngine::ProfilerPtr() const noexcept { return _impl->profiler.get(); }
+uint64_t PyxisEngine::LastInstanceCount() const noexcept {
+  return _impl->scene ? _impl->scene->LastFrameStats().instanceCount : 0;
+}
+uint64_t PyxisEngine::LastMeshCount() const noexcept {
+  return _impl->scene ? _impl->scene->LastFrameStats().meshCount : 0;
+}
 
 }  // namespace pyxis_omni

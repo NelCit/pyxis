@@ -15,6 +15,12 @@
 
 #include <cstdint>
 #include <memory>
+#include <vector>
+
+namespace pyxis {
+class GpuScene;
+class Profiler;
+}  // namespace pyxis
 
 namespace pyxis_omni {
 
@@ -41,6 +47,23 @@ class PyxisEngine {
   [[nodiscard]] uint64_t LastSignaledValue() const noexcept;
 
   [[nodiscard]] bool IsValid() const noexcept;
+
+  // Read the rendered exportable color image back to the host (RGBA16F bytes).
+  // For headless verification (the Kit path samples it on the GPU instead).
+  // Returns false if !IsValid(). `outRgba16f` is width*height*8 bytes, tightly
+  // packed (4 halfs/pixel).
+  [[nodiscard]] bool ReadbackColorHdr(std::vector<uint8_t>& outRgba16f, uint32_t& outWidth,
+                                      uint32_t& outHeight) noexcept;
+
+  // Borrowed accessors so the delegate can hand the shared scene/profiler to
+  // prim Sync impls (via the render param). Valid after Initialize().
+  [[nodiscard]] pyxis::GpuScene* Scene() const noexcept;
+  [[nodiscard]] pyxis::Profiler* ProfilerPtr() const noexcept;
+
+  // Last committed scene counts (from GpuScene::LastFrameStats) — used to verify
+  // the FSD prim adapters fed geometry through to Pyxis.
+  [[nodiscard]] uint64_t LastInstanceCount() const noexcept;
+  [[nodiscard]] uint64_t LastMeshCount() const noexcept;
 
  private:
   struct Impl;

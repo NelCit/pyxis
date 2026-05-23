@@ -62,7 +62,13 @@ Copy-Item (Join-Path $buildDir "resources\plugInfo.json")     $stageRes -Force
 # the extension loads but PyxisEngine::Initialize fails to create the renderer.
 $pyxisReleaseBin = Join-Path $repoRoot "build\dev\bin\Release"
 if (Test-Path $pyxisReleaseBin) {
-    Copy-Item (Join-Path $pyxisReleaseBin "*.dll") $stageBin -Force
+    # Stage pyxis_renderer/platform + their NON-USD deps. CRITICAL: exclude the
+    # vcpkg USD 26.3 DLLs (usd_*.dll) and tbb12.dll — Kit provides nv-usd 25.11 +
+    # its own tbb, and shipping vcpkg's same-named usd_*.dll would shadow Kit's
+    # and break the delegate (entry-point mismatch vs the 25.11 ABI it links).
+    Get-ChildItem $pyxisReleaseBin -Filter *.dll |
+        Where-Object { $_.Name -notlike 'usd_*' -and $_.Name -ne 'tbb12.dll' } |
+        Copy-Item -Destination $stageBin -Force
     $shaderSrc = Join-Path $pyxisReleaseBin "Resources\shaders"
     if (Test-Path $shaderSrc) {
         $shaderDst = Join-Path $stageBin "Resources\shaders"

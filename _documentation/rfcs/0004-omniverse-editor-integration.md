@@ -162,6 +162,38 @@ prim adapters (`CreateRprim`/`HdMesh` Sync → `GpuScene::CreateMesh`/
 just the empty-scene background. The render data-path itself is already proven on
 hardware (C3 + C4 data-path).
 
+**UPDATE (2026-05-23): Stage 3 "C4-full" — delegate renders a USD stage
+end-to-end, VERIFIED on hardware (no Kit).** The FSD prim adapters are wired:
+`HdPyxisOmniMesh::Sync` → `GpuScene::CreateMesh`/`AppendInstance` (fan-triangulated),
+`HdPyxisOmniCamera::Sync` → `GpuScene::SetCamera` (matrix transpose per §10),
+with material/light/render-buffer as functional stubs; the delegate owns the
+`PyxisEngine` and shares its `GpuScene` with prims via `HdPyxisOmniRenderParam`.
+A headless harness (`sources/pyxis_hydra_omni/tests/HdEngineSmoke.cpp`,
+`run_smoke.ps1`) drives a USD stage through the delegate exactly as a Kit
+viewport would — `UsdImagingStageSceneIndex` → `HdRenderIndex` → `HdEngine` —
+and **passes on the RTX 5000**:
+
+```
+HdEngineSmoke: meshCount=1 instanceCount=1 readback=1 (1280x720)
+PASS: HdEngine drove the Pyxis delegate end-to-end.
+```
+
+i.e. the full chain works: USD stage → scene index → `HdPyxisOmniMesh::Sync` →
+`GpuScene` → render pass → `PyxisEngine::RenderFrame` → `CommitResources`
+(BLAS/TLAS built, `instanceCount=1`) → exportable image read back.
+
+**Packaging fix surfaced by this:** `build.ps1` must NOT stage vcpkg's USD 26.3
+`usd_*.dll` (or `tbb12.dll`) into the extension — Kit provides nv-usd 25.11, and
+shipping the same-named 26.3 DLLs shadows it and breaks the delegate
+(entry-point mismatch vs the 25.11 ABI). Fixed: only `pyxis_renderer`/`platform`
++ non-USD deps are staged.
+
+Remaining for the live Kit viewport (vs the proven headless path): alias Kit's
+`HdRenderBuffer` to `GpuInteropImporter` so Kit composites Pyxis's exported image
+(the import half is already proven, C3); resize the engine to the viewport; and
+material/light adapters (currently stubs → renders unlit). The render + ingest
+chain itself is fully verified.
+
 **Reproducible build (`_tools/omniverse/`).** A clean clone can't build the Kit
 deliverables alone (SDK is Packman-only), but `setup.ps1` (acquire nv-usd 25.11 +
 Python 3.12 non-interactively) then `build.ps1` (configure + compile + stage into
