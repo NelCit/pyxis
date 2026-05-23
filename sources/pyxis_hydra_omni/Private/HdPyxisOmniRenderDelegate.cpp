@@ -12,7 +12,9 @@
 
 #include <Pyxis/Renderer/Descs/CameraDesc.h>
 #include <Pyxis/Renderer/Descs/InstanceDesc.h>
+#include <Pyxis/Renderer/Descs/LightDesc.h>
 #include <Pyxis/Renderer/Descs/MeshDesc.h>
+#include <Pyxis/Renderer/Descs/OpenPBRMaterialDesc.h>
 #include <Pyxis/Renderer/GpuScene.h>
 
 #include <pxr/base/gf/matrix4d.h>
@@ -22,6 +24,7 @@
 #include <pxr/imaging/hd/bprim.h>
 #include <pxr/imaging/hd/camera.h>
 #include <pxr/imaging/hd/instancer.h>
+#include <pxr/imaging/hd/light.h>
 #include <pxr/imaging/hd/material.h>
 #include <pxr/imaging/hd/mesh.h>
 #include <pxr/imaging/hd/meshTopology.h>
@@ -35,6 +38,7 @@
 #include <hlsl++.h>
 
 #include <cstdint>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -59,6 +63,54 @@ hlslpp::float4x4 ToPyxisMatrix(GfMatrix4d const& usd) noexcept {
 [[nodiscard]] pyxis::GpuScene* SceneOf(HdRenderParam* renderParam) noexcept {
   auto* param = static_cast<HdPyxisOmniRenderParam*>(renderParam);
   return param ? param->GetGpuScene() : nullptr;
+}
+
+// Resolve a mesh's bound material to a Pyxis MaterialHandle by reading its
+// UsdPreviewSurface network and translating the core params -> OpenPBR. Done in
+// the mesh Sync (not a separate registry) so it is independent of prim sync
+// order; GpuScene::AcquireMaterial dedups by hash. Returns Invalid (renderer's
+// default material) when there is no binding / network.
+pyxis::MaterialHandle ResolveMaterial(HdSceneDelegate* sceneDelegate, SdfPath const& materialId,
+                                      pyxis::GpuScene& scene) {
+  if (materialId.IsEmpty())
+    return pyxis::MaterialHandle::Invalid;
+  const VtValue resource = sceneDelegate->GetMaterialResource(materialId);
+  if (!resource.IsHolding<HdMaterialNetworkMap>())
+    return pyxis::MaterialHandle::Invalid;
+
+  static const TfToken kDiffuse("diffuseColor");
+  static const TfToken kMetallic("metallic");
+  static const TfToken kRoughness("roughness");
+  static const TfToken kEmissive("emissiveColor");
+  static const TfToken kOpacity("opacity");
+
+  pyxis::OpenPBRMaterialDesc desc;  // sensible defaults from the POD.
+  const auto& netMap = resource.UncheckedGet<HdMaterialNetworkMap>();
+  const auto it = netMap.map.find(HdMaterialTerminalTokens->surface);
+  if (it != netMap.map.end()) {
+    for (const HdMaterialNode& node : it->second.nodes) {
+      for (const auto& param : node.parameters) {
+        const TfToken& name = param.first;
+        const VtValue& value = param.second;
+        if (name == kDiffuse && value.IsHolding<GfVec3f>()) {
+          const GfVec3f color = value.UncheckedGet<GfVec3f>();
+          desc.baseColor = {color[0], color[1], color[2]};
+        } else if (name == kMetallic && value.IsHolding<float>()) {
+          desc.metalness = value.UncheckedGet<float>();
+        } else if (name == kRoughness && value.IsHolding<float>()) {
+          desc.roughness = value.UncheckedGet<float>();
+        } else if (name == kEmissive && value.IsHolding<GfVec3f>()) {
+          const GfVec3f color = value.UncheckedGet<GfVec3f>();
+          desc.emissionColor = {color[0], color[1], color[2]};
+          if (color[0] + color[1] + color[2] > 0.0f)
+            desc.emissionLuminance = 1.0f;
+        } else if (name == kOpacity && value.IsHolding<float>()) {
+          desc.opacity = value.UncheckedGet<float>();
+        }
+      }
+    }
+  }
+  return scene.AcquireMaterial(desc);
 }
 
 // ---- Mesh: Hydra mesh -> GpuScene::CreateMesh + AppendInstance ------------
@@ -136,6 +188,7 @@ class HdPyxisOmniMesh final : public HdMesh {
     const GfMatrix4d worldFromLocal = sceneDelegate->GetTransform(primId);
     pyxis::InstanceDesc instanceDesc;
     instanceDesc.mesh = *meshHandle;
+    instanceDesc.material = ResolveMaterial(sceneDelegate, sceneDelegate->GetMaterialId(primId), scene);
     instanceDesc.worldFromLocal = ToPyxisMatrix(worldFromLocal);
     instanceDesc.debugName = debugName;
     (void)scene.AppendInstance(instanceDesc);  // TLAS-cap exhaustion surfaces in FrameStats.
@@ -176,15 +229,45 @@ class StubMaterial final : public HdMaterial {
   [[nodiscard]] HdDirtyBits GetInitialDirtyBitsMask() const override { return HdMaterial::AllDirty; }
 };
 
-class StubLight final : public HdSprim {
+// Light: Hydra light -> GpuScene::AddLight (distant / dome / rect). Color +
+// intensity from light params; direction/position from the transform.
+class HdPyxisOmniLight final : public HdLight {
  public:
-  explicit StubLight(SdfPath const& primId) : HdSprim(primId) {}
-  void Sync(HdSceneDelegate*, HdRenderParam*, HdDirtyBits* dirtyBits) override {
+  HdPyxisOmniLight(SdfPath const& primId, pyxis::LightDesc::Kind kind)
+      : HdLight(primId), _kind(kind) {}
+
+  void Sync(HdSceneDelegate* sceneDelegate, HdRenderParam* renderParam,
+            HdDirtyBits* dirtyBits) override {
+    pyxis::GpuScene* scene = SceneOf(renderParam);
+    if (scene != nullptr && sceneDelegate != nullptr) {
+      const SdfPath& primId = GetId();
+      pyxis::LightDesc desc;
+      desc.kind = _kind;
+      const VtValue color = sceneDelegate->GetLightParamValue(primId, HdLightTokens->color);
+      if (color.IsHolding<GfVec3f>()) {
+        const GfVec3f rgb = color.UncheckedGet<GfVec3f>();
+        desc.color = {rgb[0], rgb[1], rgb[2]};
+      }
+      const VtValue intensity = sceneDelegate->GetLightParamValue(primId, HdLightTokens->intensity);
+      if (intensity.IsHolding<float>())
+        desc.intensity = intensity.UncheckedGet<float>();
+
+      const GfMatrix4d xform = sceneDelegate->GetTransform(primId);
+      const GfVec3d dir = xform.TransformDir(GfVec3d(0, 0, -1)).GetNormalized();
+      desc.direction = {static_cast<float>(dir[0]), static_cast<float>(dir[1]),
+                        static_cast<float>(dir[2])};
+      const GfVec3d pos = xform.ExtractTranslation();
+      desc.position = {static_cast<float>(pos[0]), static_cast<float>(pos[1]),
+                       static_cast<float>(pos[2])};
+      (void)scene->AddLight(desc);
+    }
     *dirtyBits = HdChangeTracker::Clean;
   }
-  [[nodiscard]] HdDirtyBits GetInitialDirtyBitsMask() const override {
-    return HdChangeTracker::AllDirty;
-  }
+
+  [[nodiscard]] HdDirtyBits GetInitialDirtyBitsMask() const override { return HdLight::AllDirty; }
+
+ private:
+  pyxis::LightDesc::Kind _kind;
 };
 
 // Minimal CPU-backed render buffer so HdEngine's AOV machinery doesn't crash.
@@ -315,9 +398,12 @@ HdSprim* HdPyxisOmniRenderDelegate::CreateSprim(TfToken const& typeId, SdfPath c
     return new HdPyxisOmniCamera(sprimId);
   if (typeId == HdPrimTypeTokens->material)
     return new StubMaterial(sprimId);
-  if (typeId == HdPrimTypeTokens->distantLight || typeId == HdPrimTypeTokens->domeLight ||
-      typeId == HdPrimTypeTokens->rectLight)
-    return new StubLight(sprimId);
+  if (typeId == HdPrimTypeTokens->distantLight)
+    return new HdPyxisOmniLight(sprimId, pyxis::LightDesc::Kind::Distant);
+  if (typeId == HdPrimTypeTokens->domeLight)
+    return new HdPyxisOmniLight(sprimId, pyxis::LightDesc::Kind::Dome);
+  if (typeId == HdPrimTypeTokens->rectLight)
+    return new HdPyxisOmniLight(sprimId, pyxis::LightDesc::Kind::Rect);
   return nullptr;
 }
 HdSprim* HdPyxisOmniRenderDelegate::CreateFallbackSprim(TfToken const& typeId) {
@@ -325,7 +411,7 @@ HdSprim* HdPyxisOmniRenderDelegate::CreateFallbackSprim(TfToken const& typeId) {
     return new HdPyxisOmniCamera(SdfPath::EmptyPath());
   if (typeId == HdPrimTypeTokens->material)
     return new StubMaterial(SdfPath::EmptyPath());
-  return new StubLight(SdfPath::EmptyPath());
+  return new HdPyxisOmniLight(SdfPath::EmptyPath(), pyxis::LightDesc::Kind::Distant);
 }
 void HdPyxisOmniRenderDelegate::DestroySprim(HdSprim* sprim) { delete sprim; }
 

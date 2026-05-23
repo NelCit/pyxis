@@ -206,5 +206,11 @@ uint64_t PyxisEngine::LastInstanceCount() const noexcept {
 uint64_t PyxisEngine::LastMeshCount() const noexcept {
   return _impl->scene ? _impl->scene->LastFrameStats().meshCount : 0;
 }
+uint64_t PyxisEngine::LastMaterialCount() const noexcept {
+  return _impl->scene ? _impl->scene->LastFrameStats().materialCount : 0;
+}
+uint64_t PyxisEngine::LastLightCount() const noexcept {
+  return _impl->scene ? _impl->scene->LastFrameStats().lightCount : 0;
+}
 
 }  // namespace pyxis_omni

@@ -64,6 +64,8 @@ class PyxisEngine {
   // the FSD prim adapters fed geometry through to Pyxis.
   [[nodiscard]] uint64_t LastInstanceCount() const noexcept;
   [[nodiscard]] uint64_t LastMeshCount() const noexcept;
+  [[nodiscard]] uint64_t LastMaterialCount() const noexcept;
+  [[nodiscard]] uint64_t LastLightCount() const noexcept;
 
  private:
   struct Impl;

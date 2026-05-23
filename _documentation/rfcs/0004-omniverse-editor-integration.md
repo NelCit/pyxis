@@ -188,11 +188,31 @@ shipping the same-named 26.3 DLLs shadows it and breaks the delegate
 (entry-point mismatch vs the 25.11 ABI). Fixed: only `pyxis_renderer`/`platform`
 + non-USD deps are staged.
 
-Remaining for the live Kit viewport (vs the proven headless path): alias Kit's
-`HdRenderBuffer` to `GpuInteropImporter` so Kit composites Pyxis's exported image
-(the import half is already proven, C3); resize the engine to the viewport; and
-material/light adapters (currently stubs → renders unlit). The render + ingest
-chain itself is fully verified.
+**UPDATE (2026-05-23): material + light adapters done & verified.**
+`HdPyxisOmniMesh` now resolves its bound material — `GetMaterialResource` →
+parse the `UsdPreviewSurface` network (diffuseColor/metallic/roughness/emissive/
+opacity) → `OpenPBRMaterialDesc` → `GpuScene::AcquireMaterial` → set on the
+instance. `HdPyxisOmniLight` (distant/dome/rect) → `GpuScene::AddLight` (color +
+intensity from light params, direction/position from the transform). The harness
+authors a bound material + a distant light; the full chain passes:
+
+```
+HdEngineSmoke: meshCount=1 instanceCount=1 materialCount=1 lightCount=1 readback=1
+PASS
+```
+
+Correctness fix: material bindings only resolve through the **full**
+`UsdImagingCreateSceneIndices` chain (binding-resolution + flatten filters), not
+the bare `UsdImagingStageSceneIndex` — the harness uses the former.
+
+So the **complete v1 Hydra ingest+render chain (geometry + camera + material +
+light) is verified end-to-end on hardware, without Kit.** The only work that
+genuinely needs a *running* Kit viewport to validate (so it cannot be proven in
+this headless setup): aliasing Kit's `HdRenderBuffer` to `GpuInteropImporter` so
+Kit composites Pyxis's exported image (the import half is proven, C3), engine
+resize-to-viewport, and packaging the `pyxis.viewer` app (deliverable 2; the
+`repo template new` wizard is interactive). Code for the buffer aliasing can be
+written; verification needs the viewport.
 
 **Reproducible build (`_tools/omniverse/`).** A clean clone can't build the Kit
 deliverables alone (SDK is Packman-only), but `setup.ps1` (acquire nv-usd 25.11 +

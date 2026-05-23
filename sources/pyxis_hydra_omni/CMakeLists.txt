@@ -68,7 +68,8 @@ endif()
 # usd_boost + usd_python: the Usd*/UsdGeom headers (used by the smoke harness)
 # instantiate pxr_boost::python converter statics for Sdf/Tf types.
 set(_usd_libs usd_hd usd_hf usd_hdsi usd_sdf usd_tf usd_vt usd_gf usd_plug
-              usd_usd usd_usdGeom usd_usdImaging usd_boost usd_python tbb)
+              usd_usd usd_usdGeom usd_usdImaging usd_usdShade usd_usdLux
+              usd_sdr usd_boost usd_python tbb)
 
 # Shared configuration applied to both the delegate DLL and the smoke harness exe.
 function(pyxis_omni_configure tgt)
