@@ -242,6 +242,18 @@ Paths to actually display Pyxis in a Kit window (pick one, post-this-RFC):
 The delegate + render + ingest chain remains fully verified; only Kit's
 viewport-renderer *selection* is closed in 110.
 
+**UPDATE (2026-05-23): Option B (Kit C++ engine plugin) confirmed infeasible
+with the public SDK.** `omni::usd::UsdManager::registerHydraEngineFactory(name,
+IHydraEngineFactoryPtr)` is a *public* registration hook, BUT the interface it
+requires — `omni::usd::hydra::IHydraEngineFactory` and the `IHydraEngine` it
+produces — is only **forward-declared** in the dev headers
+(`class IHydraEngineFactory;`); the method definitions live in NVIDIA's internal
+source (what `rtx.hydra.dll` implements) and are not shipped. So a conformant
+engine cannot be written against the public Kit 110 SDK. B needs NVIDIA's
+internal Hydra-engine SDK / RTX renderer source. → Option A (custom viewport
+extension) is the feasible in-viewport path; C (usdview/headless/file) already
+works.
+
 **Reproducible build (`_tools/omniverse/`).** A clean clone can't build the Kit
 deliverables alone (SDK is Packman-only), but `setup.ps1` (acquire nv-usd 25.11 +
 Python 3.12 non-interactively) then `build.ps1` (configure + compile + stage into
