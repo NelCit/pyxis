@@ -85,6 +85,20 @@ if (Test-Path $pyxisReleaseBin) {
 }
 Write-Host "[build] Assembled extension -> $extDir" -ForegroundColor Green
 
+# repo.bat build does NOT link our prebuilt (no-premake) extension into the
+# built app's exts dir, so a launched app would load an empty stub. Mirror the
+# complete extension there too (config-specific dir).
+$cfg = $Config.ToLower()
+$buildExtsParent = Join-Path $ExternalDir "kit-app-template\_build\windows-x86_64\$cfg\exts"
+if (Test-Path $buildExtsParent) {
+    $buildExt = Join-Path $buildExtsParent "omni.hydra.pyxis"
+    Remove-Item $buildExt -Recurse -Force -ErrorAction SilentlyContinue
+    robocopy $extDir $buildExt /E /NFL /NDL /NJH /NJS /NP | Out-Null
+    Write-Host "[build] Mirrored extension -> $buildExt"
+} else {
+    Write-Host "[build] (build exts dir not found at $buildExtsParent; run repo.bat build once.)"
+}
+
 Write-Host ""
 Write-Host "[build] DONE." -ForegroundColor Green
 Write-Host "  delegate DLL : $buildDir\pyxis_hydra_omni.dll"
