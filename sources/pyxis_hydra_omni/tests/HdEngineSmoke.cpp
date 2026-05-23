@@ -42,6 +42,7 @@
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -83,6 +84,10 @@ class RenderTask final : public HdTask {
   HdCamera* _camera;
 };
 
+// Write an RGBA16F readback as a 24-bit BMP (no deps) so "run it" yields a
+// viewable image. Bottom-up BGR rows; 1280*3 is 4-aligned so no row padding.
+void WriteBmp(const char* path, const std::vector<uint8_t>& rgba16f, uint32_t w, uint32_t h);
+
 float HalfToFloatSmoke(uint16_t half) {
   const uint32_t sign = (half >> 15) & 1u, exp = (half >> 10) & 0x1Fu, mant = half & 0x3FFu;
   uint32_t bits;
@@ -98,9 +103,47 @@ float HalfToFloatSmoke(uint16_t half) {
   return out;
 }
 
+void WriteBmp(const char* path, const std::vector<uint8_t>& rgba16f, uint32_t w, uint32_t h) {
+  if (rgba16f.size() < size_t(w) * h * 8 || w == 0 || h == 0)
+    return;
+  const uint32_t rowBytes = w * 3;             // 1280*3 = 3840 (4-aligned).
+  const uint32_t dataSize = rowBytes * h;
+  const uint32_t fileSize = 54 + dataSize;
+  std::FILE* file = std::fopen(path, "wb");
+  if (!file)
+    return;
+  uint8_t hdr[54] = {};
+  hdr[0] = 'B'; hdr[1] = 'M';
+  std::memcpy(hdr + 2, &fileSize, 4);
+  const uint32_t dataOff = 54; std::memcpy(hdr + 10, &dataOff, 4);
+  const uint32_t infoSize = 40; std::memcpy(hdr + 14, &infoSize, 4);
+  std::memcpy(hdr + 18, &w, 4); std::memcpy(hdr + 22, &h, 4);
+  const uint16_t planes = 1; std::memcpy(hdr + 26, &planes, 2);
+  const uint16_t bpp = 24; std::memcpy(hdr + 28, &bpp, 2);
+  std::memcpy(hdr + 34, &dataSize, 4);
+  std::fwrite(hdr, 1, 54, file);
+  const auto* src = reinterpret_cast<const uint16_t*>(rgba16f.data());
+  std::vector<uint8_t> row(rowBytes);
+  for (int y = int(h) - 1; y >= 0; --y) {  // BMP rows are bottom-up.
+    const uint16_t* s = src + size_t(y) * w * 4;
+    for (uint32_t x = 0; x < w; ++x) {
+      auto chan = [&](int c) {
+        float v = HalfToFloatSmoke(s[x * 4 + c]);
+        v = v < 0.f ? 0.f : (v > 1.f ? 1.f : v);
+        return static_cast<uint8_t>(v * 255.f + 0.5f);
+      };
+      row[x * 3 + 0] = chan(2);  // B
+      row[x * 3 + 1] = chan(1);  // G
+      row[x * 3 + 2] = chan(0);  // R
+    }
+    std::fwrite(row.data(), 1, rowBytes, file);
+  }
+  std::fclose(file);
+}
+
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
   // 1. A USD stage with one triangle mesh.
   UsdStageRefPtr stage = UsdStage::CreateInMemory();
   UsdGeomMesh mesh = UsdGeomMesh::Define(stage, SdfPath("/tri"));
@@ -195,6 +238,16 @@ int main() {
   }
   std::printf("HdEngineSmoke: engineNonZeroPixels=%llu\n",
               static_cast<unsigned long long>(engineNonZero));
+
+  // Write a viewable image next to the exe so "run it" produces something to open.
+  if (readback) {
+    std::string dir(argv[0]);
+    const auto slash = dir.find_last_of("\\/");
+    dir = (slash == std::string::npos) ? std::string(".") : dir.substr(0, slash);
+    const std::string bmp = dir + "\\pyxis_smoke.bmp";
+    WriteBmp(bmp.c_str(), pixels, width, height);
+    std::printf("HdEngineSmoke: wrote %s\n", bmp.c_str());
+  }
 
   // Verify the delegate COMPOSITED Pyxis's color into the host's bound render
   // buffer (the presentation path a viewport/usdview uses) — count non-zero px.
