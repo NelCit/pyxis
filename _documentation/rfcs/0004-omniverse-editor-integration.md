@@ -254,6 +254,43 @@ internal Hydra-engine SDK / RTX renderer source. → Option A (custom viewport
 extension) is the feasible in-viewport path; C (usdview/headless/file) already
 works.
 
+### Option B unblock plan (chosen path — parked on NVIDIA internal SDK)
+
+**What to request from NVIDIA** (Omniverse developer relations / partner program
+/ kit-sdk source access): the definitions of
+`omni::usd::hydra::IHydraEngineFactory` and the `IHydraEngine` it creates — the
+interface `rtx.hydra.dll` implements. The *registration* hook
+(`UsdManager::registerHydraEngineFactory`) is already public; only the interface
+to inherit is missing.
+
+**Lead that may reduce the ask:** `usdrt::hydra::ISimpleEngine`
+(`.../kit-kernel/.../dev/fabric/include/usdrt/hydra/engine/ISimpleEngine.h`) IS
+fully defined and is a render engine (`render_abi(stageId, params)`,
+`setCameraState_abi`, `setRenderViewport_abi`, `setLightingState_abi`,
+`isConverged_abi`, pause/resume). Ask NVIDIA whether implementing + registering a
+`SimpleEngine` (omni.core `IObject`) is the supported route for a custom viewport
+renderer in Kit 110 — if so, B is feasible with the *public* fabric SDK.
+
+**Integration design (ready to execute once the interface is in hand):**
+1. New Carbonite plugin `omni.hydra.pyxis.engine` (Kit-premake C++, against the
+   engine interface) that on startup calls
+   `UsdManager::registerHydraEngineFactory("pxr", PyxisHydraEngineFactory)` — the
+   `"pxr"` slot is empty in Kit 110, so registering it lights up the existing
+   (currently greyed) "pxr" entry in the viewport renderer menu. (Or register a
+   new name and add it to `exts."omni.kit.viewport.menubar.render".autoManage.enabledList`.)
+2. `PyxisHydraEngine::render_abi` / Execute → drives the existing `PyxisEngine`
+   (device + GpuScene + PyxisRenderer + exporter, already built) and uses
+   `GpuInteropImporter` (already proven, C3) to present the rendered image into
+   the engine's output surface; `setCameraState`/`setLightingState` feed
+   `GpuScene::SetCamera`/`AddLight`.
+3. Scene data already flows through the existing `HdPyxisOmni*` adapters
+   (mesh/camera/material/light → `GpuScene`, verified end-to-end).
+
+**Already done, so B is a small finish:** the renderer, GPU interop (export +
+import), the FSD prim adapters, and the reproducible build are all complete and
+hardware-verified. B reduces to (a) the engine-interface shim + (b) presenting
+into Kit's surface — both unblocked the moment the interface header arrives.
+
 **Reproducible build (`_tools/omniverse/`).** A clean clone can't build the Kit
 deliverables alone (SDK is Packman-only), but `setup.ps1` (acquire nv-usd 25.11 +
 Python 3.12 non-interactively) then `build.ps1` (configure + compile + stage into
