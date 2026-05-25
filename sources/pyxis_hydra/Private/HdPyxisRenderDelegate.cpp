@@ -15,6 +15,7 @@
 #include "HdPyxisRenderParam.h"
 #include "PyxisEngine.h"
 
+#include <Pyxis/Platform/Color/ColorEncoding.h>  // shared half/sRGB conversions
 #include <Pyxis/Renderer/Descs/CameraDesc.h>
 #include <Pyxis/Renderer/Descs/LightDesc.h>  // LightDesc::Kind — Sprim registration
 #include <Pyxis/Renderer/GpuScene.h>
@@ -241,51 +242,9 @@ class StubRenderBuffer final : public HdRenderBuffer {
   std::vector<uint8_t> _data;
 };
 
-float HalfToFloat(uint16_t half) {
-  const uint32_t sign = (half >> 15) & 0x1u, exp = (half >> 10) & 0x1Fu, mant = half & 0x3FFu;
-  uint32_t bits;
-  if (exp == 0) {
-    if (mant == 0) {
-      bits = sign << 31;
-    } else {
-      int shift = -1;
-      uint32_t norm = mant;
-      do {
-        ++shift;
-        norm <<= 1;
-      } while ((norm & 0x400u) == 0);
-      bits = (sign << 31) | (static_cast<uint32_t>(127 - 15 - shift) << 23) | ((norm & 0x3FFu) << 13);
-    }
-  } else if (exp == 0x1F) {
-    bits = (sign << 31) | (0xFFu << 23) | (mant << 13);
-  } else {
-    bits = (sign << 31) | ((exp - 15 + 127) << 23) | (mant << 13);
-  }
-  float out;
-  std::memcpy(&out, &bits, sizeof(out));
-  return out;
-}
-
-// Standard sRGB OETF (linear -> sRGB display encoding).
-float LinearToSrgb(float linear) {
-  linear = linear < 0.0f ? 0.0f : (linear > 1.0f ? 1.0f : linear);
-  return linear <= 0.0031308f ? linear * 12.92f
-                              : 1.055f * std::pow(linear, 1.0f / 2.4f) - 0.055f;
-}
-
-// Minimal float -> IEEE half (round-to-nearest-even not required for display).
-uint16_t FloatToHalf(float value) {
-  uint32_t bits;
-  std::memcpy(&bits, &value, sizeof(bits));
-  const uint32_t sign = (bits >> 16) & 0x8000u;
-  const int32_t expo = static_cast<int32_t>((bits >> 23) & 0xFFu) - 127 + 15;
-  const uint32_t mant = bits & 0x7FFFFFu;
-  if (expo <= 0)
-    return static_cast<uint16_t>(sign);  // flush subnormals/underflow to ±0
-  if (expo >= 0x1F)
-    return static_cast<uint16_t>(sign | (0x1Fu << 10));  // overflow -> inf
-  return static_cast<uint16_t>(sign | (static_cast<uint32_t>(expo) << 10) | (mant >> 13));
-}
+using pyxis::color::FloatToHalf;
+using pyxis::color::HalfToFloat;
+using pyxis::color::LinearToSrgb;
 
 // Composite Pyxis's rendered color (RGBA16F, from PyxisEngine readback) into the
 // host's bound color HdRenderBuffer. This is the host-facing presentation step —

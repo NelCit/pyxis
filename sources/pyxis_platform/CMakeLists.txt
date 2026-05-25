@@ -23,6 +23,8 @@ target_sources(pyxis_platform PUBLIC
         Public/Pyxis/Platform/Forward.h
         Public/Pyxis/Platform/PlatformApi.h
 
+        Public/Pyxis/Platform/Color/ColorEncoding.h
+
         Public/Pyxis/Platform/Device/AdapterInfo.h
         Public/Pyxis/Platform/Device/DeviceCreationParams.h
         Public/Pyxis/Platform/Device/IDeviceManager.h
