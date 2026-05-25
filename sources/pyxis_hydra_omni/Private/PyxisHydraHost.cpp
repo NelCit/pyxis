@@ -17,12 +17,10 @@
 #include <pxr/imaging/hd/engine.h>
 #include <pxr/imaging/hd/renderIndex.h>
 #include <pxr/imaging/hd/renderPassState.h>
-#include <pxr/imaging/hd/retainedDataSource.h>
 #include <pxr/imaging/hd/rprimCollection.h>
 #include <pxr/imaging/hd/task.h>
 #include <pxr/imaging/hd/tokens.h>
 #include <pxr/imaging/hd/types.h>
-#include <pxr/imaging/hdsi/implicitSurfaceSceneIndex.h>
 #include <pxr/usd/usdGeom/metrics.h>
 #include <pxr/usd/usdGeom/tokens.h>
 #include <pxr/usdImaging/usdImaging/stageSceneIndex.h>
@@ -173,23 +171,13 @@ void PyxisHydraHost::SetStage(UsdStageRefPtr stage)
     info.stage = _stage;
     _sceneIndices = UsdImagingCreateSceneIndices(info);
 
-    // §25.O.3 — tessellate implicit surfaces (sphere/cube/cone/cylinder/capsule/
-    // plane) into meshes so the Pyxis delegate (which only renders `mesh` rprims)
-    // ingests them, matching pyxis_usd_ingest's StageWalker (AnalyticGeom). Without
-    // this the World Lobby's round-mirror frames (implicit cylinders) and other
-    // implicit prims silently drop from the delegate but render in the standalone.
-    using ModeSrc = HdRetainedTypedSampledDataSource<TfToken>;
-    const TfToken toMesh = HdsiImplicitSurfaceSceneIndexTokens->toMesh;
-    const HdContainerDataSourceHandle implicitArgs = HdRetainedContainerDataSource::New(
-        HdPrimTypeTokens->sphere, ModeSrc::New(toMesh),
-        HdPrimTypeTokens->cube, ModeSrc::New(toMesh),
-        HdPrimTypeTokens->cone, ModeSrc::New(toMesh),
-        HdPrimTypeTokens->cylinder, ModeSrc::New(toMesh),
-        HdPrimTypeTokens->capsule, ModeSrc::New(toMesh),
-        HdPrimTypeTokens->plane, ModeSrc::New(toMesh));
-    _insertedSceneIndex =
-        HdsiImplicitSurfaceSceneIndex::New(_sceneIndices.finalSceneIndex, implicitArgs);
-
+    // Insert the final scene index directly. The implicit-surface tessellation
+    // wrapper (HdsiImplicitSurfaceSceneIndex) is gone: it only fed the per-prim
+    // Hydra Sync path, which has been removed. Ingest is now StageWalker-only,
+    // and StageWalker tessellates analytic prims (sphere/cube/cone/cylinder/
+    // capsule/plane) itself, so the wrapper would be redundant work. Tracking the
+    // inserted index keeps the RemoveSceneIndex teardown above unchanged.
+    _insertedSceneIndex = _sceneIndices.finalSceneIndex;
     _index->InsertSceneIndex(_insertedSceneIndex, SdfPath::AbsoluteRootPath());
     _stageInserted = true;
 }

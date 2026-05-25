@@ -12,6 +12,8 @@ README is an index of merged RFCs (one line per RFC).
 | 0003 | Move render-side `GpuScene` accessors to a `SceneResources` view | Accepted |
 | 0004 | Omniverse editor integration (Pyxis as authoring + viewport renderer) | Draft |
 | 0005 | Generalized planar projection + secondary UV set | Draft |
+| 0006 | Migrate the whole project from vcpkg OpenUSD 26.3 to Kit nv-usd 25.11 | Accepted |
+| 0007 | One Hydra module: delegate ingests via StageWalker; retire pyxis_hydra_omni | Draft |
 
 ## Lifecycle (§44.4)
 
