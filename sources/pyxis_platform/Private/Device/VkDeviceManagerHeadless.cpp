@@ -323,6 +323,12 @@ DeviceManagerCreateStatus VkDeviceManagerHeadless::Bringup(
   nvrhiDesc.graphicsQueue = _graphicsQueue;
   nvrhiDesc.graphicsQueueIndex = _graphicsFamily;
   nvrhiDesc.bufferDeviceAddressSupported = true;
+  // NVRHI sizes its VkQueryPool to maxTimerQueries at device creation (default
+  // 256). The Profiler recycles queries via a free-list, but the live peak is
+  // (distinct scopes) * SLOT_COUNT and exceeds 256 once Pyxis drives many passes
+  // per frame (e.g. inside Omniverse) -> "Insufficient query pool space". Give it
+  // generous headroom (4096 timestamps ~= 32 KiB).
+  nvrhiDesc.maxTimerQueries = 4096;
   nvrhiDesc.deviceExtensions = deviceExtensions.data();
   nvrhiDesc.numDeviceExtensions = deviceExtensions.size();
 

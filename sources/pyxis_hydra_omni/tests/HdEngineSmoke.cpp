@@ -8,8 +8,8 @@
 // Success = the synced mesh shows up in the committed scene (instanceCount >= 1)
 // and a frame reads back. Exit 0 = pass, non-zero = fail.
 
-#include "HdPyxisOmniRenderDelegate.h"
 #include "PyxisEngine.h"
+#include "PyxisHydraHost.h"
 
 #include <pxr/base/gf/vec3f.h>
 #include <pxr/base/vt/array.h>
@@ -38,6 +38,7 @@
 #include <pxr/usdImaging/usdImaging/sceneIndices.h>
 #include <pxr/usdImaging/usdImaging/stageSceneIndex.h>
 
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -49,40 +50,6 @@
 PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace {
-
-// Minimal task: Sync registers the render pass's collection (so SyncAll syncs
-// the rprims), Execute drives the pass (-> PyxisEngine::RenderFrame).
-class RenderTask final : public HdTask {
- public:
-  RenderTask(HdRenderPassSharedPtr pass, HdRenderPassAovBindingVector bindings, HdCamera* camera)
-      : HdTask(SdfPath::EmptyPath()),
-        _pass(std::move(pass)),
-        _bindings(std::move(bindings)),
-        _camera(camera) {}
-  void Sync(HdSceneDelegate*, HdTaskContext*, HdDirtyBits* bits) override {
-    _pass->Sync();
-    *bits = HdChangeTracker::Clean;
-  }
-  void Prepare(HdTaskContext*, HdRenderIndex*) override {}
-  void Execute(HdTaskContext*) override {
-    auto state = std::make_shared<HdRenderPassState>();
-    state->SetAovBindings(_bindings);  // host binds the color render buffer here.
-    if (_camera) {
-      state->SetCamera(_camera);  // triggers camera sync -> GpuScene::SetCamera.
-      state->SetViewport(GfVec4d(0, 0, 1280, 720));
-    }
-    _pass->Execute(state, GetRenderTags());
-  }
-  const TfTokenVector& GetRenderTags() const override {
-    static const TfTokenVector tags = {HdRenderTagTokens->geometry};
-    return tags;
-  }
-
- private:
-  HdRenderPassSharedPtr _pass;
-  HdRenderPassAovBindingVector _bindings;
-  HdCamera* _camera;
-};
 
 // Write an RGBA16F readback as a 24-bit BMP (no deps) so "run it" yields a
 // viewable image. Bottom-up BGR rows; 1280*3 is 4-aligned so no row padding.
@@ -171,61 +138,37 @@ int main(int argc, char** argv) {
   UsdGeomCamera camera = UsdGeomCamera::Define(stage, SdfPath("/cam"));
   UsdGeomXformCommonAPI(camera).SetTranslate(GfVec3d(0.3, 0.3, 5.0));
 
-  // 2. Render index + the Pyxis delegate.
-  auto* delegate = new HdPyxisOmniRenderDelegate();
-  if (delegate->Engine() == nullptr) {
+  // 2. The reusable Pyxis Hydra host (delegate + render index + render pass +
+  //    color AOV). The same class the in-Kit viewport panel drives (RFC 0004
+  //    Option A) — this test is just its first client.
+  constexpr uint32_t kRbW = 1280, kRbH = 720;
+  PyxisHydraHost host(kRbW, kRbH);
+  if (host.Engine() == nullptr) {
     std::fprintf(stderr, "FAIL: PyxisEngine did not initialise (no GPU / interop?).\n");
     return 2;
   }
-  HdRenderIndex* index = HdRenderIndex::New(delegate, HdDriverVector{});
-  if (index == nullptr) {
-    std::fprintf(stderr, "FAIL: HdRenderIndex::New returned null.\n");
+  if (!host.IsValid()) {
+    std::fprintf(stderr, "FAIL: PyxisHydraHost render stack did not initialise.\n");
     return 3;
   }
 
-  // 3. Feed the stage in via the FULL Hydra-2 scene-index chain (binding
-  //    resolution + flattening + ...). The bare UsdImagingStageSceneIndex does
-  //    NOT resolve material bindings, so GetMaterialId would return empty.
-  UsdImagingCreateSceneIndicesInfo info;
-  info.stage = stage;
-  const UsdImagingSceneIndices sceneIndices = UsdImagingCreateSceneIndices(info);
-  sceneIndices.stageSceneIndex->SetTime(UsdTimeCode::Default());
-  index->InsertSceneIndex(sceneIndices.finalSceneIndex, SdfPath::AbsoluteRootPath());
-  sceneIndices.stageSceneIndex->ApplyPendingUpdates();
-
-  // 4. Drive a frame.
-  HdRprimCollection collection(HdTokens->geometry, HdReprSelector(HdReprTokens->hull));
-  HdRenderPassSharedPtr pass = delegate->CreateRenderPass(index, collection);
-
-  // Host-side color render buffer (RGBA16F, matches PyxisEngine's 1280x720) the
-  // delegate must composite into — exactly what a viewport / usdview binds.
-  constexpr uint32_t kRbW = 1280, kRbH = 720;
-  auto* colorBuffer = static_cast<HdRenderBuffer*>(
-      delegate->CreateBprim(HdPrimTypeTokens->renderBuffer, SdfPath("/pyxisColor")));
-  colorBuffer->Allocate(GfVec3i(kRbW, kRbH, 1), HdFormatFloat16Vec4, /*multiSampled*/ false);
-  HdRenderPassAovBinding colorBinding;
-  colorBinding.aovName = HdAovTokens->color;
-  colorBinding.renderBuffer = colorBuffer;
-
-  // The camera sprim the scene index created (drives GpuScene::SetCamera when
-  // the render-pass state references it).
-  auto* hdCamera =
-      static_cast<HdCamera*>(index->GetSprim(HdPrimTypeTokens->camera, SdfPath("/cam")));
-
-  HdEngine engine;
-  HdTaskSharedPtrVector tasks = {std::make_shared<RenderTask>(
-      pass, HdRenderPassAovBindingVector{colorBinding}, hdCamera)};
-  engine.Execute(index, &tasks);
+  // 3. Feed the stage + 4. drive a frame, framing through /cam.
+  host.SetStage(stage);
+  if (!host.Render(UsdTimeCode::Default(), SdfPath("/cam"))) {
+    std::fprintf(stderr, "FAIL: PyxisHydraHost::Render returned false.\n");
+    return 3;
+  }
+  HdRenderBuffer* colorBuffer = host.ColorBuffer();
 
   // 5. Verify the FSD mesh adapter fed geometry through to Pyxis + it rendered.
-  const uint64_t instanceCount = delegate->Engine()->LastInstanceCount();
-  const uint64_t meshCount = delegate->Engine()->LastMeshCount();
-  const uint64_t materialCount = delegate->Engine()->LastMaterialCount();
-  const uint64_t lightCount = delegate->Engine()->LastLightCount();
+  const uint64_t instanceCount = host.Engine()->LastInstanceCount();
+  const uint64_t meshCount = host.Engine()->LastMeshCount();
+  const uint64_t materialCount = host.Engine()->LastMaterialCount();
+  const uint64_t lightCount = host.Engine()->LastLightCount();
   std::vector<uint8_t> pixels;
   uint32_t width = 0;
   uint32_t height = 0;
-  const bool readback = delegate->Engine()->ReadbackColorHdr(pixels, width, height);
+  const bool readback = host.Engine()->ReadbackColorHdr(pixels, width, height);
   // Diagnostic: non-zero pixels in the engine's OWN render (distinguishes a
   // black render from a broken composite).
   uint64_t engineNonZero = 0;
@@ -252,9 +195,11 @@ int main(int argc, char** argv) {
   // Verify the delegate COMPOSITED Pyxis's color into the host's bound render
   // buffer (the presentation path a viewport/usdview uses) — count non-zero px.
   uint64_t nonZeroAovPixels = 0;
-  bool aovMatchesEngine = false;  // composited AOV byte-identical to engine render?
+  bool aovMatchesEngine = false;  // composited AOV == sRGB(flip(engine render))?
   if (const auto* aov = static_cast<const uint16_t*>(colorBuffer->Map())) {
-    const uint64_t total = uint64_t(colorBuffer->GetWidth()) * colorBuffer->GetHeight();
+    const uint32_t bufW = colorBuffer->GetWidth();
+    const uint32_t bufH = colorBuffer->GetHeight();
+    const uint64_t total = uint64_t(bufW) * bufH;
     for (uint64_t p = 0; p < total; ++p) {
       const float r = HalfToFloatSmoke(aov[p * 4 + 0]);
       const float g = HalfToFloatSmoke(aov[p * 4 + 1]);
@@ -262,10 +207,34 @@ int main(int argc, char** argv) {
       if (r != 0.f || g != 0.f || b != 0.f)
         ++nonZeroAovPixels;
     }
-    // The Float16Vec4 AOV (same dims/format as the engine readback) must be a
-    // faithful copy of what PyxisEngine rendered.
-    if (readback && pixels.size() == total * 8)
-      aovMatchesEngine = std::memcmp(aov, pixels.data(), pixels.size()) == 0;
+    // WritePyxisColorToAov is the host PRESENTATION transform: it sRGB-encodes RGB
+    // (so Kit/usdview present display-ready values matching RTX) and flips rows
+    // (Vulkan top-down -> GL bottom-up). Verify the AOV is EXACTLY that transform
+    // of the engine's linear readback (the §25.O.3 display contract), within the
+    // half<->float round-trip epsilon.
+    auto srgb = [](float v) {
+      v = v < 0.f ? 0.f : (v > 1.f ? 1.f : v);
+      return v <= 0.0031308f ? v * 12.92f : 1.055f * std::pow(v, 1.0f / 2.4f) - 0.055f;
+    };
+    if (readback && pixels.size() == total * 8 && width == bufW && height == bufH) {
+      const auto* eng = reinterpret_cast<const uint16_t*>(pixels.data());
+      aovMatchesEngine = true;
+      for (uint32_t y = 0; y < bufH && aovMatchesEngine; ++y) {
+        const uint32_t srcY = bufH - 1 - y;  // engine top-down -> AOV bottom-up
+        for (uint32_t x = 0; x < bufW; ++x) {
+          for (int c = 0; c < 3; ++c) {
+            const float a = HalfToFloatSmoke(aov[(uint64_t(y) * bufW + x) * 4 + c]);
+            const float e = srgb(HalfToFloatSmoke(eng[(uint64_t(srcY) * bufW + x) * 4 + c]));
+            if (std::fabs(a - e) > 0.01f) {
+              aovMatchesEngine = false;
+              break;
+            }
+          }
+          if (!aovMatchesEngine)
+            break;
+        }
+      }
+    }
     colorBuffer->Unmap();
   }
 
@@ -277,8 +246,7 @@ int main(int argc, char** argv) {
       readback ? 1 : 0, width, height, static_cast<unsigned long long>(nonZeroAovPixels),
       aovMatchesEngine ? 1 : 0);
 
-  delete index;
-  delete delegate;
+  // host destructor tears down the render index + delegate + PyxisEngine.
 
   if (meshCount < 1 || instanceCount < 1) {
     std::fprintf(stderr, "FAIL: stage geometry did not reach GpuScene via the delegate.\n");
@@ -302,7 +270,9 @@ int main(int argc, char** argv) {
     return 8;
   }
   if (!aovMatchesEngine) {
-    std::fprintf(stderr, "FAIL: composited AOV is not byte-identical to the engine render.\n");
+    std::fprintf(stderr,
+                 "FAIL: composited AOV is not the sRGB-encoded, row-flipped engine render "
+                 "(WritePyxisColorToAov display contract).\n");
     return 9;
   }
   std::printf("PASS: HdEngine drove the Pyxis delegate end-to-end + composited into the host AOV.\n");

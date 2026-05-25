@@ -528,7 +528,7 @@ AnalyticGeomResult TessellateBasisCurves(const pxr::UsdGeomBasisCurves& curves,
       const std::size_t globalIdx = cvOffset + static_cast<std::size_t>(i);
       const pxr::GfVec3f vertexPos = srcPoints[globalIdx];
 
-      pxr::GfVec3f tangent;
+      pxr::GfVec3f tangent{};
       if (i == 0)
         tangent = srcPoints[globalIdx + 1u] - vertexPos;
       else if (i == curveLen - 1)
@@ -626,7 +626,7 @@ AnalyticGeomResult TessellateNurbsCurves(const pxr::UsdGeomNurbsCurves& curves,
       const std::size_t globalIdx = cvOffset + static_cast<std::size_t>(i);
       const pxr::GfVec3f vertexPos = srcPoints[globalIdx];
 
-      pxr::GfVec3f tangent;
+      pxr::GfVec3f tangent{};
       if (i == 0)
         tangent = srcPoints[globalIdx + 1u] - vertexPos;
       else if (i == curveLen - 1)

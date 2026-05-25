@@ -24,7 +24,16 @@ class PYXIS_PLATFORM_API AssetLocator final {
 
   // Path to the bundled Resources/ tree. By v1 convention this is
   //   <exe-dir>/Resources/
+  // ...unless an override is set (see SetResourcesDirectoryOverride).
   [[nodiscard]] Path Resources() const noexcept;
+
+  // Process-wide override for the Resources/ base directory. When set non-empty,
+  // Resources() (and thus LocateResource / shader loading) returns this verbatim
+  // instead of <exe-dir>/Resources. Required when the running executable is NOT
+  // the Pyxis host — e.g. inside Omniverse Kit the exe is kit.exe, but Pyxis's
+  // shaders live next to the delegate DLL. Set ONCE at engine init, before any
+  // pass loads shaders (no concurrent readers at that point).
+  static void SetResourcesDirectoryOverride(std::string_view absoluteResourcesDir) noexcept;
 
   // Resolves a `relative` path against the Resources/ tree. Returns
   // an empty Path on miss; the renderer logs once and falls back to

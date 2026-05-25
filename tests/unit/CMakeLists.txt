@@ -136,9 +136,11 @@ target_include_directories(pyxis_unit_tests PRIVATE
 pyxis_set_target_compile_options(pyxis_unit_tests)
 pyxis_enable_exceptions_and_rtti(pyxis_unit_tests)
 
-find_package(pxr CONFIG REQUIRED)
+# RFC 0006: USD comes from Kit's nv-usd 25.11 (pyxis_use_nv_usd below), not vcpkg.
+# pyxis_unit_tests recompiles SubdivRefine.cpp / VolumeLoader.cpp / UsdShadeToOpenPBR
+# directly, so it needs the nv-usd include path + import libs in its own scope.
 find_package(OpenVDB CONFIG REQUIRED)
-find_package(OpenSubdiv CONFIG REQUIRED)
+include(PyxisNvUsd)
 
 target_link_libraries(pyxis_unit_tests
     PRIVATE
@@ -149,27 +151,21 @@ target_link_libraries(pyxis_unit_tests
         # `ParsePurposeFilterSpec` symbol shipped from the
         # pyxis_usd_ingest DLL.
         Pyxis::UsdIngest
-        usd
-        usdGeom
-        usdShade
-        usdRender
-        usdSkel
-        usdVol
-        ar
-        sdf
-        tf
-        vt
-        gf
         # V2.A.5 — VolumeLoaderFixture authors a synthetic .vdb at
         # test setup time + the recompiled VolumeLoader.cpp pulls
         # openvdb's read path. CPU only; no nanovdb feature.
         OpenVDB::openvdb
-        # V2.A.1 follow-up — SubdivCreaseFixture recompiles
-        # SubdivRefine.cpp which uses OpenSubdiv's Far layer.
-        OpenSubdiv::osdCPU_static
+        # V2.A.1 follow-up — SubdivCreaseFixture recompiles SubdivRefine.cpp which
+        # uses OpenSubdiv's Far layer. nv-usd's osdCPU.lib matches its bundled
+        # v3_6_0 headers (RFC 0006) — same lib the pyxis_usd_ingest target links.
+        "${PXR_USD_ROOT}/lib/osdCPU.lib"
         GTest::gtest
         GTest::gtest_main
 )
+# nv-usd includes + the usd_*/python312 import libs (the test exe links
+# UsdStage/Sdf/etc. via the recompiled ingest TUs). Exception/RTTI already on
+# (pyxis_enable_exceptions_and_rtti above), so the full entry point is consistent.
+pyxis_use_nv_usd(pyxis_unit_tests)
 
 # V2.A.5 — VolumeLoader.cpp uses try/catch (openvdb's API is
 # exception-based) which trips clang-tidy's frontend through the

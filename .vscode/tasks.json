@@ -23,6 +23,60 @@
       "args": ["--preset", "dev", "--output-on-failure"],
       "group": { "kind": "test", "isDefault": true },
       "problemMatcher": []
+    },
+
+    {
+      "// RFC 0004": "Omniverse delegate prebuild + launch tasks.",
+      "label": "omni:build-renderer-release",
+      "detail": "Build the USD-free renderer + platform (Release) the delegate links against.",
+      "type": "shell",
+      "command": "cmake",
+      "args": [
+        "--build", "--preset", "dev-release",
+        "--target", "pyxis_renderer", "pyxis_platform"
+      ],
+      "problemMatcher": ["$gcc"]
+    },
+    {
+      "label": "omni:build-extension",
+      "detail": "Configure+build pyxis_hydra_omni (delegate DLL + native IExt + smoke) against nv-usd and stage the omni.hydra.pyxis extension into the Kit app.",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-NoProfile", "-ExecutionPolicy", "Bypass",
+        "-File", "${workspaceFolder}/_tools/omniverse/build.ps1",
+        "-Config", "Release"
+      ],
+      "problemMatcher": ["$gcc"]
+    },
+    {
+      "label": "omni:stage-smoke-shaders",
+      "detail": "Stage path-tracer .spv shaders next to the smoke exe (PyxisEngine searches next-to-exe).",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+        "$dst='${workspaceFolder}/build/omni/Resources/shaders'; New-Item -ItemType Directory -Force -Path $dst | Out-Null; Copy-Item '${workspaceFolder}/build/dev/bin/Release/Resources/shaders/*.spv' $dst -Force"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "omni:prebuild",
+      "detail": "Full prebuild for the Omniverse editor launch: renderer Release, then delegate + extension staging.",
+      "dependsOrder": "sequence",
+      "dependsOn": ["omni:build-renderer-release", "omni:build-extension"],
+      "problemMatcher": []
+    },
+    {
+      "label": "omni:prebuild-smoke",
+      "detail": "Prebuild for the HdEngine smoke debug: renderer Release, delegate + smoke, then shaders.",
+      "dependsOrder": "sequence",
+      "dependsOn": [
+        "omni:build-renderer-release",
+        "omni:build-extension",
+        "omni:stage-smoke-shaders"
+      ],
+      "problemMatcher": []
     }
   ]
 }

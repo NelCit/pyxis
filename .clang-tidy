@@ -21,7 +21,22 @@
 #     time we touch a BindingSetItem. Third-party API contract; not
 #     something Pyxis can fix.
 #
-# Both fire only in Release (CI) clang-tidy runs; the Debug local
+#   * `cplusplus.NewDeleteLeaks` / `cplusplus.NewDelete` — the Hydra
+#     render-delegate contract REQUIRES the factory methods
+#     (CreateRprim/CreateSprim/CreateBprim) to return raw `new`-
+#     allocated objects whose ownership transfers to Hydra (freed via
+#     the matching DestroyRprim/DestroySprim/DestroyBprim). The path-
+#     sensitive analyzer can't see that transfer and flags every
+#     factory as a leak. The same checks also misfire deep inside USD
+#     machinery (TfToken statics, pxr/base/tf/delegatedCountPtr.h's
+#     intrusive ref-count). §30 already forbids raw new/delete outside
+#     thin RAII in Pyxis code, so disabling these analyzer checks loses
+#     negligible coverage while removing a wall of third-party false
+#     positives. (pro-type-member-init stays ON — it still guards our
+#     §18 byte-frozen PODs; the USD Gf* locals it flagged are value-
+#     initialized at their declarations instead.)
+#
+# All fire only in Release (CI) clang-tidy runs; the Debug local
 # build doesn't trigger inter-procedural analysis the same way, so
 # the local Debug build hides these false positives. The PR-blocking
 # CI build does.
@@ -48,7 +63,9 @@ Checks: >
   readability-identifier-naming,
   readability-identifier-length,
   -clang-analyzer-optin.core.EnumCastOutOfRange,
-  -clang-analyzer-optin.cplusplus.UninitializedObject
+  -clang-analyzer-optin.cplusplus.UninitializedObject,
+  -clang-analyzer-cplusplus.NewDeleteLeaks,
+  -clang-analyzer-cplusplus.NewDelete
 
 WarningsAsErrors: '*'
 HeaderFilterRegex: 'sources/pyxis_.*'

@@ -1156,6 +1156,20 @@ void EmitLight(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCache,
     }
   }
 
+  // §25.O.3 parity diagnostic — diff against the delegate's LIGHTDUMP[hyd].
+  if (std::getenv("PYXIS_OMNI_LIGHTDUMP") != nullptr)
+  {
+    std::fprintf(stderr,
+                 "LIGHTDUMP[usd] %s kind=%d color=%.4f,%.4f,%.4f intensity=%.4f "
+                 "pos=%.3f,%.3f,%.3f dir=%.3f,%.3f,%.3f area=%.4f norm=%d envMap=%d\n",
+                 prim.GetPath().GetText(), int(desc.kind), float(desc.color.x),
+                 float(desc.color.y), float(desc.color.z), desc.intensity,
+                 float(desc.position.x), float(desc.position.y), float(desc.position.z),
+                 float(desc.direction.x), float(desc.direction.y), float(desc.direction.z),
+                 areaForNormalize, desc.normalize ? 1 : 0,
+                 desc.envMap != TextureHandle::Invalid);
+  }
+
   const LightHandle handle = scene.AddLight(desc);
   if (handle == LightHandle::Invalid)
   {
@@ -1350,24 +1364,24 @@ void EmitPointInstancer(const pxr::UsdPrim& instancerPrim,
       continue;
 
     // S · R · T · instancerWorld — USD row-vector convention.
-    pxr::GfMatrix4d perInstance;
+    pxr::GfMatrix4d perInstance{};
     perInstance.SetIdentity();
     if (!scales.empty())
     {
-      pxr::GfMatrix4d scaleMat;
+      pxr::GfMatrix4d scaleMat{};
       scaleMat.SetScale(pxr::GfVec3d(scales[instIdx][0], scales[instIdx][1],
                                      scales[instIdx][2]));
       perInstance = perInstance * scaleMat;
     }
     if (!orientations.empty())
     {
-      pxr::GfMatrix4d rotMat;
+      pxr::GfMatrix4d rotMat{};
       rotMat.SetRotate(pxr::GfRotation(pxr::GfQuatd(orientations[instIdx])));
       perInstance = perInstance * rotMat;
     }
     if (!positions.empty())
     {
-      pxr::GfMatrix4d transMat;
+      pxr::GfMatrix4d transMat{};
       transMat.SetTranslate(pxr::GfVec3d(positions[instIdx][0],
                                          positions[instIdx][1],
                                          positions[instIdx][2]));
@@ -2754,6 +2768,22 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
         material_translation::FromUsdShade(materialPrim, ACQUIRE_TEXTURE, &scene,
                                            timeCode);
     materialDesc.sourcePrim = primPath;
+
+    // §25.O.3 parity diagnostic — diff against the delegate's MATDUMP.
+    if (std::getenv("PYXIS_OMNI_MATDUMP") != nullptr)
+    {
+      std::fprintf(stderr,
+                   "MATDUMP %s source=%d base=(%.3f %.3f %.3f) metal=%.3f rough=%.3f "
+                   "emis=(%.3f %.3f %.3f) emisLum=%.3f baseTex=%d normTex=%d roughTex=%d\n",
+                   primPath.c_str(), int(materialDesc.source), float(materialDesc.baseColor.x),
+                   float(materialDesc.baseColor.y), float(materialDesc.baseColor.z),
+                   materialDesc.metalness, materialDesc.roughness,
+                   float(materialDesc.emissionColor.x), float(materialDesc.emissionColor.y),
+                   float(materialDesc.emissionColor.z), materialDesc.emissionLuminance,
+                   materialDesc.baseColorMap != TextureHandle::Invalid,
+                   materialDesc.normalMap != TextureHandle::Invalid,
+                   materialDesc.roughnessMap != TextureHandle::Invalid);
+    }
 
     // V2.A.23 follow-up — per-material texture-binding diagnostic.
     // Logs which lobes resolved to a texture handle vs fell back to

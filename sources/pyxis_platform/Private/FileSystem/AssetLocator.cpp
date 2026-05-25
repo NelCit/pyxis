@@ -27,9 +27,18 @@ std::string Wide2Utf8(const wchar_t* wide) {
   return out;
 }
 
+// Process-wide Resources/ override (empty = use <exe-dir>/Resources). Set once
+// at engine init before any reader; see SetResourcesDirectoryOverride.
+std::string g_resourcesOverride;
+
 }  // namespace
 
 AssetLocator::AssetLocator() = default;
+
+void AssetLocator::SetResourcesDirectoryOverride(std::string_view dir) noexcept {
+  g_resourcesOverride.assign(dir);
+  std::replace(g_resourcesOverride.begin(), g_resourcesOverride.end(), '\\', '/');
+}
 
 const Path& AssetLocator::ExecutableDirectory() const noexcept {
   if (!_exeDirCached)
@@ -50,6 +59,12 @@ const Path& AssetLocator::ExecutableDirectory() const noexcept {
 }
 
 Path AssetLocator::Resources() const noexcept {
+  if (!g_resourcesOverride.empty())
+  {
+    Path overridden;
+    overridden.Assign(g_resourcesOverride);
+    return overridden;
+  }
   return ExecutableDirectory().Join("Resources");
 }
 

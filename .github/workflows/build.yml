@@ -82,8 +82,13 @@ jobs:
       - name: Configure CMake
         run: cmake --preset $env:PYXIS_PRESET
 
+      # `-- -k 0` tells Ninja to keep going after a failed job instead of
+      # stopping at the first batch. clang-tidy gates every TU (/WX), so a
+      # single lint failure otherwise masks every other one in the tree —
+      # turning a one-shot fix into a multi-round game of whack-a-mole.
+      # Keep-going surfaces the full error list in one run.
       - name: Build
-        run: cmake --build --preset $env:PYXIS_PRESET
+        run: cmake --build --preset $env:PYXIS_PRESET -- -k 0
 
       # `-LE m2` excludes the M2.HeadlessByteEqualEXR test (label
       # `m2`) which needs a GPU; everything else is CPU-only.

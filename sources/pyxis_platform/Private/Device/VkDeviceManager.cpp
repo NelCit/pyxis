@@ -377,6 +377,9 @@ DeviceManagerCreateStatus VkDeviceManager::Bringup(const DeviceCreationParams& p
   nvrhiDesc.graphicsQueue = _graphicsQueue;
   nvrhiDesc.graphicsQueueIndex = _graphicsFamily;
   nvrhiDesc.bufferDeviceAddressSupported = true;
+  // VkQueryPool is sized to maxTimerQueries at creation (default 256); Pyxis's
+  // per-frame profiler scope count * SLOT_COUNT can exceed it. Headroom (~32 KiB).
+  nvrhiDesc.maxTimerQueries = 4096;
 
   // Same `deviceExtensions` array we fed to vkCreateDevice — NVRHI walks
   // it to flip its internal capability flags (vulkan-device.cpp's

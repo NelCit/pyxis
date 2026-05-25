@@ -15,7 +15,7 @@ and never vendored. These scripts acquire them non-interactively and build on to
 |---|---|
 | `check.ps1` | Verify every prerequisite (clang-cl, cmake, ninja, GPU, Vulkan + external-memory, Kit SDK, nv-usd, Python 3.12, prebuilt renderer). Prints OK/MISSING + hints. |
 | `setup.ps1` | One-time: clone kit-app-template, bootstrap Packman, pull nv-usd 25.11 + Python 3.12 into `build/omniverse`. Writes `usd-deps/paths.ps1`. |
-| `build.ps1` | Configure + compile `pyxis_hydra_omni` against nv-usd; assemble + stage the `omni.hydra.pyxis` extension (delegate DLL + runtime DLLs + shaders) into the Kit app. |
+| `build.ps1` | Configure + compile `pyxis_hydra_omni` against nv-usd; assemble + stage the `omni.hydra.pyxis` extension (delegate DLL + native IExt + runtime DLLs + shaders) into the Kit app. |
 | `run_smoke.ps1` | Headless end-to-end test: drives a USD stage through the delegate via HdEngine; verifies ingest + render + composite into the host buffer. |
 | `deps/nv-usd.packman.xml` | Pins the nv-usd 25.11 package. |
 
@@ -27,6 +27,30 @@ _tools/omniverse/setup.ps1     # one-time SDK acquisition (multi-GB)
 _tools/omniverse/check.ps1     # confirm prerequisites
 _tools/omniverse/build.ps1     # build + stage omni.hydra.pyxis
 ```
+
+The extension is **Python-free**: it ships the prebuilt delegate
+(`pyxis_hydra_omni.dll`) plus a native Carbonite IExt
+(`omni.hydra.pyxis.plugin.dll`, declared as `[[native.plugin]]`) that registers
+the delegate's `plugInfo.json` with USD's `PlugRegistry` on startup. The IExt is
+pinned to C++17 (Carbonite headers don't compile under strict clang-cl C++23);
+it links only USD `Plug`/`Tf` — never the renderer/NVRHI stack.
+
+## Run / debug from VS Code
+
+`.vscode/launch.json` has two RFC-0004 configurations, each with a prebuild:
+
+- **Omniverse: Pyxis Editor (prebuild + launch)** — prebuilds the renderer
+  (Release), the delegate + native IExt, stages the extension, then launches
+  `kit.exe` on `pyxis.editor.kit`. `cppvsdbg` so you can breakpoint inside
+  `pyxis_hydra_omni.dll` / `omni.hydra.pyxis.plugin.dll` once Kit loads them.
+- **Omniverse: HdEngine smoke (debug delegate)** — prebuilds + launches the
+  headless smoke harness (drives a USD stage through the delegate via HdEngine
+  and renders Pyxis into the host AOV). Fast iteration with full breakpoints, no
+  Kit. Sets the nv-usd-first `PATH` + `PXR_PLUGINPATH_NAME` the harness needs.
+
+Prebuild tasks live in `.vscode/tasks.json` (`omni:prebuild`,
+`omni:prebuild-smoke`, …) and can also be run standalone from the Command
+Palette → *Tasks: Run Task*.
 
 ## Tests
 

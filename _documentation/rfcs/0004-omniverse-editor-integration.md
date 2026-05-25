@@ -109,20 +109,35 @@ to link:
 
 **UPDATE (2026-05-23): Stage 3 "C2" done — delegate registers + is discoverable
 in a live Kit process.** The extension is defined entirely in-repo
-(`sources/pyxis_hydra_omni/extension/`): a prebuilt-native + Python-registration
-extension (no Kit-premake build). On startup its Python module calls
-`Plug.Registry().RegisterPlugins(<ext>/bin/resources)`. A headless `kit.exe`
-smoke (enable `omni.hydra.pyxis`, `omni.usd.libs` dep only) confirms:
+(`sources/pyxis_hydra_omni/extension/`) with **no Kit-premake build** and, as of
+the update below, **no Python**.
+
+**UPDATE (2026-05-23): the registration shim is now a native Carbonite IExt — the
+extension is Python-free.** The former Python startup module
+(`omni/hydra/pyxis/extension.py`) is replaced by `omni.hydra.pyxis.plugin.dll`
+(`sources/pyxis_hydra_omni/Private/PyxisExtModule.cpp`), declared in
+`extension.toml` as `[[native.plugin]] path = "bin/*.plugin"`. On `onStartup` it
+locates itself via `GetModuleFileNameW` and calls
+`PlugRegistry::GetInstance().RegisterPlugins(<dll-dir>/resources)` — a 1:1 port of
+the Python logic. It links only USD `Plug`/`Tf` (never the renderer/NVRHI stack)
+and is pinned to **C++17**: Carbonite's headers (`carb/PluginUtils.h` →
+`omni/String.inl`) don't compile under strict clang-cl C++23. A headless
+`kit.exe` smoke (enable `omni.hydra.pyxis`, `omni.usd.libs` dep only) confirms the
+native path:
 
 ```
-[omni.hydra.pyxis.extension] Registered Pyxis Hydra delegate ...; type discoverable = True
-PYXIS_C2 registered=... type_found=True
+[ext: omni.hydra.pyxis-0.1.0] startup
+[omni.hydra.pyxis] Registered Pyxis Hydra delegate ...; type discoverable = 1
+PYXIS_ENUM count=1 pyxis=1 plugins=[HdPyxisOmniRendererPlugin]
 ```
 
-i.e. `Plug.Registry.FindTypeByName("HdPyxisOmniRendererPlugin")` returns the type
-inside a running Kit/USD process — so a full viewport app surfaces "Pyxis" in the
-renderer list. `build.ps1` assembles the full extension (toml + Python + DLL +
-plugInfo) into the Kit extension folder, stripping the wizard's C++ scaffold.
+i.e. `TfType::FindByName("HdPyxisOmniRendererPlugin")` resolves inside a running
+Kit/USD process — so a full viewport app surfaces "Pyxis" in the renderer list.
+`build.ps1` assembles the full extension (toml + both DLLs + plugInfo + runtime
+DLLs + shaders) into the Kit extension folder, stripping the wizard's C++
+scaffold, and repairs the `<release>/apps` junction so `pyxis.editor.kit`
+launches. `.vscode/launch.json` adds a prebuild-and-launch config for the editor
+plus a debuggable HdEngine-smoke config (see `_tools/omniverse/README.md`).
 
 **UPDATE (2026-05-23): Stage 3 "C4" render data-path proven on hardware.**
 `tests/unit/PyxisRenderToExportedImage.cpp` stands up the real renderer stack
@@ -253,6 +268,115 @@ engine cannot be written against the public Kit 110 SDK. B needs NVIDIA's
 internal Hydra-engine SDK / RTX renderer source. → Option A (custom viewport
 extension) is the feasible in-viewport path; C (usdview/headless/file) already
 works.
+
+**UPDATE (2026-05-23): exhaustive SDK-wide search for the factory interface —
+definitively not obtainable; `ISimpleEngine` IS the public engine.** Swept the
+entire Kit SDK `dev/include`, the Packman `kit-kernel` `dev/include` +
+`dev/fabric/include`, and the whole Packman cache:
+- `IHydraEngineFactory` / `IHydraEngine` appear **only** as the forward-decl in
+  `omni/usd/UsdManager.h` + `UsdContext.h`. No class body, no `*_abi`, no
+  `.gen.h`, no `OMNI_DECLARE_INTERFACE` — they are **plain internal C++ abstract
+  classes, not omni.core/ONI interfaces**, so there is no ABI-stable way to
+  implement them out-of-tree. `HydraEngineTypes.h` ships only POD config/desc
+  structs (`HydraEngineCreationConfig`, `HydraEngineUniqueId`, …). No sample or
+  `.py` anywhere calls `registerHydraEngineFactory`. NVIDIA docs only cover the
+  by-name `addHydraEngine`/`createViewport` consumer APIs.
+- **Decisive asymmetry:** `usdrt::hydra::ISimpleEngine`
+  (`dev/fabric/include/usdrt/hydra/engine/ISimpleEngine.h` **+ `.gen.h`**) is a
+  fully-shipped omni.core interface. Surface (verbatim from the header):
+  `setRendererPlugin(const char* id)`, `getRendererPluginCount()`,
+  `getRendererPlugin(i)`, `render(UsdStageId, rootPath, RenderParams*, …)`,
+  `setCameraState(view, proj)`, `setRendererAov(const char*)`,
+  `setRenderBufferSize(GfVec2i*)`, `setLightingState`, `isConverged`,
+  pause/resume/stop, `getUsdrtDelegate`, `testIntersection` (picking).
+- The web lead `omni.kit.hydra_texture` (render a stage with a named HydraEngine
+  to a texture) does **not** bypass the blocker — it selects engines by name from
+  the same closed registry, so it still needs a registered factory.
+
+**Net:** reconstructing `IHydraEngineFactory`'s vtable by hand is unsupported and
+fragile (crashes across Kit/driver updates) — Option B stays parked on an NVIDIA
+internal-SDK ask. **The supported public path to Pyxis pixels in a Kit window is
+Option A via `ISimpleEngine`:** create an `ISimpleEngine` (omni.core), call
+`setRendererPlugin("HdPyxisOmniRendererPlugin")`, drive `render`/`setCameraState`
+from the live stage, select our color AOV, and present the AOV into a Kit panel
+via `GpuInteropImporter` (zero-copy, C3-proven). Sources:
+docs.omniverse.nvidia.com `omni.usd` (`UsdContext`, `namespace omni::usd::hydra`)
+and `omni.kit.hydra_texture`.
+
+**UPDATE (2026-05-23): Option A build mechanics nailed down (decisions: pure-C++
+panel, no Python; our embedded HdEngine; zero-copy display).** Surveyed the Kit
+C++ surface to choose how a no-Python panel draws:
+- **Kit ships NO import libs** (`.lib`) in `dev/`. C++ extensions link Kit only
+  via **carb interfaces** (runtime-resolved at plugin load, like our IExt — no
+  link lib). This is why `omni.hydra.pyxis.plugin.dll` links nothing from Kit.
+- **No `imgui.h` and no carb ImGui *draw* API are shipped.** `IImGuiRenderer`
+  (`omni/kit/renderer/IImGuiRenderer.h`) is a carb interface, but it's a low-level
+  service used *by* omni.ui (`allocateReferenceForTexture`, `renderDrawData`),
+  **not** a way to issue `ImGui::Image` calls. So "pure-C++ via raw ImGui" is a
+  dead end — there's no shipped header to draw with.
+- **The genuine pure-C++ display path is the omni.ui C++ classes** (`omni::ui::Window`,
+  `ImageWithProvider`, `ImageProvider/DynamicTextureProvider.h` — all shipped as
+  headers, `OMNIUI_API`-exported). Since no import lib ships, link them via a
+  **`.lib` generated from `omni.ui.dll`** (`dumpbin /exports → .def → lib /def`),
+  pinned to Kit 110.1.1 (already pinned). `omni.ui.dll` is registry-pulled, so the
+  build must first resolve the editor's exts (it lands in `_build/.../extscache`).
+- **`DynamicTextureProvider`** (extends `ByteImageProvider`) takes CPU bytes via
+  `setBytesData(...)` (easy first cut) and a GPU resource via the protected
+  `_setManagedResource(omni::kit::renderer::GpuResource*)` — the zero-copy hook:
+  subclass it, import our `GpuInteropExporter` Win32 handle into Kit's RTX
+  `carb::graphics::Device`, wrap as the renderer's `TextureGpuReference`.
+- **Live stage in C++ without linking omni.usd:** read the current stage from
+  USD's global stage cache (plain nv-usd, which we already link) rather than
+  `omni::usd::UsdContext::getStage()` (also import-lib-less). Avoids a second
+  generated lib for stage access.
+
+**Staged build plan (each independently verifiable):**
+1. **Reusable host** — extract the proven `HdEngineSmoke` driving logic (steps
+   2–4: delegate + render index + `UsdImagingCreateSceneIndices` + render pass +
+   AOV binding + camera + `HdEngine::Execute`) into a `PyxisHydraHost` class in
+   `pyxis_hydra_omni/Private`, parameterized by a `UsdStageRefPtr` + dims + time.
+   The smoke harness becomes a thin client; the panel is the second client.
+2. **In-Kit render tick** — a new pure-C++ carb IExt (`omni.pyxis.viewport.plugin`)
+   that subscribes to the app update event (carb eventdispatcher, no lib), pulls
+   the live stage from the stage cache, drives `PyxisHydraHost`, and (first proof)
+   writes the frame to disk. Verifies live-stage rendering *inside* Kit.
+3. **Display (CPU-first)** — omni.ui C++ Window + ImageWithProvider +
+   DynamicTextureProvider via the generated import lib; `setBytesData` from the
+   composited AOV. Pyxis becomes *visible* in the editor.
+4. **Zero-copy** — subclass DynamicTextureProvider, import our exported VkImage
+   into Kit's RTX device, present as a `TextureGpuReference` (no CPU copy).
+
+**UPDATE (2026-05-23): Stages 1–3 IMPLEMENTED + verified in a live (headless)
+Kit; Pyxis renders into an omni.ui panel, no Python.**
+- **Stage 1** — `PyxisHydraHost` (`Private/PyxisHydraHost.{h,cpp}`) extracted from
+  the smoke; the smoke is now a thin client and still renders byte-identically.
+- **Stage 2** — `PyxisViewportBridge` (`Private/PyxisViewportBridge.{h,cpp}`,
+  POD C++17↔C++23 boundary, `Create()` exported from `pyxis_hydra_omni.dll`) +
+  `omni.hydra.pyxis.panel.plugin.dll` (`Private/PyxisViewportPanel.cpp`, a second
+  native IExt in the same extension). Verified live: the panel stands up a second
+  Pyxis Vulkan device inside Kit, **finds the edited stage via USD's global
+  `UsdUtilsStageCache`** (no `omni.usd` link needed), drives the host, and renders
+  every app-update tick.
+- **Stage 3** — the panel hosts an `omni::ui::Window` ("Pyxis Renderer") with an
+  `ImageWithProvider` + `DynamicTextureProvider`, refilled via `setBytesData`
+  (RGBA8) each frame. Linked against `omni.ui.lib` (ships inside the omni.ui
+  *extension's* bin — NOT `dumpbin`-generated; the earlier `.lib`-gen note was
+  unnecessary). Two unshipped headers Kit's public SDK omits
+  (`carb/imaging/IImaging.h`, `carb/memorytracking/IGpuMemoryTracker.h`) are
+  supplied as minimal stubs under `Private/kit_stubs/` (only `carb::imaging::DisplayWindowRect`
+  carries ABI weight — a 4-float rect confirmed from ImageProvider.h's `{0,0,1,1}`
+  initializer; verified by scanning all 204 reachable headers, only those 2 missing).
+  A headless editor run loads the panel, creates the window, and pushes pixels for
+  1400+ frames with **no crash/exception** — confirming the stub ABI is correct.
+
+`instances=0` in the headless runs only because the editor's empty start-stage
+has no geometry; the smoke proves geometry renders through the identical host.
+**On-screen pixels are a GUI check** (handed to the user — launch the editor, open
+a scene with geometry, see the "Pyxis Renderer" window). **Stage 4 (zero-copy)**
+remains the optimization: subclass `DynamicTextureProvider` + import our exported
+VkImage into Kit's RTX device. Build wiring: `build.ps1` locates `omni.ui.lib` +
+the Packman `boost-preprocessor` include and passes them to CMake; the panel is a
+C++17 target like the registration plugin.
 
 ### Option B unblock plan (chosen path — parked on NVIDIA internal SDK)
 

@@ -25,41 +25,33 @@ target_sources(pyxis_hydra PRIVATE
     Private/HdPyxisRendererPlugin.cpp
     Private/HdPyxisRenderDelegate.h
     Private/HdPyxisRenderDelegate.cpp
+    Private/HdPyxisRenderParam.h
+    # RFC 0006: the delegate now OWNS its render engine (own Vulkan device +
+    # GpuScene + PyxisRenderer + GpuInteropExporter), so the single delegate
+    # source loads as a plugin in any HdEngine host (usdview / Omniverse Kit).
+    # This is the engine the pyxis_hydra_omni Kit fork used to carry separately.
+    Private/PyxisEngine.h
+    Private/PyxisEngine.cpp
 )
 
-find_package(pxr CONFIG REQUIRED)
-
-# USD's tf/type_Impl.h uses std::is_pod which is deprecated in C++20+.
-# We compile against C++23 so MSVC's STL fires `STL4025` at every
-# TF_REGISTRY_FUNCTION expansion. Silence the deprecation in this
-# DLL only — the choice belongs to USD, not us.
-target_compile_definitions(pyxis_hydra PRIVATE
-    _SILENCE_CXX20_IS_POD_DEPRECATION_WARNING=1
-)
+# RFC 0006: link Kit's nv-usd 25.11 (not vcpkg USD 26.3) so this delegate is the
+# single source compiled for both the standalone host and Omniverse Kit. The full
+# usd_* import set (incl. hd/hdsi/hf/usdImaging) + python312 + the std::is_pod
+# silence + /EHsc /GR come from pyxis_use_nv_usd.
+include(PyxisNvUsd)
 
 target_link_libraries(pyxis_hydra
     PUBLIC
         Pyxis::Renderer
         Pyxis::MaterialTranslation     # Sync impls call FromUsdShade.
+        Pyxis::UsdIngest               # §25.O.3 — ingest the stage via StageWalker (same as standalone).
     PRIVATE
-        # USD core + Hydra. The full set of Hd* / UsdImaging* targets the
-        # delegate touches at M4. The plug / tf set are required for
-        # the TF_REGISTRY_FUNCTION macro that hooks the plugin into
-        # the Hd renderer-plugin registry.
-        usd
-        usdGeom
-        usdLux
-        usdShade
-        sdf
-        plug
-        tf
-        gf
-        vt
-        hd
-        hdsi
-        hf
-        hio
+        # RFC 0006: PyxisEngine stands up a Pyxis Vulkan device + GpuScene +
+        # renderer + GpuInteropExporter. Platform links nvrhi PUBLIC, so the
+        # nvrhi headers PyxisEngine.cpp needs ride along transitively.
+        Pyxis::Platform
 )
+pyxis_use_nv_usd(pyxis_hydra)
 
 # ----------------------------------------------------------------------------
 # plugInfo.json — written next to pyxis_hydra.dll at build time so Hydra's

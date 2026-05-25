@@ -47,10 +47,15 @@ target_sources(pyxis_usd_ingest PRIVATE
 set_source_files_properties(Private/VolumeLoader.cpp PROPERTIES
     SKIP_LINTING ON)
 
-find_package(pxr CONFIG REQUIRED)
+# RFC 0006: USD comes from Kit's nv-usd 25.11 (pyxis_use_nv_usd below), NOT vcpkg
+# OpenUSD 26.3. mikktspace + OpenVDB stay vcpkg (they exchange raw vertex/voxel
+# data, not USD types). OpenSubdiv must come from nv-usd, NOT vcpkg: nv-usd bundles
+# its own OpenSubdiv headers (v3_6_0) which win on the include path, so the .obj
+# references nv-usd's OpenSubdiv ABI — linking vcpkg's osd would be undefined
+# symbols. nv-usd ships osdCPU.lib for exactly this.
 find_package(mikktspace CONFIG REQUIRED)
-find_package(OpenSubdiv CONFIG REQUIRED)
 find_package(OpenVDB CONFIG REQUIRED)
+include(PyxisNvUsd)
 
 # OpenMP — parallel mesh prep in StageWalker (§31 asset pool work).
 #
@@ -108,24 +113,11 @@ target_link_libraries(pyxis_usd_ingest
         Pyxis::Renderer
         Pyxis::MaterialTranslation
     PRIVATE
-        ar
-        usd
-        usdGeom
-        usdLux
-        usdRender
-        usdShade
-        usdSkel
-        usdVol
-        sdf
-        tf
-        gf
-        vt
         mikktspace::mikktspace
-        # OpenSubdiv CPU refinement (M12 / V2.A.1). The osdCPU_static
-        # target ships the Far + Sdc + Vtr layers; GPU evaluation
-        # backends (osdGPU_static) intentionally not linked — we
-        # refine on the asset I/O pool at ingest time, not on the GPU.
-        OpenSubdiv::osdCPU_static
+        # OpenSubdiv CPU refinement (M12 / V2.A.1). nv-usd's osdCPU.lib (Far +
+        # Sdc + Vtr layers) — matches the bundled v3_6_0 headers SubdivRefine.cpp
+        # compiles against (RFC 0006). GPU eval backend (osdGPU) not linked.
+        "${PXR_USD_ROOT}/lib/osdCPU.lib"
         # OpenVDB sparse-volume reader (V2.A.5). VolumeLoader opens
         # .vdb files referenced by UsdVolVolume / OpenVDBAsset prims
         # and flattens the active grid into a dense float voxel
@@ -134,3 +126,4 @@ target_link_libraries(pyxis_usd_ingest
         # `nanovdb` feature on the port (would pull CUDA).
         OpenVDB::openvdb
 )
+pyxis_use_nv_usd(pyxis_usd_ingest)

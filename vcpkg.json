@@ -7,6 +7,8 @@
   "license": "Apache-2.0",
   "supports": "windows & x64",
 
+  "$rfc-0006-comment": "OpenUSD + OpenSubdiv are intentionally NOT vcpkg deps. Pyxis links Kit's nv-usd 25.11 (build/omniverse/usd-deps/usd) via _cmake/PyxisNvUsd.cmake so the same ingest + Hydra-delegate sources build for both the standalone host and Omniverse Kit (one USD ABI, no forked delegate). nv-usd bundles OpenSubdiv v3_6_0 (we link its osdCPU.lib). nv-usd 25.11 is pinned by the packman lockfile under _tools/omniverse/, not vcpkg. pyxis_renderer stays USD-free (§1 / §30.3).",
+
   "$plan-references": [
     "§4 third-party dependency table (canonical justification per dep)",
     "§33.10 spdlog SHARED linkage rule (Tracy follows the same rule)",
@@ -73,17 +75,6 @@
       "$comment": "ECS for SceneWorld. Linked PRIVATE into pyxis_renderer; no Flecs header escapes Public/. Plan §4 / §8 / §30.11. The vcpkg port builds Flecs's monolithic profile (FLECS_REST + FLECS_HTTP enabled at compile time), so the Explorer UI at http://localhost:27750 is reachable in any build — Pyxis still gates the *call* to flecs::Rest behind PYXIS_DEBUG_TOOLS so production builds don't bind the listen socket (§30.11)."
     },
     {
-      "name": "usd",
-      "default-features": false,
-      "features": ["imaging", "materialx"],
-      "$comment": "OpenUSD (M4+). `imaging` pulls Hd / UsdImaging (the Hydra delegate's host); `materialx` enables the open_pbr_surface / standard_surface networks pyxis_material_translation reads. Python deliberately off (plan §6 — we don't embed Python). Boost dropped in modern USD (26.x) so no Boost dep here. Linked PUBLIC into pyxis_hydra + pyxis_usd_ingest only; pyxis_renderer stays USD-free (§1 / §30.3). vcpkg builds USD as DLLs (port enforces ONLY_DYNAMIC_LIBRARY)."
-    },
-    {
-      "name": "opensubdiv",
-      "default-features": false,
-      "$comment": "Pixar's OpenSubdiv (M12 / V2.A.1). Refines authored UsdGeomMesh::subdivisionScheme=catmullClark|loop cages to the limit surface at ingest, so 83 of the lobby's meshes (8.8%) render as smooth surfaces instead of faceted cages. CPU-only path (default features off: no GL/DX/CUDA backends). Linked PRIVATE into pyxis_usd_ingest."
-    },
-    {
       "name": "openvdb",
       "default-features": false,
       "$comment": "OpenVDB sparse-volume reader (V2.A.5). Pyxis loads .vdb files referenced by UsdVolVolume + OpenVDBAsset prims, flattens the active grid to a dense float voxel buffer, and binds it as a Texture3D for the shader. The shader binding is wired but the closesthit doesn't sample yet — that's a follow-up volume-integrator milestone. Default features off (no `nanovdb` — that pulls CUDA which Pyxis doesn't use; no `ax`; no `tools`). Linked PRIVATE into pyxis_usd_ingest."
@@ -98,11 +89,6 @@
 
   "features": {},
 
-  "overrides": [
-    {
-      "name": "usd",
-      "version": "26.3",
-      "$comment": "Pin USD explicitly so the binary-cache key stays stable across baseline bumps. USD is the ~hour-long compile in the dep graph; an unintended USD-version drift via builtin-baseline would invalidate the cache and force a rebuild. Bump deliberately when USD itself moves."
-    }
-  ]
+  "$overrides-comment": "The USD 26.3 override was removed with the `usd` dependency (RFC 0006); nv-usd 25.11 is version-pinned by the packman lockfile under _tools/omniverse/, not vcpkg.",
+  "overrides": []
 }

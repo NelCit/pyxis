@@ -1,13 +1,14 @@
-// Pyxis Omniverse Hydra delegate — render engine. RFC 0004 Stage 3 (C4).
+// Pyxis Hydra delegate — render engine.
 //
-// USD-free render driver living inside the Kit extension. It owns a Pyxis
-// Vulkan device (separate from Kit's, per §32), a GpuScene, a PyxisRenderer and
-// a GpuInteropExporter, and renders frames into an exportable color image that
-// Kit imports (zero host copy). This is exactly the sequence proven by
-// tests/unit/PyxisRenderToExportedImage.cpp; the HdRenderPass drives it.
+// USD-free render driver owned by HdPyxisRenderDelegate. It owns a Pyxis Vulkan
+// device (separate from any host's, per §32), a GpuScene, a PyxisRenderer and a
+// GpuInteropExporter, and renders frames into an exportable color image a host
+// (Omniverse Kit) can import with zero host copy. The HdRenderPass drives it.
 //
-// PIMPL so this header stays free of both nvrhi and USD types (the RenderPass
-// TU includes USD; this engine TU includes nvrhi + the Pyxis public API).
+// This is the single delegate engine shared by both the standalone/usdview
+// plugin (pyxis_hydra.dll) and the Omniverse Kit extension (RFC 0006 collapsed
+// the former pyxis_hydra_omni fork onto these sources). PIMPL so this header
+// stays free of both nvrhi and USD types.
 
 #pragma once
 
@@ -22,7 +23,7 @@ class GpuScene;
 class Profiler;
 }  // namespace pyxis
 
-namespace pyxis_omni {
+namespace pyxis::hydra {
 
 class PyxisEngine {
  public:
@@ -37,10 +38,25 @@ class PyxisEngine {
   [[nodiscard]] bool Initialize(uint32_t width, uint32_t height) noexcept;
 
   // Render one frame into the exportable color image and signal the timeline
-  // semaphore so the Kit side can wait before sampling. No-op if !IsValid().
+  // semaphore so the host can wait before sampling. No-op if !IsValid().
   void RenderFrame() noexcept;
 
-  // The exportable color image (Win32 handle + timeline) Kit imports. Valid
+  // Resize the render targets + exportable image to (width, height). Cheap no-op
+  // if already that size. Called when the host viewport's AOV buffer dimensions
+  // differ from the current render size (so the delegate renders at the viewport
+  // resolution + aspect rather than a fixed default that gets cropped).
+  void Resize(uint32_t width, uint32_t height) noexcept;
+
+  // Block until the GPU retires all submitted work. Required before mutating the
+  // scene in a way that drops live GPU resources (e.g. GpuScene::Clear on a
+  // stage change while the engine is persisted), per the GpuScene::Clear
+  // contract. No-op if !IsValid().
+  void WaitIdle() noexcept;
+
+  [[nodiscard]] uint32_t Width() const noexcept;
+  [[nodiscard]] uint32_t Height() const noexcept;
+
+  // The exportable color image (Win32 handle + timeline) the host imports. Valid
   // after a successful Initialize().
   [[nodiscard]] const pyxis::ExportedImage& ExportedColor() const noexcept;
   [[nodiscard]] const pyxis::ExportedSemaphore& Timeline() const noexcept;
@@ -61,7 +77,7 @@ class PyxisEngine {
   [[nodiscard]] pyxis::Profiler* ProfilerPtr() const noexcept;
 
   // Last committed scene counts (from GpuScene::LastFrameStats) — used to verify
-  // the FSD prim adapters fed geometry through to Pyxis.
+  // the prim adapters fed geometry through to Pyxis.
   [[nodiscard]] uint64_t LastInstanceCount() const noexcept;
   [[nodiscard]] uint64_t LastMeshCount() const noexcept;
   [[nodiscard]] uint64_t LastMaterialCount() const noexcept;
@@ -72,4 +88,4 @@ class PyxisEngine {
   std::unique_ptr<Impl> _impl;
 };
 
-}  // namespace pyxis_omni
+}  // namespace pyxis::hydra
