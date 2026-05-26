@@ -13,6 +13,7 @@
 // defines SsaaDownsampleUniforms under #ifdef __cplusplus.
 #include "ShaderInterop.slang"
 
+#include <algorithm>
 #include <fstream>
 #include <ios>
 #include <vector>
@@ -149,11 +150,15 @@ void SsaaResolvePass::Execute(nvrhi::ICommandList* commandList,
       || context.targets == nullptr)
     return;
 
-  const uint32_t factor = context.settings->ssaaFactor;
+  const uint32_t factor = std::max(1u, context.settings->ssaaFactor);
   nvrhi::ITexture* const source = context.targets->color;
   nvrhi::ITexture* const dest = context.targets->colorResolved;
-  // No-op for the non-SSAA path: factor 1, or no resolve target bound.
-  if (factor < 2u || source == nullptr || dest == nullptr)
+  // Runs only when a resolve target is bound. The standalone viewer binds it for
+  // BOTH the supersampled (factor > 1, box-downsample) AND the non-supersampled
+  // (factor 1) present — at factor 1 the pass is a pure sRGB present-encode
+  // (LinearToSrgb passthrough). Kit's PyxisEngine never binds colorResolved, so
+  // this stays a no-op for Omniverse (its output is unaffected).
+  if (source == nullptr || dest == nullptr)
     return;
 
   // settings.{width,height} are the super-res render dims; the resolve

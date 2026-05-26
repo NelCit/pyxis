@@ -12,6 +12,7 @@
 
 #include "HdPyxisRenderDelegate.h"
 
+#include "AovColorEncode.h"
 #include "HdPyxisRenderParam.h"
 #include "PyxisEngine.h"
 
@@ -305,7 +306,6 @@ class StubRenderBuffer final : public HdRenderBuffer {
 
 using pyxis::color::FloatToHalf;
 using pyxis::color::HalfToFloat;
-using pyxis::color::LinearToSrgb;
 
 // Composite Pyxis's rendered color (RGBA16F, from PyxisEngine readback) into the
 // host's bound color HdRenderBuffer. This is the host-facing presentation step —
@@ -370,9 +370,8 @@ void WritePyxisColorToAov(pyxis::hydra::PyxisEngine& engine, HdRenderBuffer* buf
   // pre-encode for a hypothetical host that presents the AOV without color-correction.
   const bool encodeSrgb = std::getenv("PYXIS_OMNI_AOV_SRGB") != nullptr;
   auto encode = [encodeSrgb](float linear, int channel) -> float {
-    if (channel == 3 || !encodeSrgb)
-      return linear < 0.f ? 0.f : (linear > 1.f ? 1.f : linear);
-    return LinearToSrgb(linear);
+    // Single source of truth (also pinned by pyxis_unit_tests AovColorEncode).
+    return pyxis::hydra::EncodeAovColorChannel(linear, channel, encodeSrgb);
   };
   const auto* srcRowBase = reinterpret_cast<const uint16_t*>(src.data());
   for (uint32_t row = 0; row < copyHeight; ++row) {

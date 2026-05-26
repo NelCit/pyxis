@@ -187,6 +187,20 @@ if(PYXIS_BUILD_TESTS)
         TIMEOUT 300 LABELS "omniverse;integration;parity;requires_gpu"
         RESOURCE_LOCK "pyxis_gpu")
 
+    # Display-parity: the "Omniverse viewer == Pyxis engine viewer" invariant.
+    # Renders the World Lobby through ALL THREE Pyxis display paths — headless
+    # (pyxis.exe --output), standalone viewer (pyxis.exe --screenshot), and the
+    # Kit/Omniverse pxr viewport (capture) — and asserts the displayed pixels
+    # match (each applies the sRGB OETF exactly once). Regression guard for the
+    # color double/zero-encode bug. The CPU-level proof is the AovColorEncode /
+    # ColorEncoding unit tests; this is the end-to-end GPU confirmation.
+    add_test(NAME DisplayParity.WorldLobby
+        COMMAND powershell -NoProfile -ExecutionPolicy Bypass
+                -File "${CMAKE_SOURCE_DIR}/_tools/omniverse/run_display_parity.ps1")
+    set_tests_properties(DisplayParity.WorldLobby PROPERTIES
+        TIMEOUT 360 LABELS "omniverse;integration;parity;requires_gpu"
+        RESOURCE_LOCK "pyxis_gpu")
+
     # Curated golden fixtures (static, camera at /World/Camera) covering the
     # delegate ingest paths. 256x256 to match the golden config; the comparison
     # is delegate-vs-standalone, so the resolution only needs to agree.

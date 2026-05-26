@@ -62,6 +62,8 @@ target_sources(pyxis_unit_tests PRIVATE
     MeshUvPackV2.cpp
     GpuInteropRoundTrip.cpp
     PyxisRenderToExportedImage.cpp
+    ColorEncodingFixture.cpp
+    AovColorEncodeFixture.cpp
 
     # V2.A.14 — BCn encoder helper. Recompiled here so the test exe
     # exercises the real helper directly instead of going through the
@@ -128,6 +130,10 @@ target_include_directories(pyxis_unit_tests PRIVATE
     # PR6 — PurposeFilterSpecParsing.cpp + future ingest unit tests
     # include the public UsdIngest header directly.
     ${CMAKE_SOURCE_DIR}/sources/pyxis_usd_ingest/Public
+    # AovColorEncodeFixture pins the delegate's header-only AOV encode policy
+    # (Private/AovColorEncode.h) — the single source of truth for the
+    # Omniverse⇄engine color-parity contract.
+    ${CMAKE_SOURCE_DIR}/sources/pyxis_hydra/Private
 )
 
 # pyxis_unit_tests is the one place we *do* allow exceptions — gtest
