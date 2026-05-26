@@ -312,16 +312,18 @@ using pyxis::color::LinearToSrgb;
 // every display path (custom panel, usdview, UsdImagingGL, omni.hydra.pxr) reads
 // this buffer. Supports the common AOV formats; converts from RGBA16F as needed.
 //
-// §25.O.3 / RTX-match: PyxisEngine exports the ACES-tonemapped color in LINEAR
-// display space (raygen writes acesFilmic() with no OETF; the exported texture is
-// a storage/UAV target so the GPU applies no sRGB on write). The Kit viewport
-// (and usdview's GL present) show this color AOV VERBATIM — they do NOT apply a
-// display transform to a delegate's color buffer — so to match RTX (which hands
-// the viewport display-ready values) the delegate must sRGB-ENCODE here. The
-// standalone pyxis.exe path is unaffected: it reads the LINEAR buffer via
-// ReadbackColorHdr and applies sRGB in its own PNG writer / sRGB swapchain. RGB
-// is encoded; alpha stays linear. Set PYXIS_OMNI_EXPORT_LINEAR_HDR to skip the
-// encode (a host that does its own display transform).
+// §25.O.3 color management: PyxisEngine exports the ACES-tonemapped color in
+// LINEAR display space (raygen writes acesFilmic() with no OETF). We write that
+// LINEAR value to the host's color AOV unchanged — the Hydra convention is that
+// the color AOV is linear and the consumer applies the display OETF. EMPIRICALLY
+// VERIFIED: the Kit pxr viewport (and usdview) run HdxColorCorrectionTask, whose
+// measured transfer function on this AOV is exactly the sRGB OETF; pre-encoding
+// sRGB here therefore double-applied it (washed-out / too bright vs the standalone
+// pyxis.exe PNG). Writing linear makes the Kit viewport byte-match the standalone
+// headless output. The standalone WorldLobbyHeadless harness does NOT consume this
+// AOV (it reads ReadbackColorHdr directly and sRGB-encodes in WriteBmp), so §25.O.3
+// parity is unaffected. PYXIS_OMNI_AOV_SRGB=1 restores the sRGB pre-encode for a
+// hypothetical host that presents the AOV without any color correction.
 void WritePyxisColorToAov(pyxis::hydra::PyxisEngine& engine, HdRenderBuffer* buffer) {
   // Per-frame trace (composite / render-pass): gated on PYXIS_OMNI_TRACE, NOT
   // PYXIS_OMNI_DBG, so the default-on DBG keeps only occasional lifecycle prints
@@ -356,9 +358,17 @@ void WritePyxisColorToAov(pyxis::hydra::PyxisEngine& engine, HdRenderBuffer* buf
   // only — ReadbackColorHdr (the headless EXR + §25.O.3 byte-identical
   // determinism path) is left untouched, so EXR orientation/determinism is
   // unaffected.
-  // sRGB-encode RGB (channels 0..2), pass alpha (channel 3) through linearly.
-  // Skipped only when a host opts into doing its own display transform.
-  const bool encodeSrgb = std::getenv("PYXIS_OMNI_EXPORT_LINEAR_HDR") == nullptr;
+  // The color AOV is LINEAR (Hydra convention): the host's HdxColorCorrectionTask
+  // (Kit pxr viewport, usdview) applies the sRGB OETF on present. EMPIRICALLY
+  // VERIFIED — the Kit viewport's measured display transfer function is exactly the
+  // sRGB OETF (Kit_pixel = sRGB(written)); the readback here is the ACES-tonemapped
+  // LINEAR color (range [0,1], not raw HDR). So we write that linear value VERBATIM
+  // and let the host encode — pre-applying sRGB here double-encodes (washed-out, too
+  // bright). NOTE: the standalone WorldLobbyHeadless harness does NOT read this AOV;
+  // it reads ReadbackColorHdr directly and sRGB-encodes in its own WriteBmp, so it is
+  // unaffected by this and §25.O.3 parity holds. PYXIS_OMNI_AOV_SRGB=1 forces the old
+  // pre-encode for a hypothetical host that presents the AOV without color-correction.
+  const bool encodeSrgb = std::getenv("PYXIS_OMNI_AOV_SRGB") != nullptr;
   auto encode = [encodeSrgb](float linear, int channel) -> float {
     if (channel == 3 || !encodeSrgb)
       return linear < 0.f ? 0.f : (linear > 1.f ? 1.f : linear);
@@ -442,16 +452,18 @@ class HdPyxisRenderPass final : public HdRenderPass {
     }
     const UsdStageRefPtr stage = ResolveStage(renderParam);
     const bool ingestDbg = std::getenv("PYXIS_OMNI_DBG") != nullptr;
-    if (ingestDbg) {
-      const bool hasHost = StageOf(renderParam) != nullptr;
-      const size_t cacheStages = UsdUtilsStageCache::Get().GetAllStages().size();
-      std::fprintf(stderr,
-                   "PYXISDBG ingest: hostStage=%d cacheStages=%zu resolved=%s rootLayer=%s\n",
-                   hasHost ? 1 : 0, cacheStages, stage ? "yes" : "NO",
-                   stage ? stage->GetRootLayer()->GetIdentifier().c_str() : "-");
-    }
     if (stage && _engine->Scene() != nullptr) {
+      _loggedNoStage = false;
       if (_walkedStage != stage) {
+        // Trace the ingest decision ONCE per stage transition (not per frame).
+        if (ingestDbg) {
+          const bool hasHost = StageOf(renderParam) != nullptr;
+          const size_t cacheStages = UsdUtilsStageCache::Get().GetAllStages().size();
+          std::fprintf(stderr,
+                       "PYXISDBG ingest: hostStage=%d cacheStages=%zu resolved=yes rootLayer=%s\n",
+                       hasHost ? 1 : 0, cacheStages,
+                       stage->GetRootLayer()->GetIdentifier().c_str());
+        }
         const bool sceneHasContent = _engine->LastMeshCount() > 0;
         if (_walkedStage == nullptr && sceneHasContent) {
           // Persisted switch-back: a prior delegate already walked this engine's
@@ -474,7 +486,8 @@ class HdPyxisRenderPass final : public HdRenderPass {
           }
         }
       }
-    } else if (ingestDbg) {
+    } else if (ingestDbg && !_loggedNoStage) {
+      _loggedNoStage = true;  // print once per no-stage episode, not every frame.
       std::fprintf(stderr, "PYXISDBG ingest: NO STAGE -> empty scene (Kit stage not in "
                            "UsdUtilsStageCache?). engineScene=%d\n",
                    _engine->Scene() != nullptr ? 1 : 0);
@@ -592,6 +605,10 @@ class HdPyxisRenderPass final : public HdRenderPass {
   // §25.O.3 — the stage this pass has already ingested via StageWalker. Guards
   // against re-walking each frame; null until the first walk.
   UsdStageRefPtr _walkedStage;
+  // PYXIS_OMNI_DBG: the "ingest: ..." trace is interesting only on a stage
+  // transition, not every frame. Remember whether we last logged the no-stage
+  // state so that branch prints once per episode instead of flooding.
+  bool _loggedNoStage = false;
 };
 
 }  // namespace
@@ -761,7 +778,12 @@ HdRenderSettingDescriptorList HdPyxisRenderDelegate::GetRenderSettingDescriptors
 }
 
 HdAovDescriptor HdPyxisRenderDelegate::GetDefaultAovDescriptor(TfToken const& name) const {
-  // color: half-float RGBA (matches PyxisEngine's exported tonemapped readback).
+  // color: half-float RGBA holding the LINEAR (ACES-tonemapped) color. Hydra
+  // convention: the color AOV is linear and the host (Kit pxr viewport / usdview,
+  // via HdxColorCorrectionTask) applies the sRGB OETF on present. Float16 keeps
+  // precision in the darks before that OETF. (WritePyxisColorToAov writes linear,
+  // NOT sRGB — see the note there; empirically the Kit viewport's display transfer
+  // function is exactly sRGB, so pre-encoding would double-apply it.)
   if (name == HdAovTokens->color)
     return HdAovDescriptor(HdFormatFloat16Vec4, false, VtValue(GfVec4f(0.0f, 0.0f, 0.0f, 1.0f)));
   // depth: needed by HdxTaskController for the depth AOV it always sets up.

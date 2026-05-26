@@ -216,14 +216,15 @@ void PyxisEngine::RenderFrame() noexcept {
     return;
   }
   pyxis::RenderTargets targets{};
-  // Export the TONEMAPPED `color` (display-ready). Verified empirically: the Kit
-  // viewport presents a generic delegate's color AOV VERBATIM (no auto-exposure
-  // — unlike Storm/RTX which pre-expose themselves), so the delegate must hand it
-  // display-ready values. (Exporting linear HDR here showed identical clipping —
-  // the viewport does not tonemap it.) The standalone WorldLobbyHeadless harness
-  // therefore writes this buffer directly (no second tonemap).
-  // PYXIS_OMNI_EXPORT_LINEAR_HDR=1 exports raw radiance instead, for a host that
-  // does its own exposure/tonemap.
+  // Export the ACES-TONEMAPPED `color` in LINEAR display space (range [0,1], NO
+  // OETF). This is the Hydra color-AOV convention: the consumer applies the sRGB
+  // OETF. EMPIRICALLY VERIFIED — the Kit pxr viewport's display transfer function
+  // is exactly sRGB (HdxColorCorrectionTask), so HdPyxisRenderDelegate writes this
+  // linear buffer to the color AOV verbatim and the viewport encodes it (matching
+  // the standalone pyxis.exe, which sRGB-encodes the same linear buffer in its PNG
+  // writer; the WorldLobbyHeadless harness likewise sRGB-encodes in WriteBmp).
+  // PYXIS_OMNI_EXPORT_LINEAR_HDR=1 exports raw (untonemapped) radiance instead, for
+  // a host that does its own exposure/tonemap.
   if (std::getenv("PYXIS_OMNI_EXPORT_LINEAR_HDR") != nullptr) {
     targets.colorHdr = impl.exportedColor.texture;  // raw HDR, exported
     targets.color = impl.displayColor;              // tonemapped (throwaway)
