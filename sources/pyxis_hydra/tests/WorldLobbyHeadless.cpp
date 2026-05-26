@@ -20,6 +20,8 @@
 #include "PyxisEngine.h"
 #include "PyxisHydraHost.h"
 
+#include <Pyxis/Platform/Color/ColorEncoding.h>
+
 #include <pxr/base/gf/range3d.h>
 #include <pxr/imaging/hd/renderBuffer.h>
 #include <pxr/usd/sdf/path.h>
@@ -39,21 +41,6 @@
 PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace {
-
-float HalfToFloat(uint16_t half) {
-  const uint32_t sign = (half >> 15) & 1u, exp = (half >> 10) & 0x1Fu, mant = half & 0x3FFu;
-  uint32_t bits;
-  if (exp == 0) {
-    bits = mant ? 0 : (sign << 31);
-  } else if (exp == 0x1F) {
-    bits = (sign << 31) | (0xFFu << 23) | (mant << 13);
-  } else {
-    bits = (sign << 31) | ((exp - 15 + 127) << 23) | (mant << 13);
-  }
-  float out;
-  std::memcpy(&out, &bits, sizeof(out));
-  return out;
-}
 
 // 24-bit BMP (bottom-up BGR). Caller guarantees width*3 is 4-aligned.
 void WriteBmp(const char* path, const std::vector<uint8_t>& rgba16f, uint32_t w, uint32_t h) {
@@ -86,9 +73,7 @@ void WriteBmp(const char* path, const std::vector<uint8_t>& rgba16f, uint32_t w,
         // and to match the standalone pyxis.exe PNG, which sRGB-encodes the same
         // linear buffer — apply the sRGB OETF here (this mirrors what
         // WritePyxisColorToAov does for the Kit viewport). §25.O.3 parity.
-        float v = HalfToFloat(srcRow[x * 4 + c]);
-        v = v < 0.f ? 0.f : (v > 1.f ? 1.f : v);
-        v = v <= 0.0031308f ? v * 12.92f : 1.055f * std::pow(v, 1.0f / 2.4f) - 0.055f;
+        const float v = pyxis::color::LinearToSrgb(pyxis::color::HalfToFloat(srcRow[x * 4 + c]));
         return static_cast<uint8_t>(v * 255.f + 0.5f);
       };
       row[x * 3 + 0] = chan(2);  // B

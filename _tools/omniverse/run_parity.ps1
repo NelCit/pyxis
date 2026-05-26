@@ -11,7 +11,8 @@
 # lights + materials (byte-identical) and the image (tight MAD / correlation
 # tolerance). Any divergence fails the test — this is the regression guard.
 #
-# Prereqs: build pyxis.exe (build/dev) and the omni lobby target (build/omni).
+# Prereqs (RFC 0007): a Release build of build/dev (pyxis.exe + the lobby target
+# pyxis_hydra_omni_lobby, both in build/dev/bin/Release).
 #   pwsh _tools/omniverse/run_parity.ps1 [-Scene <usd>] [-Camera <path>]
 #                                        [-Width N] [-Height N] [-Name <id>]
 # No -Scene => the World Lobby (the comprehensive fixture).

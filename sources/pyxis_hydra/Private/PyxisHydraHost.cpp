@@ -74,8 +74,8 @@ public:
 
     const TfTokenVector& GetRenderTags() const override
     {
-        static const TfTokenVector tags = { HdRenderTagTokens->geometry };
-        return tags;
+        static const TfTokenVector TAGS = { HdRenderTagTokens->geometry };
+        return TAGS;
     }
 
 private:
@@ -103,7 +103,7 @@ PyxisHydraHost::PyxisHydraHost(uint32_t width, uint32_t height)
         return;
     }
 
-    HdRprimCollection collection(HdTokens->geometry, HdReprSelector(HdReprTokens->hull));
+    const HdRprimCollection collection(HdTokens->geometry, HdReprSelector(HdReprTokens->hull));
     _pass = _delegate->CreateRenderPass(_index, collection);
 
     // Host-owned color AOV (RGBA16F, matches PyxisEngine's internal target) the
@@ -143,7 +143,7 @@ void PyxisHydraHost::SetStage(UsdStageRefPtr stage)
         _sceneIndices = UsdImagingSceneIndices{};
         _stageInserted = false;
     }
-    _stage = stage;
+    _stage = std::move(stage);
     if (!_stage)
     {
         return;

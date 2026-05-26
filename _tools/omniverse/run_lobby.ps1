@@ -25,23 +25,15 @@ if (Test-Path $pathsFile) { . $pathsFile } else {
                     Where-Object Name -like "3.12.*" | Sort-Object Name -Descending |
                     Select-Object -First 1).FullName
 }
-$lobby = Join-Path $repoRoot "build\omni\pyxis_hydra_omni_lobby.exe"
 $releaseBin = Join-Path $repoRoot "build\dev\bin\Release"
+# RFC 0007 — the lobby harness now builds in build/dev next to pyxis.exe, which
+# already stages Resources/shaders + Resources/scenes (the dome's default_sky.exr
+# fallback) there, so PyxisEngine ("shaders next to the exe") finds them with no
+# extra staging. The harness writes its BMP next to the exe (build/dev/bin/Release).
+$lobby = Join-Path $releaseBin "pyxis_hydra_omni_lobby.exe"
 if ($Scene -ne "") { $usd = $Scene } else {
     $usd = Join-Path $repoRoot "resources\scenes\world_lobby\World_Lobby.usd"
 }
-
-# Stage shaders next to the exe (PyxisEngine searches next to the executable).
-$shaderSrc = Join-Path $releaseBin "Resources\shaders"
-if (-not (Test-Path $shaderSrc)) { $shaderSrc = Join-Path $repoRoot "build\dev\bin\Debug\Resources\shaders" }
-$shaderDst = Join-Path $repoRoot "build\omni\Resources\shaders"
-New-Item -ItemType Directory -Force -Path $shaderDst | Out-Null
-Copy-Item (Join-Path $shaderSrc "*.spv") $shaderDst -Force
-# default_sky.exr fallback for the dome light.
-$sceneSrc = Join-Path $releaseBin "Resources\scenes"
-$sceneDst = Join-Path $repoRoot "build\omni\Resources\scenes"
-New-Item -ItemType Directory -Force -Path $sceneDst | Out-Null
-if (Test-Path $sceneSrc) { Copy-Item (Join-Path $sceneSrc "*") $sceneDst -Recurse -Force }
 
 $env:PATH = "$PXR_USD_ROOT\lib;$PXR_USD_ROOT\bin;$PYTHON_ROOT;$releaseBin;" + $env:PATH
 $env:PXR_PLUGINPATH_NAME = "$PXR_USD_ROOT\lib\usd;$PXR_USD_ROOT\plugin\usd"
@@ -49,7 +41,7 @@ $env:PXR_PLUGINPATH_NAME = "$PXR_USD_ROOT\lib\usd;$PXR_USD_ROOT\plugin\usd"
 & $lobby $usd $Camera $Width $Height $Frames
 $rc = $LASTEXITCODE
 
-$bmp = Join-Path $repoRoot "build\omni\pyxis_world_lobby.bmp"
+$bmp = Join-Path $releaseBin "pyxis_world_lobby.bmp"
 if ($Out -ne "" -and (Test-Path $bmp)) {
     Copy-Item $bmp $Out -Force
     Write-Host "run_lobby: copied $bmp -> $Out"

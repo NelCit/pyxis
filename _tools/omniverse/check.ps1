@@ -76,9 +76,9 @@ $spv = Join-Path $repoRoot "build\dev\bin\Release\Resources\shaders\raygen.spv"
 if (-not (Test-Path $spv)) { $spv = Join-Path $repoRoot "build\dev\bin\Debug\Resources\shaders\raygen.spv" }
 Check "run" "path-tracer shaders (.spv)" (Test-Path $spv) $(if (Test-Path $spv) { "present" } else { "build pyxis_renderer_shaders (ShaderMake)" }) $false
 
-# ---- [run] built delegate + extension -------------------------------------
-$dll = Join-Path $repoRoot "build\omni\pyxis_hydra_omni.dll"
-Check "run" "pyxis_hydra_omni.dll (delegate)" (Test-Path $dll) $(if (Test-Path $dll) { "built" } else { "pwsh _tools/omniverse/build.ps1" }) $false
+# ---- [run] built delegate + extension (RFC 0007: single build/dev delegate) -
+$dll = Join-Path $repoRoot "build\dev\bin\Release\pyxis_hydra.dll"
+Check "run" "pyxis_hydra.dll (delegate)" (Test-Path $dll) $(if (Test-Path $dll) { "built" } else { "pwsh _tools/omniverse/build.ps1" }) $false
 
 # ---- report ---------------------------------------------------------------
 $rows | Format-Table -AutoSize Cat, Item, Status, Detail | Out-Host

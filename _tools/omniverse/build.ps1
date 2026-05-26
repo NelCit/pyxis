@@ -1,10 +1,17 @@
-# RFC 0004 — build the Pyxis Omniverse Hydra delegate (deliverable 1).
+# RFC 0007 — build the Pyxis Hydra delegate (in build/dev) and stage the
+# omni.hydra.pyxis Kit extension.
 #
-# Prereq: _tools/omniverse/setup.ps1 has run (acquired nv-usd 25.11 + Python 3.12
-# under build/omniverse and wrote usd-deps/paths.ps1). Configure + compile
-# pyxis_hydra_omni against Kit's nv-usd, then assemble + stage the extension into
-# the Kit app's exts so a launched app loads it. Everything lives under
-# <repo>/build/omniverse — no sibling external folder.
+# RFC 0007 retired the separate pyxis_hydra_omni C++ module + its out-of-tree
+# build/omni: both build/dev and Kit are nv-usd 25.11, so the SINGLE delegate
+# pyxis_hydra.dll (built in build/dev) loads directly in Kit. This script:
+#   1. builds pyxis_hydra (+ the headless test exes) in build/dev via the normal
+#      CMake preset (configure once if build/dev is absent);
+#   2. assembles the omni.hydra.pyxis extension = the Python-only extension tree
+#      (_tools/omniverse/extension) + the prebuilt pyxis_hydra.dll + its staged
+#      plugInfo + the Pyxis runtime DLLs, copied into the Kit app's exts.
+# There is NO compiled C++ in the extension (no native IExt, no viewport panel):
+# the Python __init__.py registers the delegate's plugInfo with USD's
+# PlugRegistry and drives omni.hydra.pxr.
 #
 #   pwsh _tools/omniverse/build.ps1 [-Config Release]
 
@@ -13,109 +20,99 @@ param([ValidateSet("Release","RelWithDebInfo")] [string]$Config = "Release")
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $omniDir  = Join-Path $repoRoot "build\omniverse"
-$buildDir = Join-Path $repoRoot "build\omni"          # delegate CMake build (in-repo)
+$buildDir = Join-Path $repoRoot "build\dev"           # the single Pyxis build tree
 $kitDir   = Join-Path $omniDir "kit-app-template"
 
-# Load the paths setup.ps1 produced.
+# Load the paths setup.ps1 produced (nv-usd + Python roots) — informational; the
+# build/dev CMake resolves nv-usd itself via _cmake/PyxisNvUsd.cmake.
 $pathsFile = Join-Path $omniDir "usd-deps\paths.ps1"
-if (-not (Test-Path $pathsFile)) {
-    throw "Missing $pathsFile. Run _tools/omniverse/setup.ps1 first."
-}
-. $pathsFile   # defines $PXR_USD_ROOT, $PYTHON_ROOT (and $PM_PACKAGES_ROOT)
-
-Write-Host "[build] nv-usd : $PXR_USD_ROOT"
-Write-Host "[build] python : $PYTHON_ROOT"
-
-# nv-usd is a Release/MD build — match it. clang-cl is the project compiler.
-$env:CC = "clang-cl"; $env:CXX = "clang-cl"
-# Export PM_PACKAGES_ROOT so CMake can glob the Packman boost-preprocessor the
-# viewport panel needs (omni.ui's Callback.h pulls boost/preprocessor.hpp).
-if ($PM_PACKAGES_ROOT) { $env:PM_PACKAGES_ROOT = $PM_PACKAGES_ROOT }
-
-# The viewport panel links omni.ui.lib, which ships inside the omni.ui EXTENSION's
-# bin (registry-pulled, not the base install). Locate it under the editor's
-# extscache; if absent, the editor's exts haven't been resolved yet.
-$extsCache = Join-Path $kitDir "_build\windows-x86_64\$($Config.ToLower())\extscache"
-$omniUiLib = Get-ChildItem -Path (Join-Path $extsCache "omni.ui-*\bin\omni.ui.lib") -ErrorAction SilentlyContinue |
-             Select-Object -First 1
-if (-not $omniUiLib) {
-    Write-Host "[build] WARN: omni.ui.lib not found under $extsCache." -ForegroundColor Yellow
-    Write-Host "[build]       Run 'repo.bat build' (or launch pyxis.editor once) to resolve the" -ForegroundColor Yellow
-    Write-Host "[build]       editor's extensions so omni.ui is pulled, then re-run build.ps1." -ForegroundColor Yellow
+if (Test-Path $pathsFile) {
+    . $pathsFile   # defines $PXR_USD_ROOT, $PYTHON_ROOT (and $PM_PACKAGES_ROOT)
+    Write-Host "[build] nv-usd : $PXR_USD_ROOT"
+    Write-Host "[build] python : $PYTHON_ROOT"
 } else {
-    Write-Host "[build] omni.ui : $($omniUiLib.FullName)"
+    Write-Host "[build] WARN: $pathsFile not found; run _tools/omniverse/setup.ps1 first." -ForegroundColor Yellow
 }
 
-cmake -S (Join-Path $repoRoot "sources\pyxis_hydra_omni") -B $buildDir -G Ninja `
-    "-DCMAKE_BUILD_TYPE=$Config" `
-    "-DPXR_USD_ROOT=$PXR_USD_ROOT" `
-    "-DPYXIS_OMNI_PYTHON_ROOT=$PYTHON_ROOT" `
-    $(if ($omniUiLib) { "-DPYXIS_OMNI_UI_LIB=$($omniUiLib.FullName -replace '\\','/')" })
-if ($LASTEXITCODE -ne 0) { throw "CMake configure failed" }
-cmake --build $buildDir
+# clang-cl is the project compiler.
+$env:CC = "clang-cl"; $env:CXX = "clang-cl"
+
+# 1. Build the delegate + the headless test exes in build/dev (Release). Configure
+#    first if the build tree doesn't exist yet.
+if (-not (Test-Path (Join-Path $buildDir "CMakeCache.txt"))) {
+    Write-Host "[build] configuring build/dev (preset 'dev')..."
+    cmake --preset dev
+    if ($LASTEXITCODE -ne 0) { throw "CMake configure failed" }
+}
+$buildPreset = if ($Config -eq "Release") { "dev-release" } else { "dev" }
+cmake --build --preset $buildPreset --target `
+    pyxis_hydra pyxis_hydra_omni_smoke pyxis_hydra_omni_lobby `
+    pyxis_multicycle_vram_test pyxis_plugin_load_test
 if ($LASTEXITCODE -ne 0) { throw "Build failed" }
 
-# Assemble the complete omni.hydra.pyxis Kit extension from repo sources + the
-# prebuilt native delegate + the Pyxis runtime DLLs + shaders.
-$extSrc = Join-Path $repoRoot "sources\pyxis_hydra_omni\extension"
+$pyxisReleaseBin = Join-Path $buildDir "bin\$Config"
+if (-not (Test-Path (Join-Path $pyxisReleaseBin "pyxis_hydra.dll"))) {
+    throw "pyxis_hydra.dll not found in $pyxisReleaseBin after build"
+}
+
+# 2. Assemble the omni.hydra.pyxis Kit extension: the Python extension tree + the
+#    prebuilt delegate + its plugInfo + the Pyxis runtime DLLs.
+$extSrc = Join-Path $repoRoot "_tools\omniverse\extension"
 $extDir = Join-Path $kitDir "source\extensions\omni.hydra.pyxis"
 New-Item -ItemType Directory -Force -Path $extDir | Out-Null
-foreach ($leftover in @("premake5.lua", "plugins", "tests.cpp")) {
-    Remove-Item (Join-Path $extDir $leftover) -Recurse -Force -ErrorAction SilentlyContinue
+# Stage config/ + the omni/ Python module (registers the delegate plugInfo +
+# drives omni.hydra.pxr). Remove any stale copies first.
+foreach ($sub in @("config", "omni", "bin")) {
+    Remove-Item (Join-Path $extDir $sub) -Recurse -Force -ErrorAction SilentlyContinue
 }
-# Stage config/ + the small omni/ Python startup module (RFC 0006: forces the pxr
-# engine to load the Pyxis delegate at launch instead of defaulting to Storm).
 Copy-Item (Join-Path $extSrc "config") $extDir -Recurse -Force
-Remove-Item (Join-Path $extDir "omni") -Recurse -Force -ErrorAction SilentlyContinue
 if (Test-Path (Join-Path $extSrc "omni")) {
     Copy-Item (Join-Path $extSrc "omni") $extDir -Recurse -Force
 }
-$stageBin = Join-Path $extDir "bin"
-$stageRes = Join-Path $stageBin "resources"
-New-Item -ItemType Directory -Force -Path $stageRes | Out-Null
-Copy-Item (Join-Path $buildDir "pyxis_hydra_omni.dll")            $stageBin -Force
-Copy-Item (Join-Path $buildDir "omni.hydra.pyxis.plugin.dll")     $stageBin -Force
-Copy-Item (Join-Path $buildDir "resources\plugInfo.json")         $stageRes -Force
-# NOTE: the omni.ui viewport panel (omni.hydra.pyxis.panel.plugin.dll) is built
-# but intentionally NOT staged. Pyxis now integrates as a real viewport renderer
-# via omni.hydra.pxr (selectable in the Render menu), which supersedes the custom
-# panel. Remove a stale copy so the [[native.plugin]] glob doesn't load it.
-Remove-Item (Join-Path $stageBin "omni.hydra.pyxis.panel.plugin.dll") -Force -ErrorAction SilentlyContinue
 
-# Pyxis runtime DLLs + shaders. CRITICAL: exclude vcpkg's USD 26.3 usd_*.dll /
-# tbb12.dll — Kit provides nv-usd 25.11; same-named DLLs would shadow it.
-$pyxisReleaseBin = Join-Path $repoRoot "build\dev\bin\Release"
-if (Test-Path $pyxisReleaseBin) {
-    Remove-Item (Join-Path $stageBin "usd_*.dll") -Force -ErrorAction SilentlyContinue
-    Remove-Item (Join-Path $stageBin "tbb12.dll") -Force -ErrorAction SilentlyContinue
-    Get-ChildItem $pyxisReleaseBin -Filter *.dll |
-        Where-Object { $_.Name -notlike 'usd_*' -and $_.Name -ne 'tbb12.dll' } |
-        Copy-Item -Destination $stageBin -Force
-    $shaderSrc = Join-Path $pyxisReleaseBin "Resources\shaders"
-    if (Test-Path $shaderSrc) {
-        $shaderDst = Join-Path $stageBin "Resources\shaders"
-        New-Item -ItemType Directory -Force -Path $shaderDst | Out-Null
-        Copy-Item (Join-Path $shaderSrc "*.spv") $shaderDst -Force
-    }
-    Write-Host "[build] Staged Pyxis runtime DLLs + shaders -> $stageBin"
-} else {
-    Write-Host "[build] WARN: $pyxisReleaseBin not found; build pyxis_renderer Release first." -ForegroundColor Yellow
+# bin/: the delegate DLL + its plugInfo (Resources/usd/hdPyxis/resources, the
+# SAME layout build/dev produces, so plugInfo's LibraryPath "../../../pyxis_hydra.dll"
+# resolves to <ext>/bin/pyxis_hydra.dll) + the runtime dep DLLs + shaders.
+$stageBin = Join-Path $extDir "bin"
+New-Item -ItemType Directory -Force -Path $stageBin | Out-Null
+# The delegate plugInfo staged by the pyxis_hydra target.
+$pluginSrc = Join-Path $pyxisReleaseBin "Resources\usd\hdPyxis\resources\plugInfo.json"
+$pluginDst = Join-Path $stageBin "Resources\usd\hdPyxis\resources"
+New-Item -ItemType Directory -Force -Path $pluginDst | Out-Null
+Copy-Item $pluginSrc $pluginDst -Force
+# All Pyxis runtime DLLs (pyxis_hydra/renderer/platform/usd_ingest + transitive
+# nvrhi/flecs/spdlog/...). EXCLUDE any vcpkg USD usd_*.dll / tbb12.dll — Kit
+# provides nv-usd 25.11; same-named DLLs would shadow it. (build/dev is nv-usd, so
+# there should be none, but exclude defensively to match the old build/omni rule.)
+Get-ChildItem $pyxisReleaseBin -Filter *.dll |
+    Where-Object { $_.Name -notlike 'usd_*' -and $_.Name -ne 'tbb12.dll' } |
+    Copy-Item -Destination $stageBin -Force
+# Path-tracer shaders next to the delegate (PyxisEngine searches next to the DLL).
+$shaderSrc = Join-Path $pyxisReleaseBin "Resources\shaders"
+if (Test-Path $shaderSrc) {
+    $shaderDst = Join-Path $stageBin "Resources\shaders"
+    New-Item -ItemType Directory -Force -Path $shaderDst | Out-Null
+    Copy-Item (Join-Path $shaderSrc "*.spv") $shaderDst -Force
+}
+# default_sky.exr fallback for the dome light.
+$sceneSrc = Join-Path $pyxisReleaseBin "Resources\scenes"
+if (Test-Path $sceneSrc) {
+    $sceneDst = Join-Path $stageBin "Resources\scenes"
+    New-Item -ItemType Directory -Force -Path $sceneDst | Out-Null
+    Copy-Item (Join-Path $sceneSrc "*") $sceneDst -Recurse -Force
 }
 Write-Host "[build] Assembled extension -> $extDir" -ForegroundColor Green
 
-# repo.bat build does NOT link our prebuilt (no-premake) extension into the
-# built app's exts dir, so mirror the complete extension there too.
+# repo.bat build does NOT link our prebuilt (no-premake) extension into the built
+# app's exts dir, so mirror the complete extension there too.
 $cfg = $Config.ToLower()
 $buildExtsParent = Join-Path $kitDir "_build\windows-x86_64\$cfg\exts"
 if (Test-Path $buildExtsParent) {
     $buildExt = Join-Path $buildExtsParent "omni.hydra.pyxis"
     Remove-Item $buildExt -Recurse -Force -ErrorAction SilentlyContinue
-    # /R:2 /W:2 so a transient lock (e.g. a still-running kit.exe holding a
-    # staged DLL) fails fast instead of robocopy's default ~1M retries (which
-    # hangs the build indefinitely).
+    # /R:2 /W:2 so a transient lock (e.g. a still-running kit.exe holding a staged
+    # DLL) fails fast instead of robocopy's default ~1M retries.
     robocopy $extDir $buildExt /E /R:2 /W:2 /NFL /NDL /NJH /NJS /NP | Out-Null
-    # robocopy uses exit codes 0-7 for success (>=8 is failure). Don't let its
-    # "files copied" code (1) leak as this script's failure status.
     if ($LASTEXITCODE -ge 8) { throw "robocopy mirror failed ($LASTEXITCODE)" }
     $global:LASTEXITCODE = 0
     Write-Host "[build] Mirrored extension -> $buildExt"
@@ -123,9 +120,8 @@ if (Test-Path $buildExtsParent) {
     Write-Host "[build] (build exts dir not found at $buildExtsParent; run repo.bat build once.)"
 }
 
-# The built app references its .kit via <release>/apps (a link to source/apps that
-# repo.bat creates). A pre-consolidation build may have left it dangling (pointing
-# at the old sibling pyxis_external). Repair it in-repo so the editor launches.
+# The built app references its .kit via <release>/apps (a junction repo.bat
+# creates). Repair it in-repo if dangling so the editor launches.
 $relRoot  = Join-Path $kitDir "_build\windows-x86_64\$cfg"
 $appsLink = Join-Path $relRoot "apps"
 $appsTgt  = Join-Path $kitDir "source\apps"
@@ -140,4 +136,5 @@ if (Test-Path $relRoot) {
 
 Write-Host ""
 Write-Host "[build] DONE." -ForegroundColor Green
-Write-Host "  delegate DLL : $buildDir\pyxis_hydra_omni.dll"
+Write-Host "  delegate DLL : $pyxisReleaseBin\pyxis_hydra.dll"
+Write-Host "  extension    : $extDir"

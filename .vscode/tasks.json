@@ -39,7 +39,7 @@
     },
     {
       "label": "omni:build-extension",
-      "detail": "Configure+build pyxis_hydra_omni (delegate DLL + native IExt + smoke) against nv-usd and stage the omni.hydra.pyxis extension into the Kit app.",
+      "detail": "Build pyxis_hydra (delegate + headless tests) in build/dev and stage the Python omni.hydra.pyxis extension (delegate DLL + plugInfo + runtime DLLs) into the Kit app.",
       "type": "shell",
       "command": "powershell",
       "args": [
@@ -50,17 +50,6 @@
       "problemMatcher": ["$gcc"]
     },
     {
-      "label": "omni:stage-smoke-shaders",
-      "detail": "Stage path-tracer .spv shaders next to the smoke exe (PyxisEngine searches next-to-exe).",
-      "type": "shell",
-      "command": "powershell",
-      "args": [
-        "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
-        "$dst='${workspaceFolder}/build/omni/Resources/shaders'; New-Item -ItemType Directory -Force -Path $dst | Out-Null; Copy-Item '${workspaceFolder}/build/dev/bin/Release/Resources/shaders/*.spv' $dst -Force"
-      ],
-      "problemMatcher": []
-    },
-    {
       "label": "omni:prebuild",
       "detail": "Full prebuild for the Omniverse editor launch: renderer Release, then delegate + extension staging.",
       "dependsOrder": "sequence",
@@ -69,12 +58,10 @@
     },
     {
       "label": "omni:prebuild-smoke",
-      "detail": "Prebuild for the HdEngine smoke debug: renderer Release, delegate + smoke, then shaders.",
+      "detail": "Prebuild for the HdEngine smoke debug (RFC 0007): build/dev builds the delegate + smoke exe next to pyxis.exe, where Resources/shaders are already staged.",
       "dependsOrder": "sequence",
       "dependsOn": [
-        "omni:build-renderer-release",
-        "omni:build-extension",
-        "omni:stage-smoke-shaders"
+        "omni:build-extension"
       ],
       "problemMatcher": []
     }

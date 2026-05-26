@@ -52,6 +52,11 @@
 #include <pxr/usd/usd/prim.h>
 #include <pxr/usd/usd/stage.h>
 #include <pxr/usd/usdGeom/camera.h>
+#include <pxr/usd/usdGeom/metrics.h>     // UsdGeomGetStageMetersPerUnit / UpAxis
+#include <pxr/usd/usdGeom/tokens.h>      // UsdGeomTokens->z
+#include <pxr/usd/usdUtils/stageCache.h> // Kit stage discovery (no host SetStage)
+
+#include <vector>
 
 #include <hlsl++.h>
 
@@ -121,6 +126,62 @@ hlslpp::float4x4 ToPyxisMatrix(GfMatrix4d const& usd) noexcept {
 [[nodiscard]] UsdStageRefPtr StageOf(HdRenderParam* renderParam) noexcept {
   auto* param = static_cast<HdPyxisRenderParam*>(renderParam);
   return param ? param->Stage() : UsdStageRefPtr();
+}
+
+// Resolve the stage to ingest. PyxisHydraHost sets it explicitly (SetStage). Under
+// Kit's omni.hydra.pxr there is NO PyxisHydraHost, so fall back to the open stage
+// in the process-global UsdUtilsStageCache (Kit/omni.usd registers the live stage
+// there). When several stages are cached (session / anonymous layers), pick the
+// one with the most root-level prims — the content stage. Without this fallback the
+// delegate has no stage in Kit, never runs StageWalker, and renders an empty scene.
+[[nodiscard]] UsdStageRefPtr ResolveStage(HdRenderParam* renderParam) noexcept {
+  if (UsdStageRefPtr stage = StageOf(renderParam))
+    return stage;
+  UsdStageRefPtr best;
+  size_t bestRootCount = 0;
+  for (const UsdStageRefPtr& cached : UsdUtilsStageCache::Get().GetAllStages()) {
+    if (!cached)
+      continue;
+    size_t rootCount = 0;
+    for (const UsdPrim& child : cached->GetPseudoRoot().GetChildren()) {
+      (void)child;
+      ++rootCount;
+    }
+    if (!best || rootCount > bestRootCount) {
+      best = cached;
+      bestRootCount = rootCount;
+    }
+  }
+  return best;
+}
+
+// metresPerUnit scale + Z-up->Y-up rotation, matching StageWalker::BuildStageContext
+// (§10 column-vector convention). metresPerUnit <= 0 is corrupt metadata -> 1.
+[[nodiscard]] hlslpp::float4x4 BuildStageToWorld(double metersPerUnit, bool stageIsZUp) noexcept {
+  const float scaleFactor = (metersPerUnit > 0.0) ? static_cast<float>(metersPerUnit) : 1.0f;
+  hlslpp::float4x4 scale(
+      hlslpp::float4{scaleFactor, 0.0f, 0.0f, 0.0f}, hlslpp::float4{0.0f, scaleFactor, 0.0f, 0.0f},
+      hlslpp::float4{0.0f, 0.0f, scaleFactor, 0.0f}, hlslpp::float4{0.0f, 0.0f, 0.0f, 1.0f});
+  if (!stageIsZUp)
+    return scale;
+  const hlslpp::float4x4 rot(
+      hlslpp::float4{1.0f, 0.0f, 0.0f, 0.0f}, hlslpp::float4{0.0f, 0.0f, 1.0f, 0.0f},
+      hlslpp::float4{0.0f, -1.0f, 0.0f, 0.0f}, hlslpp::float4{0.0f, 0.0f, 0.0f, 1.0f});
+  return mul(rot, scale);
+}
+
+// The stage-to-world correction for the resolved stage. The host may have set it
+// (SetStageToWorld); otherwise — Kit, no host — derive it from the stage metadata
+// so the camera lands in StageWalker's metres + Y-up frame (StageWalker bakes the
+// same correction into the geometry itself, so the two must agree).
+[[nodiscard]] hlslpp::float4x4 ResolveStageToWorld(HdRenderParam* renderParam,
+                                                   const UsdStageRefPtr& stage) noexcept {
+  if (StageOf(renderParam))  // host supplied the stage -> it also set the correction.
+    return StageToWorldOf(renderParam);
+  if (!stage)
+    return hlslpp::float4x4::identity();
+  return BuildStageToWorld(UsdGeomGetStageMetersPerUnit(stage),
+                           UsdGeomGetStageUpAxis(stage) == UsdGeomTokens->z);
 }
 
 // ---- Mesh: Hydra mesh (no-op Sync; StageWalker populates the scene) -------
@@ -379,7 +440,17 @@ class HdPyxisRenderPass final : public HdRenderPass {
       if (const HdRenderDelegate* delegate = renderIndex->GetRenderDelegate())
         renderParam = delegate->GetRenderParam();
     }
-    if (const UsdStageRefPtr stage = StageOf(renderParam); stage && _engine->Scene() != nullptr) {
+    const UsdStageRefPtr stage = ResolveStage(renderParam);
+    const bool ingestDbg = std::getenv("PYXIS_OMNI_DBG") != nullptr;
+    if (ingestDbg) {
+      const bool hasHost = StageOf(renderParam) != nullptr;
+      const size_t cacheStages = UsdUtilsStageCache::Get().GetAllStages().size();
+      std::fprintf(stderr,
+                   "PYXISDBG ingest: hostStage=%d cacheStages=%zu resolved=%s rootLayer=%s\n",
+                   hasHost ? 1 : 0, cacheStages, stage ? "yes" : "NO",
+                   stage ? stage->GetRootLayer()->GetIdentifier().c_str() : "-");
+    }
+    if (stage && _engine->Scene() != nullptr) {
       if (_walkedStage != stage) {
         const bool sceneHasContent = _engine->LastMeshCount() > 0;
         if (_walkedStage == nullptr && sceneHasContent) {
@@ -392,10 +463,21 @@ class HdPyxisRenderPass final : public HdRenderPass {
           pyxis::usd_ingest::StageWalker walker;
           const pyxis::usd_ingest::IngestResult result =
               walker.WalkStage(stage, *_engine->Scene());
-          (void)result;  // counts surface via Engine()->Last*Count() after commit.
           _walkedStage = stage;
+          if (ingestDbg) {
+            const pyxis::usd_ingest::IngestStats& stats = result.Stats();
+            std::fprintf(stderr,
+                         "PYXISDBG WalkStage: meshes=%u instances=%u materials=%u lights=%u "
+                         "cameras=%u skipped=%u\n",
+                         stats.meshesEmitted, stats.instancesEmitted, stats.materialsEmitted,
+                         stats.lightsEmitted, stats.camerasEmitted, stats.skipped);
+          }
         }
       }
+    } else if (ingestDbg) {
+      std::fprintf(stderr, "PYXISDBG ingest: NO STAGE -> empty scene (Kit stage not in "
+                           "UsdUtilsStageCache?). engineScene=%d\n",
+                   _engine->Scene() != nullptr ? 1 : 0);
     }
 
     // Set the camera from the render-pass-state — this is the viewport's ACTIVE
@@ -413,8 +495,8 @@ class HdPyxisRenderPass final : public HdRenderPass {
       if (const HdRenderIndex* renderIndex = GetRenderIndex()) {
         if (const HdRenderDelegate* delegate = renderIndex->GetRenderDelegate()) {
           HdRenderParam* renderParam = delegate->GetRenderParam();
-          stageToWorld = StageToWorldOf(renderParam);
-          stage = StageOf(renderParam);
+          stage = ResolveStage(renderParam);  // host stage, or Kit's cached stage.
+          stageToWorld = ResolveStageToWorld(renderParam, stage);
         }
       }
       pyxis::CameraDesc cam;
@@ -698,23 +780,7 @@ HdRenderParam* HdPyxisRenderDelegate::GetRenderParam() const { return _renderPar
 void HdPyxisRenderDelegate::SetStageToWorld(double metersPerUnit, bool stageIsZUp) noexcept {
   if (_renderParam == nullptr)
     return;
-  // Mirror StageWalker::BuildStageContext: uniform metresPerUnit scale, then a
-  // Z-up->Y-up rotation if the stage is Z-up. Column-vector convention (§10):
-  // basis vectors land in the matrix columns. metresPerUnit <= 0 is corrupt
-  // metadata — fall back to 1 (no scale) defensively, as StageWalker does.
-  const float scaleFactor =
-      (metersPerUnit > 0.0) ? static_cast<float>(metersPerUnit) : 1.0f;
-  const hlslpp::float4x4 scale(
-      hlslpp::float4{scaleFactor, 0.0f, 0.0f, 0.0f}, hlslpp::float4{0.0f, scaleFactor, 0.0f, 0.0f},
-      hlslpp::float4{0.0f, 0.0f, scaleFactor, 0.0f}, hlslpp::float4{0.0f, 0.0f, 0.0f, 1.0f});
-  hlslpp::float4x4 stageToWorld = scale;
-  if (stageIsZUp) {
-    const hlslpp::float4x4 rot(
-        hlslpp::float4{1.0f, 0.0f, 0.0f, 0.0f}, hlslpp::float4{0.0f, 0.0f, 1.0f, 0.0f},
-        hlslpp::float4{0.0f, -1.0f, 0.0f, 0.0f}, hlslpp::float4{0.0f, 0.0f, 0.0f, 1.0f});
-    stageToWorld = mul(rot, scale);
-  }
-  _renderParam->SetStageToWorld(stageToWorld);
+  _renderParam->SetStageToWorld(BuildStageToWorld(metersPerUnit, stageIsZUp));
 }
 
 void HdPyxisRenderDelegate::SetStage(const UsdStageRefPtr& stage) noexcept {

@@ -11,6 +11,8 @@
 #include "PyxisEngine.h"
 #include "PyxisHydraHost.h"
 
+#include <Pyxis/Platform/Color/ColorEncoding.h>
+
 #include <pxr/base/gf/vec3f.h>
 #include <pxr/base/vt/array.h>
 #include <pxr/base/gf/vec4d.h>
@@ -55,21 +57,6 @@ namespace {
 // viewable image. Bottom-up BGR rows; 1280*3 is 4-aligned so no row padding.
 void WriteBmp(const char* path, const std::vector<uint8_t>& rgba16f, uint32_t w, uint32_t h);
 
-float HalfToFloatSmoke(uint16_t half) {
-  const uint32_t sign = (half >> 15) & 1u, exp = (half >> 10) & 0x1Fu, mant = half & 0x3FFu;
-  uint32_t bits;
-  if (exp == 0) {
-    bits = mant ? 0 : (sign << 31);  // treat denormals as ~0 for the check.
-  } else if (exp == 0x1F) {
-    bits = (sign << 31) | (0xFFu << 23) | (mant << 13);
-  } else {
-    bits = (sign << 31) | ((exp - 15 + 127) << 23) | (mant << 13);
-  }
-  float out;
-  std::memcpy(&out, &bits, sizeof(out));
-  return out;
-}
-
 void WriteBmp(const char* path, const std::vector<uint8_t>& rgba16f, uint32_t w, uint32_t h) {
   if (rgba16f.size() < size_t(w) * h * 8 || w == 0 || h == 0)
     return;
@@ -95,7 +82,7 @@ void WriteBmp(const char* path, const std::vector<uint8_t>& rgba16f, uint32_t w,
     const uint16_t* s = src + size_t(y) * w * 4;
     for (uint32_t x = 0; x < w; ++x) {
       auto chan = [&](int c) {
-        float v = HalfToFloatSmoke(s[x * 4 + c]);
+        float v = pyxis::color::HalfToFloat(s[x * 4 + c]);
         v = v < 0.f ? 0.f : (v > 1.f ? 1.f : v);
         return static_cast<uint8_t>(v * 255.f + 0.5f);
       };
@@ -201,9 +188,9 @@ int main(int argc, char** argv) {
     const uint32_t bufH = colorBuffer->GetHeight();
     const uint64_t total = uint64_t(bufW) * bufH;
     for (uint64_t p = 0; p < total; ++p) {
-      const float r = HalfToFloatSmoke(aov[p * 4 + 0]);
-      const float g = HalfToFloatSmoke(aov[p * 4 + 1]);
-      const float b = HalfToFloatSmoke(aov[p * 4 + 2]);
+      const float r = pyxis::color::HalfToFloat(aov[p * 4 + 0]);
+      const float g = pyxis::color::HalfToFloat(aov[p * 4 + 1]);
+      const float b = pyxis::color::HalfToFloat(aov[p * 4 + 2]);
       if (r != 0.f || g != 0.f || b != 0.f)
         ++nonZeroAovPixels;
     }
@@ -212,10 +199,6 @@ int main(int argc, char** argv) {
     // (Vulkan top-down -> GL bottom-up). Verify the AOV is EXACTLY that transform
     // of the engine's linear readback (the §25.O.3 display contract), within the
     // half<->float round-trip epsilon.
-    auto srgb = [](float v) {
-      v = v < 0.f ? 0.f : (v > 1.f ? 1.f : v);
-      return v <= 0.0031308f ? v * 12.92f : 1.055f * std::pow(v, 1.0f / 2.4f) - 0.055f;
-    };
     if (readback && pixels.size() == total * 8 && width == bufW && height == bufH) {
       const auto* eng = reinterpret_cast<const uint16_t*>(pixels.data());
       aovMatchesEngine = true;
@@ -223,8 +206,10 @@ int main(int argc, char** argv) {
         const uint32_t srcY = bufH - 1 - y;  // engine top-down -> AOV bottom-up
         for (uint32_t x = 0; x < bufW; ++x) {
           for (int c = 0; c < 3; ++c) {
-            const float a = HalfToFloatSmoke(aov[(uint64_t(y) * bufW + x) * 4 + c]);
-            const float e = srgb(HalfToFloatSmoke(eng[(uint64_t(srcY) * bufW + x) * 4 + c]));
+            const float a = pyxis::color::HalfToFloat(aov[(uint64_t(y) * bufW + x) * 4 + c]);
+            const float e =
+                pyxis::color::LinearToSrgb(pyxis::color::HalfToFloat(
+                    eng[(uint64_t(srcY) * bufW + x) * 4 + c]));
             if (std::fabs(a - e) > 0.01f) {
               aovMatchesEngine = false;
               break;

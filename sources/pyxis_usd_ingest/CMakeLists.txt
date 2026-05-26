@@ -126,4 +126,22 @@ target_link_libraries(pyxis_usd_ingest
         # `nanovdb` feature on the port (would pull CUDA).
         OpenVDB::openvdb
 )
+
+# DELAY-LOAD openvdb.dll — required for the Hydra delegate to load inside
+# Omniverse Kit. Kit's omni.volume extension ships its OWN openvdb.dll (a
+# different OpenVDB 12.0 build that is missing symbols VolumeLoader imports,
+# e.g. openvdb::io::File::open / MappedFile::createBuffer) and loads it at
+# startup. Windows resolves a DLL by base name, one instance per process, so a
+# plain (static) import binds pyxis_usd_ingest to Kit's incompatible openvdb and
+# the delegate fails with "The specified procedure could not be found"
+# (ERROR_PROC_NOT_FOUND). Volumes are deferred (§42) and no v1 scene (incl. the
+# World Lobby) loads a .vdb, so the VolumeLoader code path is never hit — delay-
+# loading defers the openvdb.dll load to the first VolumeLoader call (i.e.
+# never, in v1), so the collision never occurs. The standalone is unaffected:
+# its adjacent openvdb.dll loads on demand if a volume IS ingested. lld-link
+# needs delayimp.lib for the delay-load helper (__delayLoadHelper2). All openvdb
+# imports are functions (no data imports), so they are delay-loadable.
+target_link_options(pyxis_usd_ingest PRIVATE /DELAYLOAD:openvdb.dll)
+target_link_libraries(pyxis_usd_ingest PRIVATE delayimp.lib)
+
 pyxis_use_nv_usd(pyxis_usd_ingest)

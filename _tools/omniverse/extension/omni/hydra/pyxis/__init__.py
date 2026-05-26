@@ -1,8 +1,9 @@
-# omni.hydra.pyxis — viewport helper (RFC 0006).
+# omni.hydra.pyxis — viewport helper (RFC 0007).
 #
-# The native plugin (omni.hydra.pyxis.plugin.dll) registers the Pyxis
-# HdRendererPlugin so "Pyxis" appears in the Render menu under the 'pxr' engine
-# (NVIDIA's omni.hydra.pxr, which hosts any registered USD HdRendererPlugin —
+# This module (pure Python; RFC 0007 retired the native Carbonite IExt) registers
+# the Pyxis HdRendererPlugin with USD's PlugRegistry on startup
+# (_register_pyxis_plugin, below) so "Pyxis" appears in the Render menu under the
+# 'pxr' engine (NVIDIA's omni.hydra.pxr, which hosts any registered USD HdRendererPlugin —
 # the same path Aurora/V-Ray/Octane/Redshift/Cycles and Synopsys/ANSYS
 # AVxcelerate all use; no third-party native viewport engine exists, the SDK's
 # IHydraEngineFactory is forward-declared only).
@@ -44,6 +45,13 @@ import omni.ext
 import omni.kit.app
 import omni.usd
 
+# RFC 0007 — plugin registration is now PURE PYTHON (replaces the native
+# Carbonite IExt PyxisExtModule). On extension startup we point USD's
+# PlugRegistry at the staged delegate plugInfo so omni.hydra.pxr can instantiate
+# the Pyxis delegate. Module-level guard so registration happens at most once per
+# process even if the extension is reloaded.
+_PYXIS_PLUGIN_REGISTERED = False
+
 _STORM_PLUGIN = "HdStormRendererPlugin"
 _PYXIS_PLUGIN = "HdPyxisRendererPlugin"
 _RENDERER_ACTIVE = "/renderer/active"
@@ -82,10 +90,124 @@ def _delegate_setting_keys(token: str):
 _PXR_BOOT_DELEGATE = _STORM_PLUGIN
 
 
+def _preload_usd_libs() -> None:
+    """Make the Pyxis delegate DLL's dependencies discoverable by Kit's loader by
+    prepending the two dirs that hold them to the PROCESS PATH.
+
+    Kit instantiates the delegate via USD's ArchLibraryOpen — a *plain* LoadLibrary
+    on a worker thread. Plain LoadLibrary does NOT search the loaded module's own
+    directory and does NOT honour os.add_dll_directory, but it DOES search dirs on
+    the process PATH (standard Windows search order). pyxis_hydra.dll's deps live in
+    two places:
+      * <ext>/bin           — pyxis_platform/renderer/usd_ingest + their vcpkg siblings.
+        build.ps1 stages these but nothing puts <ext>/bin on PATH anymore (the native
+        Carbonite plugins that used to, pre-RFC-0007, are gone).
+      * Kit's nv-usd bin    — usd_tf/gf/vt/ar/sdf/usd/usdGeom/usdShade/usdLux/usdSkel/
+        usdVol/usdRender/usdUtils/hd/hf/python. Kit pre-loads the core ones but not
+        all of them, and build.ps1 deliberately does NOT stage usd_*.dll (Kit owns the
+        single nv-usd instance; a staged copy would shadow it + break the ABI).
+    Without these on PATH, LoadLibrary(pyxis_hydra.dll) fails "The specified module
+    could not be found" (Pyxis shows in the render menu but won't load).
+
+    PATH prepend (not ctypes force-load): force-loading pyxis_usd_ingest.dll via
+    LOAD_WITH_ALTERED_SEARCH_PATH gave WinError 127 in Kit (an ABI/ordinal artifact of
+    the altered search), whereas a plain LoadLibrary with these dirs on PATH succeeds.
+    PATH also mirrors how the pre-RFC-0007 native plugins made <ext>/bin resolve.
+    Idempotent (guarded against duplicate prepends) + best-effort.
+    """
+    import ctypes
+    # Locate Kit's nv-usd bin dir from a usd_*.dll Kit already has loaded.
+    usd_dir = None
+    try:
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.GetModuleHandleW.restype = ctypes.c_void_p
+        k32.GetModuleHandleW.argtypes = [ctypes.c_wchar_p]
+        k32.GetModuleFileNameW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint]
+        for probe in ("usd_tf.dll", "usd_usd.dll", "usd_sdf.dll", "usd_gf.dll"):
+            handle = k32.GetModuleHandleW(probe)
+            if not handle:
+                continue
+            buf = ctypes.create_unicode_buffer(2048)
+            if k32.GetModuleFileNameW(ctypes.c_void_p(handle), buf, 2048):
+                usd_dir = os.path.dirname(buf.value)
+                break
+    except Exception as exc:  # noqa: BLE001
+        carb.log_warn(f"[omni.hydra.pyxis] locating Kit nv-usd dir failed: {exc}")
+    if not usd_dir or not os.path.isdir(usd_dir):
+        carb.log_warn("[omni.hydra.pyxis] no loaded usd_*.dll found; delegate load may fail")
+        usd_dir = None
+
+    ext_bin = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), "bin")
+    if not os.path.isdir(ext_bin):
+        carb.log_warn(f"[omni.hydra.pyxis] ext bin dir missing: {ext_bin}")
+        ext_bin = None
+
+    # Prepend both dirs to PATH so Kit's plain LoadLibrary(pyxis_hydra.dll) resolves
+    # every sibling dep. add_dll_directory too (harmless; helps any non-Arch loads).
+    current = os.environ.get("PATH", "")
+    parts = current.split(os.pathsep)
+    added = []
+    for d in (ext_bin, usd_dir):
+        if d and d not in parts:
+            os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
+            try:
+                os.add_dll_directory(d)
+            except Exception:  # noqa: BLE001
+                pass
+            added.append(d)
+    carb.log_warn(f"[omni.hydra.pyxis] PATH-prepended for delegate load: {added or 'already present'}")
+
+
+def _register_pyxis_plugin() -> None:
+    """Register the Pyxis Hydra delegate's plugInfo with USD's PlugRegistry
+    (RFC 0007 — replaces the native Carbonite IExt PyxisExtModule).
+
+    build.ps1 stages the delegate's plugInfo at
+    <ext>/bin/Resources/usd/hdPyxis/resources/plugInfo.json (the same layout the
+    build/dev delegate target produces; LibraryPath there resolves back up to
+    <ext>/bin/pyxis_hydra.dll). We register that resources/ directory. Guarded so
+    a reload / second extension does not re-register (PlugRegistry would warn).
+    """
+    global _PYXIS_PLUGIN_REGISTERED
+    if _PYXIS_PLUGIN_REGISTERED:
+        return
+    try:
+        from pxr import Plug, Tf
+
+        # Already discoverable (e.g. PXR_PLUGINPATH_NAME already covered it)?
+        if not Tf.Type.FindByName(_PYXIS_PLUGIN).isUnknown:
+            _PYXIS_PLUGIN_REGISTERED = True
+            return
+
+        ext_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+        plugin_dir = os.path.join(ext_root, "bin", "Resources", "usd", "hdPyxis", "resources")
+        if not os.path.isfile(os.path.join(plugin_dir, "plugInfo.json")):
+            carb.log_warn(
+                f"[omni.hydra.pyxis] delegate plugInfo not found at {plugin_dir}; "
+                "delegate NOT registered (run build.ps1 to stage it)"
+            )
+            return
+        Plug.Registry().RegisterPlugins(plugin_dir)
+        discoverable = not Tf.Type.FindByName(_PYXIS_PLUGIN).isUnknown
+        _PYXIS_PLUGIN_REGISTERED = discoverable
+        carb.log_info(
+            f"[omni.hydra.pyxis] registered delegate plugInfo from {plugin_dir}; "
+            f"type discoverable = {discoverable}"
+        )
+    except Exception as exc:  # noqa: BLE001
+        carb.log_warn(f"[omni.hydra.pyxis] plugin registration failed: {exc}")
+
+
 class _PyxisViewportExt(omni.ext.IExt):
     def on_startup(self, ext_id: str) -> None:  # noqa: D401
         self._running = True
         self._settings = carb.settings.get_settings()
+        # RFC 0007 — make the delegate's nv-usd dependencies resident, THEN register
+        # it with USD's PlugRegistry. Both must happen before the pxr engine tries
+        # to instantiate the delegate (was the native IExt's job).
+        _preload_usd_libs()
+        _register_pyxis_plugin()
         self._activated = False  # already did the 2nd activation for this pxr session
         self._task = None
         self._active_sub = self._settings.subscribe_to_node_change_events(
@@ -267,14 +389,35 @@ class _PyxisViewportExt(omni.ext.IExt):
         except Exception as exc:  # noqa: BLE001
             carb.log_warn(f"[omni.hydra.pyxis] destroy pxr engine failed: {exc}")
 
+    def _ensure_stage_in_cache(self) -> None:
+        """Insert the live stage into the GLOBAL UsdUtilsStageCache.
+
+        Under omni.hydra.pxr there is NO PyxisHydraHost to call the delegate's
+        SetStage, so the Pyxis delegate discovers the stage via
+        UsdUtilsStageCache::Get() (its render pass runs StageWalker on it). Kit
+        usually registers the stage there already, but inserting it explicitly
+        (idempotent — Insert returns the existing id if present) guarantees the
+        delegate finds it; without a stage the delegate renders an empty scene.
+        """
+        try:
+            from pxr import UsdUtils
+            stage = omni.usd.get_context().get_stage()
+            if stage is not None:
+                UsdUtils.StageCache.Get().Insert(stage)
+        except Exception as exc:  # noqa: BLE001
+            carb.log_warn(f"[omni.hydra.pyxis] stage-cache insert failed: {exc}")
+
     def _on_stage_event(self, event) -> None:  # noqa: ANN001
         try:
-            # Stamp the stage identity on OPENED and ASSETS_LOADED so the delegate
-            # can reset the persisted engine when a DIFFERENT scene opens (step 5).
-            # OPENED fires before geometry syncs, so the token is in place before
-            # the first EmitToScene of the new stage reads it.
+            # On OPENED / ASSETS_LOADED, make the live stage discoverable by the
+            # delegate (StageWalker ingest reads it from UsdUtilsStageCache). OPENED
+            # fires before geometry syncs, so the stage is in the cache before the
+            # render pass's first WalkStage. (The stage-token stamp is retained as a
+            # harmless no-op for now — the delegate's stage-change reset is handled
+            # by the render pass's _walkedStage guard.)
             if event.type in (int(omni.usd.StageEventType.OPENED),
                               int(omni.usd.StageEventType.ASSETS_LOADED)):
+                self._ensure_stage_in_cache()
                 self._stamp_stage_token()
             if event.type == int(omni.usd.StageEventType.ASSETS_LOADED):
                 if str(self._settings.get(_RENDERER_ACTIVE)) == "pxr":

@@ -1,11 +1,13 @@
-# omni.hydra.pyxis — RFC 0004. The Pyxis Hydra render-delegate Kit extension.
+# omni.hydra.pyxis — RFC 0007. The Pyxis Hydra render-delegate Kit extension.
 #
-# This extension is Python-free. It ships a PREBUILT native delegate
-# (pyxis_hydra_omni.dll, compiled out-of-tree by _tools/omniverse/build.ps1
-# against nv-usd 25.11) plus a tiny native Carbonite IExt
-# (omni.hydra.pyxis.plugin.dll) that registers the delegate's plugInfo with
-# USD's PlugRegistry on startup, so "Pyxis" appears in the Kit viewport's
-# Hydra-engine / renderer enumeration.
+# This extension carries NO compiled C++ (RFC 0007). It ships the prebuilt
+# delegate pyxis_hydra.dll (+ its runtime deps + plugInfo), built in build/dev by
+# _tools/omniverse/build.ps1, plus pure-Python glue (omni/hydra/pyxis/__init__.py)
+# that, on startup: registers the delegate's plugInfo with USD's PlugRegistry
+# (Plug.Registry().RegisterPlugins — replaces the former native Carbonite IExt),
+# switches omni.hydra.pxr to Pyxis via set_hd_engine, and adds the Pyxis section
+# to the Render Settings window. "Pyxis" then appears in the Kit viewport's
+# renderer menu.
 
 [package]
 title = "Pyxis Hydra"
@@ -16,13 +18,14 @@ keywords = ["hydra", "render", "delegate", "pyxis", "pathtracer"]
 authors = ["Pyxis"]
 
 # USD must be loaded before we register a USD plugin. omni.usd.libs brings the
-# nv-usd runtime libs into the process (our native plugin links Plug/Tf import
-# libs, resolved at load by these DLLs). A viewport app additionally pulls the
-# Hydra-engine/viewport extensions that surface the renderer dropdown; we don't
-# depend on those here so the extension also loads in a bare kit.exe for
-# registration smoke-testing.
+# nv-usd runtime libs into the process; omni.usd gives the Python Plug binding the
+# __init__.py uses to call Plug.Registry().RegisterPlugins. A viewport app
+# additionally pulls the Hydra-engine/viewport extensions that surface the
+# renderer dropdown; we don't hard-depend on those so the extension also loads in
+# a bare kit.exe for registration smoke-testing (the module guards those imports).
 [dependencies]
 "omni.usd.libs" = {}
+"omni.usd" = {}
 # omni.hydra.pxr is NVIDIA's "Pixar Hydra" Kit viewport engine. It registers the
 # Kit hydra-engine factory for the `pxr` renderer slot and drives ANY registered
 # USD HdRendererPlugin — including ours. With it loaded, "Pyxis" becomes a real,
@@ -42,16 +45,11 @@ authors = ["Pyxis"]
 # declares. The module guards the import so a bare kit.exe still loads.
 "omni.rtx.window.settings" = {}
 
-# Native Carbonite IExt that performs the PlugRegistry registration on startup.
-# Kit's loader globs `*.plugin` and appends the platform extension ->
-# bin/omni.hydra.pyxis.plugin.dll.
-[[native.plugin]]
-path = "bin/*.plugin"
-recursive = false
-
-# Python startup module (RFC 0006) — forces the pxr engine to actually load the
-# Pyxis delegate at launch (the pxr engine otherwise starts on Storm even when
-# /pxr/rendermode says Pyxis). See omni/hydra/pyxis/__init__.py.
+# Python startup module (RFC 0007). On startup it registers the delegate's
+# plugInfo with USD's PlugRegistry (replaces the former native Carbonite IExt),
+# then forces the pxr engine to actually load the Pyxis delegate (the pxr engine
+# otherwise starts on Storm even when /pxr/rendermode says Pyxis). See
+# omni/hydra/pyxis/__init__.py.
 [[python.module]]
 name = "omni.hydra.pyxis"
 
