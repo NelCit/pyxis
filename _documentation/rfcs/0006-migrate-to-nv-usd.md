@@ -141,7 +141,13 @@ every switch-back rebuilt everything — the user saw `PyxisEngine: initialised`
 
 **Fix.** The `PyxisEngine` now lives in a process-static holder
 (`PersistentPyxisState`, file-local in `HdPyxisRenderDelegate.cpp`) that outlives
-any single delegate instance. On switch-back the delegate BORROWS the resident
+any single delegate instance. This is a deliberate, RFC-sanctioned exception to the
+§30 "no singletons except `Logging::Get()` / Tracy" rule: it is scoped to the
+Kit-hosted delegate (the standalone/headless paths never use it), gated by
+`pyxis:persistEngine` / `PYXIS_OMNI_NO_PERSIST`, and exists only because the closed
+pxr engine's destroy-on-switch behaviour leaves no other way to avoid a full
+~10 GB device + texture rebuild per renderer switch. On switch-back the delegate
+BORROWS the resident
 engine instead of building a new one; the destructor leaves a borrowed engine
 resident (no `waitForIdle`/teardown). Hydra builds a fresh render index on
 switch-back and re-syncs ALL prims as `AllDirty`, so dirty-bits can't be used to
