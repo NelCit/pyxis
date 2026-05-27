@@ -115,21 +115,42 @@ nvrhi::BindingSetHandle SsaaResolvePass::GetOrCreateBindingSet(
   return set;
 }
 
+nvrhi::ITexture* SsaaResolvePass::EnsureLinearOutput(uint32_t width, uint32_t height) {
+  if (width == 0u || height == 0u)
+    return nullptr;
+  if (_linearOut && _linearOutW == width && _linearOutH == height)
+    return _linearOut;
+  nvrhi::TextureDesc desc;
+  desc.width = width;
+  desc.height = height;
+  desc.format = nvrhi::Format::RGBA16_FLOAT;  // LINEAR; precision before the sRGB blit.
+  desc.dimension = nvrhi::TextureDimension::Texture2D;
+  desc.isUAV = true;            // compute-written by this pass.
+  desc.isShaderResource = true; // sampled by BlitToSrgbPass.
+  desc.debugName = "SsaaResolve.linearOut";
+  desc.initialState = nvrhi::ResourceStates::UnorderedAccess;
+  desc.keepInitialState = true;
+  _linearOut = _device->createTexture(desc);
+  _linearOutW = width;
+  _linearOutH = height;
+  return _linearOut;
+}
+
 void SsaaResolvePass::Execute(nvrhi::ICommandList* commandList,
                               const PassContext& context) {
   if (!_ready || commandList == nullptr || context.settings == nullptr
       || context.targets == nullptr)
     return;
 
-  const uint32_t factor = std::max(1u, context.settings->ssaaFactor);
+  const uint32_t factor = context.settings->ssaaFactor;
   nvrhi::ITexture* const source = context.targets->color;
-  nvrhi::ITexture* const dest = context.targets->colorResolved;
-  // Runs only when a resolve target is bound. The standalone viewer binds it for
-  // BOTH the supersampled (factor > 1, box-downsample) AND the non-supersampled
-  // (factor 1) present — at factor 1 the pass is a pure sRGB present-encode
-  // (LinearToSrgb passthrough). Kit's PyxisEngine never binds colorResolved, so
-  // this stays a no-op for Omniverse (its output is unaffected).
-  if (source == nullptr || dest == nullptr)
+  nvrhi::ITexture* const dest = context.colorLinearResolved;
+  // DOWNSAMPLE ONLY, and only when supersampling: box-average the super-res LINEAR
+  // color (source) into the base-res LINEAR intermediate (dest, renderer-owned,
+  // set by PyxisRenderer). At factor 1 there is nothing to downsample -- the
+  // BlitToSrgbPass reads targets->color directly. Kit's PyxisEngine never sets
+  // colorLinearResolved, so this no-ops for Omniverse.
+  if (factor < 2u || source == nullptr || dest == nullptr)
     return;
 
   // settings.{width,height} are the super-res render dims; the resolve
