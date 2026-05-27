@@ -1,6 +1,6 @@
-# RFC 0008: Kit shared-device rendering + direct GPU color AOV (no readback)
+# RFC 0008: Direct GPU color AOV to the Kit viewport (no readback)
 
-- Status: Rejected (blocked by API availability — see "Why rejected")
+- Status: Draft (revised — the GL external-memory path IS viable; see "Revision")
 - Author(s): Pyxis team
 - Created: 2026-05-27
 - Last updated: 2026-05-27
@@ -112,7 +112,39 @@ Kit's device removes the bridge entirely.
 - Does `omni.hydra.pxr`'s `HdxColorCorrectionTask` consume a delegate-provided
   `GetResource()` GPU AOV, or does it always go through `Map()`? (Moot.)
 
-## Why rejected
+## Revision — the GL external-memory path is viable (supersedes "Why rejected")
+
+The original draft + "Why rejected" below assumed (a) Kit's pxr viewport runs an Hgi
+**Vulkan** backend and (b) the closed engine never calls `HdRenderBuffer::GetResource()`.
+A runtime probe (`HdPyxisRenderDelegate::SetDrivers` logs `Hgi::GetAPIName()`;
+`StubRenderBuffer` logs `Map()`/`GetResource()` calls) proved **both wrong**:
+
+```
+SetDrivers: host Hgi API = 'OpenGL'
+RenderBuffer::Map() called by host        (the CPU path we use today)
+RenderBuffer::GetResource() called by host (the GPU path IS exercised)
+```
+
+So Kit's pxr engine runs **HgiGL**, and it **does** query `GetResource()`. That makes
+the direct GPU AOV reachable WITHOUT sharing the device — via **Vulkan→GL
+external-memory interop** (we already ship hgiGL + the exportable image):
+
+1. `PyxisEngine` keeps its own Vulkan device and renders into the exportable
+   `exportedColor` image (Win32 handle + `allocationSize`) — unchanged.
+2. In Kit's GL context (current on the host render thread where `_Execute` /
+   `GetResource` run), import that Win32 handle as a GL memory object +
+   `glTextureStorageMem2DEXT` texture (`GL_EXT_memory_object_win32`) — once per size.
+3. The color AOV is a normal HgiGL texture (`Hgi::CreateTexture`); each frame
+   `glCopyImageSubData` the imported texture into it (GPU→GPU, no CPU), after a
+   targeted wait on our device's render-complete (the existing EventQuery) so GL
+   reads finished pixels. `StubRenderBuffer::GetResource()` returns that HgiGL handle.
+4. `ReadbackColorHdr` / `WritePyxisColorToAov` are skipped on this path.
+
+No device sharing (RT stays on our own device — no extension gate), no public API
+change. Fallback to the CPU readback if any GL-interop step is unavailable (e.g. a
+non-GL host, or `GL_EXT_memory_object_win32` missing). Implemented on this branch.
+
+## Why rejected (SUPERSEDED — kept for history; the assumptions were wrong)
 
 Both this RFC's shared-device design AND the lighter alternative proposed during
 review (keep the own-device, import the already-exported `VkImage` into Kit's

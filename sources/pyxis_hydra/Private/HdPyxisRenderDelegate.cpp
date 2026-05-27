@@ -33,6 +33,8 @@
 #include <pxr/base/vt/value.h>
 #include <pxr/imaging/hd/aov.h>
 #include <pxr/imaging/hd/bprim.h>
+#include <pxr/imaging/hd/driver.h>
+#include <pxr/imaging/hgi/hgi.h>
 #include <pxr/imaging/hd/camera.h>
 #include <pxr/imaging/hd/instancer.h>
 #include <pxr/imaging/hd/light.h>
@@ -282,6 +284,10 @@ class StubRenderBuffer final : public HdRenderBuffer {
   HdFormat GetFormat() const override { return _format; }
   bool IsMultiSampled() const override { return false; }
   void* Map() override {
+    if (!_loggedMap && std::getenv("PYXIS_OMNI_DBG") != nullptr) {
+      _loggedMap = true;
+      std::fprintf(stderr, "PYXISDBG RenderBuffer::Map() called by host (CPU AOV path)\n");
+    }
     _mapped = true;
     return _data.data();
   }
@@ -289,6 +295,15 @@ class StubRenderBuffer final : public HdRenderBuffer {
   bool IsMapped() const override { return _mapped; }
   void Resolve() override {}
   bool IsConverged() const override { return true; }
+  // Probe: does the host ever ask for the GPU resource (vs Map)? Base returns empty.
+  VtValue GetResource(bool multiSampled) const override {
+    if (!_loggedGetResource && std::getenv("PYXIS_OMNI_DBG") != nullptr) {
+      _loggedGetResource = true;
+      std::fprintf(stderr, "PYXISDBG RenderBuffer::GetResource(multiSampled=%d) called by host "
+                           "(GPU AOV path is reachable!)\n", multiSampled ? 1 : 0);
+    }
+    return HdRenderBuffer::GetResource(multiSampled);
+  }
 
  protected:
   void _Deallocate() override {
@@ -301,6 +316,8 @@ class StubRenderBuffer final : public HdRenderBuffer {
   uint32_t _height = 0;
   HdFormat _format = HdFormatUNorm8Vec4;
   bool _mapped = false;
+  bool _loggedMap = false;
+  mutable bool _loggedGetResource = false;  // GetResource() is const
   std::vector<uint8_t> _data;
 };
 
@@ -817,6 +834,23 @@ void HdPyxisRenderDelegate::SetStage(const UsdStageRefPtr& stage) noexcept {
 
 HdResourceRegistrySharedPtr HdPyxisRenderDelegate::GetResourceRegistry() const {
   return _resourceRegistry;
+}
+
+void HdPyxisRenderDelegate::SetDrivers(HdDriverVector const& drivers) {
+  // Probe (PYXIS_OMNI_DBG): what Hgi backend does the host (omni.hydra.pxr) run, and
+  // can we reach a native texture handle? Determines whether a GPU-direct color AOV
+  // (no CPU readback) is reachable — see RFC 0008.
+  // Filter by the held type (Hgi*) rather than HgiTokens->renderDriver to avoid
+  // linking usd_hgi for the token data symbol; GetAPIName() is a vtable call.
+  for (const HdDriver* driver : drivers) {
+    if (driver == nullptr || !driver->driver.IsHolding<Hgi*>())
+      continue;
+    const Hgi* hgi = driver->driver.UncheckedGet<Hgi*>();
+    if (hgi != nullptr && std::getenv("PYXIS_OMNI_DBG") != nullptr)
+      std::fprintf(stderr, "PYXISDBG SetDrivers: host Hgi API = '%s' (hgi=%p)\n",
+                   hgi->GetAPIName().GetText(), static_cast<const void*>(hgi));
+  }
+  HdRenderDelegate::SetDrivers(drivers);
 }
 
 HdRenderPassSharedPtr HdPyxisRenderDelegate::CreateRenderPass(

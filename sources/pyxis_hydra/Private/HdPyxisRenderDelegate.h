@@ -70,6 +70,10 @@ class HdPyxisRenderDelegate final : public HdRenderDelegate {
 
   [[nodiscard]] HdResourceRegistrySharedPtr GetResourceRegistry() const override;
 
+  // Host hands us its HdDriver list (incl. the Hgi render driver) here. We capture
+  // the Hgi so we can probe its backend (Vulkan/GL) for the direct-AOV question.
+  void SetDrivers(HdDriverVector const& drivers) override;
+
   // ---- Rprim / Sprim / Bprim factories -----------------------------
   [[nodiscard]] HdRprim* CreateRprim(TfToken const& typeId, SdfPath const& primId) override;
   void DestroyRprim(HdRprim* rprim) override;
