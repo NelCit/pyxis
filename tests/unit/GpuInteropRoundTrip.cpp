@@ -379,6 +379,39 @@ TEST(GpuInteropExport, UnsupportedFormatFailsCleanly) {
   EXPECT_EQ(img.memoryHandle, nullptr);
 }
 
+// ReleaseImage frees the image's resources and the exporter does NOT accumulate
+// images across create/release cycles. Regression guard for the per-resize leak
+// (PyxisEngine::Resize re-created the exportable color image every viewport resize
+// but never released the old one -> VkImage + VkDeviceMemory + Win32 HANDLE leaked
+// for the life of the persisted engine). Simulates many resizes.
+TEST(GpuInteropExport, ReleaseImageDoesNotAccumulate) {
+  InteropHarness harness = MakeHarness();
+  if (!harness.Ready())
+    GTEST_SKIP() << "No device / external-memory interop unavailable.";
+
+  EXPECT_EQ(harness.exporter->DebugLiveImageCount(), 0u);
+
+  // Steady state: one live image, re-created at varying sizes (a resize loop).
+  ExportedImage current{};
+  for (uint32_t i = 0; i < 50; ++i) {
+    if (current.texture != nullptr)
+      harness.exporter->ReleaseImage(current);
+    const uint32_t width = 256u + i * 4u;   // distinct size each "resize"
+    const uint32_t height = 128u + i * 2u;
+    current = harness.exporter->CreateExportableImage(
+        width, height, VK_FORMAT_R16G16B16A16_SFLOAT, true);
+    ASSERT_TRUE(current.IsValid()) << "resize iter " << i;
+    // After release-then-create, exactly one image is live — no accumulation.
+    EXPECT_EQ(harness.exporter->DebugLiveImageCount(), 1u) << "resize iter " << i;
+  }
+  // Releasing the last one drops to zero; releasing an already-released / unknown
+  // image is a harmless no-op.
+  harness.exporter->ReleaseImage(current);
+  EXPECT_EQ(harness.exporter->DebugLiveImageCount(), 0u);
+  harness.exporter->ReleaseImage(current);  // double-release: no crash, no-op
+  EXPECT_EQ(harness.exporter->DebugLiveImageCount(), 0u);
+}
+
 // The device UUID is stable, valid, and non-zero — it is the value the Kit
 // importer compares against its own device before importing (RFC 0004 §4).
 TEST(GpuInteropExport, DeviceUuidStableAndValid) {

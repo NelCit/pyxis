@@ -17,6 +17,8 @@
 
 #include <nvrhi/nvrhi.h>
 
+#include <algorithm>
+#include <cstddef>
 #include <cstring>
 #include <vector>
 
@@ -285,6 +287,31 @@ ExportedImage GpuInteropExporter::CreateExportableImage(uint32_t width, uint32_t
   out.dedicatedAllocation = true;
   impl.images.push_back(std::move(owned));
   return out;
+}
+
+void GpuInteropExporter::ReleaseImage(const ExportedImage& image) noexcept {
+  Impl& impl = *_impl;
+  if (impl.device == VK_NULL_HANDLE || image.texture == nullptr)
+    return;
+  const auto match = std::find_if(impl.images.begin(), impl.images.end(),
+      [&](const Impl::OwnedImage& owned) { return owned.texture.Get() == image.texture; });
+  if (match == impl.images.end())
+    return;
+  // Drain GPU work before freeing — the image may still be referenced by an
+  // in-flight submit. Resize-time only, so the full idle is acceptable.
+  vkDeviceWaitIdle(impl.device);
+  match->texture = nullptr;  // drop the NVRHI wrapper before destroying the VkImage.
+  if (match->image != VK_NULL_HANDLE)
+    vkDestroyImage(impl.device, match->image, nullptr);
+  if (match->memory != VK_NULL_HANDLE)
+    vkFreeMemory(impl.device, match->memory, nullptr);
+  if (match->win32 != nullptr)
+    ::CloseHandle(match->win32);
+  impl.images.erase(match);
+}
+
+std::size_t GpuInteropExporter::DebugLiveImageCount() const noexcept {
+  return _impl->images.size();
 }
 
 ExportedSemaphore GpuInteropExporter::CreateExportableTimelineSemaphore() noexcept {

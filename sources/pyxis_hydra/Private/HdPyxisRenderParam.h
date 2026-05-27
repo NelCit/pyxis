@@ -17,8 +17,6 @@
 
 #include <hlsl++.h>
 
-#include <mutex>
-
 namespace pyxis {
 class GpuScene;
 class Profiler;
@@ -51,14 +49,12 @@ class HdPyxisRenderParam final : public HdRenderParam {
   // content-hash dedup map and uses today's CreateMesh + AppendInstance path.
   [[nodiscard]] bool PersistEngine() const noexcept { return _persistEngine; }
 
-  // Hydra syncs Rprims in PARALLEL (HdRenderIndex::SyncAll dispatches prim Sync
-  // across worker threads), and every prim's Sync mutates this one shared
-  // GpuScene (CreateMesh / AppendInstance / AcquireMaterial / AddLight /
-  // SetCamera). GpuScene is single-writer (§30.11) — concurrent mutation is a
-  // data race that corrupts memory and crashes on many-prim scenes (World
-  // Lobby), while staying invisible on small scenes and under cdb/ASAN/validation
-  // (timing shifts hide it). Serialize all GpuScene mutations on this mutex.
-  [[nodiscard]] std::mutex& SceneMutex() noexcept { return _sceneMutex; }
+  // NOTE: there is NO scene mutex anymore. Under the RFC 0007 StageWalker-only
+  // ingest, every prim Sync (HdPyxisMesh/Light/Camera) is a no-op — ALL GpuScene
+  // mutation happens single-threaded in HdPyxisRenderPass::_Execute (one
+  // StageWalker::WalkStage on the render thread). So the §30.11 single-writer
+  // invariant holds by construction and Hydra's parallel Sync can't race the
+  // GpuScene. (The old per-prim-Sync path needed a mutex here; it's gone.)
 
   // Stage-to-world correction (metersPerUnit scale + Z-up->Y-up rotation),
   // matching pyxis_usd_ingest's StageWalker::BuildStageContext. Hydra's
@@ -91,7 +87,6 @@ class HdPyxisRenderParam final : public HdRenderParam {
   pyxis::Profiler* _profiler;
   pyxis::hydra::PyxisEngine* _engine;
   bool _persistEngine;
-  std::mutex _sceneMutex;
   hlslpp::float4x4 _stageToWorld = hlslpp::float4x4::identity();
   UsdStageRefPtr _stage;
 };

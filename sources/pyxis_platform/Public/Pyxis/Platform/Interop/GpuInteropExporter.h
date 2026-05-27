@@ -23,6 +23,7 @@
 #include <Pyxis/Platform/Forward.h>
 #include <Pyxis/Platform/PlatformApi.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 
@@ -93,6 +94,19 @@ class PYXIS_PLATFORM_API GpuInteropExporter {
   [[nodiscard]] ExportedImage CreateExportableImage(uint32_t width, uint32_t height,
                                                     uint32_t vkFormat,
                                                     bool isColorRenderTarget) noexcept;
+
+  // Release an image previously returned by CreateExportableImage: waits for the
+  // device to idle, drops the NVRHI wrapper, and destroys the VkImage +
+  // VkDeviceMemory + Win32 HANDLE. MUST be called before re-creating an image at a
+  // new size (e.g. on viewport resize) — otherwise the old image + memory + handle
+  // leak until the exporter is destroyed. No-op for an invalid/unknown image.
+  // CAUTION: only call once no importer still references the image's memory handle
+  // (the exporter owns and closes that handle here).
+  void ReleaseImage(const ExportedImage& image) noexcept;
+
+  // Diagnostic: number of live images the exporter currently owns. For tests
+  // (assert resize releases the old image) and leak triage.
+  [[nodiscard]] std::size_t DebugLiveImageCount() const noexcept;
 
   // Create an exportable timeline semaphore (initial value 0).
   [[nodiscard]] ExportedSemaphore CreateExportableTimelineSemaphore() noexcept;

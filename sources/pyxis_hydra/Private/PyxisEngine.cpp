@@ -263,7 +263,13 @@ void PyxisEngine::Resize(uint32_t width, uint32_t height) noexcept {
   impl.height = height;
 
   // Recreate the exportable color image (the texture the path tracer writes +
-  // the host samples) and the throwaway display target at the new size.
+  // the host samples) and the throwaway display target at the new size. RELEASE
+  // the previous exportable image first — the exporter owns its VkImage +
+  // VkDeviceMemory + Win32 HANDLE and only frees them on ReleaseImage/teardown,
+  // so without this every resize leaks an image+memory+handle for the life of the
+  // (persisted) engine.
+  if (impl.exportedColor.texture != nullptr)
+    impl.exporter->ReleaseImage(impl.exportedColor);
   impl.exportedColor =
       impl.exporter->CreateExportableImage(width, height, EXPORT_COLOR_VK_FORMAT, true);
 
