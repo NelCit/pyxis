@@ -3,6 +3,7 @@
 #include "Passes/PathTracePass.h"
 
 #include "RenderGraph/PassContext.h"
+#include "RenderGraph/ShaderLoad.h"
 
 #include <Pyxis/Platform/FileSystem/AssetLocator.h>
 #include <Pyxis/Platform/Logging/Log.h>
@@ -44,35 +45,11 @@ static_assert(sizeof(shaderinterop::FrameUiUniforms) == 32,
               "FrameUiUniforms is 32 bytes (2 cbuffer rows): picker + display "
               "selector on row 0, per-AOV knobs (worldPosPeriod + reserved) on row 1.");
 
-std::vector<char> ReadBinaryFile(std::string_view path) noexcept {
-  std::ifstream stream(std::string{path}, std::ios::binary | std::ios::ate);
-  if (!stream.is_open())
-    return {};
-  const auto fileSize = stream.tellg();
-  if (fileSize <= 0)
-    return {};
-  std::vector<char> bytes(static_cast<std::size_t>(fileSize));
-  stream.seekg(0, std::ios::beg);
-  stream.read(bytes.data(), fileSize);
-  return bytes;
-}
-
+// Thin wrapper over the shared LoadSpirvShader (RenderGraph/ShaderLoad.h) that
+// pins the "PathTracePass" log prefix so the call sites below stay terse.
 nvrhi::ShaderHandle LoadSpirv(nvrhi::IDevice* device, std::string_view path,
                               nvrhi::ShaderType stage, const char* entry) noexcept {
-  auto& log = Logging::Get();
-  auto bytes = ReadBinaryFile(path);
-  if (bytes.empty())
-  {
-    std::string msg = "PathTracePass: failed to load shader ";
-    msg.append(path);
-    log.Error(log::RENDER, msg);
-    return nullptr;
-  }
-  nvrhi::ShaderDesc shaderDesc{};
-  shaderDesc.shaderType = stage;
-  shaderDesc.entryName = entry;
-  shaderDesc.debugName = std::string{path};
-  return device->createShader(shaderDesc, bytes.data(), bytes.size());
+  return LoadSpirvShader(device, path, stage, entry, "PathTracePass");
 }
 
 }  // namespace

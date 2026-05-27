@@ -5,8 +5,10 @@
 // ToneMap → AovResolve → DebugView → CopyToHydraBuffer → Present)
 // fills in at M5+.
 
+#include "Passes/BlitToSrgbPass.h"
 #include "Passes/PathTracePass.h"
 #include "Passes/SsaaResolvePass.h"
+#include "RenderGraph/IRenderPass.h"
 #include "RenderGraph/PassContext.h"
 #include "RenderGraph/RenderGraph.h"
 
@@ -31,13 +33,19 @@ PyxisRenderer::PyxisRenderer(nvrhi::IDevice* device, GpuScene& scene, Profiler& 
   auto pathTrace = std::make_unique<PathTracePass>(device, scene);
   _pathTracePass = pathTrace.get();
   _graph->AddPass(std::move(pathTrace));
-  // SSAA resolve runs as the next graph pass after PathTrace: it
-  // box-downsamples the super-res color AOV into the output-res
-  // colorResolved target. No-ops at ssaaFactor == 1 / when its shader
-  // failed to load (§9 linear graph — passes self-gate, no DAG cull).
-  _graph->AddPass(std::make_unique<SsaaResolvePass>(device));
-  Logging::Get().Info(log::RENDER,
-                      "PyxisRenderer: initialised (PathTrace + SsaaResolve registered)");
+  // SSAA resolve runs next: it box-downsamples the super-res LINEAR color AOV into
+  // a base-res LINEAR intermediate (it owns the texture; RenderFrame threads it via
+  // PassContext::colorLinearResolved). No-ops at ssaaFactor < 2.
+  auto ssaa = std::make_unique<SsaaResolvePass>(device);
+  _ssaaPass = ssaa.get();
+  _graph->AddPass(std::move(ssaa));
+  // BlitToSrgb is the final present-encode: linear -> sRGB OETF into colorResolved
+  // (the present target). Reads the SSAA intermediate at factor > 1, else `color`
+  // directly. No-ops when colorResolved is unbound (Kit never binds it; only the
+  // standalone viewer does). Split from SsaaResolvePass so each pass has one job.
+  _graph->AddPass(std::make_unique<BlitToSrgbPass>(device));
+  Logging::Get().Info(
+      log::RENDER, "PyxisRenderer: initialised (PathTrace + SsaaResolve + BlitToSrgb registered)");
 }
 
 // Out-of-line dtor lives here so unique_ptr<RenderGraph>'s deleter sees
@@ -62,11 +70,20 @@ void PyxisRenderer::RenderFrame(nvrhi::ICommandList* commandList, const RenderSe
   // readback asserts == 1 since the mapBuffer-without-fence path
   // would race past that.
   context.framesInFlight = _framesInFlight;
+  // At SSAA factor > 1, give SsaaResolvePass its base-res LINEAR downsample target
+  // (it owns the texture) and thread it to BlitToSrgbPass via the context. At
+  // factor 1 it stays null and BlitToSrgbPass reads `color` directly.
+  if (settings.ssaaFactor > 1u && _ssaaPass != nullptr && targets.colorResolved != nullptr) {
+    const uint32_t baseWidth = settings.width / settings.ssaaFactor;
+    const uint32_t baseHeight = settings.height / settings.ssaaFactor;
+    context.colorLinearResolved =
+        static_cast<SsaaResolvePass*>(_ssaaPass)->EnsureLinearOutput(baseWidth, baseHeight);
+  }
 
   const Profiler::CpuScope frameScope(*_profiler, "render.frame.cpu");
-  // The graph runs PathTrace → SsaaResolve. SsaaResolve self-no-ops
-  // when settings.ssaaFactor < 2 / colorResolved is unbound, so the
-  // non-SSAA path is unaffected.
+  // The graph runs PathTrace → SsaaResolve → BlitToSrgb. SsaaResolve no-ops at
+  // factor < 2; BlitToSrgb no-ops when colorResolved is unbound (Kit's path), so
+  // the headless / Omniverse paths are unaffected.
   _graph->Execute(commandList, context);
 }
 

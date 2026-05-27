@@ -1,0 +1,10 @@
+<!-- RFC 0004 — nv-usd 25.11 dev package, pinned to Kit 110.1.1's all-deps.
+     Pulled non-interactively by setup.ps1 (proven: packman pulls this from the
+     public CloudFront feed without the interactive template wizard).
+     The full kit dev all-deps.packman.xml can't be pulled wholesale (some pins
+     like abseil are on internal-only feeds); a Hydra delegate only needs USD. -->
+<project toolsVersion="6.11">
+    <dependency name="usd" linkPath="${OUTDIR}/usd">
+        <package name="usd.py312.windows-x86_64.stock.release" version="0.25.11.kit.2-gl.19811" />
+    </dependency>
+</project>

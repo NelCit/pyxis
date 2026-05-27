@@ -31,8 +31,6 @@ target_sources(pyxis PRIVATE
     Private/Output/ExrWriter.cpp
     Private/Output/PngWriter.h
     Private/Output/PngWriter.cpp
-    Private/Output/TextureReadback.h
-    Private/Output/TextureReadback.cpp
     Private/Camera/FlyCameraController.h
     Private/Camera/FlyCameraController.cpp
     Private/Render/AovTextures.h
@@ -70,6 +68,16 @@ find_package(Stb REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(tinyexr CONFIG REQUIRED)
 
+# RFC 0006: IngestUsd.cpp calls UsdStage::Open / authors variant selections, so
+# pyxis_app sees USD headers + links the nv-usd 25.11 import libs directly. We use
+# the includes+libs-only entry point (NOT pyxis_use_nv_usd): pyxis_app stays on the
+# exception-free perimeter (/EHs-c- + _HAS_EXCEPTIONS=0 from
+# pyxis_disable_exceptions_and_rtti above). USD's headers are catch-free, so they
+# compile without exceptions enabled — exactly as they did against vcpkg USD on
+# main, where the include path arrived globally via the vcpkg toolchain.
+include(PyxisNvUsd)
+pyxis_nv_usd_includes_and_libs(pyxis)
+
 # Plan §29.1 overlay order: pyxis loads <exe-dir>/Resources/parameters.
 # default.json as the on-disk default. Copy the source-of-truth to the
 # binary's Resources/ alongside the shaders Slang.cmake puts there.
@@ -104,45 +112,49 @@ unset(_pyxis_app_resources_src)
 unset(_pyxis_app_resources_dst)
 
 # ----------------------------------------------------------------------------
-# USD plugin tree (M4). USD discovers its prim-type plugins (UsdGeom,
-# UsdLux, UsdShade, etc.) by walking `<dir-of-usd-DLLs>/usd/<plugin>/
-# resources/plugInfo.json`. vcpkg copies the usd_*.dll files next to
-# pyxis.exe but NOT the matching `usd/` plugin tree, so without this
-# copy step UsdStage::Open(...) hangs trying to resolve schema TfTypes.
+# nv-usd runtime staging (RFC 0006). USD discovers its prim-type plugins
+# (UsdGeom, UsdLux, UsdShade, …) by walking `<dir-of-usd-DLLs>/usd/<plugin>/
+# resources/plugInfo.json`. We mirror nv-usd's standard relative layout next to
+# pyxis.exe: the usd_*.dll go beside the exe, and the plugin tree goes to
+# `<bin>/usd/`, so USD's PlugRegistry finds it automatically (no env var needed).
 #
-# Debug vs Release: vcpkg ships separate trees under
-# vcpkg_installed/x64-windows/{,debug/}bin/usd/. Both trees are
-# structurally identical; only their referenced DLLs differ in linkage
-# (debug-vs-release CRT). copy_directory mirrors the right one based
-# on $<CONFIG>.
+# nv-usd ships ONE release build (no debug tree, unlike vcpkg), so there is no
+# $<CONFIG> branching, and it ships its own `lib/usd/plugInfo.json` aggregator
+# with the correct `Includes: ["*/resources/"]` wildcard — we copy it verbatim
+# rather than writing our own.
+#
+# DLLs staged next to pyxis.exe:
+#   - PXR_USD_ROOT/lib/*.dll   — usd_*.dll core + Alembic/draco/OpenSubdiv
+#   - PXR_USD_ROOT/bin/*.dll   — Imath, MaterialX*, tbb*, zlib support libs
+#   - PYTHON_ROOT/python312.dll + python3.dll — nv-usd 25.11 is a py312 build
 # ----------------------------------------------------------------------------
-set(_pyxis_usd_plugin_src
-    "$<IF:$<CONFIG:Debug>,${CMAKE_BINARY_DIR}/vcpkg_installed/x64-windows/debug/bin/usd,${CMAKE_BINARY_DIR}/vcpkg_installed/x64-windows/bin/usd>")
-set(_pyxis_usd_plugin_dst
-    "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/$<CONFIG>/usd")
-
-# USD's PlugRegistry walks the path in PXR_PLUGINPATH_NAME for a
-# top-level `plugInfo.json` aggregator that lists per-plugin
-# subdirs via `Includes: ["*/resources/"]`. vcpkg ships that
-# aggregator at `lib/usd/plugInfo.json` (Linux convention) but the
-# actual plugin tree lives at `bin/usd/<plugin>/resources/` on
-# Windows; the aggregator's wildcard there resolves to nothing.
-# We write our own one-line aggregator next to the copied tree so
-# USD's wildcard finds the real per-plugin plugInfo.jsons.
-set(_pyxis_usd_aggregator "${CMAKE_CURRENT_BINARY_DIR}/usd_plugInfo.json")
-file(WRITE "${_pyxis_usd_aggregator}" "{\n    \"Includes\": [ \"*/resources/\" ]\n}\n")
+set(_pyxis_usd_plugin_dst "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/$<CONFIG>/usd")
+set(_pyxis_exe_dir        "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/$<CONFIG>")
 
 add_custom_command(TARGET pyxis POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different
-        "${_pyxis_usd_plugin_src}"
+        "${PXR_USD_ROOT}/lib/usd"
         "${_pyxis_usd_plugin_dst}"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${_pyxis_usd_aggregator}"
-        "${_pyxis_usd_plugin_dst}/plugInfo.json"
-    COMMENT "Copying vcpkg USD plugin tree (44 plugins, ~7 MB) + aggregator plugInfo.json to <bin>/usd/")
-unset(_pyxis_usd_plugin_src)
+    COMMENT "Copying nv-usd plugin tree (lib/usd/, incl. aggregator plugInfo.json) to <bin>/usd/")
+
+# Stage the nv-usd + python runtime DLLs next to pyxis.exe. Globbed at configure
+# time (CONFIGURE_DEPENDS re-globs on rebuild if the set changes); each file is a
+# copy_if_different so incremental builds skip unchanged DLLs.
+file(GLOB _pyxis_nv_usd_dlls CONFIGURE_DEPENDS
+    "${PXR_USD_ROOT}/lib/*.dll" "${PXR_USD_ROOT}/bin/*.dll")
+foreach(_dll IN LISTS _pyxis_nv_usd_dlls)
+    add_custom_command(TARGET pyxis POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_dll}" "${_pyxis_exe_dir}")
+endforeach()
+foreach(_pydll python312.dll python3.dll)
+    add_custom_command(TARGET pyxis POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${PYXIS_NV_USD_PYTHON_ROOT}/${_pydll}" "${_pyxis_exe_dir}")
+endforeach()
+
 unset(_pyxis_usd_plugin_dst)
-unset(_pyxis_usd_aggregator)
+unset(_pyxis_exe_dir)
+unset(_pyxis_nv_usd_dlls)
 
 # ImGui (with Vulkan + GLFW backends) — built lazily by the helper in
 # _cmake/Thirdparty.cmake. pyxis_app/ViewerMode is the only consumer

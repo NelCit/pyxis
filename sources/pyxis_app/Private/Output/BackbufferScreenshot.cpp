@@ -2,7 +2,7 @@
 
 #include "Output/BackbufferScreenshot.h"
 
-#include "Output/TextureReadback.h"
+#include <Pyxis/Platform/Gpu/TextureReadback.h>
 
 #include <Pyxis/Platform/Logging/Log.h>
 #include <Pyxis/Platform/Logging/LogCategories.h>
@@ -23,7 +23,7 @@ bool CaptureBackbufferToPng(nvrhi::IDevice* device, nvrhi::ICommandList* command
     return false;
 
   auto readback =
-      TextureReadback::RecordCopy(device, commandList, backbuffer, "screenshot-staging");
+      TextureReadback::RecordCopyOnce(device, commandList, backbuffer, "screenshot-staging");
   if (!readback)
   {
     log.Error(log::APP, "screenshot: " + readback.error());

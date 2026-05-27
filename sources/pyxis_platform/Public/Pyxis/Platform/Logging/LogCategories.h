@@ -8,6 +8,14 @@
 
 #pragma once
 
+// Python's pyconfig.h (pulled transitively by nv-usd's Tf python glue, RFC 0006)
+// #defines PLATFORM as "win32". That macro would mangle the PLATFORM category
+// constant below into a string literal ("expected unqualified-id"). Drop the
+// leaked implementation-detail macro before we use the identifier.
+#ifdef PLATFORM
+#  undef PLATFORM
+#endif
+
 namespace pyxis::log {
 
 // Top-level component prefixes. New categories should always start with

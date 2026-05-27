@@ -60,6 +60,59 @@
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",
       "preLaunchTask": "build:dev"
+    },
+
+    {
+      "//": "RFC 0007 — launch Omniverse Kit (pyxis.editor) with the Pyxis Hydra",
+      "//2": "delegate. Prebuilds the delegate (pyxis_hydra.dll, build/dev) and stages",
+      "//3": "the Python omni.hydra.pyxis extension. cppvsdbg lets you set breakpoints",
+      "//4": "in pyxis_hydra.dll once Kit loads it (Python __init__.py registers its",
+      "//5": "plugInfo). The renderer menu lists 'Pyxis' (see RFC viewport caveat).",
+      "name": "Omniverse: Pyxis Editor (prebuild + launch)",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/omniverse/kit-app-template/_build/windows-x86_64/release/kit/kit.exe",
+      "args": [
+        "${workspaceFolder}/build/omniverse/kit-app-template/_build/windows-x86_64/release/apps/pyxis.editor.kit",
+        "--vulkan"
+      ],
+      "cwd": "${workspaceFolder}/build/omniverse/kit-app-template/_build/windows-x86_64/release",
+      "console": "integratedTerminal",
+      "environment": [
+        {
+          "//": "RFC 0006: Pyxis delegate debug prints (PYXISDBG ...) — engine",
+          "//2": "borrow/release, persistEngine reads, SetRenderSetting, AOV writes.",
+          "name": "PYXIS_OMNI_DBG",
+          "value": "1"
+        }
+      ],
+      "symbolSearchPath": "${workspaceFolder}/build/dev/bin/Release",
+      "preLaunchTask": "omni:prebuild"
+    },
+    {
+      "//": "RFC 0004 — debug the Pyxis Hydra delegate end-to-end WITHOUT Kit: the",
+      "//2": "smoke harness drives a USD stage (mesh+material+light+camera) through",
+      "//3": "the delegate via HdEngine and renders Pyxis into the host AOV. Fast",
+      "//4": "iteration + full breakpoints in the delegate/engine. nv-usd 25.11 must",
+      "//5": "precede vcpkg USD on PATH; PYXIS_OMNI_PYTHON_ROOT matches the CMake default.",
+      "name": "Omniverse: HdEngine smoke (debug delegate)",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/dev/bin/Release/pyxis_hydra_omni_smoke.exe",
+      "args": [],
+      "cwd": "${workspaceFolder}/build/dev/bin/Release",
+      "console": "integratedTerminal",
+      "environment": [
+        {
+          "name": "PATH",
+          "value": "${workspaceFolder}/build/omniverse/usd-deps/usd/lib;${workspaceFolder}/build/omniverse/usd-deps/usd/bin;D:/packman-repo/chk/python/3.12.13+nv1-windows-x86_64;${workspaceFolder}/build/dev/bin/Release;${env:PATH}"
+        },
+        {
+          "name": "PXR_PLUGINPATH_NAME",
+          "value": "${workspaceFolder}/build/omniverse/usd-deps/usd/lib/usd;${workspaceFolder}/build/omniverse/usd-deps/usd/plugin/usd"
+        }
+      ],
+      "preLaunchTask": "omni:prebuild-smoke"
     }
   ],
   "inputs": [

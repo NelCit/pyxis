@@ -9,7 +9,7 @@
 #include <imgui.h>
 #include "Output/AovExrSaver.h"
 #include "Output/BackbufferScreenshot.h"
-#include "Output/TextureReadback.h"
+#include <Pyxis/Platform/Gpu/TextureReadback.h>
 #include "Render/AovRegistry.h"
 #include "Render/AovTextures.h"
 #include "IngestUsd.h"
@@ -684,10 +684,14 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
       return true;
     const uint32_t superW = baseW * ssaa;
     const uint32_t superH = baseH * ssaa;
-    const bool resolveOk = (ssaa == 1u) ? !ssaaResolveTarget
-                                        : (ssaaResolveTarget
-                                           && ssaaResolveTarget->getDesc().width == baseW
-                                           && ssaaResolveTarget->getDesc().height == baseH);
+    // The resolve target is the PRESENT target — always base-res, bound for every
+    // factor (incl. 1). SsaaResolvePass box-downsamples (factor > 1) or
+    // passes-through (factor 1) and, in BOTH cases, applies the sRGB OETF so the
+    // value copied into the sRGB swapchain displays correctly (matching headless /
+    // Omniverse). aovs.color itself stays LINEAR for readback paths.
+    const bool resolveOk = ssaaResolveTarget
+                           && ssaaResolveTarget->getDesc().width == baseW
+                           && ssaaResolveTarget->getDesc().height == baseH;
     if (aovs.width == superW && aovs.height == superH && activeSsaa == ssaa && resolveOk)
       return true;
     auto rebuilt = AovTextures::Create(device, superW, superH);
@@ -698,27 +702,22 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
     }
     aovs = std::move(*rebuilt);
     renderer.Resize(superW, superH);
-    if (ssaa > 1u)
     {
       nvrhi::TextureDesc resolveDesc;
       resolveDesc.width = baseW;
       resolveDesc.height = baseH;
-      resolveDesc.format = nvrhi::Format::BGRA8_UNORM;  // matches aovs.color + copy to backbuffer
+      resolveDesc.format = nvrhi::Format::BGRA8_UNORM;  // sRGB-encoded bytes; raw-copied to the sRGB backbuffer
       resolveDesc.dimension = nvrhi::TextureDimension::Texture2D;
       resolveDesc.isUAV = true;
-      resolveDesc.debugName = "ViewerSsaaResolveTarget";
+      resolveDesc.debugName = "ViewerPresentTarget";
       resolveDesc.initialState = nvrhi::ResourceStates::UnorderedAccess;
       resolveDesc.keepInitialState = true;
       ssaaResolveTarget = device->createTexture(resolveDesc);
       if (!ssaaResolveTarget)
       {
-        log.Error(log::APP, "ViewerMode: SSAA resolve-target createTexture failed");
+        log.Error(log::APP, "ViewerMode: present/resolve-target createTexture failed");
         return false;
       }
-    }
-    else
-    {
-      ssaaResolveTarget = nullptr;
     }
     activeSsaa = ssaa;
     if (ssaa > 1u)
@@ -730,6 +729,12 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
     }
     return true;
   };
+  // Allocate the present target up-front (factor 1) so the very first frame
+  // presents through the sRGB-encoding resolve pass — not the raw, un-encoded
+  // copy. Without this the first frame(s) before any resize/factor change would
+  // display linear-dark.
+  if (!ensureSsaaTargets(winDesc.width, winDesc.height, 1u))
+    return EXIT_DEVICE_INIT_FAIL;
 
   // ---- Single command list --------------------------------------------
   // M1 pins framesInFlight = 1, so one command list reused across frames
@@ -1039,7 +1044,9 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
       // SSAA: when supersampling, the renderer's SsaaResolvePass
       // box-downsamples aovs.color (super-res) into this base-res
       // target; we copy THAT to the backbuffer below. Null at factor 1.
-      targets.colorResolved = (activeSsaa > 1u) ? ssaaResolveTarget.Get() : nullptr;
+      // Always bound: the resolve pass is the present-encode for every factor
+      // (downsample at >1, sRGB passthrough at 1). aovs.color stays linear.
+      targets.colorResolved = ssaaResolveTarget.Get();
       // M7 follow-up — wire the raw AOV outputs + pick buffer pair so
       // the AOV inspector / picker / Save EXR all have data to read.
       // The pass tolerates nullptr (binds 1×1 fallbacks); we feed the
@@ -1123,16 +1130,15 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
       // transitions for both images via `keepInitialState`, so
       // an explicit barrier isn't needed — copyTexture inserts
       // the right CopySrc/CopyDest transitions automatically.
-      // SSAA: copy the base-res resolve target (the SsaaResolvePass's
-      // downsampled output) when supersampling; else the AOV color
-      // (which is already at backbuffer res). Both are BGRA8_UNORM →
-      // BGRA8_SRGB backbuffer, the same copy the non-SSAA path uses.
-      nvrhi::ITexture* const presentSource =
-          (activeSsaa > 1u && ssaaResolveTarget) ? ssaaResolveTarget.Get() : aovs.color.Get();
-      // Explicit compute-write → copy-read barrier on the resolve
-      // target (UAV → CopySource). The auto-tracker wasn't inserting
-      // it reliably for the UAV-initial-state resolve target.
-      if (activeSsaa > 1u && ssaaResolveTarget)
+      // Always present the resolve/present target: SsaaResolvePass has written it
+      // with the sRGB-encoded display color (downsampled at factor > 1, a pure
+      // LinearToSrgb passthrough at factor 1). Its sRGB bytes raw-copy into the
+      // sRGB backbuffer and display correctly — matching headless / Omniverse.
+      nvrhi::ITexture* const presentSource = ssaaResolveTarget.Get();
+      // Explicit compute-write → copy-read barrier on the present target
+      // (UAV → CopySource); the auto-tracker wasn't inserting it reliably for the
+      // UAV-initial-state target.
+      if (ssaaResolveTarget)
       {
         commandList->setTextureState(presentSource, nvrhi::AllSubresources,
                                      nvrhi::ResourceStates::CopySource);

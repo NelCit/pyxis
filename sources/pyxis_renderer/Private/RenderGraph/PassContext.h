@@ -17,6 +17,7 @@
 
 namespace nvrhi {
 class ICommandList;
+class ITexture;
 }
 
 namespace pyxis {
@@ -28,6 +29,12 @@ struct PassContext {
   Profiler* profiler = nullptr;
   const RenderSettings* settings = nullptr;
   const RenderTargets* targets = nullptr;
+  // Renderer-internal scratch (NOT a public RenderTargets field): the base-res
+  // LINEAR color produced by SsaaResolvePass at SSAA factor > 1, consumed by
+  // BlitToSrgbPass. PyxisRenderer owns the texture and sets this each frame; null
+  // at factor 1 (BlitToSrgbPass then reads targets->color directly). Keeps the
+  // SSAA(downsample) + Blit(sRGB) split entirely Private/ -- no §18 surface change.
+  nvrhi::ITexture* colorLinearResolved = nullptr;
   uint64_t frameIndex = 0;
   // Default 0 to flush out anyone who forgot to wire it through —
   // PyxisRenderer::RenderFrame always sets the real value. A pass

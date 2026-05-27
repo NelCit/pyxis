@@ -6,7 +6,7 @@
 #include "Output/AovExrSaver.h"
 #include "Output/ExrWriter.h"
 #include "Output/PngWriter.h"
-#include "Output/TextureReadback.h"
+#include <Pyxis/Platform/Gpu/TextureReadback.h>
 #include "Render/AovRegistry.h"
 #include "Render/AovTextures.h"
 #include "IngestUsd.h"
@@ -299,7 +299,7 @@ void LogDeterminismPin(const Configuration& config, uint32_t framesInFlight) noe
   // unmaps on scope exit.
   commandList->open();
   auto readback =
-      TextureReadback::RecordCopy(device, commandList, renderTarget, "headless-readback-staging");
+      TextureReadback::RecordCopyOnce(device, commandList, renderTarget, "headless-readback-staging");
   if (!readback)
   {
     log.Error(log::APP, "headless: " + readback.error());

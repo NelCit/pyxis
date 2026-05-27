@@ -1,33 +1,27 @@
-// Pyxis renderer — SSAA box-downsample compute shader.
+// Pyxis renderer -- SSAA box-downsample compute shader.
 //
-// Viewer-mode deterministic supersampling resolve. The path tracer
-// renders the color AOV at `factor`× the swapchain resolution per
-// axis; this compute pass box-averages each factor×factor block down
-// to one output texel and writes the backbuffer-resolution result.
+// Viewer-mode deterministic supersampling resolve. The path tracer renders the
+// color AOV at `factor`x the swapchain resolution per axis; this compute pass
+// box-averages each factor x factor block down to one output texel.
 //
-// Gamma-aware: the source color AOV is the post-tonemap display-
-// referred image (sRGB-encoded BGRA8 semantics, but stored in the
-// AOV's RGBA8 texture). We average in approximately-linear light
-// (decode → average → re-encode) so edges don't darken — the sRGB
-// curve is convex, so a naive average of encoded values biases dark.
+// Single responsibility: DOWNSAMPLE ONLY, staying in LINEAR throughout. The source
+// color AOV is the ACES-tonemapped color in LINEAR display space (raygen writes
+// acesFilmic() with NO OETF -- verified by readback: range [0,1], not raw HDR), and
+// averaging in linear is the correct way to downsample (the sRGB curve is convex;
+// a naive average of encoded values biases dark). The sRGB DISPLAY encode is a
+// separate pass (BlitToSrgbPass / blit_to_srgb.slang) -- this pass is misnamed-free
+// box-downsample, nothing else. Output is base-res LINEAR.
 //
-// Deterministic by construction: fixed box kernel, no jitter, no
-// accumulation. One dispatch per frame; thread per output texel.
+// Deterministic by construction: fixed box kernel, no jitter, no accumulation.
+// One dispatch per frame; thread per output texel. Only the standalone viewer
+// binds the resolve target and only at factor > 1; Kit's PyxisEngine never binds
+// it, so Omniverse output is unaffected.
 
 #include "ShaderInterop.slang"
 
-[[vk::binding(0, 0)]] Texture2D<float4>   gSource;   // super-res color (RGBA8 UNORM)
-[[vk::binding(1, 0)]] RWTexture2D<float4> gDest;     // backbuffer-res output (RGBA8 UNORM)
+[[vk::binding(0, 0)]] Texture2D<float4>   gSource;   // super-res LINEAR color
+[[vk::binding(1, 0)]] RWTexture2D<float4> gDest;     // base-res LINEAR output
 [[vk::binding(2, 0)]] ConstantBuffer<SsaaDownsampleUniforms> gParams;
-
-float SrgbToLinear(float val) {
-    return (val <= 0.04045f) ? (val / 12.92f)
-                             : pow((val + 0.055f) / 1.055f, 2.4f);
-}
-float LinearToSrgb(float val) {
-    return (val <= 0.0031308f) ? (val * 12.92f)
-                               : (1.055f * pow(val, 1.0f / 2.4f) - 0.055f);
-}
 
 [shader("compute")]
 [numthreads(8, 8, 1)]
@@ -38,21 +32,13 @@ void main(uint3 tid : SV_DispatchThreadID) {
     const uint factor = max(1u, gParams.factor);
     const float invSamples = 1.0f / float(factor * factor);
 
-    float3 accumLinear = float3(0.0f, 0.0f, 0.0f);
-    float  accumAlpha  = 0.0f;
+    // Source is LINEAR -- average it directly and write LINEAR (no OETF here).
+    float4 accum = float4(0.0f, 0.0f, 0.0f, 0.0f);
     for (uint subY = 0u; subY < factor; ++subY) {
         for (uint subX = 0u; subX < factor; ++subX) {
             const uint2 srcCoord = uint2(tid.x * factor + subX, tid.y * factor + subY);
-            const float4 texel = gSource.Load(int3(int2(srcCoord), 0));
-            accumLinear += float3(SrgbToLinear(texel.r),
-                                  SrgbToLinear(texel.g),
-                                  SrgbToLinear(texel.b));
-            accumAlpha += texel.a;
+            accum += gSource.Load(int3(int2(srcCoord), 0));
         }
     }
-    accumLinear *= invSamples;
-    const float3 outRgb = float3(LinearToSrgb(accumLinear.r),
-                                 LinearToSrgb(accumLinear.g),
-                                 LinearToSrgb(accumLinear.b));
-    gDest[tid.xy] = float4(outRgb, accumAlpha * invSamples);
+    gDest[tid.xy] = accum * invSamples;
 }

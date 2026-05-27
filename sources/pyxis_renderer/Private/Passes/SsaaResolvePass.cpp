@@ -3,6 +3,7 @@
 #include "Passes/SsaaResolvePass.h"
 
 #include "RenderGraph/PassContext.h"
+#include "RenderGraph/ShaderLoad.h"
 
 #include <Pyxis/Platform/FileSystem/AssetLocator.h>
 #include <Pyxis/Platform/Logging/Log.h>
@@ -13,48 +14,19 @@
 // defines SsaaDownsampleUniforms under #ifdef __cplusplus.
 #include "ShaderInterop.slang"
 
-#include <fstream>
-#include <ios>
-#include <vector>
+#include <algorithm>
 
 namespace pyxis {
-
-namespace {
-
-[[nodiscard]] std::vector<char> ReadBinaryFile(std::string_view path) noexcept {
-  std::ifstream stream(std::string{path}, std::ios::binary | std::ios::ate);
-  if (!stream)
-    return {};
-  const std::streamsize fileSize = stream.tellg();
-  if (fileSize <= 0)
-    return {};
-  std::vector<char> bytes(static_cast<std::size_t>(fileSize));
-  stream.seekg(0, std::ios::beg);
-  stream.read(bytes.data(), fileSize);
-  return bytes;
-}
-
-}  // namespace
 
 SsaaResolvePass::SsaaResolvePass(nvrhi::IDevice* device) : _device(device) {
   auto& log = Logging::Get();
   const AssetLocator locator;
   const auto spvPath = locator.LocateResource("shaders/ssaa_downsample.spv");
 
-  const auto bytes = ReadBinaryFile(spvPath.View());
-  if (bytes.empty()) {
-    log.Error(log::RENDER, "SsaaResolvePass: failed to load ssaa_downsample.spv");
+  _shader = LoadSpirvShader(_device, spvPath.View(), nvrhi::ShaderType::Compute, "main",
+                            "SsaaResolvePass");
+  if (!_shader)
     return;
-  }
-  nvrhi::ShaderDesc shaderDesc{};
-  shaderDesc.shaderType = nvrhi::ShaderType::Compute;
-  shaderDesc.entryName = "main";
-  shaderDesc.debugName = "ssaa_downsample";
-  _shader = _device->createShader(shaderDesc, bytes.data(), bytes.size());
-  if (!_shader) {
-    log.Error(log::RENDER, "SsaaResolvePass: createShader failed");
-    return;
-  }
 
   nvrhi::BindingLayoutDesc layoutDesc;
   layoutDesc.visibility = nvrhi::ShaderType::Compute;
@@ -143,6 +115,27 @@ nvrhi::BindingSetHandle SsaaResolvePass::GetOrCreateBindingSet(
   return set;
 }
 
+nvrhi::ITexture* SsaaResolvePass::EnsureLinearOutput(uint32_t width, uint32_t height) {
+  if (width == 0u || height == 0u)
+    return nullptr;
+  if (_linearOut && _linearOutW == width && _linearOutH == height)
+    return _linearOut;
+  nvrhi::TextureDesc desc;
+  desc.width = width;
+  desc.height = height;
+  desc.format = nvrhi::Format::RGBA16_FLOAT;  // LINEAR; precision before the sRGB blit.
+  desc.dimension = nvrhi::TextureDimension::Texture2D;
+  desc.isUAV = true;            // compute-written by this pass.
+  desc.isShaderResource = true; // sampled by BlitToSrgbPass.
+  desc.debugName = "SsaaResolve.linearOut";
+  desc.initialState = nvrhi::ResourceStates::UnorderedAccess;
+  desc.keepInitialState = true;
+  _linearOut = _device->createTexture(desc);
+  _linearOutW = width;
+  _linearOutH = height;
+  return _linearOut;
+}
+
 void SsaaResolvePass::Execute(nvrhi::ICommandList* commandList,
                               const PassContext& context) {
   if (!_ready || commandList == nullptr || context.settings == nullptr
@@ -151,8 +144,12 @@ void SsaaResolvePass::Execute(nvrhi::ICommandList* commandList,
 
   const uint32_t factor = context.settings->ssaaFactor;
   nvrhi::ITexture* const source = context.targets->color;
-  nvrhi::ITexture* const dest = context.targets->colorResolved;
-  // No-op for the non-SSAA path: factor 1, or no resolve target bound.
+  nvrhi::ITexture* const dest = context.colorLinearResolved;
+  // DOWNSAMPLE ONLY, and only when supersampling: box-average the super-res LINEAR
+  // color (source) into the base-res LINEAR intermediate (dest, renderer-owned,
+  // set by PyxisRenderer). At factor 1 there is nothing to downsample -- the
+  // BlitToSrgbPass reads targets->color directly. Kit's PyxisEngine never sets
+  // colorLinearResolved, so this no-ops for Omniverse.
   if (factor < 2u || source == nullptr || dest == nullptr)
     return;
 

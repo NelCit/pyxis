@@ -104,6 +104,8 @@ target_sources(pyxis_renderer PRIVATE
     Private/Passes/PathTracePass.cpp
     Private/Passes/SsaaResolvePass.h
     Private/Passes/SsaaResolvePass.cpp
+    Private/Passes/BlitToSrgbPass.h
+    Private/Passes/BlitToSrgbPass.cpp
 
     Private/Profiler/Profiler.cpp
 
@@ -322,4 +324,13 @@ pyxis_compile_slang_shader(
     ENTRY_POINT main
     STAGE       compute
     OUTPUT      ssaa_downsample.spv
+)
+# Viewer present blit (compute): linear -> sRGB OETF into the present target.
+# Split out of SsaaResolvePass so each pass has one job; runs every viewer frame.
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/blit_to_srgb.slang
+    ENTRY_POINT main
+    STAGE       compute
+    OUTPUT      blit_to_srgb.spv
 )

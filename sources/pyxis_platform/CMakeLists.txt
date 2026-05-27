@@ -23,11 +23,16 @@ target_sources(pyxis_platform PUBLIC
         Public/Pyxis/Platform/Forward.h
         Public/Pyxis/Platform/PlatformApi.h
 
+        Public/Pyxis/Platform/Color/ColorEncoding.h
+
         Public/Pyxis/Platform/Device/AdapterInfo.h
         Public/Pyxis/Platform/Device/DeviceCreationParams.h
         Public/Pyxis/Platform/Device/IDeviceManager.h
         Public/Pyxis/Platform/Device/Resolution.h
         Public/Pyxis/Platform/Device/VulkanContext.h
+
+        Public/Pyxis/Platform/Interop/GpuInteropExporter.h
+        Public/Pyxis/Platform/Interop/GpuInteropImporter.h
 
         Public/Pyxis/Platform/Logging/Log.h
         Public/Pyxis/Platform/Logging/LogCategories.h
@@ -35,6 +40,8 @@ target_sources(pyxis_platform PUBLIC
 
         Public/Pyxis/Platform/FileSystem/AssetLocator.h
         Public/Pyxis/Platform/FileSystem/Path.h
+
+        Public/Pyxis/Platform/Gpu/TextureReadback.h
 
         Public/Pyxis/Platform/Window/IWindow.h
         Public/Pyxis/Platform/Window/WindowDesc.h
@@ -54,6 +61,11 @@ target_sources(pyxis_platform PRIVATE
     Private/Device/VulkanFeatureCheck.h
     Private/Device/VulkanFeatureCheck.cpp
     Private/Device/VulkanHppStorage.cpp
+
+    Private/Interop/GpuInteropExporter.cpp
+    Private/Interop/GpuInteropImporter.cpp
+
+    Private/Gpu/TextureReadback.cpp
 
     Private/Logging/SpdlogBackend.h
     Private/Logging/SpdlogBackend.cpp
