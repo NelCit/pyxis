@@ -74,6 +74,12 @@ struct PyxisEngine::Impl {
   std::unique_ptr<pyxis::GpuInteropExporter> exporter;
   nvrhi::CommandListHandle commandList;
   nvrhi::TextureHandle displayColor;  // throwaway `color` target (no tonemap pass yet).
+  // Cached readback resources (ReadbackColorHdr). Recreated on Resize, reused every
+  // frame so the per-frame viewport readback does NOT allocate a fresh staging
+  // texture (~16 MB @1080p) each call. The event query lets us wait for just the
+  // copy submission instead of flushing the whole device (waitForIdle).
+  nvrhi::StagingTextureHandle readbackStaging;
+  nvrhi::EventQueryHandle readbackQuery;
   std::string shaderDir;  // backs rendererDesc.shaderSearchPath (string_view).
   pyxis::ExportedImage exportedColor{};
   pyxis::ExportedSemaphore timeline{};
@@ -272,6 +278,9 @@ void PyxisEngine::Resize(uint32_t width, uint32_t height) noexcept {
     impl.exporter->ReleaseImage(impl.exportedColor);
   impl.exportedColor =
       impl.exporter->CreateExportableImage(width, height, EXPORT_COLOR_VK_FORMAT, true);
+  // Drop the cached readback staging texture so it is re-created at the new size on
+  // the next ReadbackColorHdr.
+  impl.readbackStaging = nullptr;
 
   nvrhi::TextureDesc displayDesc;
   displayDesc.width = width;
@@ -294,41 +303,53 @@ uint32_t PyxisEngine::Height() const noexcept { return _impl->height; }
 
 bool PyxisEngine::ReadbackColorHdr(std::vector<uint8_t>& outRgba16f, uint32_t& outWidth,
                                    uint32_t& outHeight) noexcept {
-  const Impl& impl = *_impl;
+  Impl& impl = *_impl;
   if (!impl.valid || impl.exportedColor.texture == nullptr)
     return false;
   nvrhi::IDevice* device = impl.deviceManager->GetDevice();
 
-  const nvrhi::TextureDesc stagingDesc = impl.exportedColor.texture->getDesc();
-  const nvrhi::StagingTextureHandle staging =
-      device->createStagingTexture(stagingDesc, nvrhi::CpuAccessMode::Read);
-  if (!staging)
-    return false;
+  // Reuse a cached staging texture across frames (recreated on Resize). Creating a
+  // fresh full-res staging texture every frame was ~16 MB of host-visible alloc per
+  // viewport frame on the render thread.
+  if (!impl.readbackStaging) {
+    const nvrhi::TextureDesc stagingDesc = impl.exportedColor.texture->getDesc();
+    impl.readbackStaging = device->createStagingTexture(stagingDesc, nvrhi::CpuAccessMode::Read);
+    if (!impl.readbackStaging)
+      return false;
+  }
 
   impl.commandList->open();
   impl.commandList->setTextureState(impl.exportedColor.texture, nvrhi::AllSubresources,
                                     nvrhi::ResourceStates::CopySource);
   impl.commandList->commitBarriers();
-  impl.commandList->copyTexture(staging, nvrhi::TextureSlice(), impl.exportedColor.texture,
-                                nvrhi::TextureSlice());
+  impl.commandList->copyTexture(impl.readbackStaging, nvrhi::TextureSlice(),
+                                impl.exportedColor.texture, nvrhi::TextureSlice());
   impl.commandList->close();
   device->executeCommandList(impl.commandList);
-  device->waitForIdle();
-  device->runGarbageCollection();
+  // Wait for JUST this copy submission to retire (not the whole device). The copy
+  // is ordered after the render submit on the graphics queue, so this also covers
+  // the render. Avoids flushing unrelated GPU work (e.g. RTXMU BLAS compaction).
+  if (!impl.readbackQuery)
+    impl.readbackQuery = device->createEventQuery();
+  device->resetEventQuery(impl.readbackQuery);
+  device->setEventQuery(impl.readbackQuery, nvrhi::CommandQueue::Graphics);
+  device->waitEventQuery(impl.readbackQuery);
 
   size_t rowPitch = 0;
-  const void* mapped =
-      device->mapStagingTexture(staging, nvrhi::TextureSlice(), nvrhi::CpuAccessMode::Read, &rowPitch);
+  const void* mapped = device->mapStagingTexture(impl.readbackStaging, nvrhi::TextureSlice(),
+                                                 nvrhi::CpuAccessMode::Read, &rowPitch);
   if (mapped == nullptr)
     return false;
   outWidth = impl.width;
   outHeight = impl.height;
+  // resize() reuses the vector's capacity after the first frame — no realloc once
+  // the caller passes a persistent buffer.
   outRgba16f.resize(static_cast<size_t>(impl.width) * impl.height * 8u);  // 4 halfs/pixel
   const auto* src = static_cast<const uint8_t*>(mapped);
   const size_t tightRow = static_cast<size_t>(impl.width) * 8u;
   for (uint32_t row = 0; row < impl.height; ++row)
     std::memcpy(outRgba16f.data() + row * tightRow, src + row * rowPitch, tightRow);
-  device->unmapStagingTexture(staging);
+  device->unmapStagingTexture(impl.readbackStaging);
   return true;
 }
 

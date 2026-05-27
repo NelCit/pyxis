@@ -324,7 +324,8 @@ using pyxis::color::HalfToFloat;
 // AOV (it reads ReadbackColorHdr directly and sRGB-encodes in WriteBmp), so §25.O.3
 // parity is unaffected. PYXIS_OMNI_AOV_SRGB=1 restores the sRGB pre-encode for a
 // hypothetical host that presents the AOV without any color correction.
-void WritePyxisColorToAov(pyxis::hydra::PyxisEngine& engine, HdRenderBuffer* buffer) {
+void WritePyxisColorToAov(pyxis::hydra::PyxisEngine& engine, HdRenderBuffer* buffer,
+                          std::vector<uint8_t>& src) {
   // Per-frame trace (composite / render-pass): gated on PYXIS_OMNI_TRACE, NOT
   // PYXIS_OMNI_DBG, so the default-on DBG keeps only occasional lifecycle prints
   // and doesn't flood every frame.
@@ -334,7 +335,9 @@ void WritePyxisColorToAov(pyxis::hydra::PyxisEngine& engine, HdRenderBuffer* buf
       std::fprintf(stderr, "PYXISDBG WriteAov: buffer null or 0-size\n");
     return;
   }
-  std::vector<uint8_t> src;
+  // `src` is a caller-owned scratch buffer reused across frames (see the render
+  // pass member) — ReadbackColorHdr::resize keeps its capacity, so no per-frame
+  // heap alloc of the readback image (~16 MB @1080p).
   uint32_t srcWidth = 0, srcHeight = 0;
   if (!engine.ReadbackColorHdr(src, srcWidth, srcHeight) || srcWidth == 0 || srcHeight == 0) {
     if (dbg)
@@ -587,7 +590,7 @@ class HdPyxisRenderPass final : public HdRenderPass {
       bool composited = false;
       for (const HdRenderPassAovBinding& binding : bindings) {
         if (binding.aovName == HdAovTokens->color && binding.renderBuffer != nullptr) {
-          WritePyxisColorToAov(*_engine, binding.renderBuffer);
+          WritePyxisColorToAov(*_engine, binding.renderBuffer, _readbackScratch);
           composited = true;
           break;
         }
@@ -608,6 +611,9 @@ class HdPyxisRenderPass final : public HdRenderPass {
   // transition, not every frame. Remember whether we last logged the no-stage
   // state so that branch prints once per episode instead of flooding.
   bool _loggedNoStage = false;
+  // Reused scratch for the per-frame color readback (WritePyxisColorToAov) so the
+  // ~16 MB @1080p readback buffer is allocated once, not every frame.
+  std::vector<uint8_t> _readbackScratch;
 };
 
 }  // namespace
