@@ -13,6 +13,7 @@
 #include "HdPyxisRenderDelegate.h"
 
 #include "AovColorEncode.h"
+#include "GlVkInterop.h"
 #include "HdPyxisRenderParam.h"
 #include "PyxisEngine.h"
 
@@ -35,6 +36,8 @@
 #include <pxr/imaging/hd/bprim.h>
 #include <pxr/imaging/hd/driver.h>
 #include <pxr/imaging/hgi/hgi.h>
+#include <pxr/imaging/hgi/texture.h>
+#include <pxr/imaging/hgiGL/texture.h>
 #include <pxr/imaging/hd/camera.h>
 #include <pxr/imaging/hd/instancer.h>
 #include <pxr/imaging/hd/light.h>
@@ -266,17 +269,45 @@ class HdPyxisLight final : public HdLight {
 // the host-facing presentation target the render pass composites into.
 class StubRenderBuffer final : public HdRenderBuffer {
  public:
-  explicit StubRenderBuffer(SdfPath const& primId) : HdRenderBuffer(primId) {}
+  // `hgi` is the host render driver, non-null + GL only when the RFC 0008
+  // GL-interop AOV path is active (the delegate passes its captured _hgi). When set
+  // for a Float16Vec4 color buffer, Allocate creates a GL-backed AOV the host
+  // samples via GetResource(); the render pass fills it from the exported image.
+  StubRenderBuffer(SdfPath const& primId, Hgi* hgi) : HdRenderBuffer(primId), _hgi(hgi) {}
 
   bool Allocate(GfVec3i const& dimensions, HdFormat format, bool /*multiSampled*/) override {
     _width = static_cast<uint32_t>(dimensions[0]);
     _height = static_cast<uint32_t>(dimensions[1]);
     _format = format;
     _data.assign(static_cast<size_t>(_width) * _height * HdDataSizeOfFormat(format), 0);
+    // GPU AOV (RFC 0008): a GL-backed color texture the host samples directly. Only
+    // for the Float16Vec4 color buffer when a GL Hgi was captured. The render pass
+    // copies the exported image into it each frame; falls back to the CPU _data path
+    // (Map) otherwise / for other AOVs.
+    DestroyGpuAov();
+    if (_hgi != nullptr && format == HdFormatFloat16Vec4 && _width > 0 && _height > 0) {
+      HgiTextureDesc desc;
+      desc.debugName = "pyxis.color.aov";
+      desc.dimensions = GfVec3i(static_cast<int>(_width), static_cast<int>(_height), 1);
+      desc.format = HgiFormatFloat16Vec4;
+      desc.layerCount = 1;
+      desc.mipLevels = 1;
+      desc.sampleCount = HgiSampleCount1;
+      desc.type = HgiTextureType2D;
+      desc.usage = HgiTextureUsageBitsColorTarget | HgiTextureUsageBitsShaderRead;
+      _gpuAov = _hgi->CreateTexture(desc);
+    }
     if (std::getenv("PYXIS_OMNI_DBG") != nullptr)
-      std::fprintf(stderr, "PYXISDBG RenderBuffer::Allocate id='%s' %ux%u fmt=%d\n",
-                   GetId().GetText(), _width, _height, static_cast<int>(format));
+      std::fprintf(stderr, "PYXISDBG RenderBuffer::Allocate id='%s' %ux%u fmt=%d gpuAov=%d\n",
+                   GetId().GetText(), _width, _height, static_cast<int>(format),
+                   _gpuAov ? 1 : 0);
     return true;
+  }
+
+  // RFC 0008 GL-interop accessors (render pass fills the GL texture).
+  [[nodiscard]] bool HasGpuAov() const { return static_cast<bool>(_gpuAov); }
+  [[nodiscard]] uint32_t GpuAovGlId() const {
+    return _gpuAov ? static_cast<HgiGLTexture*>(_gpuAov.Get())->GetTextureId() : 0u;
   }
   unsigned int GetWidth() const override { return _width; }
   unsigned int GetHeight() const override { return _height; }
@@ -295,13 +326,16 @@ class StubRenderBuffer final : public HdRenderBuffer {
   bool IsMapped() const override { return _mapped; }
   void Resolve() override {}
   bool IsConverged() const override { return true; }
-  // Probe: does the host ever ask for the GPU resource (vs Map)? Base returns empty.
+  // RFC 0008: hand the host the GL-backed AOV texture so it samples our render on
+  // the GPU (no CPU readback). Empty VtValue (CPU Map path) when no GPU AOV.
   VtValue GetResource(bool multiSampled) const override {
     if (!_loggedGetResource && std::getenv("PYXIS_OMNI_DBG") != nullptr) {
       _loggedGetResource = true;
-      std::fprintf(stderr, "PYXISDBG RenderBuffer::GetResource(multiSampled=%d) called by host "
-                           "(GPU AOV path is reachable!)\n", multiSampled ? 1 : 0);
+      std::fprintf(stderr, "PYXISDBG RenderBuffer::GetResource(multiSampled=%d) gpuAov=%d\n",
+                   multiSampled ? 1 : 0, _gpuAov ? 1 : 0);
     }
+    if (_gpuAov)
+      return VtValue(_gpuAov);
     return HdRenderBuffer::GetResource(multiSampled);
   }
 
@@ -309,9 +343,18 @@ class StubRenderBuffer final : public HdRenderBuffer {
   void _Deallocate() override {
     _data.clear();
     _width = _height = 0;
+    DestroyGpuAov();
   }
 
  private:
+  void DestroyGpuAov() {
+    if (_gpuAov && _hgi != nullptr)
+      _hgi->DestroyTexture(&_gpuAov);
+    _gpuAov = HgiTextureHandle();
+  }
+
+  Hgi* _hgi = nullptr;            // host render driver (GL only); null = CPU path.
+  HgiTextureHandle _gpuAov;       // GL-backed color AOV the host samples (RFC 0008).
   uint32_t _width = 0;
   uint32_t _height = 0;
   HdFormat _format = HdFormatUNorm8Vec4;
@@ -607,7 +650,25 @@ class HdPyxisRenderPass final : public HdRenderPass {
       bool composited = false;
       for (const HdRenderPassAovBinding& binding : bindings) {
         if (binding.aovName == HdAovTokens->color && binding.renderBuffer != nullptr) {
-          WritePyxisColorToAov(*_engine, binding.renderBuffer, _readbackScratch);
+          // RFC 0008 direct GPU AOV: if the color buffer is GL-backed (Kit/HgiGL),
+          // import the exported image into GL and copy it into the AOV texture — no
+          // CPU readback. Falls back to WritePyxisColorToAov (readback) otherwise or
+          // if any GL-interop step fails.
+          auto* gpuBuf = dynamic_cast<StubRenderBuffer*>(binding.renderBuffer);
+          const pyxis::ExportedImage& exp = _engine->ExportedColor();
+          bool didGpuPath = false;
+          if (gpuBuf != nullptr && gpuBuf->HasGpuAov() && exp.texture != nullptr
+              && exp.memoryHandle != nullptr) {
+            _engine->WaitRenderComplete();  // shared image holds finished pixels.
+            const uint32_t srcTex = _glInterop.ImportExportedImage(
+                exp.memoryHandle, exp.allocationSize, exp.width, exp.height, /*optimalTiling*/ true);
+            if (srcTex != 0u) {
+              _glInterop.CopyImportedInto(gpuBuf->GpuAovGlId(), exp.width, exp.height);
+              didGpuPath = true;
+            }
+          }
+          if (!didGpuPath)
+            WritePyxisColorToAov(*_engine, binding.renderBuffer, _readbackScratch);
           composited = true;
           break;
         }
@@ -628,6 +689,9 @@ class HdPyxisRenderPass final : public HdRenderPass {
   // transition, not every frame. Remember whether we last logged the no-stage
   // state so that branch prints once per episode instead of flooding.
   bool _loggedNoStage = false;
+  // RFC 0008: Vulkan->GL import for the direct GPU color AOV (HgiGL host). Loads its
+  // GL entry points lazily in Kit's GL context; no-op/unused on the readback path.
+  pyxis::hydra::GlVkInterop _glInterop;
   // Reused scratch for the per-frame color readback (WritePyxisColorToAov) so the
   // ~16 MB @1080p readback buffer is allocated once, not every frame.
   std::vector<uint8_t> _readbackScratch;
@@ -842,13 +906,20 @@ void HdPyxisRenderDelegate::SetDrivers(HdDriverVector const& drivers) {
   // (no CPU readback) is reachable — see RFC 0008.
   // Filter by the held type (Hgi*) rather than HgiTokens->renderDriver to avoid
   // linking usd_hgi for the token data symbol; GetAPIName() is a vtable call.
+  // Capture the Hgi only when it is GL — that is the backend our GL-interop AOV path
+  // (RFC 0008) targets; for any other backend we keep the CPU readback path.
   for (const HdDriver* driver : drivers) {
     if (driver == nullptr || !driver->driver.IsHolding<Hgi*>())
       continue;
-    const Hgi* hgi = driver->driver.UncheckedGet<Hgi*>();
-    if (hgi != nullptr && std::getenv("PYXIS_OMNI_DBG") != nullptr)
-      std::fprintf(stderr, "PYXISDBG SetDrivers: host Hgi API = '%s' (hgi=%p)\n",
-                   hgi->GetAPIName().GetText(), static_cast<const void*>(hgi));
+    Hgi* hgi = driver->driver.UncheckedGet<Hgi*>();
+    if (hgi == nullptr)
+      continue;
+    const bool isGl = hgi->GetAPIName().GetString() == "OpenGL";
+    if (isGl)
+      _hgi = hgi;
+    if (std::getenv("PYXIS_OMNI_DBG") != nullptr)
+      std::fprintf(stderr, "PYXISDBG SetDrivers: host Hgi API = '%s' (hgi=%p) glInterop=%d\n",
+                   hgi->GetAPIName().GetText(), static_cast<void*>(hgi), isGl ? 1 : 0);
   }
   HdRenderDelegate::SetDrivers(drivers);
 }
@@ -910,12 +981,12 @@ HdBprim* HdPyxisRenderDelegate::CreateBprim(TfToken const& typeId, SdfPath const
     std::fprintf(stderr, "PYXISDBG CreateBprim type='%s' id='%s'\n", typeId.GetText(),
                  bprimId.GetText());
   if (typeId == HdPrimTypeTokens->renderBuffer)
-    return new StubRenderBuffer(bprimId);
+    return new StubRenderBuffer(bprimId, _hgi);  // _hgi (GL) enables the direct AOV
   return nullptr;
 }
 HdBprim* HdPyxisRenderDelegate::CreateFallbackBprim(TfToken const& typeId) {
   if (typeId == HdPrimTypeTokens->renderBuffer)
-    return new StubRenderBuffer(SdfPath::EmptyPath());
+    return new StubRenderBuffer(SdfPath::EmptyPath(), _hgi);
   return nullptr;
 }
 void HdPyxisRenderDelegate::DestroyBprim(HdBprim* bprim) { delete bprim; }

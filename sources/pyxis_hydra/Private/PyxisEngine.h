@@ -62,6 +62,11 @@ class PyxisEngine {
   [[nodiscard]] const pyxis::ExportedSemaphore& Timeline() const noexcept;
   [[nodiscard]] uint64_t LastSignaledValue() const noexcept;
 
+  // Block until the most recent RenderFrame submission has retired (targeted wait,
+  // not a device flush). For the RFC 0008 GL-interop path: ensures the shared image
+  // holds finished pixels before a GL importer copies from it.
+  void WaitRenderComplete() noexcept;
+
   [[nodiscard]] bool IsValid() const noexcept;
 
   // Read the rendered exportable color image back to the host (RGBA16F bytes).

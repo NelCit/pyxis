@@ -1,6 +1,7 @@
 # RFC 0008: Direct GPU color AOV to the Kit viewport (no readback)
 
-- Status: Draft (revised — the GL external-memory path IS viable; see "Revision")
+- Status: Accepted (GL external-memory direct AOV — implemented + verified; the
+  shared-device design is superseded, see "Revision" and "Why rejected")
 - Author(s): Pyxis team
 - Created: 2026-05-27
 - Last updated: 2026-05-27
@@ -134,15 +135,38 @@ external-memory interop** (we already ship hgiGL + the exportable image):
 2. In Kit's GL context (current on the host render thread where `_Execute` /
    `GetResource` run), import that Win32 handle as a GL memory object +
    `glTextureStorageMem2DEXT` texture (`GL_EXT_memory_object_win32`) — once per size.
-3. The color AOV is a normal HgiGL texture (`Hgi::CreateTexture`); each frame
-   `glCopyImageSubData` the imported texture into it (GPU→GPU, no CPU), after a
+3. The color AOV is a normal HgiGL texture (`Hgi::CreateTexture`); each frame copy
+   the imported texture into it (GPU→GPU, no CPU) with a **vertically-flipping
+   `glBlitNamedFramebuffer`** (source rows 0..h → destination rows h..0), after a
    targeted wait on our device's render-complete (the existing EventQuery) so GL
    reads finished pixels. `StubRenderBuffer::GetResource()` returns that HgiGL handle.
+   The flip is mandatory: Pyxis renders top-row-first (Vulkan) but the pxr engine
+   presents the color AOV bottom-row-first (GL convention) — it mirrors the existing
+   `WritePyxisColorToAov` readback flip. (`glCopyImageSubData`, the obvious copy, was
+   the initial implementation and produced a **Y-inverted** viewport; it cannot flip,
+   hence the framebuffer blit.)
 4. `ReadbackColorHdr` / `WritePyxisColorToAov` are skipped on this path.
 
 No device sharing (RT stays on our own device — no extension gate), no public API
 change. Fallback to the CPU readback if any GL-interop step is unavailable (e.g. a
 non-GL host, or `GL_EXT_memory_object_win32` missing). Implemented on this branch.
+
+### Verification (World Lobby, 949×577, `DisplayParity.WorldLobby`)
+
+- **Orientation.** Upright vs the standalone headless render: mean abs diff 2.76;
+  the same capture compared *flipped* scores 72.9 — the blit flip is correct.
+- **Color.** A no-render linear-ramp injected into the AOV and captured through Kit
+  recovers Kit's transfer function as the **standard sRGB OETF**, matching Pyxis's
+  `LinearToSrgb` to MAE **0.54** (vs 1.30 for pure gamma-2.2). Kit applies sRGB once;
+  the delegate writes linear once — the `viewer == headless == Kit` invariant holds.
+- **Pixel parity.** Per-channel abs-diff vs headless: **median 1**, mean 2.8, p95 5.
+  The thin ~1% tail (50–250 LSB) is the bright windows — two *independent* renders of
+  high-variance highlights, not a color/orientation bug (the residual is frame-index-
+  independent and pixel-aligned: a shift search bottoms out at 0,0).
+- **Gate.** `display_parity_check.py` uses robust median + mean: headless-vs-viewer
+  strict (median 0, mean ≤ 1); Kit median ≤ 2 and mean ≤ 6 — which the correct capture
+  passes and a flip (≈70), a double/zero sRGB encode (tens of LSB), or a 1-px
+  misalignment (mean ≈17) all fail. The prior mean+correlation gate was flip-blind.
 
 ## Why rejected (SUPERSEDED — kept for history; the assumptions were wrong)
 

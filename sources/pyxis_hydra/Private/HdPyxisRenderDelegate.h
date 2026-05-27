@@ -25,6 +25,7 @@ class PyxisEngine;
 PXR_NAMESPACE_OPEN_SCOPE
 
 class HdPyxisRenderParam;
+class Hgi;  // host render driver (captured in SetDrivers; RFC 0008 GL-interop AOV)
 
 // HdPyxisRenderPass (drives PyxisEngine::RenderFrame + composites to the host's
 // color AOV) is private to the .cpp — CreateRenderPass returns it as the base
@@ -143,6 +144,10 @@ class HdPyxisRenderDelegate final : public HdRenderDelegate {
   bool _ownsEngine = false;
   bool _persistEngine = true;
   std::unique_ptr<HdPyxisRenderParam> _renderParam;
+  // Host Hgi (borrowed; captured in SetDrivers). When it is HgiGL, the color render
+  // buffer can expose a GL texture via GetResource() and the render pass feeds it
+  // from the exported image (RFC 0008), skipping the CPU readback. Null otherwise.
+  Hgi* _hgi = nullptr;
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

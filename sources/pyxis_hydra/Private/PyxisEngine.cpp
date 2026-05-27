@@ -85,6 +85,7 @@ struct PyxisEngine::Impl {
   // done -> no real stall). First frame / post-resize falls back to reading `cur`.
   pyxis::TextureReadback readback[2];
   nvrhi::EventQueryHandle readbackQuery[2];
+  nvrhi::EventQueryHandle renderQuery;  // RFC 0008: "render retired" for the GL path
   bool readbackSlotValid[2] = {false, false};
   uint32_t readbackSlotW[2] = {0, 0};
   uint32_t readbackSlotH[2] = {0, 0};
@@ -257,6 +258,12 @@ void PyxisEngine::RenderFrame() noexcept {
   impl.commandList->commitBarriers();
   impl.commandList->close();
   device->executeCommandList(impl.commandList);
+  // Targeted "render retired" marker so the GL-interop path (RFC 0008) can wait for
+  // just this submission before GL reads the shared image (no full device flush).
+  if (!impl.renderQuery)
+    impl.renderQuery = device->createEventQuery();
+  device->resetEventQuery(impl.renderQuery);
+  device->setEventQuery(impl.renderQuery, nvrhi::CommandQueue::Graphics);
   impl.profiler->EndFrame();  // recycles this frame's timer-query slot
 
   // Publish "frame N ready" so the Kit side waits before sampling the image.
@@ -365,6 +372,16 @@ bool PyxisEngine::ReadbackColorHdr(std::vector<uint8_t>& outRgba16f, uint32_t& o
 
 const pyxis::ExportedImage& PyxisEngine::ExportedColor() const noexcept {
   return _impl->exportedColor;
+}
+
+void PyxisEngine::WaitRenderComplete() noexcept {
+  const Impl& impl = *_impl;
+  if (!impl.valid || !impl.renderQuery)
+    return;
+  // Block until the most recent RenderFrame submission has retired, so a GL importer
+  // (RFC 0008) reads finished pixels from the shared image. Targeted (this submit),
+  // not a full device flush.
+  impl.deviceManager->GetDevice()->waitEventQuery(impl.renderQuery);
 }
 const pyxis::ExportedSemaphore& PyxisEngine::Timeline() const noexcept { return _impl->timeline; }
 uint64_t PyxisEngine::LastSignaledValue() const noexcept { return _impl->frameValue; }

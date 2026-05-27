@@ -32,6 +32,11 @@ target_sources(pyxis_hydra PRIVATE
     # This is the engine the pyxis_hydra_omni Kit fork used to carry separately.
     Private/PyxisEngine.h
     Private/PyxisEngine.cpp
+    # RFC 0008: Vulkan->GL external-memory interop for the Kit (HgiGL) viewport —
+    # imports the exported color image into Kit's GL context so the viewport samples
+    # it directly (no CPU readback). GL-context-only; falls back to readback.
+    Private/GlVkInterop.h
+    Private/GlVkInterop.cpp
 )
 
 # RFC 0006: link Kit's nv-usd 25.11 (not vcpkg USD 26.3) so this delegate is the
@@ -97,6 +102,9 @@ unset(PYXIS_HYDRA_PLUGIN_LIBPATH)
 set(_pyxis_hydra_delegate_src
     Private/HdPyxisRenderDelegate.cpp
     Private/PyxisEngine.cpp
+    # RFC 0008: the render pass references GlVkInterop; the test exes compile the
+    # delegate sources directly (they don't link pyxis_hydra.dll), so they need it.
+    Private/GlVkInterop.cpp
     ${CMAKE_SOURCE_DIR}/sources/pyxis_material_translation/Private/UsdShadeToOpenPBR.cpp
     Private/PyxisHydraHost.cpp)
 
