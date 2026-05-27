@@ -75,13 +75,20 @@ struct PyxisEngine::Impl {
   std::unique_ptr<pyxis::GpuInteropExporter> exporter;
   nvrhi::CommandListHandle commandList;
   nvrhi::TextureHandle displayColor;  // throwaway `color` target (no tonemap pass yet).
-  // Reusable readback helper (shared pyxis::TextureReadback). Reuses its staging
-  // texture across frames (recreated only on a size change), so the per-frame
-  // viewport readback does NOT allocate a fresh ~16 MB staging texture each call.
-  // The event query lets us wait for just the copy submission instead of flushing
-  // the whole device (waitForIdle).
-  pyxis::TextureReadback readback;
-  nvrhi::EventQueryHandle readbackQuery;
+  // Double-buffered readback (RFC 0008 "Why rejected": the Kit viewport AOV must be
+  // read back to CPU — no portable GPU-AOV path exists in this stack). Two staging
+  // textures ping-pong: each frame records frame N's copy into slot `cur` and MAPS
+  // frame N-1's already-finished copy from the other slot, so the render thread
+  // never stalls waiting for the readback copy. The shared pyxis::TextureReadback
+  // reuses each slot's staging across frames (no per-frame alloc). EventQuery per
+  // slot lets us wait for just that slot's copy (the prev slot is normally already
+  // done -> no real stall). First frame / post-resize falls back to reading `cur`.
+  pyxis::TextureReadback readback[2];
+  nvrhi::EventQueryHandle readbackQuery[2];
+  bool readbackSlotValid[2] = {false, false};
+  uint32_t readbackSlotW[2] = {0, 0};
+  uint32_t readbackSlotH[2] = {0, 0};
+  int readbackCur = 0;
   std::string shaderDir;  // backs rendererDesc.shaderSearchPath (string_view).
   pyxis::ExportedImage exportedColor{};
   pyxis::ExportedSemaphore timeline{};
@@ -280,8 +287,12 @@ void PyxisEngine::Resize(uint32_t width, uint32_t height) noexcept {
     impl.exporter->ReleaseImage(impl.exportedColor);
   impl.exportedColor =
       impl.exporter->CreateExportableImage(width, height, EXPORT_COLOR_VK_FORMAT, true);
-  // The readback helper re-creates its staging texture automatically when the
-  // source size changes on the next ReadbackColorHdr — no explicit reset needed.
+  // Invalidate the double-buffered readback slots: a frame N-1 captured at the old
+  // size must not be presented at the new size. The helper re-creates each slot's
+  // staging automatically on the size change; this just forces the first post-resize
+  // read to be synchronous (read `cur`) instead of the stale prev slot.
+  impl.readbackSlotValid[0] = false;
+  impl.readbackSlotValid[1] = false;
 
   nvrhi::TextureDesc displayDesc;
   displayDesc.width = width;
@@ -309,34 +320,46 @@ bool PyxisEngine::ReadbackColorHdr(std::vector<uint8_t>& outRgba16f, uint32_t& o
     return false;
   nvrhi::IDevice* device = impl.deviceManager->GetDevice();
 
-  // Record the copy via the shared, reusable readback helper (staging texture is
-  // allocated once and reused across frames; recreated only on a size change).
+  const int cur = impl.readbackCur;
+  const int prev = cur ^ 1;
+
+  // 1. Record frame N's copy into slot `cur` (staging reused across frames).
   impl.commandList->open();
   impl.commandList->setTextureState(impl.exportedColor.texture, nvrhi::AllSubresources,
                                     nvrhi::ResourceStates::CopySource);
   impl.commandList->commitBarriers();
-  if (!impl.readback.RecordCopy(device, impl.commandList, impl.exportedColor.texture,
-                                "pyxis.hydra.readback")) {
+  if (!impl.readback[cur].RecordCopy(device, impl.commandList, impl.exportedColor.texture,
+                                     "pyxis.hydra.readback")) {
     impl.commandList->close();
     return false;
   }
   impl.commandList->close();
   device->executeCommandList(impl.commandList);
-  // Wait for JUST this copy submission to retire (not the whole device). The copy
-  // is ordered after the render submit on the graphics queue, so this also covers
-  // the render. Avoids flushing unrelated GPU work (e.g. RTXMU BLAS compaction).
-  if (!impl.readbackQuery)
-    impl.readbackQuery = device->createEventQuery();
-  device->resetEventQuery(impl.readbackQuery);
-  device->setEventQuery(impl.readbackQuery, nvrhi::CommandQueue::Graphics);
-  device->waitEventQuery(impl.readbackQuery);
+  if (!impl.readbackQuery[cur])
+    impl.readbackQuery[cur] = device->createEventQuery();
+  device->resetEventQuery(impl.readbackQuery[cur]);
+  device->setEventQuery(impl.readbackQuery[cur], nvrhi::CommandQueue::Graphics);
+  impl.readbackSlotValid[cur] = true;
+  impl.readbackSlotW[cur] = impl.width;
+  impl.readbackSlotH[cur] = impl.height;
 
-  if (!impl.readback.Map())
+  // 2. Pick the slot to PRESENT: frame N-1 (prev) if it's valid and same-size — its
+  // copy was submitted last frame and is normally already retired, so waiting on it
+  // doesn't stall (the pipelining win). On the first frame / right after a resize,
+  // prev is invalid → read `cur` synchronously (one stall, then pipelined again).
+  const bool usePrev = impl.readbackSlotValid[prev] && impl.readbackSlotW[prev] == impl.width
+                       && impl.readbackSlotH[prev] == impl.height;
+  const int readSlot = usePrev ? prev : cur;
+
+  device->waitEventQuery(impl.readbackQuery[readSlot]);
+  if (!impl.readback[readSlot].Map())
     return false;
-  outWidth = impl.width;
-  outHeight = impl.height;
-  impl.readback.CopyTightlyInto(outRgba16f);  // strips row pitch; reuses capacity.
-  impl.readback.Unmap();
+  outWidth = impl.readbackSlotW[readSlot];
+  outHeight = impl.readbackSlotH[readSlot];
+  impl.readback[readSlot].CopyTightlyInto(outRgba16f);  // strips row pitch; reuses capacity.
+  impl.readback[readSlot].Unmap();
+
+  impl.readbackCur = prev;  // ping-pong for next frame.
   return true;
 }
 

@@ -1,0 +1,142 @@
+# RFC 0008: Kit shared-device rendering + direct GPU color AOV (no readback)
+
+- Status: Rejected (blocked by API availability — see "Why rejected")
+- Author(s): Pyxis team
+- Created: 2026-05-27
+- Last updated: 2026-05-27
+- Implementation PRs: (this branch)
+- Amends: RFC 0004 (§32 NVRHI device sharing / own-device + external-memory interop)
+
+## Summary
+
+When the Pyxis Hydra delegate is hosted in Omniverse Kit's `omni.hydra.pxr`
+viewport, render on **Kit's existing Vulkan device** instead of creating a separate
+own-device, and write the color AOV into a **GPU texture the host samples directly**
+(`HdRenderBuffer::GetResource()` → `HgiTexture`), eliminating the per-frame
+GPU→CPU→GPU readback. The standalone / usdview / headless paths keep the own-device
+(`VkDeviceManagerHeadless`) — they have no Kit device — so this is an *additional*
+Kit-only code path, gated at runtime.
+
+## Motivation
+
+Today the delegate's color AOV (`StubRenderBuffer`) is CPU-only (`Map()` → a
+`std::vector`), and `PyxisEngine` renders on its own headless Vulkan device. Kit's
+viewport reads the AOV via `Map()`, so every viewport frame does a full
+GPU→CPU readback (`PyxisEngine::ReadbackColorHdr`) + CPU reconvert + the host's
+CPU→GPU upload. The branch audit measured this as the dominant per-frame cost on the
+Omniverse path (the per-frame *allocations* and the full `waitForIdle` were already
+removed; the remaining cost is the readback round-trip itself). The readback exists
+purely as a **device bridge**: our own device ≠ Kit's device, and Hgi has no public
+API to adopt our externally-exported `VkImage` as an `HgiTexture`. Rendering on
+Kit's device removes the bridge entirely.
+
+## Detailed design
+
+1. **Capture Kit's Hgi.** `HdRenderDelegate::SetDrivers(HdDriverVector const&)` is
+   called by the host with the `HgiTokens->renderDriver` driver carrying `Hgi*`.
+   Capture it. `HgiVulkan::GetPrimaryDevice()` exposes the `VkInstance` /
+   `VkPhysicalDevice` / `VkDevice` / graphics queue + family.
+
+2. **Feasibility gate (FIRST, before any of the below).** Pyxis requires the
+   ray-tracing extensions (`VK_KHR_ray_tracing_pipeline`,
+   `VK_KHR_acceleration_structure`, `buffer_device_address`, …) to be enabled **at
+   device-creation time** — they cannot be added to an already-created device. So
+   shared-device rendering is only possible if **Kit's device already enabled them**
+   (Kit's RTX path does; the shared `omni.gpu_foundation` device is the candidate).
+   A startup probe logs Kit's device's enabled extensions; if the RT set is missing,
+   shared-device rendering is **infeasible** and the delegate falls back to the
+   own-device + readback path (today's behaviour). This gate is implemented and
+   verified before the rest of the design is built.
+
+3. **NVRHI on Kit's device.** When the gate passes, create the NVRHI Vulkan device
+   from Kit's existing handles (`nvrhi::vulkan::createDevice` with the instance /
+   physical / device / queue + the enabled extension list) instead of
+   `CreateHeadlessDeviceManager`. `PyxisEngine` gains a "hosted" construction path
+   that adopts an external device + queue rather than owning a `VkDeviceManager`.
+
+4. **GPU color AOV.** Replace the CPU `StubRenderBuffer` (for the Kit path) with a
+   GPU-backed render buffer whose `GetResource()` returns an `HgiTextureHandle`. The
+   AOV's `VkImage` is created via Hgi (so the host accepts it) and adopted into NVRHI
+   (`createHandleForNativeTexture`) so the path tracer renders into it directly.
+   `WritePyxisColorToAov` + `ReadbackColorHdr` are skipped on this path.
+
+5. **Synchronisation.** Same-device now, so a normal NVRHI barrier / the existing
+   timeline suffices; no cross-device external-memory semaphore.
+
+6. **Fallback unchanged.** Standalone/headless and any Kit session whose device
+   fails the gate keep `VkDeviceManagerHeadless` + the readback. The color math
+   (delegate writes linear, host applies sRGB) is identical on both paths, so the
+   §25.O.3 / display-parity invariant (`viewer == headless == Kit`) must still hold.
+
+## Alternatives considered
+
+- **Cross-device external-memory import into Kit's Hgi (keep own-device).** Import
+  our exported `VkImage` into Kit's `VkDevice` and wrap as an `HgiTexture`. Rejected:
+  Hgi exposes no public API to adopt an external `VkImage`; would require Hgi
+  internals.
+- **Keep the readback, double-buffer it (read frame N-1).** Hides the stall without
+  any architecture change. Rejected as the primary fix (still a full round-trip +
+  CPU reconvert; 1-frame-stale), but is the safe fallback if shared-device proves
+  infeasible.
+- **Status quo (readback).** Already optimised (no per-frame allocs, targeted
+  EventQuery wait). Rejected: the round-trip itself remains.
+
+## Drawbacks / risks
+
+- **Feasibility risk (gating).** If Kit's shared device did not enable the RT
+  extensions, shared-device rendering is impossible — Pyxis can't ray-trace on it.
+  Mitigated by the gate + fallback.
+- **Hgi/NVRHI interop risk.** Adopting an Hgi-created `VkImage` into NVRHI (or vice
+  versa) and getting the closed pxr engine to consume a GPU-resource AOV via
+  `GetResource()` is unverified against Kit's engine; may not work as documented.
+- **Device-lifetime risk.** Pyxis no longer owns the device; teardown ordering and
+  not destroying Kit-owned resources must be exact.
+- **Parity risk.** Re-verify `viewer == headless == Kit` (display-parity ctest)
+  after the change — the color result must be byte-identical to today.
+- **§32 reversal.** Contradicts RFC 0004's "Pyxis owns its own device" for the Kit
+  case; this RFC amends §32 to "own-device by default; share the host device when
+  hosted and the host device is RT-capable."
+
+## Migration & impact
+
+- No public API change (the delegate + engine are `Private/`); `RenderTargets` /
+  §18 surface untouched. Affects M8a/M8b (Omniverse path perf) — a latency win, no
+  milestone exit-criteria change.
+- The own-device path stays the default and the only path for standalone/headless,
+  so non-Kit behaviour is unchanged.
+
+## Open questions
+
+- Does Kit's shared `omni.gpu_foundation` device enable the full RT extension set
+  Pyxis needs? (Moot — see "Why rejected".)
+- Does `omni.hydra.pxr`'s `HdxColorCorrectionTask` consume a delegate-provided
+  `GetResource()` GPU AOV, or does it always go through `Map()`? (Moot.)
+
+## Why rejected
+
+Both this RFC's shared-device design AND the lighter alternative proposed during
+review (keep the own-device, import the already-exported `VkImage` into Kit's
+device, and present it as the AOV's GPU resource) require the **same last mile**:
+handing the closed `omni.hydra.pxr` viewport a GPU texture via
+`HdRenderBuffer::GetResource()` → an `HgiTexture`. Constructing a Vulkan-backed
+`HgiTexture` requires Pixar's **HgiVulkan** backend, which is present in **neither**
+the Pyxis nv-usd build **nor** Kit:
+
+- `build/omniverse/usd-deps/usd/lib` ships `usd_hgi`, `usd_hgiGL`, `usd_hgiInterop`
+  only — no `usd_hgiVulkan` (and no `pxr/imaging/hgiVulkan` headers).
+- Kit's `omni.usd.libs` ships the same three — no `usd_hgiVulkan.dll` and no
+  Hgi-Vulkan plugin. Kit's GPU layer is omni/carb (`omni.gpu_foundation`), not
+  Pixar Hgi-Vulkan.
+
+The Hgi base class is backend-agnostic and exposes no `VkDevice`/`VkImage`. So a
+generic Hydra delegate in this stack has no way to create or hand the pxr viewport
+a GPU texture — the only portable AOV channel to the closed engine is the CPU
+`HdRenderBuffer::Map()` path. The per-frame GPU→CPU readback is therefore the
+required bridge, not an oversight. (Re-opening this would require Pixar HgiVulkan in
+nv-usd + Kit consuming a GPU-resource AOV — both outside Pyxis's control.)
+
+**Achievable instead (no new API):** the readback's per-frame allocations are
+already gone (cached staging + scratch) and it uses a targeted EventQuery wait;
+the remaining render-thread stall is hidden by **double-buffering** the readback
+(map frame N-1's already-finished copy while frame N's copy is in flight). That is
+implemented in lieu of this RFC.
