@@ -48,13 +48,10 @@ class GlVkInterop {
   // before calling.
   void CopyImportedInto(uint32_t dstGlTexture, uint32_t width, uint32_t height) noexcept;
 
-  [[nodiscard]] bool Loaded() const noexcept { return _loaded; }
-
  private:
   void ReleaseImport() noexcept;
 
   bool _loaded = false;
-  bool _loadFailed = false;
   // Imported state (recreated on size/handle change).
   uint32_t _srcTexture = 0;
   uint32_t _memoryObject = 0;

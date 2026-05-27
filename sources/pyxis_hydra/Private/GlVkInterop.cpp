@@ -129,7 +129,6 @@ GlVkInterop::~GlVkInterop() { ReleaseImport(); }
 
 bool GlVkInterop::EnsureLoaded() noexcept {
   _loaded = LoadOnce();
-  _loadFailed = !_loaded;
   return _loaded;
 }
 
@@ -187,6 +186,10 @@ void GlVkInterop::CopyImportedInto(uint32_t dstGlTexture, uint32_t width, uint32
 }
 
 void GlVkInterop::ReleaseImport() noexcept {
+  // Requires Kit's GL context current (true for the per-frame re-import path, which
+  // runs in _Execute). The destructor path may run without it on viewport teardown;
+  // the glDelete* then no-op and the objects are reclaimed when Kit destroys the GL
+  // context at shutdown — a bounded, process-lifetime release, not a steady leak.
   if (g_loadState != 1)
     return;
   if (_srcTexture != 0) {
