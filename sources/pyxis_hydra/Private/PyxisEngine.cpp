@@ -6,6 +6,7 @@
 #include <Pyxis/Platform/FileSystem/AssetLocator.h>
 #include <Pyxis/Platform/Device/IDeviceManager.h>
 #include <Pyxis/Platform/Device/Resolution.h>
+#include <Pyxis/Platform/Gpu/TextureReadback.h>
 #include <Pyxis/Platform/Interop/GpuInteropExporter.h>
 #include <Pyxis/Platform/Logging/Log.h>
 #include <Pyxis/Platform/Logging/LogCategories.h>
@@ -74,11 +75,12 @@ struct PyxisEngine::Impl {
   std::unique_ptr<pyxis::GpuInteropExporter> exporter;
   nvrhi::CommandListHandle commandList;
   nvrhi::TextureHandle displayColor;  // throwaway `color` target (no tonemap pass yet).
-  // Cached readback resources (ReadbackColorHdr). Recreated on Resize, reused every
-  // frame so the per-frame viewport readback does NOT allocate a fresh staging
-  // texture (~16 MB @1080p) each call. The event query lets us wait for just the
-  // copy submission instead of flushing the whole device (waitForIdle).
-  nvrhi::StagingTextureHandle readbackStaging;
+  // Reusable readback helper (shared pyxis::TextureReadback). Reuses its staging
+  // texture across frames (recreated only on a size change), so the per-frame
+  // viewport readback does NOT allocate a fresh ~16 MB staging texture each call.
+  // The event query lets us wait for just the copy submission instead of flushing
+  // the whole device (waitForIdle).
+  pyxis::TextureReadback readback;
   nvrhi::EventQueryHandle readbackQuery;
   std::string shaderDir;  // backs rendererDesc.shaderSearchPath (string_view).
   pyxis::ExportedImage exportedColor{};
@@ -278,9 +280,8 @@ void PyxisEngine::Resize(uint32_t width, uint32_t height) noexcept {
     impl.exporter->ReleaseImage(impl.exportedColor);
   impl.exportedColor =
       impl.exporter->CreateExportableImage(width, height, EXPORT_COLOR_VK_FORMAT, true);
-  // Drop the cached readback staging texture so it is re-created at the new size on
-  // the next ReadbackColorHdr.
-  impl.readbackStaging = nullptr;
+  // The readback helper re-creates its staging texture automatically when the
+  // source size changes on the next ReadbackColorHdr — no explicit reset needed.
 
   nvrhi::TextureDesc displayDesc;
   displayDesc.width = width;
@@ -308,22 +309,17 @@ bool PyxisEngine::ReadbackColorHdr(std::vector<uint8_t>& outRgba16f, uint32_t& o
     return false;
   nvrhi::IDevice* device = impl.deviceManager->GetDevice();
 
-  // Reuse a cached staging texture across frames (recreated on Resize). Creating a
-  // fresh full-res staging texture every frame was ~16 MB of host-visible alloc per
-  // viewport frame on the render thread.
-  if (!impl.readbackStaging) {
-    const nvrhi::TextureDesc stagingDesc = impl.exportedColor.texture->getDesc();
-    impl.readbackStaging = device->createStagingTexture(stagingDesc, nvrhi::CpuAccessMode::Read);
-    if (!impl.readbackStaging)
-      return false;
-  }
-
+  // Record the copy via the shared, reusable readback helper (staging texture is
+  // allocated once and reused across frames; recreated only on a size change).
   impl.commandList->open();
   impl.commandList->setTextureState(impl.exportedColor.texture, nvrhi::AllSubresources,
                                     nvrhi::ResourceStates::CopySource);
   impl.commandList->commitBarriers();
-  impl.commandList->copyTexture(impl.readbackStaging, nvrhi::TextureSlice(),
-                                impl.exportedColor.texture, nvrhi::TextureSlice());
+  if (!impl.readback.RecordCopy(device, impl.commandList, impl.exportedColor.texture,
+                                "pyxis.hydra.readback")) {
+    impl.commandList->close();
+    return false;
+  }
   impl.commandList->close();
   device->executeCommandList(impl.commandList);
   // Wait for JUST this copy submission to retire (not the whole device). The copy
@@ -335,21 +331,12 @@ bool PyxisEngine::ReadbackColorHdr(std::vector<uint8_t>& outRgba16f, uint32_t& o
   device->setEventQuery(impl.readbackQuery, nvrhi::CommandQueue::Graphics);
   device->waitEventQuery(impl.readbackQuery);
 
-  size_t rowPitch = 0;
-  const void* mapped = device->mapStagingTexture(impl.readbackStaging, nvrhi::TextureSlice(),
-                                                 nvrhi::CpuAccessMode::Read, &rowPitch);
-  if (mapped == nullptr)
+  if (!impl.readback.Map())
     return false;
   outWidth = impl.width;
   outHeight = impl.height;
-  // resize() reuses the vector's capacity after the first frame — no realloc once
-  // the caller passes a persistent buffer.
-  outRgba16f.resize(static_cast<size_t>(impl.width) * impl.height * 8u);  // 4 halfs/pixel
-  const auto* src = static_cast<const uint8_t*>(mapped);
-  const size_t tightRow = static_cast<size_t>(impl.width) * 8u;
-  for (uint32_t row = 0; row < impl.height; ++row)
-    std::memcpy(outRgba16f.data() + row * tightRow, src + row * rowPitch, tightRow);
-  device->unmapStagingTexture(impl.readbackStaging);
+  impl.readback.CopyTightlyInto(outRgba16f);  // strips row pitch; reuses capacity.
+  impl.readback.Unmap();
   return true;
 }
 

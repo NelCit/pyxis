@@ -41,6 +41,8 @@ target_sources(pyxis_platform PUBLIC
         Public/Pyxis/Platform/FileSystem/AssetLocator.h
         Public/Pyxis/Platform/FileSystem/Path.h
 
+        Public/Pyxis/Platform/Gpu/TextureReadback.h
+
         Public/Pyxis/Platform/Window/IWindow.h
         Public/Pyxis/Platform/Window/WindowDesc.h
         Public/Pyxis/Platform/Window/InputEvent.h
@@ -62,6 +64,8 @@ target_sources(pyxis_platform PRIVATE
 
     Private/Interop/GpuInteropExporter.cpp
     Private/Interop/GpuInteropImporter.cpp
+
+    Private/Gpu/TextureReadback.cpp
 
     Private/Logging/SpdlogBackend.h
     Private/Logging/SpdlogBackend.cpp

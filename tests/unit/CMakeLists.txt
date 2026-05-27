@@ -64,6 +64,7 @@ target_sources(pyxis_unit_tests PRIVATE
     PyxisRenderToExportedImage.cpp
     ColorEncodingFixture.cpp
     AovColorEncodeFixture.cpp
+    TextureReadbackFixture.cpp
 
     # V2.A.14 — BCn encoder helper. Recompiled here so the test exe
     # exercises the real helper directly instead of going through the

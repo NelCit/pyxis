@@ -9,7 +9,7 @@
 #include <imgui.h>
 #include "Output/AovExrSaver.h"
 #include "Output/BackbufferScreenshot.h"
-#include "Output/TextureReadback.h"
+#include <Pyxis/Platform/Gpu/TextureReadback.h>
 #include "Render/AovRegistry.h"
 #include "Render/AovTextures.h"
 #include "IngestUsd.h"

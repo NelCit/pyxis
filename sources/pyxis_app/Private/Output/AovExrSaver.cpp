@@ -3,7 +3,7 @@
 #include "Output/AovExrSaver.h"
 
 #include "Output/ExrWriter.h"
-#include "Output/TextureReadback.h"
+#include <Pyxis/Platform/Gpu/TextureReadback.h>
 
 #include <Pyxis/Platform/Logging/Log.h>
 #include <Pyxis/Platform/Logging/LogCategories.h>
@@ -140,7 +140,7 @@ std::expected<void, std::string> SaveAovAsExr(nvrhi::IDevice* device,
 
   commandList->open();
   auto readbackResult =
-      TextureReadback::RecordCopy(device, commandList, aov, debugNameOwned.c_str());
+      TextureReadback::RecordCopyOnce(device, commandList, aov, debugNameOwned.c_str());
   commandList->close();
   device->executeCommandList(commandList);
   device->waitForIdle();
