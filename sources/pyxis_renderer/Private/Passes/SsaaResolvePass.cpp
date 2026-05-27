@@ -3,6 +3,7 @@
 #include "Passes/SsaaResolvePass.h"
 
 #include "RenderGraph/PassContext.h"
+#include "RenderGraph/ShaderLoad.h"
 
 #include <Pyxis/Platform/FileSystem/AssetLocator.h>
 #include <Pyxis/Platform/Logging/Log.h>
@@ -14,48 +15,18 @@
 #include "ShaderInterop.slang"
 
 #include <algorithm>
-#include <fstream>
-#include <ios>
-#include <vector>
 
 namespace pyxis {
-
-namespace {
-
-[[nodiscard]] std::vector<char> ReadBinaryFile(std::string_view path) noexcept {
-  std::ifstream stream(std::string{path}, std::ios::binary | std::ios::ate);
-  if (!stream)
-    return {};
-  const std::streamsize fileSize = stream.tellg();
-  if (fileSize <= 0)
-    return {};
-  std::vector<char> bytes(static_cast<std::size_t>(fileSize));
-  stream.seekg(0, std::ios::beg);
-  stream.read(bytes.data(), fileSize);
-  return bytes;
-}
-
-}  // namespace
 
 SsaaResolvePass::SsaaResolvePass(nvrhi::IDevice* device) : _device(device) {
   auto& log = Logging::Get();
   const AssetLocator locator;
   const auto spvPath = locator.LocateResource("shaders/ssaa_downsample.spv");
 
-  const auto bytes = ReadBinaryFile(spvPath.View());
-  if (bytes.empty()) {
-    log.Error(log::RENDER, "SsaaResolvePass: failed to load ssaa_downsample.spv");
+  _shader = LoadSpirvShader(_device, spvPath.View(), nvrhi::ShaderType::Compute, "main",
+                            "SsaaResolvePass");
+  if (!_shader)
     return;
-  }
-  nvrhi::ShaderDesc shaderDesc{};
-  shaderDesc.shaderType = nvrhi::ShaderType::Compute;
-  shaderDesc.entryName = "main";
-  shaderDesc.debugName = "ssaa_downsample";
-  _shader = _device->createShader(shaderDesc, bytes.data(), bytes.size());
-  if (!_shader) {
-    log.Error(log::RENDER, "SsaaResolvePass: createShader failed");
-    return;
-  }
 
   nvrhi::BindingLayoutDesc layoutDesc;
   layoutDesc.visibility = nvrhi::ShaderType::Compute;

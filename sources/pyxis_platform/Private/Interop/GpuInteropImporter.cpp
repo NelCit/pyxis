@@ -8,25 +8,11 @@
 #include <Pyxis/Platform/Logging/Log.h>
 #include <Pyxis/Platform/Logging/LogCategories.h>
 
+#include "InteropVkCommon.h"
+
 #include <vector>
 
 namespace pyxis {
-namespace {
-
-[[nodiscard]] uint32_t FindMemoryType(VkPhysicalDevice phys, uint32_t typeBits,
-                                      VkMemoryPropertyFlags wanted) noexcept {
-  VkPhysicalDeviceMemoryProperties props{};
-  vkGetPhysicalDeviceMemoryProperties(phys, &props);
-  for (uint32_t i = 0; i < props.memoryTypeCount; ++i) {
-    const bool typeOk = (typeBits & (1u << i)) != 0u;
-    const bool propsOk = (props.memoryTypes[i].propertyFlags & wanted) == wanted;
-    if (typeOk && propsOk)
-      return i;
-  }
-  return UINT32_MAX;
-}
-
-}  // namespace
 
 struct GpuInteropImporter::Impl {
   VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
@@ -81,28 +67,10 @@ ImportedImage GpuInteropImporter::ImportImage(void* memoryHandle, uint64_t alloc
   ImportedImage out{};
   Impl& impl = *_impl;
 
+  // Shared create-info — MUST match the exporter's (or the import fails).
   VkExternalMemoryImageCreateInfo extImg{};
-  extImg.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
-  extImg.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
-
-  VkImageUsageFlags usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-                            VK_IMAGE_USAGE_SAMPLED_BIT;
-  if (isColorRenderTarget)
-    usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
-
   VkImageCreateInfo imgInfo{};
-  imgInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-  imgInfo.pNext = &extImg;
-  imgInfo.imageType = VK_IMAGE_TYPE_2D;
-  imgInfo.format = static_cast<VkFormat>(vkFormat);
-  imgInfo.extent = {width, height, 1};
-  imgInfo.mipLevels = 1;
-  imgInfo.arrayLayers = 1;
-  imgInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-  imgInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-  imgInfo.usage = usage;
-  imgInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-  imgInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+  interop::FillSharedImageCreateInfo(width, height, vkFormat, isColorRenderTarget, extImg, imgInfo);
 
   VkImage image = VK_NULL_HANDLE;
   if (vkCreateImage(impl.device, &imgInfo, nullptr, &image) != VK_SUCCESS) {
@@ -112,8 +80,8 @@ ImportedImage GpuInteropImporter::ImportImage(void* memoryHandle, uint64_t alloc
 
   VkMemoryRequirements req{};
   vkGetImageMemoryRequirements(impl.device, image, &req);
-  const uint32_t typeIndex =
-      FindMemoryType(impl.physicalDevice, req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  const uint32_t typeIndex = interop::FindMemoryType(impl.physicalDevice, req.memoryTypeBits,
+                                                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
   if (typeIndex == UINT32_MAX) {
     log.Error(log::PLATFORM, "GpuInteropImporter: no DEVICE_LOCAL memory type");
     vkDestroyImage(impl.device, image, nullptr);
