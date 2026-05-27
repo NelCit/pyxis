@@ -45,8 +45,12 @@ class GlVkInterop {
   // GPU equivalent of the WritePyxisColorToAov readback flip. Implemented as a
   // glBlitNamedFramebuffer with the destination Y range reversed (glCopyImageSubData
   // cannot flip). Caller guarantees the Vulkan render has retired (writes visible)
-  // before calling.
-  void CopyImportedInto(uint32_t dstGlTexture, uint32_t width, uint32_t height) noexcept;
+  // before calling. Returns false (error logged once) if the blit raised a GL error,
+  // so the caller can take the CPU readback path: that surfaces the problem in the log
+  // and feeds any host that reads Map(); a GL host samples GetResource() so its AOV
+  // stays as the (failed) blit left it until the next good frame.
+  [[nodiscard]] bool CopyImportedInto(uint32_t dstGlTexture, uint32_t width,
+                                      uint32_t height) noexcept;
 
  private:
   void ReleaseImport() noexcept;
@@ -61,6 +65,7 @@ class GlVkInterop {
   // Framebuffers for the flipping blit (created lazily; src + dst color attachment).
   uint32_t _readFbo = 0;
   uint32_t _drawFbo = 0;
+  bool _loggedCopyError = false;  // one-shot guard for the per-frame blit error log
 
   // GL entry points (loaded via wglGetProcAddress). Opaque void* kept in the .cpp.
   struct Fns;

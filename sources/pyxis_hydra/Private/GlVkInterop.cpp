@@ -168,9 +168,9 @@ uint32_t GlVkInterop::ImportExportedImage(void* win32Handle, uint64_t allocation
   return _srcTexture;
 }
 
-void GlVkInterop::CopyImportedInto(uint32_t dstGlTexture, uint32_t width, uint32_t height) noexcept {
+bool GlVkInterop::CopyImportedInto(uint32_t dstGlTexture, uint32_t width, uint32_t height) noexcept {
   if (!_loaded || _srcTexture == 0 || dstGlTexture == 0)
-    return;
+    return false;
   if (_readFbo == 0)
     g_fns.createFramebuffers(1, &_readFbo);
   if (_drawFbo == 0)
@@ -183,6 +183,21 @@ void GlVkInterop::CopyImportedInto(uint32_t dstGlTexture, uint32_t width, uint32
   // engine's bottom-up color present needs (mirrors WritePyxisColorToAov).
   g_fns.blitNamedFramebuffer(_readFbo, _drawFbo, 0, 0, dimX, dimY, 0, dimY, dimX, 0,
                              COLOR_BUFFER_BIT, NEAREST);
+  // glGetError reads the sticky flag without a GPU sync, so this is cheap per frame.
+  // On error the blit produced nothing usable; report it once and let the caller fall
+  // back to the readback rather than present a stale AOV.
+  if (g_fns.getError != nullptr) {
+    const GLenum err = g_fns.getError();
+    if (err != 0) {
+      if (!_loggedCopyError) {
+        _loggedCopyError = true;
+        std::fprintf(stderr, "GlVkInterop: GL error 0x%x during AOV blit; falling back to readback\n",
+                     err);
+      }
+      return false;
+    }
+  }
+  return true;
 }
 
 void GlVkInterop::ReleaseImport() noexcept {

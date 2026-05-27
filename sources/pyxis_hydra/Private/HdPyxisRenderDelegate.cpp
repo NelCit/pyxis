@@ -662,10 +662,8 @@ class HdPyxisRenderPass final : public HdRenderPass {
             _engine->WaitRenderComplete();  // shared image holds finished pixels.
             const uint32_t srcTex = _glInterop.ImportExportedImage(
                 exp.memoryHandle, exp.allocationSize, exp.width, exp.height, /*optimalTiling*/ true);
-            if (srcTex != 0u) {
-              _glInterop.CopyImportedInto(gpuBuf->GpuAovGlId(), exp.width, exp.height);
-              didGpuPath = true;
-            }
+            if (srcTex != 0u)
+              didGpuPath = _glInterop.CopyImportedInto(gpuBuf->GpuAovGlId(), exp.width, exp.height);
           }
           if (!didGpuPath)
             WritePyxisColorToAov(*_engine, binding.renderBuffer, _readbackScratch);
