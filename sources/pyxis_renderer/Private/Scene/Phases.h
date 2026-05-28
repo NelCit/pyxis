@@ -13,13 +13,17 @@
 
 namespace pyxis::scene {
 
-struct PhaseUploadTextures {};   // System_UploadDirtyTextures
-struct PhaseUploadMaterials {};  // System_UploadDirtyMaterials
-struct PhaseExtractMeshes {};    // System_ExtractDirtyMeshes
-struct PhaseBuildBlas {};        // System_BuildDirtyBlas
-struct PhaseRebuildTlas {};      // System_RebuildTlas
-struct PhaseUpdateBindless {};   // System_UpdateBindlessTable
-struct PhaseClearDirty {};       // System_ClearDirtyFlags
+// The GpuScene commit systems registered on each phase (RFC 0009,
+// GpuScene/Commit.cpp::RegisterCommitPipeline):
+struct PhaseUploadTextures {};   // Sys_UploadTextures
+struct PhaseUploadMaterials {};  // Sys_UploadMaterials / _UploadLights / _InstanceSideTables / _UploadVolumes
+struct PhaseExtractMeshes {};    // Sys_UploadMeshes + the 5 mesh side-table systems
+struct PhaseBuildBlas {};        // Sys_BuildBlas
+struct PhaseRebuildTlas {};      // Sys_RebuildTlas
+struct PhaseUpdateBindless {};   // reserved: the bindless descriptor table is bound by
+                                 // PathTracePass (the render graph), not GpuScene, so
+                                 // this phase carries no commit system in v1.
+struct PhaseClearDirty {};       // Sys_ClearDirty
 
 // Returns the registered Flecs entity for a phase tag. Phases are
 // constructed at SceneWorld::Init time and registered into the custom
