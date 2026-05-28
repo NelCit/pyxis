@@ -68,7 +68,7 @@
     },
     {
       "name": "concurrentqueue",
-      "$comment": "moodycamel MPMC lock-free queue — ingest→render thread mutation queue. Plan §4 / §31 / §18.5."
+      "$comment": "moodycamel MPMC lock-free queue — RESERVED for the deferred concurrent-ingest mutation queue (Plan §4 / §31 / §18.5); currently UNUSED. v1 single-writer is met by single-threaded ingest; the queue lands with concurrent ingest (also needs handle-alloc split from entity creation since verbs return handles synchronously)."
     },
     {
       "name": "flecs",

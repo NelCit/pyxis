@@ -90,7 +90,7 @@ The Flecs `SceneWorld` (a `flecs::world`) is owned by `GpuScene::Impl` (`Private
 - **Queries are cached at registration time** — building a query inside a per-frame system body is a PR-blocking violation.
 - Prefer pair relationships `(Instance, MaterialOf, mat)` over entity-field components.
 - Custom phase pipeline (`PYXIS_PHASE_*`); built-in `flecs::OnUpdate` is **not** used.
-- **Single-writer mutation**: only the render thread calls `world.entity()`/`set()`/`destruct()`. Ingest threads push `MutationCommand` records onto a `moodycamel::ConcurrentQueue` drained at the start of `CommitResources`.
+- **Single-writer mutation**: only one thread mutates the world (`world.entity()`/`set()`/`destruct()`). **As implemented (v1):** this holds because ingest is single-threaded — the Hydra delegate runs the bulk `StageWalker::WalkStage` on the render-pass thread, and the standalone runs it on the ingest thread; nothing mutates the world concurrently. The `MutationCommand`-queue design (ingest thread enqueues, render thread drains at `CommitResources`) is **deferred** until concurrent ingest is built: it additionally needs handle allocation split from entity creation, because the mutation verbs return handles synchronously (`CreateMesh → MeshHandle`, then `AppendInstance` chains on it) and a fire-and-forget queue can't. The `concurrentqueue` dep is reserved for that, currently unused.
 
 ---
 
