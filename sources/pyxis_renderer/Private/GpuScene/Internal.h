@@ -746,6 +746,16 @@ struct GpuScene::Impl
   // TLAS rebuild so an empty scene doesn't pay for it.
   nvrhi::rt::AccelStructHandle tlas;
   bool                         tlasNeedsRebuild = false;
+  // RFC 0009 — TLAS refit (§16 "rebuilt every frame if dirty; refit otherwise").
+  // `tlasStructureChanged` (set by Append/Destroy/SetVisibility — the instance SET or
+  // its BLAS pointers change) forces a full rebuild; a transform-only edit
+  // (UpdateInstanceTransform) leaves it false → eligible for a cheap refit.
+  // `tlasAllowsUpdate` tracks whether the live TLAS was built with the AllowUpdate
+  // flag. It stays false for static scenes (which never call UpdateInstanceTransform),
+  // so their TLAS build is byte-identical to before; the AllowUpdate variant is only
+  // created once a transform edit actually needs refit capability.
+  bool                         tlasStructureChanged = true;
+  bool                         tlasAllowsUpdate     = false;
 
   // M6 audit closeout: separate dirty track for the instance→material
   // side-table buffer (binding 4). Kept distinct from tlasNeedsRebuild

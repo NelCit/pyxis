@@ -60,8 +60,9 @@ Expected<InstanceHandle> GpuScene::Impl::AppendInstance(const InstanceDesc& inst
       matEntity.id() != 0)
     entity.add<MaterialOf>(matEntity);
 
-  // New instance → TLAS pack changes + side-table gains an entry.
+  // New instance → TLAS pack changes (structural → full rebuild) + side-table entry.
   tlasNeedsRebuild = true;
+  tlasStructureChanged = true;
   instanceMaterialNeedsUpload = true;
   return static_cast<InstanceHandle>(handleRaw);
 }
@@ -113,6 +114,7 @@ void GpuScene::Impl::SetInstanceVisibility(InstanceHandle instanceHandle, bool v
   {
     entry.visible = visible;
     tlasNeedsRebuild = true;          // in/out of the TLAS pack.
+    tlasStructureChanged = true;      // structural → full rebuild, not refit.
     instanceMaterialNeedsUpload = true;  // ID gaps must match the new instance set.
   }
 }
@@ -131,6 +133,7 @@ void GpuScene::Impl::DestroyInstance(InstanceHandle instanceHandle)
   // any DirtyTransform tag) + bumps the slot generation.
   instanceSlots.Free(static_cast<uint32_t>(instanceHandle));
   tlasNeedsRebuild = true;
+  tlasStructureChanged = true;  // structural → full rebuild, not refit.
   instanceMaterialNeedsUpload = true;
 }
 

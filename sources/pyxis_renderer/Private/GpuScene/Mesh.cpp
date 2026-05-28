@@ -209,6 +209,25 @@ void GpuScene::Impl::DestroyMesh(MeshHandle meshHandle)
       ++lastFrameStats.staleHandleDrops;  // §18.5 — stale handle counted.
     return;
   }
+  // RFC 0009 — orphan detection via the Instance→MeshOf relationship: warn if live
+  // instances still reference this mesh (they'd silently drop out of the TLAS, having
+  // no live BLAS). This is the safe consumer of the relationship; auto-releasing a
+  // shared BLAS by instance refcount is intentionally NOT done (a mesh's BLAS is keyed
+  // by MeshHandle and may be re-instanced, so its lifetime tracks the handle, §15/§16).
+  if (const flecs::entity meshEntity = meshSlots.Resolve(static_cast<uint32_t>(meshHandle));
+      meshEntity.id() != 0)
+  {
+    uint32_t referencing = 0;
+    instanceSlots.ForEachLiveSlot([&](uint32_t, flecs::entity instanceEntity) {
+      if (instanceEntity.has<MeshOf>(meshEntity))
+        ++referencing;
+    });
+    if (referencing > 0)
+      Logging::Get().Warn(log::RENDER,
+                          "GpuScene::DestroyMesh: mesh still referenced by "
+                              + std::to_string(referencing)
+                              + " live instance(s); they will drop out of the TLAS.");
+  }
   // §15 content-dedup map cleanup. Erase by stored hash so a future CreateMesh of
   // the same content allocates fresh instead of looking up a dead slot.
   meshDescHashToHandle.erase(entry->descHash);

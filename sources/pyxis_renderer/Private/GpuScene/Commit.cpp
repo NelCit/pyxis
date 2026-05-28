@@ -215,6 +215,8 @@ void GpuScene::Impl::Clear() noexcept
   // TLAS + camera + dirty flags.
   tlas = nullptr;
   tlasNeedsRebuild = false;
+  tlasStructureChanged = true;   // RFC 0009 — fresh scene → next build is a full rebuild.
+  tlasAllowsUpdate = false;
   instanceMaterialNeedsUpload = false;
   hasCamera = false;
   cameraDesc = CameraDesc{};
@@ -1011,12 +1013,23 @@ Expected<void> GpuScene::Impl::RebuildTlasIfDirty(nvrhi::ICommandList* commandLi
   if (!tlasNeedsRebuild)
     return {};
 
-  if (!tlas)
+  // RFC 0009 / §16 — refit when only instance transforms changed (no add/remove/
+  // visibility since the last build) AND the live TLAS supports update. Otherwise a
+  // full rebuild. A transform-only edit on a TLAS that lacks AllowUpdate triggers ONE
+  // full rebuild that recreates it with AllowUpdate, enabling refit thereafter.
+  // Static scenes never reach the AllowUpdate path → their build stays byte-identical.
+  const bool transformOnly = !tlasStructureChanged;
+  const bool wantAllowUpdate = transformOnly;  // dynamic transforms want refit capability.
+  const bool canRefit = transformOnly && tlas && tlasAllowsUpdate;
+
+  if (!tlas || (wantAllowUpdate && !tlasAllowsUpdate))
   {
     nvrhi::rt::AccelStructDesc tlasDesc;
     tlasDesc.isTopLevel = true;
     tlasDesc.topLevelMaxInstances = TLAS_MAX_INSTANCES;
-    tlasDesc.buildFlags = nvrhi::rt::AccelStructBuildFlags::PreferFastTrace;
+    tlasDesc.buildFlags = nvrhi::rt::AccelStructBuildFlags::PreferFastTrace
+                          | (wantAllowUpdate ? nvrhi::rt::AccelStructBuildFlags::AllowUpdate
+                                             : nvrhi::rt::AccelStructBuildFlags::None);
     tlasDesc.debugName = "scene.tlas";
     tlas = device->createAccelStruct(tlasDesc);
     if (!tlas)
@@ -1026,6 +1039,7 @@ Expected<void> GpuScene::Impl::RebuildTlasIfDirty(nvrhi::ICommandList* commandLi
                       "CommitResources: createAccelStruct(TLAS, max=%zu) failed",
                       TLAS_MAX_INSTANCES)};
     }
+    tlasAllowsUpdate = wantAllowUpdate;
   }
 
   // Gather one nvrhi::rt::InstanceDesc per live + visible instance
@@ -1095,10 +1109,15 @@ Expected<void> GpuScene::Impl::RebuildTlasIfDirty(nvrhi::ICommandList* commandLi
                     instanceDescs.size(), TLAS_MAX_INSTANCES)};
   }
 
+  auto buildFlags = nvrhi::rt::AccelStructBuildFlags::PreferFastTrace;
+  if (tlasAllowsUpdate)
+    buildFlags = buildFlags | nvrhi::rt::AccelStructBuildFlags::AllowUpdate;
+  if (canRefit)
+    buildFlags = buildFlags | nvrhi::rt::AccelStructBuildFlags::PerformUpdate;  // refit in place.
   commandList->buildTopLevelAccelStruct(tlas.Get(), instanceDescs.data(),
-                                        instanceDescs.size(),
-                                        nvrhi::rt::AccelStructBuildFlags::PreferFastTrace);
+                                        instanceDescs.size(), buildFlags);
   tlasNeedsRebuild = false;
+  tlasStructureChanged = false;  // next transform-only edit may refit.
   return {};
 }
 
