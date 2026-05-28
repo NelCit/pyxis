@@ -78,38 +78,28 @@ Expected<MeshHandle> GpuScene::Impl::CreateMesh(const MeshDesc& meshDesc)
     // mesh counts but not zero) or a stale entry from a Destroy that
     // somehow missed the map cleanup falls through to a fresh
     // allocation.
-    if (LookupMesh(found->second) != nullptr)
+    if (meshSlots.Resolve(static_cast<uint32_t>(found->second)).id() != 0)
       return found->second;
     // Stale map entry — drop it and fall through to allocate fresh.
     meshDescHashToHandle.erase(found);
   }
 
-  // ---- Allocate slot -----------------------------------------------------
-  // O(1) free-list pop. DestroyMesh pushes the slot back here
-  // symmetrically; an append-only load never enters the pop branch.
-  uint32_t slot = 0;
-  if (!freeMeshSlots.empty())
+  // ---- Allocate slot (RFC 0009 P4 — Flecs entity via meshSlots) ----------
+  flecs::entity entity;
+  const uint32_t handleRaw = meshSlots.Allocate(entity);
+  if (handleRaw == 0)
   {
-    slot = freeMeshSlots.back();
-    freeMeshSlots.pop_back();
+    return std::unexpected{PYXIS_ERROR(
+        ErrorKind::InvalidState, "CreateMesh: mesh-handle slot space exhausted (limit = %u)",
+        (1u << HANDLE_SLOT_BITS))};
   }
-  else
-  {
-    if (meshes.size() >= (1u << HANDLE_SLOT_BITS))
-    {
-      return std::unexpected{PYXIS_ERROR(
-          ErrorKind::InvalidState, "CreateMesh: mesh-handle slot space exhausted (limit = %u)",
-          (1u << HANDLE_SLOT_BITS))};
-    }
-    meshes.emplace_back();
-    slot = static_cast<uint32_t>(meshes.size() - 1);
-  }
+  const uint32_t slot = GpuSlotMap::SlotOf(handleRaw);
+  if (meshResources.size() <= slot)
+    meshResources.resize(slot + 1u);
 
-  // ---- Populate entry ----------------------------------------------------
-  MeshEntry& entry = meshes[slot];
-  entry.live = true;
-  entry.needsGpuUpload = true;
-  entry.needsBlasBuild = true;
+  // ---- Populate the slot-indexed resource record -------------------------
+  MeshResource& entry = meshResources[slot];
+  entry = MeshResource{};  // reset a recycled slot to a clean state.
   entry.vertexCount = static_cast<uint32_t>(meshDesc.positions.size());
   entry.indexCount = static_cast<uint32_t>(meshDesc.indices.size());
   entry.positions.assign(meshDesc.positions.begin(), meshDesc.positions.end());
@@ -176,29 +166,16 @@ Expected<MeshHandle> GpuScene::Impl::CreateMesh(const MeshDesc& meshDesc)
                                    static_cast<float>(normal.y),
                                    static_cast<float>(normal.z), texelDensity);
   }
-  meshFaceNormalsNeedUpload = true;
 
-  // M8a: any mesh registration also dirties the per-mesh UV +
-  // index flat buffers (re-uploaded next CommitResources). UV array
-  // can be empty when the source authored no `primvars:st`; the
-  // closesthit's HasBaseColorMap flag falls through to the scalar
-  // baseColor in that case.
-  meshUvsNeedUpload     = true;
-  meshIndicesNeedUpload = true;
-  // M9 smooth shading: mesh registration dirties the per-vertex
-  // normal buffer too. Empty `meshDesc.normals` is fine — the closesthit
-  // detects a near-zero magnitude and falls back to the M7 face-normal
-  // path, so meshes that authored no normals still render.
-  meshVertexNormalsNeedUpload = true;
-  // M9 normal mapping: same dirty-flag pattern. Empty `meshDesc.tangents`
-  // is fine — closesthit's normal-mapping branch detects the
-  // zero-magnitude case and skips its TBN sample.
-  meshTangentsNeedUpload = true;
-
-  // Record the descHash on the entry + register the handle in the
-  // dedup map. DestroyMesh erases the map entry symmetrically.
+  // Record the descHash + set the mesh component + mark the entity dirty. The single
+  // DirtyTopology tag gates ALL the per-mesh GPU work this commit — vertex/index upload,
+  // BLAS build, and the five concatenated side-table buffers (face normals / UVs /
+  // indices / vertex normals / tangents), which all re-pack when LowestDirtyMeshSlot
+  // finds a dirty mesh. DestroyMesh erases the dedup-map entry symmetrically.
   entry.descHash = descHash;
-  const auto handle = static_cast<MeshHandle>(HandleEncode(slot, entry.generation));
+  entity.set<GpuMeshComponent>({descHash});
+  entity.add<scene::DirtyTopology>();
+  const auto handle = static_cast<MeshHandle>(handleRaw);
   meshDescHashToHandle.emplace(descHash, handle);
   return handle;
 }
@@ -210,49 +187,47 @@ Expected<void> GpuScene::Impl::UpdateMesh(MeshHandle /*meshHandle*/, const MeshD
 
 void GpuScene::Impl::DestroyMesh(MeshHandle meshHandle)
 {
-  MeshEntry* entry = ResolveMesh(meshHandle);
+  MeshResource* entry = ResolveMeshResource(meshHandle);
   if (entry == nullptr)
+  {
+    if (static_cast<uint32_t>(meshHandle) != 0)
+      ++lastFrameStats.staleHandleDrops;  // §18.5 — stale handle counted.
     return;
-  // §15 content-dedup map cleanup. Erase by stored hash so a future
-  // CreateMesh of the same content allocates fresh instead of
-  // looking up a dead slot.
+  }
+  // RFC 0009 — orphan detection via the Instance→MeshOf relationship: warn if live
+  // instances still reference this mesh (they'd silently drop out of the TLAS, having
+  // no live BLAS). This is the safe consumer of the relationship; auto-releasing a
+  // shared BLAS by instance refcount is intentionally NOT done (a mesh's BLAS is keyed
+  // by MeshHandle and may be re-instanced, so its lifetime tracks the handle, §15/§16).
+  if (const flecs::entity meshEntity = meshSlots.Resolve(static_cast<uint32_t>(meshHandle));
+      meshEntity.id() != 0)
+  {
+    uint32_t referencing = 0;
+    instanceSlots.ForEachLiveSlot([&](uint32_t, flecs::entity instanceEntity) {
+      if (instanceEntity.has<MeshOf>(meshEntity))
+        ++referencing;
+    });
+    if (referencing > 0)
+      Logging::Get().Warn(log::RENDER,
+                          "GpuScene::DestroyMesh: mesh still referenced by "
+                              + std::to_string(referencing)
+                              + " live instance(s); they will drop out of the TLAS.");
+  }
+  // §15 content-dedup map cleanup. Erase by stored hash so a future CreateMesh of
+  // the same content allocates fresh instead of looking up a dead slot.
   meshDescHashToHandle.erase(entry->descHash);
-  entry->descHash = 0;
-  entry->live = false;
-  entry->needsGpuUpload = false;
-  entry->needsBlasBuild = false;
-  entry->positions.clear();
-  entry->indices.clear();
-  entry->normals.clear();
-  entry->tangents.clear();
-  entry->uv0.clear();
-  entry->debugName.clear();
-  // Drop the GPU resources. NVRHI's deferred-destruction queue
-  // keeps them alive until any in-flight command list that
-  // references them retires.
-  entry->vertexBuffer = nullptr;
-  entry->indexBuffer = nullptr;
-  entry->blas = nullptr;
-  entry->vertexCount = 0;
-  entry->indexCount = 0;
-  if (entry->generation == HANDLE_GENERATION_QUARANTINE)
-  {
-    entry->quarantined = true;
-    // Quarantined slots are never reused — don't push to free list.
-  }
-  else
-  {
-    ++entry->generation;
-    // Recycle the slot for the next CreateMesh. Generation bump
-    // protects stale handles from accidentally resolving here.
-    const auto slot = static_cast<std::uint32_t>(entry - meshes.data());
-    freeMeshSlots.push_back(slot);
-  }
+  // Drop the GPU resources (the BLAS-release hand-off — NVRHI's deferred-destruction
+  // queue keeps them alive until any in-flight command list referencing them
+  // retires). Resetting the record frees the CPU-side vectors too.
+  *entry = MeshResource{};
+  // meshSlots.Free destructs the entity (dropping GpuMeshComponent + any DirtyTopology
+  // tag) + bumps the slot generation (or quarantines at 255).
+  meshSlots.Free(static_cast<uint32_t>(meshHandle));
 }
 
 bool GpuScene::Impl::HasMesh(MeshHandle meshHandle) const
 {
-  return LookupMesh(meshHandle) != nullptr;
+  return meshSlots.Resolve(static_cast<uint32_t>(meshHandle)).id() != 0;
 }
 
 }  // namespace pyxis

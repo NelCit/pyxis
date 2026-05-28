@@ -20,6 +20,10 @@
 
 #include "GpuScene/Internal.h"
 
+#if defined(PYXIS_DEBUG_TOOLS) && defined(FLECS_REST)
+#include <flecs/addons/rest.h>  // Flecs Explorer (Debug-tools only); ticked by progress().
+#endif
+
 namespace pyxis {
 
 using namespace gpuscene_detail;  // bring the helpers into scope so the bodies below stay terse
@@ -39,27 +43,36 @@ GpuScene::GpuScene(nvrhi::IDevice* device, Profiler& profiler, const GpuSceneCre
   // most a few hundred bytes per slot, so 4096 reservations cost
   // ~MB-class up front.
   constexpr std::size_t INITIAL_MESH_RESERVE     = 4096;
-  constexpr std::size_t INITIAL_INSTANCE_RESERVE = 4096;
   constexpr std::size_t INITIAL_MATERIAL_RESERVE = 512;
   constexpr std::size_t INITIAL_TEXTURE_RESERVE  = 1024;
-  constexpr std::size_t INITIAL_LIGHT_RESERVE    = 256;
-  _impl->meshes.reserve(INITIAL_MESH_RESERVE);
-  _impl->instances.reserve(INITIAL_INSTANCE_RESERVE);
-  _impl->materials.reserve(INITIAL_MATERIAL_RESERVE);
-  _impl->textures.reserve(INITIAL_TEXTURE_RESERVE);
-  _impl->lights.reserve(INITIAL_LIGHT_RESERVE);
   _impl->meshDescHashToHandle.reserve(INITIAL_MESH_RESERVE);
   _impl->materialDescHashToHandle.reserve(INITIAL_MATERIAL_RESERVE);
   _impl->textureKeyHashToHandle.reserve(INITIAL_TEXTURE_RESERVE);
-  // Slot 0 is the Invalid sentinel for every handle table — keep
-  // each one permanently quarantined so a fabricated handle whose
-  // slot decodes to 0 never resolves.
-  _impl->meshes.emplace_back();
-  _impl->meshes[0].quarantined = true;
-  _impl->instances.emplace_back();
-  _impl->instances[0].quarantined = true;
-  _impl->lights.emplace_back();
-  _impl->lights[0].quarantined = true;
+  // RFC 0009 — meshes/materials/textures/instances all use GpuSlotMap, whose ctor
+  // reserves the slot-0 Invalid sentinel; no vector-backed sentinel left to seed.
+  // RFC 0009 P1 — lights live in `sceneWorld`; no sentinel slot needed (the
+  // HandleBimap encodes slot+1 so handle 0 stays Invalid). Build the cached
+  // light query ONCE here (§30.11: never inside a per-frame body).
+  _impl->lightQuery = _impl->sceneWorld.query<GpuLightComponent>();
+  // RFC 0009 follow-up — cache the Dirty<T> clear/gate queries once (§30.11).
+  _impl->dirtyTransformQuery =
+      _impl->sceneWorld.query_builder().with<scene::DirtyTransform>().build();
+  _impl->dirtyVisibilityQuery =
+      _impl->sceneWorld.query_builder().with<scene::DirtyVisibility>().build();
+  _impl->dirtyMaterialQuery =
+      _impl->sceneWorld.query_builder().with<scene::DirtyMaterial>().build();
+  _impl->dirtyLightQuery =
+      _impl->sceneWorld.query_builder().with<scene::DirtyLight>().build();
+  _impl->removalSentinel = _impl->sceneWorld.entity();  // carries removal dirty signals.
+
+#if defined(PYXIS_DEBUG_TOOLS) && defined(FLECS_REST)
+  // RFC 0009 follow-up — re-enable the Flecs Explorer on the GpuScene-owned world (the
+  // retired SceneWorldFacade used to host it). The REST server is ticked by
+  // sceneWorld.progress() inside CommitResources. Debug-tools builds only (§30.11 / §4).
+  _impl->sceneWorld.set<flecs::Rest>({});
+  Logging::Get().Info(log::RENDER,
+                      "Flecs Explorer up at http://localhost:27750 (GpuScene sceneWorld)");
+#endif
 }
 
 // Out-of-line dtor so unique_ptr<Impl>'s deleter sees the complete
@@ -209,17 +222,15 @@ bool GpuScene::HasVolume(VolumeHandle volumeHandle) const
 
 uint32_t GpuScene::GetVolumeCount() const noexcept
 {
-  return static_cast<uint32_t>(_impl->volumes.size());
+  // RFC 0009 P6 — slot count (== old volumes.size()); slot == volume index.
+  return _impl->volumeSlots.SlotCount();
 }
 
 nvrhi::ITexture* GpuScene::GetVolumeTextureAt(uint32_t volumeSlot) const noexcept
 {
-  if (volumeSlot >= _impl->volumes.size())
+  if (!_impl->volumeSlots.IsLive(volumeSlot) || volumeSlot >= _impl->volumeResources.size())
     return nullptr;
-  const Impl::VolumeEntry& entry = _impl->volumes[volumeSlot];
-  if (!entry.live)
-    return nullptr;
-  return entry.texture.Get();
+  return _impl->volumeResources[volumeSlot].texture.Get();
 }
 
 // ---- Scene-wide reset + frame boundary -------------------------------------
@@ -259,21 +270,13 @@ nvrhi::IBuffer* GpuScene::GetLightBuffer() const noexcept {
 }
 
 nvrhi::ITexture* GpuScene::GetDomeEnvMapTexture() const noexcept {
-  // Walk live LightEntries in slot order; return the first Dome with
-  // a valid + non-quarantined envMap-resolved texture. The miss
-  // shader's lat-long sample uses just one dome (the convention every
-  // production renderer follows — multiple domes is post-v1, §43).
-  // Returns nullptr when no dome with an env-map exists; PathTracePass
-  // binds a 1×1 black fallback in that case.
-  for (const Impl::LightEntry& entry : _impl->lights)
-  {
-    if (!entry.live || entry.descCopy.kind != LightDesc::Kind::Dome)
-      continue;
-    const Impl::TextureEntry* tex = _impl->LookupTexture(entry.descCopy.envMap);
-    if (tex != nullptr && tex->texture)
-      return tex->texture.Get();
-  }
-  return nullptr;
+  // The single-dome env-map texture (the first live Dome with a resolved env-map, slot
+  // order — the convention every production renderer follows; multiple domes is post-v1,
+  // §43). Review fix #2 — the selection is computed once per commit in
+  // RefreshDomeEnvMapCache and cached here; this accessor is on the per-frame
+  // PathTracePass binding path, so it must not allocate/sort. nullptr when no dome with
+  // an env-map exists → PathTracePass binds a 1×1 black fallback.
+  return _impl->domeEnvMapTexture;
 }
 
 nvrhi::ISampler* GpuScene::GetBindlessSampler() const noexcept {
@@ -333,16 +336,16 @@ nvrhi::ITexture* GpuScene::GetMissingTexture() const noexcept {
 }
 
 uint32_t GpuScene::GetBindlessTextureCount() const noexcept {
-  return static_cast<uint32_t>(_impl->textures.size());
+  // RFC 0009 P3 — slot count (== old textures.size()); the bindless table is sized to
+  // this so slot == bindless index stays stable.
+  return _impl->textureSlots.SlotCount();
 }
 
 nvrhi::ITexture* GpuScene::GetBindlessTextureAt(uint32_t bindlessSlot) const noexcept {
-  if (bindlessSlot >= _impl->textures.size())
+  // bindlessSlot == texture slot for M5. The GPU resource lives in the side table.
+  if (!_impl->textureSlots.IsLive(bindlessSlot) || bindlessSlot >= _impl->textureResources.size())
     return nullptr;
-  const Impl::TextureEntry& entry = _impl->textures[bindlessSlot];
-  if (!entry.live || !entry.texture)
-    return nullptr;
-  return entry.texture.Get();
+  return _impl->textureResources[bindlessSlot].Get();
 }
 
 // ---- Editor introspection (M7 follow-up) -----------------------------------
@@ -352,99 +355,80 @@ nvrhi::ITexture* GpuScene::GetBindlessTextureAt(uint32_t bindlessSlot) const noe
 // default-init. v1 uses these only from the viewer's editor panel
 // (call frequency = once per frame) so the linear walk is fine.
 uint32_t GpuScene::GetLiveLightCount() const noexcept {
-  uint32_t count = 0;
-  for (const Impl::LightEntry& entry : _impl->lights)
-  {
-    if (entry.live)
-      ++count;
-  }
-  return count;
+  return _impl->lightHandles.LiveCount();
 }
 
 LightHandle GpuScene::GetLightHandleAt(uint32_t liveIndex) const noexcept {
-  uint32_t walked = 0;
-  for (uint32_t slot = 0; slot < _impl->lights.size(); ++slot)
-  {
-    const Impl::LightEntry& entry = _impl->lights[slot];
-    if (!entry.live)
-      continue;
-    if (walked == liveIndex)
-      return static_cast<LightHandle>(HandleEncode(slot, entry.generation));
-    ++walked;
-  }
-  return LightHandle::Invalid;
+  std::vector<std::pair<uint32_t, LightDesc>> liveLights;
+  _impl->CollectLiveLightsSorted(liveLights);
+  if (liveIndex >= liveLights.size())
+    return LightHandle::Invalid;
+  return static_cast<LightHandle>(liveLights[liveIndex].first);
 }
 
 LightDesc GpuScene::GetLightDescAt(uint32_t liveIndex) const noexcept {
-  uint32_t walked = 0;
-  for (const Impl::LightEntry& entry : _impl->lights)
-  {
-    if (!entry.live)
-      continue;
-    if (walked == liveIndex)
-      return entry.descCopy;
-    ++walked;
-  }
-  return LightDesc{};
+  std::vector<std::pair<uint32_t, LightDesc>> liveLights;
+  _impl->CollectLiveLightsSorted(liveLights);
+  if (liveIndex >= liveLights.size())
+    return LightDesc{};
+  return liveLights[liveIndex].second;
 }
 
 uint32_t GpuScene::GetLiveMaterialCount() const noexcept {
-  uint32_t count = 0;
-  for (const Impl::MaterialEntry& entry : _impl->materials)
-  {
-    if (entry.live)
-      ++count;
-  }
-  return count;
+  return _impl->materialSlots.LiveCount();
 }
 
 MaterialHandle GpuScene::GetMaterialHandleAt(uint32_t liveIndex) const noexcept {
+  // RFC 0009 P2 — walk live material slots in slot order (matches the old vector walk).
   uint32_t walked = 0;
-  for (uint32_t slot = 0; slot < _impl->materials.size(); ++slot)
-  {
-    const Impl::MaterialEntry& entry = _impl->materials[slot];
-    if (!entry.live)
-      continue;
-    if (walked == liveIndex)
-      return static_cast<MaterialHandle>(HandleEncode(slot, entry.generation));
-    ++walked;
-  }
-  return MaterialHandle::Invalid;
+  MaterialHandle result = MaterialHandle::Invalid;
+  _impl->materialSlots.ForEachLiveSlot([&](uint32_t slot, flecs::entity) {
+    if (result == MaterialHandle::Invalid && walked++ == liveIndex)
+      result = static_cast<MaterialHandle>(_impl->materialSlots.HandleForSlot(slot));
+  });
+  return result;
 }
 
 OpenPBRMaterialDesc GpuScene::GetMaterialDescAt(uint32_t liveIndex) const noexcept {
   uint32_t walked = 0;
-  for (const Impl::MaterialEntry& entry : _impl->materials)
-  {
-    if (!entry.live)
-      continue;
-    if (walked == liveIndex)
-      return entry.descCopy;
-    ++walked;
-  }
-  return OpenPBRMaterialDesc{};
+  OpenPBRMaterialDesc result{};
+  bool found = false;
+  _impl->materialSlots.ForEachLiveSlot([&](uint32_t slot, flecs::entity entity) {
+    if (!found && walked++ == liveIndex)
+    {
+      result = entity.get<GpuMaterialComponent>().desc;
+      // Review fix #5 — the stored desc.sourcePrim views materialSourcePrims[slot],
+      // which can move when that vector reallocates (dangling for SSO-short paths).
+      // Re-point at the CURRENT owned string so the returned view is always valid.
+      if (slot < _impl->materialSourcePrims.size())
+        result.sourcePrim = _impl->materialSourcePrims[slot];
+      found = true;
+    }
+  });
+  return result;
 }
 
 std::string_view GpuScene::GetTexturePath(TextureHandle textureHandle) const noexcept {
-  // Editor-side path lookup. Returns the owned `resolvedPath` string
-  // backing the texture entry's `keyCopy.resolvedPath` view. Empty
-  // when the handle is Invalid / out-of-range / dead / quarantined.
-  const Impl::TextureEntry* entry = _impl->LookupTexture(textureHandle);
-  if (entry == nullptr || !entry->live || entry->quarantined)
+  // Editor-side path lookup. RFC 0009 P3 — returns the owned resolvedPath string
+  // from the slot-indexed side table. Empty when the handle is Invalid / dead.
+  const flecs::entity entity = _impl->textureSlots.Resolve(static_cast<uint32_t>(textureHandle));
+  if (entity.id() == 0)
     return {};
-  return entry->resolvedPath;
+  const uint32_t slot = GpuSlotMap::SlotOf(static_cast<uint32_t>(textureHandle));
+  if (slot >= _impl->textureResolvedPaths.size())
+    return {};
+  return _impl->textureResolvedPaths[slot];
 }
 
 MaterialHandle GpuScene::LookupInstanceMaterialBySlot(uint32_t instanceSlot) const noexcept {
   // Slot 0 is the §15 sentinel; the picker writes 0 when no instance
   // was hit OR for a degenerate primitive that maps back to the
   // permanent quarantine entry. Either way → no selection.
-  if (instanceSlot == 0 || instanceSlot >= _impl->instances.size())
+  // RFC 0009 P5 — slot-indexed instance resource via instanceSlots liveness.
+  if (instanceSlot == 0 || !_impl->instanceSlots.IsLive(instanceSlot)
+      || instanceSlot >= _impl->instanceResources.size())
     return MaterialHandle::Invalid;
-  const Impl::InstanceEntry& entry = _impl->instances[instanceSlot];
-  if (!entry.live || entry.quarantined)
-    return MaterialHandle::Invalid;
-  return entry.material;
+  return _impl->instanceResources[instanceSlot].material;
 }
 
 // ---- Introspection ---------------------------------------------------------
@@ -469,10 +453,9 @@ FrameStats GpuScene::LastFrameStats() const {
   // approximate from triangle count for the v1 panel. M8 perf-sweep
   // wires the real number via NVRHI's RTXMU pool-stats hook.
   constexpr uint64_t BLAS_BYTES_PER_TRIANGLE_ESTIMATE = 70;
-  for (const Impl::MeshEntry& entry : _impl->meshes)
-  {
-    if (!entry.live)
-      continue;
+  // RFC 0009 P4 — meshes are Flecs entities; walk live slots + their resource record.
+  _impl->meshSlots.ForEachLiveSlot([&](uint32_t slot, flecs::entity) {
+    const Impl::MeshResource& entry = _impl->meshResources[slot];
     ++liveMeshCount;
     if (entry.blas)
     {
@@ -484,60 +467,37 @@ FrameStats GpuScene::LastFrameStats() const {
       vertexBytes += entry.vertexBuffer->getDesc().byteSize;
     if (entry.indexBuffer)
       indexBytes += entry.indexBuffer->getDesc().byteSize;
-  }
-  uint64_t liveInstanceCount = 0;
-  for (const Impl::InstanceEntry& entry : _impl->instances)
-  {
-    if (entry.live)
-      ++liveInstanceCount;
-  }
-  uint64_t liveLightCount = 0;
-  for (const Impl::LightEntry& entry : _impl->lights)
-  {
-    if (entry.live)
-      ++liveLightCount;
-  }
-  uint64_t liveMaterialCount = 0;
-  for (const Impl::MaterialEntry& entry : _impl->materials)
-  {
-    // Material slot 0 is the §19.7 sentinel — exclude it from the
-    // user-visible count.
-    if (entry.live)
-      ++liveMaterialCount;
-  }
+  });
+  // RFC 0009 P5 — instances are Flecs entities; the slot map tracks live count O(1).
+  const uint64_t liveInstanceCount = _impl->instanceSlots.LiveCount();
+  // RFC 0009 P1 — lights are Flecs entities; the bimap tracks the live count O(1).
+  const uint64_t liveLightCount = _impl->lightHandles.LiveCount();
+  // RFC 0009 P2 — materials are Flecs entities; the slot map tracks live count O(1)
+  // (already excludes the slot-0 sentinel).
+  const uint64_t liveMaterialCount = _impl->materialSlots.LiveCount();
+  // RFC 0009 P3 — textures are Flecs entities; walk live slots, read the component
+  // metadata for the byte tally. bytesPerBlock is "bytes per pixel" for the
+  // uncompressed formats the pool holds today (compressed BCn under-counts but isn't
+  // authorized yet — M8 follow-up).
   uint64_t liveTextureCount = 0;
   uint64_t textureBytes = 0;
-  for (const Impl::TextureEntry& entry : _impl->textures)
-  {
-    if (!entry.live)
-      continue;
+  _impl->textureSlots.ForEachLiveSlot([&](uint32_t, flecs::entity entity) {
+    const GpuTextureComponent& component = entity.get<GpuTextureComponent>();
     ++liveTextureCount;
-    // Bytes per pixel via NVRHI's format introspection — covers every
-    // uncompressed format the texture pool can hold. Pre-fix the
-    // switch only knew about RGBA8 / SRGBA8 / RGBA32F and silently
-    // counted everything else (RGBA16F, R32F, R32_UINT, ...) as 0,
-    // making the Stats panel's "Total" row visibly inconsistent
-    // with the per-row sum the user could compute by hand. The
-    // bytesPerBlock convention is "bytes per pixel" for uncompressed
-    // formats; compressed formats (BC1..BC7) report bytes per 4×4
-    // block but Pyxis doesn't authorize compressed textures yet
-    // (M8 follow-up) so this path is exact today.
-    const uint64_t bytesPerPixel = nvrhi::getFormatInfo(entry.format).bytesPerBlock;
-    textureBytes += static_cast<uint64_t>(entry.width) * entry.height * bytesPerPixel;
-  }
+    const uint64_t bytesPerPixel = nvrhi::getFormatInfo(component.format).bytesPerBlock;
+    textureBytes += static_cast<uint64_t>(component.width) * component.height * bytesPerPixel;
+  });
   // V2.A.5 — live volumes + their VRAM footprint. `bytesOnGpu` is
   // computed at AddVolume time as `dim_x * dim_y * dim_z * sizeof(float)`
   // since every volume binds a R32_FLOAT 3D texture. Slot 0 sentinel
   // is `live=false` so the sum naturally excludes it.
+  // RFC 0009 P6 — volumes are Flecs entities; walk live slots for the byte tally.
   uint64_t liveVolumeCount = 0;
   uint64_t volumeBytes = 0;
-  for (const Impl::VolumeEntry& entry : _impl->volumes)
-  {
-    if (!entry.live)
-      continue;
+  _impl->volumeSlots.ForEachLiveSlot([&](uint32_t slot, flecs::entity) {
     ++liveVolumeCount;
-    volumeBytes += entry.bytesOnGpu;
-  }
+    volumeBytes += _impl->volumeResources[slot].bytesOnGpu;
+  });
   stats.meshCount = liveMeshCount;
   stats.blasCount = liveBlasCount;
   stats.instanceCount = liveInstanceCount;

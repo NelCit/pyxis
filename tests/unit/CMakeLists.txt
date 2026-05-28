@@ -23,6 +23,8 @@ target_sources(pyxis_unit_tests PRIVATE
     GpuSceneCamera.cpp
     GpuSceneClear.cpp
     GpuSceneLookupInstanceMaterial.cpp
+    GpuSlotMapFixture.cpp
+    GpuSceneIncrementalUpload.cpp
     SceneResolver.cpp
     UsdShadeToOpenPBR.cpp
     AnalyticGeomTessellation.cpp
@@ -104,6 +106,10 @@ target_sources(pyxis_unit_tests PRIVATE
     # from pyxis_renderer.dll.
     ${CMAKE_SOURCE_DIR}/sources/pyxis_renderer/Private/RenderGraph/RenderGraph.cpp
 
+    # RFC 0009 — SceneWorldInit pins the §30.11 phase pipeline; Phases.cpp is a
+    # Private symbol not exported from pyxis_renderer.dll, so compile it directly.
+    ${CMAKE_SOURCE_DIR}/sources/pyxis_renderer/Private/Scene/Phases.cpp
+
     # SceneResolver lives in pyxis_app's Private (the executable, not
     # a DLL) so we recompile its .cpp directly here. CliArgs.h /
     # Configuration.h are pure POD declarations — we don't need to
@@ -149,6 +155,7 @@ pyxis_enable_exceptions_and_rtti(pyxis_unit_tests)
 find_package(OpenVDB CONFIG REQUIRED)
 include(PyxisNvUsd)
 
+find_package(flecs CONFIG REQUIRED)  # RFC 0009 — GpuSlotMapFixture links flecs.
 target_link_libraries(pyxis_unit_tests
     PRIVATE
         Pyxis::Platform
@@ -166,6 +173,12 @@ target_link_libraries(pyxis_unit_tests
         # uses OpenSubdiv's Far layer. nv-usd's osdCPU.lib matches its bundled
         # v3_6_0 headers (RFC 0006) — same lib the pyxis_usd_ingest target links.
         "${PXR_USD_ROOT}/lib/osdCPU.lib"
+        # RFC 0009 — GpuSlotMapFixture white-box-tests the Flecs-backed handle table
+        # (Private/GpuScene/GpuSlotMap.h), which is header-only over flecs. The test
+        # exe creates its own flecs::world (its own runtime; independent of the one
+        # inside pyxis_renderer.dll), so it links flecs directly.
+        $<TARGET_NAME_IF_EXISTS:flecs::flecs_static>
+        $<TARGET_NAME_IF_EXISTS:flecs::flecs>
         GTest::gtest
         GTest::gtest_main
 )

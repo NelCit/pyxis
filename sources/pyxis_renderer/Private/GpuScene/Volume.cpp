@@ -63,31 +63,20 @@ VolumeHandle GpuScene::Impl::AddVolume(const VolumeDesc& volumeDesc)
     return VolumeHandle::Invalid;
   }
 
-  // O(1) free-list pop; RemoveVolume pushes back symmetrically.
-  // Slot 0 is the Invalid sentinel — first real allocation lands
-  // at slot 1.
-  uint32_t slot = 0;
-  if (!freeVolumeSlots.empty())
+  // RFC 0009 P6 — allocate a Flecs entity (slot == volume index; slot 0 = sentinel).
+  flecs::entity entity;
+  const uint32_t handleRaw = volumeSlots.Allocate(entity);
+  if (handleRaw == 0)
   {
-    slot = freeVolumeSlots.back();
-    freeVolumeSlots.pop_back();
+    Logging::Get().Warn(log::RENDER, "GpuScene::AddVolume: handle space exhausted.");
+    return VolumeHandle::Invalid;
   }
-  else
-  {
-    if (volumes.empty())
-      volumes.emplace_back();  // sentinel slot 0
-    if (volumes.size() >= (1u << HANDLE_SLOT_BITS))
-    {
-      Logging::Get().Warn(log::RENDER,
-          "GpuScene::AddVolume: handle space exhausted.");
-      return VolumeHandle::Invalid;
-    }
-    volumes.emplace_back();
-    slot = static_cast<uint32_t>(volumes.size() - 1);
-  }
+  const uint32_t slot = GpuSlotMap::SlotOf(handleRaw);
+  if (volumeResources.size() <= slot)
+    volumeResources.resize(slot + 1u);
 
-  VolumeEntry& entry = volumes[slot];
-  entry.live = true;
+  VolumeResource& entry = volumeResources[slot];
+  entry = VolumeResource{};  // reset a recycled slot.
   entry.dimensions = volumeDesc.dimensions;
   entry.bboxMin = volumeDesc.bboxMin;
   entry.bboxMax = volumeDesc.bboxMax;
@@ -96,34 +85,29 @@ VolumeHandle GpuScene::Impl::AddVolume(const VolumeDesc& volumeDesc)
   entry.voxelData.assign(volumeDesc.voxels.begin(), volumeDesc.voxels.end());
   entry.needsGpuUpload = true;
   entry.bytesOnGpu = static_cast<std::uint64_t>(expectedVoxels) * sizeof(float);
+  entity.set<GpuVolumeComponent>({});
   volumesNeedGpuUpload = true;
-  return static_cast<VolumeHandle>(HandleEncode(slot, entry.generation));
+  return static_cast<VolumeHandle>(handleRaw);
 }
 
 void GpuScene::Impl::RemoveVolume(VolumeHandle volumeHandle)
 {
-  VolumeEntry* entry = ResolveVolume(volumeHandle);
+  VolumeResource* entry = ResolveVolumeResource(volumeHandle);
   if (entry == nullptr)
+  {
+    if (static_cast<uint32_t>(volumeHandle) != 0)
+      ++lastFrameStats.staleHandleDrops;
     return;
-  entry->live = false;
-  entry->texture = nullptr;
-  entry->voxelData.clear();
-  entry->voxelData.shrink_to_fit();
-  if (entry->generation == HANDLE_GENERATION_QUARANTINE)
-  {
-    entry->quarantined = true;
   }
-  else
-  {
-    ++entry->generation;
-    const auto slot = static_cast<std::uint32_t>(entry - volumes.data());
-    freeVolumeSlots.push_back(slot);
-  }
+  // Reset the record (drops the GPU texture into NVRHI's deferred-destruction queue
+  // + frees the CPU voxel buffer); Free destructs the entity + bumps the generation.
+  *entry = VolumeResource{};
+  volumeSlots.Free(static_cast<uint32_t>(volumeHandle));
 }
 
 bool GpuScene::Impl::HasVolume(VolumeHandle volumeHandle) const
 {
-  return LookupVolume(volumeHandle) != nullptr;
+  return volumeSlots.Resolve(static_cast<uint32_t>(volumeHandle)).id() != 0;
 }
 
 Expected<void> GpuScene::Impl::UploadPendingVolumes(nvrhi::ICommandList* commandList)
@@ -131,9 +115,13 @@ Expected<void> GpuScene::Impl::UploadPendingVolumes(nvrhi::ICommandList* command
   if (!volumesNeedGpuUpload)
     return {};
 
-  for (VolumeEntry& entry : volumes)
+  // RFC 0009 P6 — iterate live volume slots; upload those flagged needsGpuUpload.
+  for (uint32_t slot = 1; slot < volumeSlots.SlotCount(); ++slot)
   {
-    if (!entry.live || !entry.needsGpuUpload)
+    if (!volumeSlots.IsLive(slot))
+      continue;
+    VolumeResource& entry = volumeResources[slot];
+    if (!entry.needsGpuUpload)
       continue;
 
     nvrhi::TextureDesc texDesc;

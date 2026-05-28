@@ -57,7 +57,7 @@ sources/pyxis_<module>/Private/...                  # everything else
 
 Renderer's public surface is exhaustive (§18.1) — `Forward.h`, `RendererApi.h`, `Error.h`, `GpuScene.h`, `PyxisRenderer.h`, `Profiler.h`, `Descs/*.h`. **Anything else is `Private/` and inaccessible to ingest adapters or app.** Reviewers reject PRs that widen this.
 
-`SceneWorld` lives in `pyxis_renderer/Private/Scene/` with subfolders `Components/` (one POD per header), `Systems/` (free functions), `Queries/` (cached `flecs::query_t*`), `Observers/`, plus `World.h`, `Phases.h`, `HandleBimap.h`, `Pipeline.cpp`.
+The Flecs `SceneWorld` (a `flecs::world`) is owned by `GpuScene::Impl` (`Private/GpuScene/`) — the scene representation and the GPU-resource layer share one world (RFC 0009). Each entity type gets a `GpuSlotMap` handle table + slot-indexed side tables for its non-POD data. `Private/Scene/` holds the shared ECS primitives `GpuScene` builds on: `Phases.h`/`.cpp` (the §30.11 custom phase pipeline, driven by `CommitResources` via `world.progress()`), `HandleBimap.h`/`.cpp` (light handle table), and `Components/Dirty.h` (the `Dirty<T>` tags). The earlier parallel app-side `SceneWorldFacade` + its no-op `System_*`/`QueryCache` stubs were retired in RFC 0009.
 
 ---
 
@@ -90,7 +90,7 @@ Renderer's public surface is exhaustive (§18.1) — `Forward.h`, `RendererApi.h
 - **Queries are cached at registration time** — building a query inside a per-frame system body is a PR-blocking violation.
 - Prefer pair relationships `(Instance, MaterialOf, mat)` over entity-field components.
 - Custom phase pipeline (`PYXIS_PHASE_*`); built-in `flecs::OnUpdate` is **not** used.
-- **Single-writer mutation**: only the render thread calls `world.entity()`/`set()`/`destruct()`. Ingest threads push `MutationCommand` records onto a `moodycamel::ConcurrentQueue` drained at the start of `CommitResources`.
+- **Single-writer mutation**: only one thread mutates the world (`world.entity()`/`set()`/`destruct()`). **As implemented (v1):** this holds because ingest is single-threaded — the Hydra delegate runs the bulk `StageWalker::WalkStage` on the render-pass thread, and the standalone runs it on the ingest thread; nothing mutates the world concurrently. The `MutationCommand`-queue design (ingest thread enqueues, render thread drains at `CommitResources`) is **deferred** until concurrent ingest is built: it additionally needs handle allocation split from entity creation, because the mutation verbs return handles synchronously (`CreateMesh → MeshHandle`, then `AppendInstance` chains on it) and a fire-and-forget queue can't. The `concurrentqueue` dep is reserved for that, currently unused.
 
 ---
 

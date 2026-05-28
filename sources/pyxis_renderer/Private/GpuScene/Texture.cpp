@@ -5,6 +5,12 @@
 // methods in GpuScene.cpp forward one line into here. The actual
 // pixel decode (stb_image / tinyexr) happens lazily inside
 // CommitResources, not at AcquireTexture time — see Commit.cpp.
+//
+// RFC 0009 P3 — textures are GpuTextureComponent entities in `sceneWorld`, indexed by
+// `textureSlots` (GpuSlotMap; slot == bindless slot == GPU index). The GPU resource +
+// transient decode pixels + owned resolvedPath live in the slot-indexed side tables
+// (textureResources / texturePixelData / textureResolvedPaths). A `DirtyTexture` tag
+// marks an entity awaiting decode/upload (replaces the old per-entry needsGpuUpload).
 
 #include "GpuScene/Internal.h"
 
@@ -12,140 +18,137 @@ namespace pyxis {
 
 using namespace gpuscene_detail;
 
+namespace {
+
+// Grow the slot-indexed texture side tables so [slot] is addressable.
+void EnsureTextureSideTables(std::vector<nvrhi::TextureHandle>& resources,
+                             std::vector<std::vector<std::uint8_t>>& pixels,
+                             std::vector<std::string>& paths,
+                             std::vector<std::uint64_t>& accessTicks, uint32_t slot)
+{
+  if (resources.size() <= slot)
+  {
+    resources.resize(slot + 1u);
+    pixels.resize(slot + 1u);
+    paths.resize(slot + 1u);
+    accessTicks.resize(slot + 1u);
+  }
+}
+
+}  // namespace
+
 TextureHandle GpuScene::Impl::AcquireTexture(const TextureKey& textureKey)
 {
-  // Same dedup + slot-allocation shape as AcquireMaterial. Decode
-  // happens lazily inside CommitResources (M5 stub: synchronous
-  // stb_image decode on the render thread; the §31 async I/O pool
-  // wires at M8 when texture-load latency starts to dominate).
-  if (textures.empty())
-    textures.emplace_back();  // sentinel slot 0
-
+  // Same dedup + slot-allocation shape as AcquireMaterial. Decode happens lazily
+  // inside CommitResources (the DirtyTexture tag gates it).
   const std::uint64_t hash = HashTextureKey(textureKey);
-  // V2.A.12 — bump access tick + hit counter on cache-hit. Eviction
-  // policy (when it lands) reads `lastAccessTick` to find the coldest
-  // entries; bumping on hit keeps frequently-sampled textures warm.
+  // V2.A.12 — bump access tick on every Acquire (hit or fresh) for the LRU policy.
   ++nextTextureAccessTick;
-  if (auto found = textureKeyHashToHandle.find(hash);
-      found != textureKeyHashToHandle.end())
+  if (auto found = textureKeyHashToHandle.find(hash); found != textureKeyHashToHandle.end())
   {
-    if (TextureEntry* hitEntry = ResolveTexture(found->second); hitEntry != nullptr)
-      hitEntry->lastAccessTick = nextTextureAccessTick;
+    // Review fix #4 — bump the LRU tick with a plain side-table write; no
+    // get<>()+set<>() component round-trip (which also re-persisted a fragile view).
+    if (const flecs::entity hit = textureSlots.Resolve(static_cast<uint32_t>(found->second));
+        hit.id() != 0)
+    {
+      const uint32_t slot = GpuSlotMap::SlotOf(static_cast<uint32_t>(found->second));
+      if (slot < textureLastAccessTick.size())
+        textureLastAccessTick[slot] = nextTextureAccessTick;
+    }
     ++lruHitCount;
     return found->second;
   }
   ++lruMissCount;
 
-  // O(1) free-list pop; DestroyTexture pushes back symmetrically.
-  uint32_t slot = 0;
-  if (!freeTextureSlots.empty())
-  {
-    slot = freeTextureSlots.back();
-    freeTextureSlots.pop_back();
-  }
-  else
-  {
-    if (textures.size() >= (1u << HANDLE_SLOT_BITS))
-      return TextureHandle::Invalid;
-    textures.emplace_back();
-    slot = static_cast<uint32_t>(textures.size() - 1);
-  }
+  flecs::entity entity;
+  const uint32_t handle = textureSlots.Allocate(entity);
+  if (handle == 0)
+    return TextureHandle::Invalid;  // slot space exhausted (§18.5).
+  const uint32_t slot = GpuSlotMap::SlotOf(handle);
+  EnsureTextureSideTables(textureResources, texturePixelData, textureResolvedPaths,
+                          textureLastAccessTick, slot);
+  textureResolvedPaths[slot].assign(textureKey.resolvedPath);
+  textureLastAccessTick[slot] = nextTextureAccessTick;  // review fix #4 — LRU side table.
 
-  TextureEntry& entry = textures[slot];
-  entry.live = true;
-  entry.needsGpuUpload = true;
-  entry.keyCopy = textureKey;
-  entry.keyHash = hash;
-  entry.resolvedPath.assign(textureKey.resolvedPath);
-  entry.keyCopy.resolvedPath = entry.resolvedPath;  // re-point at owned copy
-  entry.bindlessSlot = slot;  // bindless slot = handle slot for M5
+  GpuTextureComponent component;
+  component.keyCopy = textureKey;
+  component.keyCopy.resolvedPath = textureResolvedPaths[slot];  // re-point at owned copy.
+  component.keyHash = hash;
+  component.bindlessSlot = slot;  // bindless slot = handle slot for M5.
+  entity.set<GpuTextureComponent>(component);
+  entity.add<scene::DirtyTexture>();  // pending decode/upload.
 
-  const auto handle = static_cast<TextureHandle>(HandleEncode(slot, entry.generation));
-  textureKeyHashToHandle.emplace(hash, handle);
-  return handle;
+  const auto textureHandle = static_cast<TextureHandle>(handle);
+  textureKeyHashToHandle.emplace(hash, textureHandle);
+  return textureHandle;
 }
 
 void GpuScene::Impl::DestroyTexture(TextureHandle textureHandle)
 {
-  TextureEntry* entry = ResolveTexture(textureHandle);
-  if (entry == nullptr)
+  const flecs::entity entity = textureSlots.Resolve(static_cast<uint32_t>(textureHandle));
+  if (entity.id() == 0)
+  {
+    if (static_cast<uint32_t>(textureHandle) != 0)
+      ++lastFrameStats.staleHandleDrops;
     return;
-  textureKeyHashToHandle.erase(entry->keyHash);
-  entry->live = false;
-  entry->texture = nullptr;
-  entry->resolvedPath.clear();
-  entry->pixelData.clear();
-  entry->pixelData.shrink_to_fit();
-  if (entry->generation == HANDLE_GENERATION_QUARANTINE)
-  {
-    entry->quarantined = true;
   }
-  else
+  textureKeyHashToHandle.erase(entity.get<GpuTextureComponent>().keyHash);
+  const uint32_t slot = GpuSlotMap::SlotOf(static_cast<uint32_t>(textureHandle));
+  if (slot < textureResources.size())
   {
-    ++entry->generation;
-    const auto slot = static_cast<std::uint32_t>(entry - textures.data());
-    freeTextureSlots.push_back(slot);
+    textureResources[slot] = nullptr;
+    textureResolvedPaths[slot].clear();
+    texturePixelData[slot].clear();
+    texturePixelData[slot].shrink_to_fit();
+    if (slot < textureLastAccessTick.size())
+      textureLastAccessTick[slot] = 0u;
   }
+  textureSlots.Free(static_cast<uint32_t>(textureHandle));  // destructs entity, bumps gen.
 }
 
 bool GpuScene::Impl::HasTexture(TextureHandle textureHandle) const
 {
-  return LookupTexture(textureHandle) != nullptr;
+  return textureSlots.Resolve(static_cast<uint32_t>(textureHandle)).id() != 0;
 }
 
-// V2.A.12 — texture LRU eviction. Walks every live texture entry,
-// sorts by `lastAccessTick` ascending (coldest first), and destroys
-// entries until total decoded byte count drops below `targetBytes`.
-// Returns the number of textures evicted. Safe to call between
-// frames (single-writer); the resulting destroyed handles flow
-// through the regular DestroyTexture cleanup.
-//
-// The closesthit shader sees magenta-fallback (slot 0) for any sampled
-// texture whose handle was evicted; the operator gets a one-shot
-// warning per evicted texture so the gap is visible.
+// V2.A.12 — texture LRU eviction. Walks every live texture entity, sorts by
+// lastAccessTick ascending (coldest first), and destroys entries until the total
+// decoded byte count drops below `targetBytes`. Returns the number evicted.
 std::uint32_t GpuScene::Impl::EvictColdTextures(std::uint64_t targetBytes) noexcept
 {
-  // Collect (lastAccessTick, slot, byteCount) for every live entry.
   struct EvictionCandidate
   {
     std::uint64_t accessTick;
-    std::uint32_t slot;
+    uint32_t      slot;
     std::uint64_t byteCount;
   };
   std::vector<EvictionCandidate> candidates;
   std::uint64_t totalBytes = 0;
-  candidates.reserve(textures.size());
-  for (std::size_t slotIdx = 1; slotIdx < textures.size(); ++slotIdx)
-  {
-    const TextureEntry& entry = textures[slotIdx];
-    if (!entry.live)
-      continue;
-    const std::uint64_t entryBytes = static_cast<std::uint64_t>(entry.width)
-                                  * entry.height * 4u;
+  textureSlots.ForEachLiveSlot([&](uint32_t slot, flecs::entity entity) {
+    const GpuTextureComponent& component = entity.get<GpuTextureComponent>();
+    const std::uint64_t entryBytes =
+        static_cast<std::uint64_t>(component.width) * component.height * 4u;
     totalBytes += entryBytes;
-    candidates.push_back({entry.lastAccessTick,
-                          static_cast<std::uint32_t>(slotIdx),
-                          entryBytes});
-  }
+    const std::uint64_t accessTick =
+        slot < textureLastAccessTick.size() ? textureLastAccessTick[slot] : 0u;  // review fix #4.
+    candidates.push_back({accessTick, slot, entryBytes});
+  });
 
   if (totalBytes <= targetBytes)
-    return 0;  // already under budget — no eviction needed
+    return 0;  // already under budget.
 
   std::sort(candidates.begin(), candidates.end(),
             [](const EvictionCandidate& lhs, const EvictionCandidate& rhs) {
-              return lhs.accessTick < rhs.accessTick;  // coldest first
+              return lhs.accessTick < rhs.accessTick;  // coldest first.
             });
 
   std::uint32_t evicted = 0;
-  for (const EvictionCandidate& cand : candidates)
+  for (const EvictionCandidate& candidate : candidates)
   {
     if (totalBytes <= targetBytes)
       break;
-    const TextureEntry& entry = textures[cand.slot];
-    const auto handle = static_cast<TextureHandle>(
-        HandleEncode(cand.slot, entry.generation));
-    DestroyTexture(handle);
-    totalBytes -= cand.byteCount;
+    DestroyTexture(static_cast<TextureHandle>(textureSlots.HandleForSlot(candidate.slot)));
+    totalBytes -= candidate.byteCount;
     ++evicted;
   }
   return evicted;

@@ -37,6 +37,10 @@ class HandleBimap final {
 
   [[nodiscard]] uint32_t LiveCount() const noexcept { return _live; }
 
+  // Decode the slot index from an encoded handle (the deterministic sort key
+  // for packing live entities into their GPU buffer in slot order). Pure util.
+  [[nodiscard]] static uint32_t SlotIndex(uint32_t encoded) noexcept;
+
  private:
   struct Slot {
     flecs::entity entity;
@@ -46,7 +50,6 @@ class HandleBimap final {
   };
 
   static uint32_t Encode(uint32_t slotIndex, uint8_t gen) noexcept;
-  static uint32_t SlotIndex(uint32_t encoded) noexcept;
   static uint8_t Generation(uint32_t encoded) noexcept;
 
   std::vector<Slot> _slots;

@@ -27,7 +27,6 @@
 #include <Pyxis/Renderer/GpuScene.h>
 #include <Pyxis/Renderer/Profiler.h>
 #include <Pyxis/Renderer/PyxisRenderer.h>
-#include <Pyxis/Renderer/SceneWorldFacade.h>
 #include <Pyxis/Renderer/Version.h>
 
 #include <nvrhi/nvrhi.h>
@@ -538,16 +537,11 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
   const AovTextures aovs = std::move(*aovsResult);
   nvrhi::ITexture* const renderTarget = aovs.color.Get();
 
-  // ---- SceneWorld + Profiler + GpuScene + Renderer -------------------
-  // GpuScene is the canonical scene-mutation API (§18.5);
-  // PyxisRenderer's ctor takes it by reference per §18.6 and
-  // PathTracePass binds its TLAS + camera every frame.
-  SceneWorldFacade scene;
-  if (scene.Init() != SceneWorldStatus::Ok)
-  {
-    log.Error(log::RENDER, "SceneWorldFacade::Init failed");
-    return EXIT_RUNTIME_FAIL;
-  }
+  // ---- Profiler + GpuScene + Renderer --------------------------------
+  // GpuScene is the canonical scene-mutation API (§18.5) and owns the
+  // §8 Flecs SceneWorld internally (RFC 0009); PyxisRenderer's ctor
+  // takes it by reference per §18.6 and PathTracePass binds its TLAS +
+  // camera every frame.
   Profiler profiler{device};
   GpuSceneCreateDesc gpuSceneDesc{};
   gpuSceneDesc.framesInFlight    = HEADLESS_FRAMES_IN_FLIGHT;
@@ -569,7 +563,6 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
                            populationMask, frameNumber,
                            loadMode, variantSelections, renderPurpose))
   {
-    scene.Shutdown();
     return EXIT_RUNTIME_FAIL;
   }
   const auto loadEndNs = std::chrono::steady_clock::now();
@@ -594,7 +587,6 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
   // accumulation today, so iterating buys nothing —
   // `samplesPerFrame * accumulationFrameLimit` wires in once the
   // accumulation buffer lands (post-M7).
-  scene.Tick();
   profiler.BeginFrame();
   deviceManager->BeginFrame();
 
@@ -602,7 +594,6 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
     const Profiler::CpuScope frameScope(profiler, "headless.frame");
     if (!RecordAndExecuteRenderFrame(device, commandList, gpuScene, renderer, aovs, renderTarget))
     {
-      scene.Shutdown();
       return EXIT_RUNTIME_FAIL;
     }
   }
@@ -711,7 +702,6 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
   // ---- Readback + EXR write ------------------------------------------
   if (!ReadbackAndWriteExr(device, commandList, renderTarget, config.output.image, ssaaFactor))
   {
-    scene.Shutdown();
     return EXIT_RUNTIME_FAIL;
   }
 
@@ -765,7 +755,6 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
     };
 
     auto runOneFrame = [&]() -> bool {
-      scene.Tick();
       profiler.BeginFrame();
       deviceManager->BeginFrame();
       bool frameOk = true;
@@ -786,7 +775,6 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
     {
       if (!runOneFrame())
       {
-        scene.Shutdown();
         return EXIT_RUNTIME_FAIL;
       }
     }
@@ -794,7 +782,6 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
     {
       if (!runOneFrame())
       {
-        scene.Shutdown();
         return EXIT_RUNTIME_FAIL;
       }
       recordFrame(profiler.LastFrameProfile());
@@ -1009,7 +996,6 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
       log.Warn(log::APP, "headless: " + effectiveResult.error());
     }
   }
-  scene.Shutdown();
   return EXIT_OK;
 }
 

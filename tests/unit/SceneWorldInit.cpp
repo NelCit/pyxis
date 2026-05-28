@@ -1,63 +1,82 @@
 // Pyxis unit test — SceneWorldInit.
 //
-// Plan §41 M0 exit criterion:
-//   "SceneWorld::Init constructs a flecs::world, registers every component,
-//    registers the PYXIS_PHASE_* custom pipeline with no-op systems, and
-//    tears down cleanly. Verified by a unit test (`SceneWorldInit`)."
+// Plan §41 M0 exit criterion (restated for RFC 0009): the §8 / §30.11 custom
+// Flecs phase pipeline registers cleanly on a fresh world and ticks in the
+// declared order. The former app-side `SceneWorldFacade` (a parallel, no-op
+// world the app constructed + Tick()'d) was retired in RFC 0009 once GpuScene
+// became the real SceneWorld owner; this test now pins the surviving primitive
+// the GpuScene commit path is built on — `scene::RegisterPhasePipeline`.
 //
-// The test exercises the Public/ surface (SceneWorldFacade) — Flecs is
-// never visible from a unit test, by §30.11 design.
+// §35 white-box exception: the test compiles Private/Scene/Phases.cpp directly
+// and links Flecs (the renderer DLL does not export this Private symbol).
 
-#include <Pyxis/Renderer/SceneWorldFacade.h>
+#include "Scene/Phases.h"
+
+#include <Pyxis/Renderer/Forward.h>
 
 #include <gtest/gtest.h>
 
+#include <flecs.h>
+#include <vector>
+
 namespace {
 
-TEST(SceneWorldInit, ConstructAndDestructIsClean) {
-  pyxis::SceneWorldFacade scene;
-  EXPECT_FALSE(scene.IsAlive());
-  EXPECT_EQ(scene.TickCount(), 0u);
+using namespace pyxis::scene;
 
-  const auto status = scene.Init();
-  EXPECT_EQ(status, pyxis::SceneWorldStatus::Ok);
-  EXPECT_TRUE(scene.IsAlive());
+TEST(SceneWorldInit, RegisterPhasePipelineTicksCleanly) {
+  flecs::world world;
+  const flecs::entity pipeline = RegisterPhasePipeline(world);
+  EXPECT_NE(pipeline.id(), 0u);  // a real pipeline entity was built + set.
 
-  scene.Shutdown();
-  EXPECT_FALSE(scene.IsAlive());
+  // A no-op system on every §30.11 phase; world.progress() must run them all
+  // without error (the M0 "registers the PYXIS_PHASE_* pipeline + tears down
+  // cleanly" criterion, now against the real primitive).
+  int ran = 0;
+  world.system("T_UploadTextures").kind<PhaseUploadTextures>().run(
+      [&ran](flecs::iter&) { ++ran; });
+  world.system("T_UploadMaterials").kind<PhaseUploadMaterials>().run(
+      [&ran](flecs::iter&) { ++ran; });
+  world.system("T_ExtractMeshes").kind<PhaseExtractMeshes>().run(
+      [&ran](flecs::iter&) { ++ran; });
+  world.system("T_BuildBlas").kind<PhaseBuildBlas>().run(
+      [&ran](flecs::iter&) { ++ran; });
+  world.system("T_RebuildTlas").kind<PhaseRebuildTlas>().run(
+      [&ran](flecs::iter&) { ++ran; });
+  world.system("T_UpdateBindless").kind<PhaseUpdateBindless>().run(
+      [&ran](flecs::iter&) { ++ran; });
+  world.system("T_ClearDirty").kind<PhaseClearDirty>().run(
+      [&ran](flecs::iter&) { ++ran; });
+
+  EXPECT_TRUE(world.progress());
+  EXPECT_EQ(ran, 7);  // every phase's system fired exactly once.
 }
 
-TEST(SceneWorldInit, TickAdvancesTickCount) {
-  pyxis::SceneWorldFacade scene;
-  ASSERT_EQ(scene.Init(), pyxis::SceneWorldStatus::Ok);
+TEST(SceneWorldInit, PhasesRunInDeclaredOrder) {
+  flecs::world world;
+  RegisterPhasePipeline(world);
 
-  EXPECT_EQ(scene.TickCount(), 0u);
-  scene.Tick();
-  EXPECT_EQ(scene.TickCount(), 1u);
-  scene.Tick();
-  scene.Tick();
-  EXPECT_EQ(scene.TickCount(), 3u);
-}
+  // Systems are registered out of phase order on purpose; the pipeline must
+  // still run them in the §30.11 phase order (textures → … → clear-dirty).
+  // Reordering phases is an RFC-gated change (§44), so this pins it.
+  std::vector<int> order;
+  world.system("T_ClearDirty").kind<PhaseClearDirty>().run(
+      [&order](flecs::iter&) { order.push_back(6); });
+  world.system("T_UploadTextures").kind<PhaseUploadTextures>().run(
+      [&order](flecs::iter&) { order.push_back(0); });
+  world.system("T_BuildBlas").kind<PhaseBuildBlas>().run(
+      [&order](flecs::iter&) { order.push_back(3); });
+  world.system("T_UploadMaterials").kind<PhaseUploadMaterials>().run(
+      [&order](flecs::iter&) { order.push_back(1); });
+  world.system("T_RebuildTlas").kind<PhaseRebuildTlas>().run(
+      [&order](flecs::iter&) { order.push_back(4); });
+  world.system("T_ExtractMeshes").kind<PhaseExtractMeshes>().run(
+      [&order](flecs::iter&) { order.push_back(2); });
+  world.system("T_UpdateBindless").kind<PhaseUpdateBindless>().run(
+      [&order](flecs::iter&) { order.push_back(5); });
 
-TEST(SceneWorldInit, RepeatedInitIsIdempotent) {
-  pyxis::SceneWorldFacade scene;
-  ASSERT_EQ(scene.Init(), pyxis::SceneWorldStatus::Ok);
-  ASSERT_EQ(scene.Init(), pyxis::SceneWorldStatus::Ok);
-  EXPECT_TRUE(scene.IsAlive());
-}
-
-TEST(SceneWorldInit, ShutdownThenReinit) {
-  pyxis::SceneWorldFacade scene;
-  ASSERT_EQ(scene.Init(), pyxis::SceneWorldStatus::Ok);
-  scene.Tick();
-  scene.Shutdown();
-  EXPECT_FALSE(scene.IsAlive());
-
-  ASSERT_EQ(scene.Init(), pyxis::SceneWorldStatus::Ok);
-  EXPECT_TRUE(scene.IsAlive());
-  EXPECT_EQ(scene.TickCount(), 0u);  // Shutdown resets the counter.
-  scene.Tick();
-  EXPECT_EQ(scene.TickCount(), 1u);
+  world.progress();
+  const std::vector<int> expected{0, 1, 2, 3, 4, 5, 6};
+  EXPECT_EQ(order, expected);
 }
 
 // Plan §19.7 — slot + generation handle bits are encoded in

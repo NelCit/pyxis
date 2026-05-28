@@ -292,7 +292,7 @@ CMake helpers under `_cmake/`: `Slang.cmake` (compiles `.slang` into SPIR-V), `V
 | **gtest** | Unit tests |
 | **DirectXShaderCompiler** | Optional, only if Slang uses it as backend; usually not needed |
 | **Flecs** | ECS for `SceneWorld`. Permissively-licensed (MIT). Pinned via `vcpkg.json` baseline. Linked PRIVATE into `pyxis_renderer` only — no Flecs header is exposed through `Public/`. Flecs Explorer (REST/web UI on port 27750) is enabled in **Debug** builds only via the `flecs[rest]` vcpkg feature, gated behind `PYXIS_DEBUG_TOOLS`. |
-| **moodycamel-concurrentqueue** | Lock-free MPMC queue used to ferry ingest-thread mutations to the render thread (§31). |
+| **moodycamel-concurrentqueue** | Lock-free MPMC queue **reserved** for the deferred concurrent-ingest mutation queue (§31); currently unused — v1 single-writer is met by single-threaded ingest. |
 
 Excluded in v1: OpenImageIO (USD pulls a viable subset), OpenColorIO (basic color
 mgmt only), OIDN/OptiX denoiser (deferred).
@@ -529,6 +529,20 @@ there is no v1 shim, no plain-tables fallback. Nothing in this section is part o
 public surface (§18); ingest adapters never touch these types. Flecs is linked PRIVATE
 into `pyxis_renderer` and no Flecs header escapes through `Public/`.
 
+> **Amended by RFC 0009 (Accepted).** As shipped, the `flecs::world` is owned directly
+> by `GpuScene::Impl` (not a separate `SceneWorld`/`SceneWorldFacade` wrapper the app
+> constructs + `Tick()`s — that parallel, no-op world was retired). Each entity type has
+> a `GpuSlotMap` handle table (slot == GPU buffer index, §19.7 encoding) plus
+> slot-indexed side tables for its non-POD CPU/GPU data; dedup hash maps are retained as
+> hash→entity indices. The §8.1 component names below are illustrative — the concrete
+> components are `GpuLightComponent`/`GpuMaterialComponent`/`GpuTextureComponent`/
+> `GpuMeshComponent`/`GpuInstanceComponent` + the `MeshOf`/`MaterialOf` pairs + the
+> `Dirty<Topology|Transform|Texture>` tags, all in `Private/GpuScene/Internal.h`. The
+> §8.1 systems run as real Flecs systems on the §30.11 phases, driven by
+> `CommitResources → world.progress()`. `Private/Scene/` retains only the shared
+> primitives: `Phases.*`, `HandleBimap.*`, `Components/Dirty.h`. See RFC 0009 for the
+> full mapping + determinism rules.
+
 ### 8.1 Canonical shape (Flecs ECS)
 
 ```
@@ -606,11 +620,17 @@ day-0 contract:
 - **Query caching**: every system caches its `flecs::query_t*` once at registration time
   (`Private/Scene/Queries/QueryCache.h`). **Building a query inside a hot loop is a
   PR-blocking violation** (§30.11).
-- **Mutation submission**: ingest threads do **not** call `world.entity(...)` directly.
-  They push `MutationCommand` records into a `moodycamel::ConcurrentQueue`; the render
-  thread drains the queue at the start of `CommitResources` and applies all writes on
-  the world (Flecs is not threadsafe for arbitrary multi-writer access; single-writer
-  is the contract).
+- **Mutation submission**: single-writer is the contract (Flecs is not threadsafe for
+  arbitrary multi-writer access). **As implemented (v1)** this holds by single-threaded
+  ingest — the Hydra delegate runs the bulk `StageWalker::WalkStage` on the render-pass
+  thread, the standalone runs it on the ingest thread, and nothing mutates the world
+  concurrently — so the verbs apply writes directly. The `MutationCommand`-queue design
+  below (ingest threads push records into a `moodycamel::ConcurrentQueue`; the render
+  thread drains it at the start of `CommitResources`) is **deferred** to the
+  concurrent-ingest milestone: it additionally requires splitting handle allocation from
+  entity creation, since the verbs return handles synchronously (`CreateMesh → MeshHandle`,
+  chained by `AppendInstance`) and a fire-and-forget queue can't return one. The
+  `concurrentqueue` dependency is reserved for that work and is currently unused.
 - **`CommitResources(cl)` body** is essentially `world.progress();` (Flecs runs the
   custom pipeline, in order, and yields back). Pre/post hooks integrate with `Profiler`
   via `PYXIS_GPU_SCOPE`/`PYXIS_CPU_SCOPE`.
@@ -1164,9 +1184,10 @@ to the §20 catalogue):
 
 **Threading.** The graph is **render-thread-only** (§31). `AddPass`, `Compile`,
 `Execute` and every `IRenderPass` method run on the render thread. Ingest
-threads never touch the graph; they push mutations onto `GpuScene`'s
-moodycamel queue (§4) which the render thread drains inside
-`GpuScene::CommitResources` *before* the graph executes (§18.5).
+threads never touch the graph; scene mutations are applied to `GpuScene` before the
+graph executes. (The deferred `moodycamel` mutation queue — §4/§31 — would be drained
+in `CommitResources` *before* the graph executes; v1 instead relies on single-threaded
+ingest, so the verbs apply writes directly. See §31.)
 
 **What the graph deliberately does not do, and where it would change to.**
 
@@ -2004,11 +2025,15 @@ anything added later) drives a frame with.
 
 Threading: `producer-consumer` — mutation calls may be issued on the ingest thread; only
 `CommitResources` touches the GPU and must run on the render thread.
-Internally the `Impl` enqueues every mutation onto a multi-producer / single-consumer
-lock-free queue (`moodycamel::ConcurrentQueue`, vendored via vcpkg) drained at the
-start of `CommitResources`. Multiple ingest threads (Hydra `Sync`, USD-direct
-`StageWalker`, asset-I/O completions) may produce concurrently; the render thread is
-the sole consumer. Plain `std::vector::push_back` from any non-render thread is
+**As implemented (v1)** ingest is single-threaded (the bulk `StageWalker::WalkStage`),
+so the `Impl` verbs apply mutations directly under the single-writer contract. The
+designed model — the `Impl` enqueues every mutation onto a multi-producer /
+single-consumer lock-free queue (`moodycamel::ConcurrentQueue`, vendored via vcpkg)
+drained at the start of `CommitResources`, with multiple ingest threads (Hydra `Sync`,
+USD-direct `StageWalker`, asset-I/O completions) producing concurrently and the render
+thread the sole consumer — is **deferred** to the concurrent-ingest milestone (it also
+needs handle allocation split from synchronous entity creation). Plain
+`std::vector::push_back` from any non-render thread is
 forbidden — reviewers reject any direct container mutation from a non-render thread.
 
 ```cpp
@@ -3200,8 +3225,9 @@ regression EXRs match byte-for-byte across adapters.
     `pyxis_material_translation::FromUsdShade(...)`. Same code path the Hydra
     delegate calls.
   - `UsdLuxLightAPI` → `LightDesc` (distant, dome, rect supported v1).
-- Output: a single `IngestSnapshot` POD pushed onto the
-  `moodycamel::ConcurrentQueue` (§18.5).
+- Output: a single `IngestSnapshot` POD applied to `GpuScene` (in the designed
+  concurrent-ingest model, pushed onto the deferred `moodycamel::ConcurrentQueue`; v1
+  applies it directly via single-threaded ingest — §18.5 / §31).
 
 #### O.2 Update model — API-only outside Hydra
 
@@ -3924,9 +3950,14 @@ any `Public/` header.
   used; all systems run inside the `PYXIS_PHASE_*` pipeline registered in
   `Private/Scene/Phases.h`. Reordering phases or inserting between them requires an
   RFC (§44).
-- **Mutation is single-writer.** Only the render thread calls `world.entity(...)`,
-  `e.set<T>(...)`, or `e.destruct()`. Ingest threads push `MutationCommand` records
-  into the `moodycamel::ConcurrentQueue` drained at the start of `CommitResources`.
+- **Mutation is single-writer.** Only one thread mutates the world (`world.entity(...)`,
+  `e.set<T>(...)`, `e.destruct()`). **As implemented (v1)** this is satisfied by
+  single-threaded ingest (the bulk `StageWalker::WalkStage` — on the render-pass thread
+  under Hydra, on the ingest thread standalone — with no concurrent world mutation), so
+  the verbs write directly. The `MutationCommand` → `moodycamel::ConcurrentQueue` design
+  (drained at the start of `CommitResources`) is **deferred** to a concurrent-ingest
+  milestone and also needs handle allocation split from entity creation (the verbs return
+  handles synchronously); the `concurrentqueue` dep is reserved for it, currently unused.
 - **Flecs Explorer (REST UI)** is gated behind `PYXIS_DEBUG_TOOLS` (Debug builds only),
   served on `http://localhost:27750` via the `flecs[rest]` vcpkg feature.
 
