@@ -261,28 +261,74 @@ Expected<void> GpuScene::Impl::CommitResources(nvrhi::ICommandList* commandList)
 
   const Profiler::CpuScope commitScope(*profiler, "render.commitResources");
 
-  // Order matters: meshes upload first (BLAS build needs the buffers
-  // to exist), bindless fallbacks before texture decode (texture
-  // entries fall back to slot 0), texture decode before material pack
-  // (material-flag bits depend on resolved bindless slots), TLAS
-  // rebuild before instance side-tables (the side-tables mirror the
-  // instance vector shape, not strictly TLAS-dependent, but keeping
-  // them adjacent makes the dirty-flag dependency obvious).
-  PYXIS_TRY(UploadPendingMeshes(commandList));
-  PYXIS_TRY(EnsureBindlessFallbacks(commandList));
-  PYXIS_TRY(UploadPendingTextures(commandList));
-  PYXIS_TRY(UploadMaterialBuffer(commandList));
-  PYXIS_TRY(UploadLightBuffer(commandList));
-  PYXIS_TRY(BuildPendingBlas(commandList));
-  PYXIS_TRY(RebuildTlasIfDirty(commandList));
-  PYXIS_TRY(UploadInstanceSideTables(commandList));
-  PYXIS_TRY(UploadMeshFaceNormals(commandList));
-  PYXIS_TRY(UploadMeshUvs(commandList));
-  PYXIS_TRY(UploadMeshIndices(commandList));
-  PYXIS_TRY(UploadMeshVertexNormals(commandList));
-  PYXIS_TRY(UploadMeshTangents(commandList));
-  PYXIS_TRY(UploadPendingVolumes(commandList));
-  return {};
+  // RFC 0009 follow-up — the §30.11 phase pipeline now executes the commit for real:
+  // the systems registered in RegisterCommitPipeline run via sceneWorld.progress() in
+  // phase order (UploadTextures → UploadMaterials → ExtractMeshes → BuildBlas →
+  // RebuildTlas → UpdateBindless → ClearDirty). The load-bearing dependencies are
+  // preserved by that order (textures' bindless slots before material packing; mesh
+  // vertex/index before BLAS; BLAS before TLAS); the reordered steps are independent
+  // GPU buffers, so the output is byte-identical (verified against the golden suite).
+  RegisterCommitPipeline();  // idempotent.
+  currentCommandList = commandList;
+  commitError = {};
+  sceneWorld.progress();  // runs the commit systems in phase order.
+  currentCommandList = nullptr;
+  return commitError;
+}
+
+void GpuScene::Impl::RegisterCommitPipeline() noexcept
+{
+  if (commitPipelineRegistered)
+    return;
+  commitPipelineRegistered = true;
+
+  scene::RegisterPhasePipeline(sceneWorld);  // §30.11 phases + the active pipeline.
+
+  // Each system runs one commit step, short-circuiting once a prior step errored.
+  // `this` is captured: the Impl (and its sceneWorld) outlive every system.
+  auto runStep = [this](Expected<void> (Impl::*commitFn)(nvrhi::ICommandList*)) {
+    if (!commitError)
+      return;  // a prior step already failed — skip.
+    commitError = (this->*commitFn)(currentCommandList);
+  };
+
+  // PhaseUploadTextures — bindless fallbacks (slot-0 magenta) before texture decode.
+  sceneWorld.system("Sys_BindlessFallbacks").kind<scene::PhaseUploadTextures>().run(
+      [runStep](flecs::iter&) { runStep(&Impl::EnsureBindlessFallbacks); });
+  sceneWorld.system("Sys_UploadTextures").kind<scene::PhaseUploadTextures>().run(
+      [runStep](flecs::iter&) { runStep(&Impl::UploadPendingTextures); });
+
+  // PhaseUploadMaterials — material pack reads the resolved texture bindless slots.
+  sceneWorld.system("Sys_UploadMaterials").kind<scene::PhaseUploadMaterials>().run(
+      [runStep](flecs::iter&) { runStep(&Impl::UploadMaterialBuffer); });
+  sceneWorld.system("Sys_UploadLights").kind<scene::PhaseUploadMaterials>().run(
+      [runStep](flecs::iter&) { runStep(&Impl::UploadLightBuffer); });
+  sceneWorld.system("Sys_InstanceSideTables").kind<scene::PhaseUploadMaterials>().run(
+      [runStep](flecs::iter&) { runStep(&Impl::UploadInstanceSideTables); });
+  sceneWorld.system("Sys_UploadVolumes").kind<scene::PhaseUploadMaterials>().run(
+      [runStep](flecs::iter&) { runStep(&Impl::UploadPendingVolumes); });
+
+  // PhaseExtractMeshes — vertex/index + the per-mesh side-table buffers.
+  sceneWorld.system("Sys_UploadMeshes").kind<scene::PhaseExtractMeshes>().run(
+      [runStep](flecs::iter&) { runStep(&Impl::UploadPendingMeshes); });
+  sceneWorld.system("Sys_MeshFaceNormals").kind<scene::PhaseExtractMeshes>().run(
+      [runStep](flecs::iter&) { runStep(&Impl::UploadMeshFaceNormals); });
+  sceneWorld.system("Sys_MeshUvs").kind<scene::PhaseExtractMeshes>().run(
+      [runStep](flecs::iter&) { runStep(&Impl::UploadMeshUvs); });
+  sceneWorld.system("Sys_MeshIndices").kind<scene::PhaseExtractMeshes>().run(
+      [runStep](flecs::iter&) { runStep(&Impl::UploadMeshIndices); });
+  sceneWorld.system("Sys_MeshVertexNormals").kind<scene::PhaseExtractMeshes>().run(
+      [runStep](flecs::iter&) { runStep(&Impl::UploadMeshVertexNormals); });
+  sceneWorld.system("Sys_MeshTangents").kind<scene::PhaseExtractMeshes>().run(
+      [runStep](flecs::iter&) { runStep(&Impl::UploadMeshTangents); });
+
+  // PhaseBuildBlas — needs the vertex/index buffers from ExtractMeshes.
+  sceneWorld.system("Sys_BuildBlas").kind<scene::PhaseBuildBlas>().run(
+      [runStep](flecs::iter&) { runStep(&Impl::BuildPendingBlas); });
+
+  // PhaseRebuildTlas — needs the BLAS handles from BuildBlas.
+  sceneWorld.system("Sys_RebuildTlas").kind<scene::PhaseRebuildTlas>().run(
+      [runStep](flecs::iter&) { runStep(&Impl::RebuildTlasIfDirty); });
 }
 
 // ============================================================================

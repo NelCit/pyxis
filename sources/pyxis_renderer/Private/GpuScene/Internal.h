@@ -40,6 +40,7 @@
 #include "GpuScene/GpuSlotMap.h"
 #include "Scene/Components/Dirty.h"
 #include "Scene/HandleBimap.h"
+#include "Scene/Phases.h"  // RFC 0009 — §30.11 phase tags + RegisterPhasePipeline.
 
 #include <flecs.h>
 
@@ -575,6 +576,13 @@ struct GpuScene::Impl
   // query is built once in the ctor (§30.11, no per-frame build).
   scene::HandleBimap                lightHandles;
   flecs::query<GpuLightComponent>   lightQuery;
+  // RFC 0009 follow-up — CommitResources runs the §30.11 phase pipeline for real via
+  // sceneWorld.progress(). The per-commit command list + first-error live here (the
+  // registered systems are ctor lambdas that capture `this`, so no FrameContext
+  // singleton component is needed). `commitPipelineRegistered` guards one-time setup.
+  nvrhi::ICommandList*              currentCommandList = nullptr;
+  Expected<void>                    commitError{};
+  bool                              commitPipelineRegistered = false;
   // P2 — materials (GpuMaterialComponent). GpuSlotMap keeps slot == GPU buffer index
   // (gpuscene_detail encoding) so the packed material buffer + instance side-table
   // are byte-identical. `materialSourcePrims` is the slot-indexed owned-string table
@@ -918,6 +926,9 @@ struct GpuScene::Impl
   // and propagates GPU-creation failures up through PYXIS_TRY.
   void                 Clear() noexcept;
   [[nodiscard]] Expected<void> CommitResources(nvrhi::ICommandList* commandList);
+  // RFC 0009 follow-up — register the §30.11 phases + the commit systems on
+  // sceneWorld (once). CommitResources then drives them via sceneWorld.progress().
+  void                 RegisterCommitPipeline() noexcept;
 
   [[nodiscard]] Expected<void> UploadPendingMeshes(nvrhi::ICommandList* commandList);
   [[nodiscard]] Expected<void> EnsureBindlessFallbacks(nvrhi::ICommandList* commandList);
