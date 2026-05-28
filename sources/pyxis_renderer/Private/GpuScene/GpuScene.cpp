@@ -39,18 +39,13 @@ GpuScene::GpuScene(nvrhi::IDevice* device, Profiler& profiler, const GpuSceneCre
   // most a few hundred bytes per slot, so 4096 reservations cost
   // ~MB-class up front.
   constexpr std::size_t INITIAL_MESH_RESERVE     = 4096;
-  constexpr std::size_t INITIAL_INSTANCE_RESERVE = 4096;
   constexpr std::size_t INITIAL_MATERIAL_RESERVE = 512;
   constexpr std::size_t INITIAL_TEXTURE_RESERVE  = 1024;
-  _impl->instances.reserve(INITIAL_INSTANCE_RESERVE);
   _impl->meshDescHashToHandle.reserve(INITIAL_MESH_RESERVE);
   _impl->materialDescHashToHandle.reserve(INITIAL_MATERIAL_RESERVE);
   _impl->textureKeyHashToHandle.reserve(INITIAL_TEXTURE_RESERVE);
-  // Slot 0 is the Invalid sentinel for the vector-backed handle tables — keep
-  // each one permanently quarantined so a fabricated handle whose slot decodes
-  // to 0 never resolves. (Meshes use meshSlots, whose ctor reserves slot 0.)
-  _impl->instances.emplace_back();
-  _impl->instances[0].quarantined = true;
+  // RFC 0009 — meshes/materials/textures/instances all use GpuSlotMap, whose ctor
+  // reserves the slot-0 Invalid sentinel; no vector-backed sentinel left to seed.
   // RFC 0009 P1 — lights live in `sceneWorld`; no sentinel slot needed (the
   // HandleBimap encodes slot+1 so handle 0 stays Invalid). Build the cached
   // light query ONCE here (§30.11: never inside a per-frame body).
@@ -419,12 +414,11 @@ MaterialHandle GpuScene::LookupInstanceMaterialBySlot(uint32_t instanceSlot) con
   // Slot 0 is the §15 sentinel; the picker writes 0 when no instance
   // was hit OR for a degenerate primitive that maps back to the
   // permanent quarantine entry. Either way → no selection.
-  if (instanceSlot == 0 || instanceSlot >= _impl->instances.size())
+  // RFC 0009 P5 — slot-indexed instance resource via instanceSlots liveness.
+  if (instanceSlot == 0 || !_impl->instanceSlots.IsLive(instanceSlot)
+      || instanceSlot >= _impl->instanceResources.size())
     return MaterialHandle::Invalid;
-  const Impl::InstanceEntry& entry = _impl->instances[instanceSlot];
-  if (!entry.live || entry.quarantined)
-    return MaterialHandle::Invalid;
-  return entry.material;
+  return _impl->instanceResources[instanceSlot].material;
 }
 
 // ---- Introspection ---------------------------------------------------------
@@ -464,12 +458,8 @@ FrameStats GpuScene::LastFrameStats() const {
     if (entry.indexBuffer)
       indexBytes += entry.indexBuffer->getDesc().byteSize;
   });
-  uint64_t liveInstanceCount = 0;
-  for (const Impl::InstanceEntry& entry : _impl->instances)
-  {
-    if (entry.live)
-      ++liveInstanceCount;
-  }
+  // RFC 0009 P5 — instances are Flecs entities; the slot map tracks live count O(1).
+  const uint64_t liveInstanceCount = _impl->instanceSlots.LiveCount();
   // RFC 0009 P1 — lights are Flecs entities; the bimap tracks the live count O(1).
   const uint64_t liveLightCount = _impl->lightHandles.LiveCount();
   // RFC 0009 P2 — materials are Flecs entities; the slot map tracks live count O(1)

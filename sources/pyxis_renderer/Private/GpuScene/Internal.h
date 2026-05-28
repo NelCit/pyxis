@@ -103,6 +103,24 @@ struct GpuMeshComponent
   std::uint64_t descHash = 0;
 };
 
+// RFC 0009 P5 — per-instance marker component (the data lives in the slot-indexed
+// `instanceResources` side table — same thin-key shape as meshes/textures).
+struct GpuInstanceComponent
+{
+};
+
+// RFC 0009 P5 — Flecs relationships an instance entity carries: (Instance, MeshOf,
+// meshEntity) and (Instance, MaterialOf, materialEntity). They make "which instances
+// reference this mesh/material" a query — the basis for refcounted BLAS sharing +
+// orphan detection (§30.11 "prefer pair relationships"). The TLAS/side-table build
+// still resolves by handle (byte-identical); these pairs are additive metadata.
+struct MeshOf
+{
+};
+struct MaterialOf
+{
+};
+
 }  // namespace pyxis
 
 namespace pyxis {
@@ -473,11 +491,11 @@ struct GpuScene::Impl
     std::uint64_t                descHash       = 0;
   };
 
-  struct InstanceEntry
+  // RFC 0009 P5 — per-instance resource record (slot-indexed in `instanceResources`,
+  // paired with a GpuInstanceComponent entity). live/quarantined/generation moved to
+  // instanceSlots; DirtyTransform marks a transform change (future TLAS refit).
+  struct InstanceResource
   {
-    bool             live        = false;
-    bool             quarantined = false;
-    std::uint8_t     generation  = 0;
     MeshHandle       mesh        = MeshHandle::Invalid;
     MaterialHandle   material    = MaterialHandle::Invalid;
     hlslpp::float4x4 worldFromLocal{};
@@ -543,7 +561,6 @@ struct GpuScene::Impl
   // in-progress frame's activity.
   FrameStats lastFrameStats{};
 
-  std::vector<InstanceEntry> instances;
   std::vector<VolumeEntry>   volumes;
 
   // RFC 0009 — the Flecs SceneWorld. Entities live here; the per-type handle tables
@@ -572,6 +589,11 @@ struct GpuScene::Impl
   // data; meshSlots owns slot/generation/liveness; DirtyTopology marks (re)upload+BLAS.
   GpuSlotMap                        meshSlots{sceneWorld};
   std::vector<MeshResource>         meshResources;
+  // P5 — instances (GpuInstanceComponent). instanceResources is the slot-indexed
+  // data; instanceSlots owns slot/generation/liveness (slot == instanceCustomIndex);
+  // DirtyTransform marks a transform change.
+  GpuSlotMap                        instanceSlots{sceneWorld};
+  std::vector<InstanceResource>     instanceResources;
 
   // O(1) slot recycling. Each Destroy verb pushes the freed slot;
   // each Acquire / Append verb pops the latest one. Stack ordering
@@ -581,7 +603,6 @@ struct GpuScene::Impl
   // per-verb bodies would linear-scan their entry vectors looking
   // for a free slot — quadratic over the lifetime of an
   // append-heavy load.
-  std::vector<std::uint32_t> freeInstanceSlots;
   std::vector<std::uint32_t> freeVolumeSlots;
   // V2.A.5 — set when a fresh AddVolume needs CommitResources to
   // create the matching nvrhi::TextureHandle + write the dense
@@ -781,10 +802,20 @@ struct GpuScene::Impl
     return const_cast<Entry*>(entry);
   }
 
-  [[nodiscard]] const InstanceEntry* LookupInstance(InstanceHandle handle) const noexcept
-  { return LookupEntryImpl(static_cast<uint32_t>(handle), instances); }
   [[nodiscard]] const VolumeEntry*   LookupVolume(VolumeHandle handle) const noexcept
   { return LookupEntryImpl(static_cast<uint32_t>(handle), volumes); }
+
+  // RFC 0009 P5 — resolve an InstanceHandle to its slot-indexed InstanceResource (or
+  // null for Invalid/stale). Does NOT bump staleHandleDrops; callers that need the
+  // §18.5 count do it explicitly (mirrors the per-verb pattern of the other types).
+  [[nodiscard]] InstanceResource* ResolveInstanceResource(InstanceHandle handle) noexcept
+  {
+    const flecs::entity entity = instanceSlots.Resolve(static_cast<uint32_t>(handle));
+    if (entity.id() == 0)
+      return nullptr;
+    const uint32_t slot = GpuSlotMap::SlotOf(static_cast<uint32_t>(handle));
+    return slot < instanceResources.size() ? &instanceResources[slot] : nullptr;
+  }
 
   // RFC 0009 P4 — resolve a MeshHandle to its slot-indexed MeshResource (or null for
   // Invalid/stale handles). Mirrors the old ResolveMesh contract via meshSlots.
@@ -797,8 +828,6 @@ struct GpuScene::Impl
     return slot < meshResources.size() ? &meshResources[slot] : nullptr;
   }
 
-  [[nodiscard]] InstanceEntry* ResolveInstance(InstanceHandle handle) noexcept
-  { return BumpIfStaleAndReturn(handle, LookupInstance(handle)); }
   [[nodiscard]] VolumeEntry*   ResolveVolume(VolumeHandle handle) noexcept
   { return BumpIfStaleAndReturn(handle, LookupVolume(handle)); }
 

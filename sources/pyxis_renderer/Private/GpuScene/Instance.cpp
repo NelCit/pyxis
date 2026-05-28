@@ -25,30 +25,22 @@ Expected<InstanceHandle> GpuScene::Impl::AppendInstance(const InstanceDesc& inst
                     static_cast<uint32_t>(instanceDesc.mesh))};
   }
 
-  // O(1) free-list pop. DestroyInstance pushes the slot back on
-  // the free list symmetrically; an append-heavy load never enters
-  // the pop branch.
-  uint32_t slot = 0;
-  if (!freeInstanceSlots.empty())
+  // RFC 0009 P5 — allocate a Flecs entity (slot == instanceCustomIndex).
+  flecs::entity entity;
+  const uint32_t handleRaw = instanceSlots.Allocate(entity);
+  if (handleRaw == 0)
   {
-    slot = freeInstanceSlots.back();
-    freeInstanceSlots.pop_back();
+    return std::unexpected{
+        PYXIS_ERROR(ErrorKind::TlasInstanceLimitExceeded,
+                    "AppendInstance: instance-handle slot space exhausted (limit = %u)",
+                    (1u << HANDLE_SLOT_BITS))};
   }
-  else
-  {
-    if (instances.size() >= (1u << HANDLE_SLOT_BITS))
-    {
-      return std::unexpected{
-          PYXIS_ERROR(ErrorKind::TlasInstanceLimitExceeded,
-                      "AppendInstance: instance-handle slot space exhausted (limit = %u)",
-                      (1u << HANDLE_SLOT_BITS))};
-    }
-    instances.emplace_back();
-    slot = static_cast<uint32_t>(instances.size() - 1);
-  }
+  const uint32_t slot = GpuSlotMap::SlotOf(handleRaw);
+  if (instanceResources.size() <= slot)
+    instanceResources.resize(slot + 1u);
 
-  InstanceEntry& entry = instances[slot];
-  entry.live = true;
+  InstanceResource& entry = instanceResources[slot];
+  entry = InstanceResource{};  // reset a recycled slot.
   entry.mesh = instanceDesc.mesh;
   entry.material = instanceDesc.material;
   entry.worldFromLocal = instanceDesc.worldFromLocal;
@@ -56,85 +48,95 @@ Expected<InstanceHandle> GpuScene::Impl::AppendInstance(const InstanceDesc& inst
   entry.doubleSided = instanceDesc.doubleSided;
   entry.debugName.assign(instanceDesc.debugName);
 
-  // AppendInstance changes the TLAS (new instance to pack) AND the
-  // side-table (new entry to hold this instance's material slot).
+  entity.set<GpuInstanceComponent>({});
+  // Relationship pairs (Instance, MeshOf, mesh) / (Instance, MaterialOf, material) —
+  // make "instances of this mesh/material" a query (refcounted sharing / orphans).
+  if (const flecs::entity meshEntity =
+          meshSlots.Resolve(static_cast<uint32_t>(instanceDesc.mesh));
+      meshEntity.id() != 0)
+    entity.add<MeshOf>(meshEntity);
+  if (const flecs::entity matEntity =
+          materialSlots.Resolve(static_cast<uint32_t>(instanceDesc.material));
+      matEntity.id() != 0)
+    entity.add<MaterialOf>(matEntity);
+
+  // New instance → TLAS pack changes + side-table gains an entry.
   tlasNeedsRebuild = true;
   instanceMaterialNeedsUpload = true;
-  return static_cast<InstanceHandle>(HandleEncode(slot, entry.generation));
+  return static_cast<InstanceHandle>(handleRaw);
 }
 
 void GpuScene::Impl::UpdateInstanceTransform(InstanceHandle instanceHandle,
                                              const hlslpp::float4x4& worldFromLocal)
 {
-  if (auto* entry = ResolveInstance(instanceHandle))
+  const flecs::entity entity = instanceSlots.Resolve(static_cast<uint32_t>(instanceHandle));
+  if (entity.id() == 0)
   {
-    entry->worldFromLocal = worldFromLocal;
-    tlasNeedsRebuild = true;
+    if (static_cast<uint32_t>(instanceHandle) != 0)
+      ++lastFrameStats.staleHandleDrops;
+    return;
   }
+  instanceResources[GpuSlotMap::SlotOf(static_cast<uint32_t>(instanceHandle))].worldFromLocal =
+      worldFromLocal;
+  entity.add<scene::DirtyTransform>();  // enables a future TLAS refit; rebuild for now.
+  tlasNeedsRebuild = true;
 }
 
 void GpuScene::Impl::UpdateInstanceMaterial(InstanceHandle instanceHandle,
                                             MaterialHandle materialHandle)
 {
-  if (auto* entry = ResolveInstance(instanceHandle))
+  const flecs::entity entity = instanceSlots.Resolve(static_cast<uint32_t>(instanceHandle));
+  if (entity.id() == 0)
   {
-    // M6 audit closeout: only the side-table needs re-upload; the
-    // TLAS doesn't know about materials (it only carries mesh BLAS
-    // + transform + visibility + the per-§15 instance slot in
-    // instanceCustomIndex). Bumping just instanceMaterialNeedsUpload
-    // avoids a pointless TLAS rebuild on material edits, which the
-    // M9 "Save Scene As USD" + AOV inspector edit-material flows
-    // will exercise per-frame.
-    entry->material = materialHandle;
-    instanceMaterialNeedsUpload = true;
+    if (static_cast<uint32_t>(instanceHandle) != 0)
+      ++lastFrameStats.staleHandleDrops;
+    return;
   }
+  // Only the side-table needs re-upload; the TLAS doesn't carry materials.
+  instanceResources[GpuSlotMap::SlotOf(static_cast<uint32_t>(instanceHandle))].material =
+      materialHandle;
+  instanceMaterialNeedsUpload = true;
 }
 
 void GpuScene::Impl::SetInstanceVisibility(InstanceHandle instanceHandle, bool visible)
 {
-  if (auto* entry = ResolveInstance(instanceHandle))
+  const flecs::entity entity = instanceSlots.Resolve(static_cast<uint32_t>(instanceHandle));
+  if (entity.id() == 0)
   {
-    if (entry->visible != visible)
-    {
-      entry->visible = visible;
-      // Visibility flipping a slot in/out of the TLAS pack changes
-      // which entries are live → side-table must re-upload too so
-      // any ID gap matches the new TLAS instance set.
-      tlasNeedsRebuild = true;
-      instanceMaterialNeedsUpload = true;
-    }
+    if (static_cast<uint32_t>(instanceHandle) != 0)
+      ++lastFrameStats.staleHandleDrops;
+    return;
+  }
+  InstanceResource& entry =
+      instanceResources[GpuSlotMap::SlotOf(static_cast<uint32_t>(instanceHandle))];
+  if (entry.visible != visible)
+  {
+    entry.visible = visible;
+    tlasNeedsRebuild = true;          // in/out of the TLAS pack.
+    instanceMaterialNeedsUpload = true;  // ID gaps must match the new instance set.
   }
 }
 
 void GpuScene::Impl::DestroyInstance(InstanceHandle instanceHandle)
 {
-  InstanceEntry* entry = ResolveInstance(instanceHandle);
-  if (entry == nullptr)
+  const flecs::entity entity = instanceSlots.Resolve(static_cast<uint32_t>(instanceHandle));
+  if (entity.id() == 0)
+  {
+    if (static_cast<uint32_t>(instanceHandle) != 0)
+      ++lastFrameStats.staleHandleDrops;
     return;
-  entry->live = false;
-  entry->mesh = MeshHandle::Invalid;
-  entry->material = MaterialHandle::Invalid;
-  entry->worldFromLocal = hlslpp::float4x4{};
-  entry->visible = false;
-  entry->debugName.clear();
-  if (entry->generation == HANDLE_GENERATION_QUARANTINE)
-  {
-    entry->quarantined = true;
-    // Quarantined slot — never reuse, don't push to free list.
   }
-  else
-  {
-    ++entry->generation;
-    const auto slot = static_cast<std::uint32_t>(entry - instances.data());
-    freeInstanceSlots.push_back(slot);
-  }
+  instanceResources[GpuSlotMap::SlotOf(static_cast<uint32_t>(instanceHandle))] = InstanceResource{};
+  // Free destructs the entity (drops GpuInstanceComponent + MeshOf/MaterialOf pairs +
+  // any DirtyTransform tag) + bumps the slot generation.
+  instanceSlots.Free(static_cast<uint32_t>(instanceHandle));
   tlasNeedsRebuild = true;
   instanceMaterialNeedsUpload = true;
 }
 
 bool GpuScene::Impl::HasInstance(InstanceHandle instanceHandle) const
 {
-  return LookupInstance(instanceHandle) != nullptr;
+  return instanceSlots.Resolve(static_cast<uint32_t>(instanceHandle)).id() != 0;
 }
 
 }  // namespace pyxis

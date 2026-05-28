@@ -148,9 +148,10 @@ void GpuScene::Impl::Clear() noexcept
   meshSlots.Reset();
   meshResources.clear();
 
-  instances.clear();
-  instances.emplace_back();
-  instances[0].quarantined = true;
+  // RFC 0009 P5 — instances are Flecs entities; Reset destructs them + clears the
+  // slot-indexed resource records.
+  instanceSlots.Reset();
+  instanceResources.clear();
 
   // RFC 0009 P1 — lights are Flecs entities; delete them all + reset the slot map
   // (no slot-0 sentinel: HandleBimap encodes slot+1 so handle 0 stays Invalid).
@@ -180,7 +181,6 @@ void GpuScene::Impl::Clear() noexcept
   // would survive Clear() and the next Acquire/Append would pop a
   // slot that's now out of range for the cleared entry vector →
   // out-of-bounds `entries[slot]` → UB.
-  freeInstanceSlots.clear();
   freeVolumeSlots.clear();
   volumesNeedGpuUpload = false;
 
@@ -1038,11 +1038,13 @@ Expected<void> GpuScene::Impl::RebuildTlasIfDirty(nvrhi::ICommandList* commandLi
   // mid-frame ingest — they'll join on the next CommitResources
   // tick.
   std::vector<nvrhi::rt::InstanceDesc> instanceDescs;
-  instanceDescs.reserve(instances.size());
-  for (uint32_t slot = 1; slot < instances.size(); ++slot)
+  instanceDescs.reserve(instanceSlots.SlotCount());
+  for (uint32_t slot = 1; slot < instanceSlots.SlotCount(); ++slot)
   {
-    const InstanceEntry& inst = instances[slot];
-    if (!inst.live || !inst.visible)
+    if (!instanceSlots.IsLive(slot))
+      continue;
+    const InstanceResource& inst = instanceResources[slot];
+    if (!inst.visible)
       continue;
     const auto meshValue = static_cast<uint32_t>(inst.mesh);
     const uint32_t meshSlot = HandleSlot(meshValue);
@@ -1114,16 +1116,16 @@ Expected<void> GpuScene::Impl::UploadInstanceSideTables(nvrhi::ICommandList* com
   // GpuScene sentinel grey material). Re-uploaded whenever the
   // dedicated dirty flag fires — independent of TLAS rebuild so
   // UpdateInstanceMaterial doesn't pointlessly rebuild the TLAS.
-  if (!instanceMaterialNeedsUpload || instances.empty())
+  if (!instanceMaterialNeedsUpload || instanceSlots.SlotCount() <= 1u)
     return {};
 
-  const std::size_t instanceTableEntries = instances.size();
+  const std::size_t instanceTableEntries = instanceSlots.SlotCount();
   std::vector<std::uint32_t> instanceMaterialTable(instanceTableEntries, 0u);
   for (std::size_t entrySlot = 1; entrySlot < instanceTableEntries; ++entrySlot)
   {
-    const InstanceEntry& inst = instances[entrySlot];
-    if (!inst.live)
+    if (!instanceSlots.IsLive(static_cast<uint32_t>(entrySlot)))
       continue;
+    const InstanceResource& inst = instanceResources[entrySlot];
     const auto materialValue = static_cast<std::uint32_t>(inst.material);
     instanceMaterialTable[entrySlot] =
         (materialValue == 0) ? 0u : HandleSlot(materialValue);
@@ -1145,9 +1147,9 @@ Expected<void> GpuScene::Impl::UploadInstanceSideTables(nvrhi::ICommandList* com
   std::vector<std::uint32_t> instanceMeshTable(instanceTableEntries, 0u);
   for (std::size_t entrySlot = 1; entrySlot < instanceTableEntries; ++entrySlot)
   {
-    const InstanceEntry& inst = instances[entrySlot];
-    if (!inst.live)
+    if (!instanceSlots.IsLive(static_cast<uint32_t>(entrySlot)))
       continue;
+    const InstanceResource& inst = instanceResources[entrySlot];
     const auto meshValue = static_cast<std::uint32_t>(inst.mesh);
     instanceMeshTable[entrySlot] =
         (meshValue == 0) ? 0u : HandleSlot(meshValue);
