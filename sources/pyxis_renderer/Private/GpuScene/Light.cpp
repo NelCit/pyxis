@@ -4,7 +4,7 @@
 // `GpuScene::Impl` in Internal.h, public `GpuScene::Verb()`
 // methods in GpuScene.cpp forward one line into here.
 //
-// RFC 0009 P1 — lights are Flecs entities (GpuLightComponent in `lightWorld`),
+// RFC 0009 P1 — lights are Flecs entities (GpuLightComponent in `sceneWorld`),
 // not a std::vector. `lightHandles` (HandleBimap, §8.2) owns slot/generation and
 // the handle<->entity map; the GPU light buffer is packed from a slot-sorted query
 // at commit time (CollectLiveLightsSorted). No mirror data: the LightDesc lives
@@ -32,7 +32,7 @@ LightHandle GpuScene::Impl::AddLight(const LightDesc& lightDesc)
   if (lightHandles.LiveCount() >= (1u << HANDLE_SLOT_BITS))
     return LightHandle::Invalid;
 
-  const flecs::entity entity = lightWorld.entity();
+  const flecs::entity entity = sceneWorld.entity();
   const uint32_t handle = lightHandles.Allocate(entity);
   entity.set<GpuLightComponent>({handle, lightDesc});
   lightsNeedGpuUpload = true;

@@ -34,9 +34,10 @@
 #include <nvrhi/nvrhi.h>
 
 // RFC 0009 — the Flecs SceneWorld is the scene representation. P1 migrates LIGHTS:
-// they live as entities in `lightWorld` (component below) rather than a std::vector,
+// they live as entities in `sceneWorld` (component below) rather than a std::vector,
 // with HandleBimap owning slot/generation. flecs is a PRIVATE renderer dep, so this
 // header (Private only, §18.9) may include it; no Flecs type reaches Public/.
+#include "GpuScene/GpuSlotMap.h"
 #include "Scene/HandleBimap.h"
 
 #include <flecs.h>
@@ -60,6 +61,16 @@ struct GpuLightComponent
 {
   uint32_t  handle = 0;
   LightDesc desc{};
+};
+
+// RFC 0009 P2 — per-material Flecs component. The OpenPBRMaterialDesc + its FNV1a
+// hash. `desc.sourcePrim` is a string_view (POD — no owning container, so this is a
+// valid §30.11 component); its backing owned string lives in the slot-indexed
+// `materialSourcePrims` table on Impl (variable-length data → a GpuScene table).
+struct GpuMaterialComponent
+{
+  OpenPBRMaterialDesc desc{};
+  std::uint64_t       descHash = 0;
 };
 
 }  // namespace pyxis
@@ -449,7 +460,7 @@ struct GpuScene::Impl
   };
 
   // RFC 0009 P1 — lights are no longer a std::vector<LightEntry>; they live as
-  // GpuLightComponent entities in `lightWorld` (see members below). LightEntry,
+  // GpuLightComponent entities in `sceneWorld` (see members below). LightEntry,
   // the `lights` vector, `freeLightSlots`, LookupLight and ResolveLight are gone.
 
   // V2.A.5 — UsdVolVolume / OpenVDBAsset slot. Owns the dense float
@@ -481,16 +492,8 @@ struct GpuScene::Impl
   // is the FNV1a-64 hash of the descriptor body and is used by the
   // dedup map; identical descs collapse to the same MaterialHandle
   // per the §11 dedup rule.
-  struct MaterialEntry
-  {
-    bool                 live           = false;
-    bool                 quarantined    = false;
-    bool                 needsGpuUpload = false;
-    std::uint8_t         generation     = 0;
-    OpenPBRMaterialDesc  descCopy{};
-    std::uint64_t        descHash       = 0;
-    std::string          sourcePrim;       // owned copy of descCopy.sourcePrim
-  };
+  // RFC 0009 P2 — materials are GpuMaterialComponent entities (see GpuSlotMap
+  // materialSlots below), not a std::vector<MaterialEntry>. The struct is gone.
 
   // M5: texture entry. The TextureKey copy + the NVRHI texture +
   // the bindless slot index used by the closesthit's
@@ -538,17 +541,23 @@ struct GpuScene::Impl
 
   std::vector<MeshEntry>     meshes;
   std::vector<InstanceEntry> instances;
-  std::vector<MaterialEntry> materials;
   std::vector<TextureEntry>  textures;
   std::vector<VolumeEntry>   volumes;
 
-  // RFC 0009 P1 — lights live here as GpuLightComponent entities (not a vector).
-  // `lightHandles` owns slot/generation + handle<->entity (§8.2). `lightQuery` is
-  // built once (ctor) so no per-frame query construction (§30.11). Declaration
-  // order matters: the query must destruct before the world it references.
-  flecs::world                      lightWorld;
+  // RFC 0009 — the Flecs SceneWorld. Entities live here; the per-type handle tables
+  // map handle<->entity. Declaration order matters: tables/queries reference
+  // sceneWorld, so it must be declared FIRST (destruct last).
+  flecs::world                      sceneWorld;
+  // P1 — lights (GpuLightComponent). HandleBimap (§8.2) owns slot/generation; the
+  // query is built once in the ctor (§30.11, no per-frame build).
   scene::HandleBimap                lightHandles;
   flecs::query<GpuLightComponent>   lightQuery;
+  // P2 — materials (GpuMaterialComponent). GpuSlotMap keeps slot == GPU buffer index
+  // (gpuscene_detail encoding) so the packed material buffer + instance side-table
+  // are byte-identical. `materialSourcePrims` is the slot-indexed owned-string table
+  // backing each desc's sourcePrim view (variable-length data → a GpuScene table).
+  GpuSlotMap                        materialSlots{sceneWorld};
+  std::vector<std::string>          materialSourcePrims;
 
   // O(1) slot recycling. Each Destroy verb pushes the freed slot;
   // each Acquire / Append verb pops the latest one. Stack ordering
@@ -560,7 +569,6 @@ struct GpuScene::Impl
   // append-heavy load.
   std::vector<std::uint32_t> freeMeshSlots;
   std::vector<std::uint32_t> freeInstanceSlots;
-  std::vector<std::uint32_t> freeMaterialSlots;
   std::vector<std::uint32_t> freeTextureSlots;
   std::vector<std::uint32_t> freeVolumeSlots;
   // V2.A.5 — set when a fresh AddVolume needs CommitResources to
@@ -763,8 +771,6 @@ struct GpuScene::Impl
 
   [[nodiscard]] const MeshEntry*     LookupMesh(MeshHandle handle) const noexcept
   { return LookupEntryImpl(static_cast<uint32_t>(handle), meshes); }
-  [[nodiscard]] const MaterialEntry* LookupMaterial(MaterialHandle handle) const noexcept
-  { return LookupEntryImpl(static_cast<uint32_t>(handle), materials); }
   [[nodiscard]] const TextureEntry*  LookupTexture(TextureHandle handle) const noexcept
   { return LookupEntryImpl(static_cast<uint32_t>(handle), textures); }
   [[nodiscard]] const InstanceEntry* LookupInstance(InstanceHandle handle) const noexcept
@@ -774,8 +780,6 @@ struct GpuScene::Impl
 
   [[nodiscard]] MeshEntry*     ResolveMesh(MeshHandle handle) noexcept
   { return BumpIfStaleAndReturn(handle, LookupMesh(handle)); }
-  [[nodiscard]] MaterialEntry* ResolveMaterial(MaterialHandle handle) noexcept
-  { return BumpIfStaleAndReturn(handle, LookupMaterial(handle)); }
   [[nodiscard]] TextureEntry*  ResolveTexture(TextureHandle handle) noexcept
   { return BumpIfStaleAndReturn(handle, LookupTexture(handle)); }
   [[nodiscard]] InstanceEntry* ResolveInstance(InstanceHandle handle) noexcept

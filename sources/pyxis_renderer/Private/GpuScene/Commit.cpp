@@ -153,10 +153,14 @@ void GpuScene::Impl::Clear() noexcept
 
   // RFC 0009 P1 — lights are Flecs entities; delete them all + reset the slot map
   // (no slot-0 sentinel: HandleBimap encodes slot+1 so handle 0 stays Invalid).
-  lightWorld.delete_with<GpuLightComponent>();
+  sceneWorld.delete_with<GpuLightComponent>();
   lightHandles = scene::HandleBimap{};
 
-  materials.clear();
+  // RFC 0009 P2 — materials are Flecs entities; Reset destructs them + restores the
+  // slot-0-only sentinel state, and clears the slot-indexed sourcePrim table.
+  materialSlots.Reset();
+  materialSourcePrims.clear();
+
   textures.clear();
   volumes.clear();
 
@@ -171,7 +175,6 @@ void GpuScene::Impl::Clear() noexcept
   // out-of-bounds `entries[slot]` → UB.
   freeMeshSlots.clear();
   freeInstanceSlots.clear();
-  freeMaterialSlots.clear();
   freeTextureSlots.clear();
   freeVolumeSlots.clear();
   volumesNeedGpuUpload = false;
@@ -746,15 +749,16 @@ Expected<void> GpuScene::Impl::UploadMaterialBuffer(nvrhi::ICommandList* command
   // (~80 bytes per material × hundreds-of-thousands materials cap
   // = a few MiB worst case) that we always re-upload the whole
   // table rather than tracking dirty ranges.
-  if (!materialsNeedGpuUpload || materials.size() <= 1)
+  if (!materialsNeedGpuUpload || materialSlots.SlotCount() <= 1)
     return {};
 
+  // RFC 0009 P2 — pack from the Flecs material entities by slot (was: iterate the
+  // `materials` vector). buffer[slot] layout unchanged → byte-identical.
   std::vector<shaderinterop::OpenPBRMaterialGPU> packed;
-  packed.resize(materials.size());
-  for (std::uint32_t slot = 0; slot < materials.size(); ++slot)
+  packed.resize(materialSlots.SlotCount());
+  for (std::uint32_t slot = 0; slot < materialSlots.SlotCount(); ++slot)
   {
-    const MaterialEntry& entry = materials[slot];
-    if (slot == 0 || !entry.live)
+    if (slot == 0 || !materialSlots.IsLive(slot))
     {
       // Sentinel slot 0 + dead materials → magenta-fallback
       // material so the closesthit reads valid bytes regardless.
@@ -771,21 +775,24 @@ Expected<void> GpuScene::Impl::UploadMaterialBuffer(nvrhi::ICommandList* command
           shaderinterop::INVALID_BINDLESS_TEXTURE);
       continue;
     }
+    const OpenPBRMaterialDesc& descCopy = materialSlots.EntityAtSlot(slot)
+                                              .get<GpuMaterialComponent>()
+                                              .desc;
     // Compute MaterialFlag bits from the desc + the texture
     // handles. The closesthit reads `flags` to short-circuit the
     // bindless lookup so a missing texture renders the scalar
     // fallback rather than the magenta missingTexture.
     std::uint32_t flags = 0;
-    if (entry.descCopy.opacity < 1.0f) flags |= MaterialFlag::AlphaTested;
-    if (entry.descCopy.coatWeight > 0.0f) flags |= MaterialFlag::CoatEnabled;
-    if (entry.descCopy.transmissionWeight > 0.0f)
+    if (descCopy.opacity < 1.0f) flags |= MaterialFlag::AlphaTested;
+    if (descCopy.coatWeight > 0.0f) flags |= MaterialFlag::CoatEnabled;
+    if (descCopy.transmissionWeight > 0.0f)
       flags |= MaterialFlag::TransmissionEnabled;
-    if (entry.descCopy.emissionLuminance > 0.0f) flags |= MaterialFlag::Emissive;
+    if (descCopy.emissionLuminance > 0.0f) flags |= MaterialFlag::Emissive;
     // V2.A.24 — normal-map tangent flips + non-identity UV transform.
-    if (entry.descCopy.flipTangentU != 0u) flags |= MaterialFlag::FlipTangentU;
-    if (entry.descCopy.flipTangentV != 0u) flags |= MaterialFlag::FlipTangentV;
+    if (descCopy.flipTangentU != 0u) flags |= MaterialFlag::FlipTangentU;
+    if (descCopy.flipTangentV != 0u) flags |= MaterialFlag::FlipTangentV;
     {
-      const OpenPBRMaterialDesc& mdesc = entry.descCopy;
+      const OpenPBRMaterialDesc& mdesc = descCopy;
       const bool nonIdentityUv =
           mdesc.baseColorUvScaleX != 1.0f || mdesc.baseColorUvScaleY != 1.0f
           || mdesc.baseColorUvRotationDeg != 0.0f
@@ -795,27 +802,27 @@ Expected<void> GpuScene::Impl::UploadMaterialBuffer(nvrhi::ICommandList* command
     }
     // RFC 0005 — planar projection mode → exactly one flag bit.
     // 1 = world-space, 2 = object-space (projection follows the instance).
-    if (entry.descCopy.projectionMode == 1u)
+    if (descCopy.projectionMode == 1u)
       flags |= MaterialFlag::WorldProjection;
-    else if (entry.descCopy.projectionMode == 2u)
+    else if (descCopy.projectionMode == 2u)
       flags |= MaterialFlag::ObjectProjection;
 
     const std::uint32_t baseColorSlot =
-        ResolveTextureBindlessSlot(entry.descCopy.baseColorMap);
+        ResolveTextureBindlessSlot(descCopy.baseColorMap);
     const std::uint32_t normalSlot =
-        ResolveTextureBindlessSlot(entry.descCopy.normalMap);
+        ResolveTextureBindlessSlot(descCopy.normalMap);
     const std::uint32_t metallicSlot =
-        ResolveTextureBindlessSlot(entry.descCopy.metallicMap);
+        ResolveTextureBindlessSlot(descCopy.metallicMap);
     const std::uint32_t roughnessSlot =
-        ResolveTextureBindlessSlot(entry.descCopy.roughnessMap);
+        ResolveTextureBindlessSlot(descCopy.roughnessMap);
     const std::uint32_t emissionSlot =
-        ResolveTextureBindlessSlot(entry.descCopy.emissionMap);
+        ResolveTextureBindlessSlot(descCopy.emissionMap);
     const std::uint32_t opacitySlot =
-        ResolveTextureBindlessSlot(entry.descCopy.opacityMap);
+        ResolveTextureBindlessSlot(descCopy.opacityMap);
     const std::uint32_t transmissionSlot =
-        ResolveTextureBindlessSlot(entry.descCopy.transmissionMap);
+        ResolveTextureBindlessSlot(descCopy.transmissionMap);
     const std::uint32_t coatRoughnessSlot =
-        ResolveTextureBindlessSlot(entry.descCopy.coatRoughnessMap);
+        ResolveTextureBindlessSlot(descCopy.coatRoughnessMap);
 
     if (baseColorSlot != shaderinterop::INVALID_BINDLESS_TEXTURE)
       flags |= MaterialFlag::HasBaseColorMap;
@@ -835,7 +842,7 @@ Expected<void> GpuScene::Impl::UploadMaterialBuffer(nvrhi::ICommandList* command
       flags |= MaterialFlag::HasCoatRoughnessMap;
 
     packed[slot] = PackMaterialGpu(
-        entry.descCopy, flags,
+        descCopy, flags,
         baseColorSlot, normalSlot, metallicSlot, roughnessSlot,
         emissionSlot, opacitySlot, transmissionSlot, coatRoughnessSlot);
   }
@@ -848,12 +855,6 @@ Expected<void> GpuScene::Impl::UploadMaterialBuffer(nvrhi::ICommandList* command
                                    sizeof(shaderinterop::OpenPBRMaterialGPU),
                                    "scene.materials", "materials"));
   commandList->writeBuffer(materialGpuBuffer.Get(), packed.data(), bufferBytes);
-  // Per-entry needsGpuUpload flags are advisory only since we
-  // always re-upload the whole table; clearing them keeps the
-  // bookkeeping consistent so a future incremental-upload path
-  // (M8+) can drop into place without semantic changes.
-  for (MaterialEntry& entry : materials)
-    entry.needsGpuUpload = false;
   materialsNeedGpuUpload = false;
   return {};
 }

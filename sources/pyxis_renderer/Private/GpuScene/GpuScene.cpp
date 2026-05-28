@@ -44,7 +44,6 @@ GpuScene::GpuScene(nvrhi::IDevice* device, Profiler& profiler, const GpuSceneCre
   constexpr std::size_t INITIAL_TEXTURE_RESERVE  = 1024;
   _impl->meshes.reserve(INITIAL_MESH_RESERVE);
   _impl->instances.reserve(INITIAL_INSTANCE_RESERVE);
-  _impl->materials.reserve(INITIAL_MATERIAL_RESERVE);
   _impl->textures.reserve(INITIAL_TEXTURE_RESERVE);
   _impl->meshDescHashToHandle.reserve(INITIAL_MESH_RESERVE);
   _impl->materialDescHashToHandle.reserve(INITIAL_MATERIAL_RESERVE);
@@ -56,10 +55,10 @@ GpuScene::GpuScene(nvrhi::IDevice* device, Profiler& profiler, const GpuSceneCre
   _impl->meshes[0].quarantined = true;
   _impl->instances.emplace_back();
   _impl->instances[0].quarantined = true;
-  // RFC 0009 P1 — lights live in `lightWorld`; no sentinel slot needed (the
+  // RFC 0009 P1 — lights live in `sceneWorld`; no sentinel slot needed (the
   // HandleBimap encodes slot+1 so handle 0 stays Invalid). Build the cached
   // light query ONCE here (§30.11: never inside a per-frame body).
-  _impl->lightQuery = _impl->lightWorld.query<GpuLightComponent>();
+  _impl->lightQuery = _impl->sceneWorld.query<GpuLightComponent>();
 }
 
 // Out-of-line dtor so unique_ptr<Impl>'s deleter sees the complete
@@ -374,40 +373,32 @@ LightDesc GpuScene::GetLightDescAt(uint32_t liveIndex) const noexcept {
 }
 
 uint32_t GpuScene::GetLiveMaterialCount() const noexcept {
-  uint32_t count = 0;
-  for (const Impl::MaterialEntry& entry : _impl->materials)
-  {
-    if (entry.live)
-      ++count;
-  }
-  return count;
+  return _impl->materialSlots.LiveCount();
 }
 
 MaterialHandle GpuScene::GetMaterialHandleAt(uint32_t liveIndex) const noexcept {
+  // RFC 0009 P2 — walk live material slots in slot order (matches the old vector walk).
   uint32_t walked = 0;
-  for (uint32_t slot = 0; slot < _impl->materials.size(); ++slot)
-  {
-    const Impl::MaterialEntry& entry = _impl->materials[slot];
-    if (!entry.live)
-      continue;
-    if (walked == liveIndex)
-      return static_cast<MaterialHandle>(HandleEncode(slot, entry.generation));
-    ++walked;
-  }
-  return MaterialHandle::Invalid;
+  MaterialHandle result = MaterialHandle::Invalid;
+  _impl->materialSlots.ForEachLiveSlot([&](uint32_t slot, flecs::entity) {
+    if (result == MaterialHandle::Invalid && walked++ == liveIndex)
+      result = static_cast<MaterialHandle>(_impl->materialSlots.HandleForSlot(slot));
+  });
+  return result;
 }
 
 OpenPBRMaterialDesc GpuScene::GetMaterialDescAt(uint32_t liveIndex) const noexcept {
   uint32_t walked = 0;
-  for (const Impl::MaterialEntry& entry : _impl->materials)
-  {
-    if (!entry.live)
-      continue;
-    if (walked == liveIndex)
-      return entry.descCopy;
-    ++walked;
-  }
-  return OpenPBRMaterialDesc{};
+  OpenPBRMaterialDesc result{};
+  bool found = false;
+  _impl->materialSlots.ForEachLiveSlot([&](uint32_t, flecs::entity entity) {
+    if (!found && walked++ == liveIndex)
+    {
+      result = entity.get<GpuMaterialComponent>().desc;
+      found = true;
+    }
+  });
+  return result;
 }
 
 std::string_view GpuScene::GetTexturePath(TextureHandle textureHandle) const noexcept {
@@ -478,14 +469,9 @@ FrameStats GpuScene::LastFrameStats() const {
   }
   // RFC 0009 P1 — lights are Flecs entities; the bimap tracks the live count O(1).
   const uint64_t liveLightCount = _impl->lightHandles.LiveCount();
-  uint64_t liveMaterialCount = 0;
-  for (const Impl::MaterialEntry& entry : _impl->materials)
-  {
-    // Material slot 0 is the §19.7 sentinel — exclude it from the
-    // user-visible count.
-    if (entry.live)
-      ++liveMaterialCount;
-  }
+  // RFC 0009 P2 — materials are Flecs entities; the slot map tracks live count O(1)
+  // (already excludes the slot-0 sentinel).
+  const uint64_t liveMaterialCount = _impl->materialSlots.LiveCount();
   uint64_t liveTextureCount = 0;
   uint64_t textureBytes = 0;
   for (const Impl::TextureEntry& entry : _impl->textures)

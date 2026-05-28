@@ -3,6 +3,12 @@
 // Per-verb split off GpuScene.cpp; declarations live on
 // `GpuScene::Impl` in Internal.h, public `GpuScene::Verb()`
 // methods in GpuScene.cpp forward one line into here.
+//
+// RFC 0009 P2 — materials are GpuMaterialComponent entities in `sceneWorld`, indexed
+// by `materialSlots` (GpuSlotMap; slot == GPU buffer index, gpuscene_detail encoding,
+// slot 0 sentinel). The §11 dedup hash map stays as a hash->handle index. The
+// owned sourcePrim string lives in the slot-indexed `materialSourcePrims` table; the
+// stored desc's sourcePrim view points into it (preserving the old re-point).
 
 #include "GpuScene/Internal.h"
 
@@ -10,99 +16,85 @@ namespace pyxis {
 
 using namespace gpuscene_detail;
 
+namespace {
+
+// Write the desc + hash into the entity's component, re-pointing the desc's
+// sourcePrim view at the owned per-slot string (so the view outlives the caller's
+// borrowed storage — same contract as the old MaterialEntry::sourcePrim copy).
+void StoreMaterialComponent(std::vector<std::string>& sourcePrims, const flecs::entity& entity,
+                            uint32_t slot, const OpenPBRMaterialDesc& desc, std::uint64_t hash)
+{
+  if (sourcePrims.size() <= slot)
+    sourcePrims.resize(slot + 1u);
+  sourcePrims[slot].assign(desc.sourcePrim);
+  GpuMaterialComponent component;
+  component.desc = desc;
+  component.desc.sourcePrim = sourcePrims[slot];  // re-point at the owned copy.
+  component.descHash = hash;
+  entity.set<GpuMaterialComponent>(component);
+}
+
+}  // namespace
+
 MaterialHandle GpuScene::Impl::AcquireMaterial(const OpenPBRMaterialDesc& materialDesc)
 {
-  // §11 dedup: hash → existing handle if present, else allocate
-  // a new slot. Lazy-init the materials vector with slot 0
-  // reserved (the §19.7 invalid-handle sentinel) so `materialId =
-  // 0` in the closesthit unambiguously means "no material".
-  if (materials.empty())
-    materials.emplace_back();  // sentinel slot 0
-
+  // §11 dedup: hash → existing handle if present, else allocate a new slot.
   const std::uint64_t hash = HashMaterialDesc(materialDesc);
-  if (auto found = materialDescHashToHandle.find(hash);
-      found != materialDescHashToHandle.end())
-  {
-    // Cache hit — return the existing handle. (Hash collisions
-    // are theoretically possible at FNV1a-64; in practice
-    // material counts in v1 are small enough that the
-    // birthday-paradox risk is negligible. M8 XXH3 swap revisits.)
-    return found->second;
-  }
+  if (auto found = materialDescHashToHandle.find(hash); found != materialDescHashToHandle.end())
+    return found->second;  // cache hit (FNV1a collision risk negligible at v1 counts).
 
-  // O(1) free-list pop; DestroyMaterial pushes back symmetrically.
-  uint32_t slot = 0;
-  if (!freeMaterialSlots.empty())
-  {
-    slot = freeMaterialSlots.back();
-    freeMaterialSlots.pop_back();
-  }
-  else
-  {
-    if (materials.size() >= (1u << HANDLE_SLOT_BITS))
-      return MaterialHandle::Invalid;  // slot space exhausted
-    materials.emplace_back();
-    slot = static_cast<uint32_t>(materials.size() - 1);
-  }
+  flecs::entity entity;
+  const uint32_t handle = materialSlots.Allocate(entity);
+  if (handle == 0)
+    return MaterialHandle::Invalid;  // slot space exhausted (§18.5).
+  StoreMaterialComponent(materialSourcePrims, entity, GpuSlotMap::SlotOf(handle), materialDesc, hash);
 
-  MaterialEntry& entry = materials[slot];
-  entry.live = true;
-  entry.needsGpuUpload = true;
-  entry.descCopy = materialDesc;
-  entry.descHash = hash;
-  entry.sourcePrim.assign(materialDesc.sourcePrim);
-  entry.descCopy.sourcePrim = entry.sourcePrim;  // re-point at owned copy
-
-  const auto handle = static_cast<MaterialHandle>(HandleEncode(slot, entry.generation));
-  materialDescHashToHandle.emplace(hash, handle);
+  const auto materialHandle = static_cast<MaterialHandle>(handle);
+  materialDescHashToHandle.emplace(hash, materialHandle);
   materialsNeedGpuUpload = true;
-  return handle;
+  return materialHandle;
 }
 
 void GpuScene::Impl::UpdateMaterial(MaterialHandle materialHandle,
                                     const OpenPBRMaterialDesc& materialDesc)
 {
-  MaterialEntry* entry = ResolveMaterial(materialHandle);
-  if (entry == nullptr)
+  const flecs::entity entity = materialSlots.Resolve(static_cast<uint32_t>(materialHandle));
+  if (entity.id() == 0)
+  {
+    if (static_cast<uint32_t>(materialHandle) != 0)
+      ++lastFrameStats.staleHandleDrops;  // §18.5 stale drop.
     return;
-  // Re-hash + dedup-map maintenance: drop the old hash entry, add
-  // the new one. If the new hash already maps to a different live
-  // material, we leave that alone (Update doesn't merge handles —
-  // semantics: this material's *fields* changed in place).
-  materialDescHashToHandle.erase(entry->descHash);
-  entry->descCopy = materialDesc;
-  entry->descHash = HashMaterialDesc(materialDesc);
-  entry->sourcePrim.assign(materialDesc.sourcePrim);
-  entry->descCopy.sourcePrim = entry->sourcePrim;
-  entry->needsGpuUpload = true;
-  materialDescHashToHandle.emplace(entry->descHash, materialHandle);
+  }
+  // Re-hash + dedup-map maintenance: drop the old hash entry, add the new one.
+  // The resolved entity always carries the component (set at Acquire).
+  materialDescHashToHandle.erase(entity.get<GpuMaterialComponent>().descHash);
+  const std::uint64_t hash = HashMaterialDesc(materialDesc);
+  StoreMaterialComponent(materialSourcePrims, entity,
+                         GpuSlotMap::SlotOf(static_cast<uint32_t>(materialHandle)), materialDesc,
+                         hash);
+  materialDescHashToHandle.emplace(hash, materialHandle);
   materialsNeedGpuUpload = true;
 }
 
 void GpuScene::Impl::DestroyMaterial(MaterialHandle materialHandle)
 {
-  MaterialEntry* entry = ResolveMaterial(materialHandle);
-  if (entry == nullptr)
+  const flecs::entity entity = materialSlots.Resolve(static_cast<uint32_t>(materialHandle));
+  if (entity.id() == 0)
+  {
+    if (static_cast<uint32_t>(materialHandle) != 0)
+      ++lastFrameStats.staleHandleDrops;
     return;
-  materialDescHashToHandle.erase(entry->descHash);
-  entry->live = false;
-  entry->descCopy = OpenPBRMaterialDesc{};
-  entry->sourcePrim.clear();
-  if (entry->generation == HANDLE_GENERATION_QUARANTINE)
-  {
-    entry->quarantined = true;
   }
-  else
-  {
-    ++entry->generation;
-    const auto slot = static_cast<std::uint32_t>(entry - materials.data());
-    freeMaterialSlots.push_back(slot);
-  }
+  materialDescHashToHandle.erase(entity.get<GpuMaterialComponent>().descHash);
+  // Free destructs the entity + bumps the slot generation (or quarantines at 255).
+  // Matches the old verb: the GPU buffer is NOT re-uploaded here (the slot keeps its
+  // stale bytes until the next Acquire/Update; goldens are static so unaffected).
+  materialSlots.Free(static_cast<uint32_t>(materialHandle));
 }
 
 bool GpuScene::Impl::HasMaterial(MaterialHandle materialHandle) const
 {
-  return LookupMaterial(materialHandle) != nullptr;
+  return materialSlots.Resolve(static_cast<uint32_t>(materialHandle)).id() != 0;
 }
 
 }  // namespace pyxis
