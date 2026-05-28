@@ -20,6 +20,10 @@
 
 #include "GpuScene/Internal.h"
 
+#if defined(PYXIS_DEBUG_TOOLS) && defined(FLECS_REST)
+#include <flecs/addons/rest.h>  // Flecs Explorer (Debug-tools only); ticked by progress().
+#endif
+
 namespace pyxis {
 
 using namespace gpuscene_detail;  // bring the helpers into scope so the bodies below stay terse
@@ -60,6 +64,15 @@ GpuScene::GpuScene(nvrhi::IDevice* device, Profiler& profiler, const GpuSceneCre
   _impl->dirtyLightQuery =
       _impl->sceneWorld.query_builder().with<scene::DirtyLight>().build();
   _impl->removalSentinel = _impl->sceneWorld.entity();  // carries removal dirty signals.
+
+#if defined(PYXIS_DEBUG_TOOLS) && defined(FLECS_REST)
+  // RFC 0009 follow-up — re-enable the Flecs Explorer on the GpuScene-owned world (the
+  // retired SceneWorldFacade used to host it). The REST server is ticked by
+  // sceneWorld.progress() inside CommitResources. Debug-tools builds only (§30.11 / §4).
+  _impl->sceneWorld.set<flecs::Rest>({});
+  Logging::Get().Info(log::RENDER,
+                      "Flecs Explorer up at http://localhost:27750 (GpuScene sceneWorld)");
+#endif
 }
 
 // Out-of-line dtor so unique_ptr<Impl>'s deleter sees the complete
