@@ -221,10 +221,11 @@ void GpuScene::Impl::Clear() noexcept
   missingTexture = nullptr;
   domeEnvMapTexture = nullptr;  // review fix #2 — drop the cached dome pointer.
 
-  // TLAS + camera + dirty flags.
+  // TLAS + camera + dirty flags. A fresh scene's first AppendInstance tags
+  // DirtyVisibility → the next build is a full rebuild (transformOnly is false), so no
+  // tlasStructureChanged flag is needed; the DirtyVisibility/DirtyTransform tags are
+  // dropped by the entity destructs (instanceSlots.Reset) + the sentinel clear above.
   tlas = nullptr;
-  tlasNeedsRebuild = false;
-  tlasStructureChanged = true;   // RFC 0009 — fresh scene → next build is a full rebuild.
   tlasAllowsUpdate = false;
   tlasBuiltInstanceCount = 0;    // review fix #1 — no prior build to refit against.
   instanceMaterialNeedsUpload = false;
@@ -1126,15 +1127,19 @@ Expected<void> GpuScene::Impl::RebuildTlasIfDirty(nvrhi::ICommandList* commandLi
   // Lazy-allocate the TLAS on first need; size it to a fixed
   // M3-friendly capacity (TLAS_MAX_INSTANCES). M6+ grows this with
   // the scene budget.
-  if (!tlasNeedsRebuild)
+  // RFC 0009 follow-up — the TLAS is dirty when any instance carries DirtyTransform
+  // (transform edit) or DirtyVisibility (Append/SetVisibility/Destroy-via-sentinel,
+  // i.e. structural). Sys_ClearDirty clears both at commit end.
+  if (dirtyTransformQuery.count() == 0 && dirtyVisibilityQuery.count() == 0)
     return {};
 
-  // RFC 0009 / §16 — refit when only instance transforms changed (no add/remove/
-  // visibility since the last build) AND the live TLAS supports update. Otherwise a
-  // full rebuild. A transform-only edit on a TLAS that lacks AllowUpdate triggers ONE
-  // full rebuild that recreates it with AllowUpdate, enabling refit thereafter.
-  // Static scenes never reach the AllowUpdate path → their build stays byte-identical.
-  const bool transformOnly = !tlasStructureChanged;
+  // RFC 0009 / §16 — refit when only instance transforms changed (no structural
+  // DirtyVisibility this commit) AND the live TLAS supports update. Otherwise a full
+  // rebuild. A transform-only edit on a TLAS that lacks AllowUpdate triggers ONE full
+  // rebuild that recreates it with AllowUpdate, enabling refit thereafter. Static
+  // scenes only ever tag DirtyVisibility (appends) → never the AllowUpdate path → their
+  // build stays byte-identical.
+  const bool transformOnly = dirtyVisibilityQuery.count() == 0;
   const bool wantAllowUpdate = transformOnly;  // dynamic transforms want refit capability.
   const bool canRefit = transformOnly && tlas && tlasAllowsUpdate;
 
@@ -1226,11 +1231,11 @@ Expected<void> GpuScene::Impl::RebuildTlasIfDirty(nvrhi::ICommandList* commandLi
   }
 
   // Review fix #1 — a refit (PerformUpdate) is only valid against the SAME instance
-  // count/topology as the build it updates. tlasStructureChanged tracks add/remove/
+  // count/topology as the build it updates. DirtyVisibility tracks add/remove/
   // visibility, but DestroyMesh of a still-referenced mesh drops that instance from
-  // the gather (its BLAS goes away) WITHOUT setting the flag, so the gathered count can
-  // shrink under a transform-only tick. Fall back to a full rebuild when the count
-  // differs from the last build rather than issuing an invalid refit.
+  // the gather (its BLAS goes away) WITHOUT tagging DirtyVisibility, so the gathered
+  // count can shrink under a transform-only tick. Fall back to a full rebuild when the
+  // count differs from the last build rather than issuing an invalid refit.
   const bool countMatches =
       static_cast<uint32_t>(instanceDescs.size()) == tlasBuiltInstanceCount;
   auto buildFlags = nvrhi::rt::AccelStructBuildFlags::PreferFastTrace;
@@ -1241,8 +1246,8 @@ Expected<void> GpuScene::Impl::RebuildTlasIfDirty(nvrhi::ICommandList* commandLi
   commandList->buildTopLevelAccelStruct(tlas.Get(), instanceDescs.data(),
                                         instanceDescs.size(), buildFlags);
   tlasBuiltInstanceCount = static_cast<uint32_t>(instanceDescs.size());
-  tlasNeedsRebuild = false;
-  tlasStructureChanged = false;  // next transform-only edit may refit.
+  // DirtyTransform/DirtyVisibility are cleared by Sys_ClearDirty at commit end; a
+  // transform-only edit next commit (DirtyTransform, no DirtyVisibility) then refits.
   return {};
 }
 

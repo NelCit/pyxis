@@ -385,21 +385,19 @@ struct GpuScene::Impl
   // Top-level acceleration structure. Allocated lazily on the first
   // TLAS rebuild so an empty scene doesn't pay for it.
   nvrhi::rt::AccelStructHandle tlas;
-  bool                         tlasNeedsRebuild = false;
-  // RFC 0009 — TLAS refit (§16 "rebuilt every frame if dirty; refit otherwise").
-  // `tlasStructureChanged` (set by Append/Destroy/SetVisibility — the instance SET or
-  // its BLAS pointers change) forces a full rebuild; a transform-only edit
-  // (UpdateInstanceTransform) leaves it false → eligible for a cheap refit.
-  // `tlasAllowsUpdate` tracks whether the live TLAS was built with the AllowUpdate
-  // flag. It stays false for static scenes (which never call UpdateInstanceTransform),
-  // so their TLAS build is byte-identical to before; the AllowUpdate variant is only
-  // created once a transform edit actually needs refit capability.
-  bool                         tlasStructureChanged = true;
+  // RFC 0009 — TLAS dirty/refit (§16 "rebuilt every frame if dirty; refit otherwise"),
+  // driven by the instance Dirty<T> tags: DirtyVisibility (Append/Destroy/SetVisibility
+  // — the instance SET or its BLAS pointers change) forces a full rebuild; a
+  // transform-only edit (UpdateInstanceTransform → DirtyTransform, no DirtyVisibility)
+  // is eligible for a cheap refit. `tlasAllowsUpdate` tracks whether the live TLAS was
+  // built with the AllowUpdate flag. It stays false for static scenes (which only ever
+  // tag DirtyVisibility via appends), so their TLAS build is byte-identical to before;
+  // the AllowUpdate variant is only created once a transform edit needs refit capability.
   bool                         tlasAllowsUpdate     = false;
   // Review fix #1 — instance count of the last TLAS build. A refit (PerformUpdate)
   // is only valid against an identical instance count/topology, so a transform-only
   // tick whose gathered count differs (e.g. DestroyMesh dropped a still-referenced
-  // mesh's BLAS, which does NOT set tlasStructureChanged) must full-rebuild, not refit.
+  // mesh's BLAS, which does NOT tag DirtyVisibility) must full-rebuild, not refit.
   uint32_t                     tlasBuiltInstanceCount = 0;
   // Review fix #2 — cached single-dome env-map texture, refreshed once per commit
   // (RefreshDomeEnvMapCache). GetDomeEnvMapTexture is read every frame by the
@@ -407,14 +405,12 @@ struct GpuScene::Impl
   // set per frame.
   nvrhi::ITexture*             domeEnvMapTexture = nullptr;
 
-  // M6 audit closeout: separate dirty track for the instance→material
-  // side-table buffer (binding 4). Kept distinct from tlasNeedsRebuild
-  // so UpdateInstanceMaterial doesn't pointlessly trigger a TLAS
-  // rebuild — the TLAS doesn't change when an instance's bound
-  // material changes; only the side-table does. AppendInstance,
-  // DestroyInstance, SetInstanceVisibility (which all DO change the
-  // TLAS) implicitly need a side-table re-upload too, so they bump
-  // both flags. UpdateInstanceMaterial only bumps this one.
+  // M6 audit closeout: the instance→material/mesh side-table buffer (binding 4) has
+  // FOUR heterogeneous triggers — AppendInstance, DestroyInstance, SetInstanceVisibility
+  // (all also tag DirtyVisibility → TLAS rebuild) and UpdateInstanceMaterial (side-table
+  // ONLY — must NOT rebuild the TLAS). Because that last trigger maps to no TLAS dirty
+  // tag, the side-table keeps its own coarse bool rather than folding into DirtyVisibility
+  // (which would force a needless TLAS rebuild on a material-binding change).
   bool                         instanceMaterialNeedsUpload = false;
 
   // ---- Handle resolution -----------------------------------------------

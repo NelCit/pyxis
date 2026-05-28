@@ -60,9 +60,11 @@ Expected<InstanceHandle> GpuScene::Impl::AppendInstance(const InstanceDesc& inst
       matEntity.id() != 0)
     entity.add<MaterialOf>(matEntity);
 
-  // New instance → TLAS pack changes (structural → full rebuild) + side-table entry.
-  tlasNeedsRebuild = true;
-  tlasStructureChanged = true;
+  // New instance → structural TLAS change (DirtyVisibility → full rebuild, not refit)
+  // + side-table entry. DirtyVisibility gates the TLAS; instanceMaterialNeedsUpload
+  // gates the instance→material/mesh side-table (its other trigger, UpdateInstance
+  // Material, is side-table-only and must NOT rebuild the TLAS, so it stays a bool).
+  entity.add<scene::DirtyVisibility>();
   instanceMaterialNeedsUpload = true;
   return static_cast<InstanceHandle>(handleRaw);
 }
@@ -79,8 +81,7 @@ void GpuScene::Impl::UpdateInstanceTransform(InstanceHandle instanceHandle,
   }
   instanceResources[GpuSlotMap::SlotOf(static_cast<uint32_t>(instanceHandle))].worldFromLocal =
       worldFromLocal;
-  entity.add<scene::DirtyTransform>();  // enables a future TLAS refit; rebuild for now.
-  tlasNeedsRebuild = true;
+  entity.add<scene::DirtyTransform>();  // gates the TLAS refit (no DirtyVisibility → refit).
 }
 
 void GpuScene::Impl::UpdateInstanceMaterial(InstanceHandle instanceHandle,
@@ -113,9 +114,8 @@ void GpuScene::Impl::SetInstanceVisibility(InstanceHandle instanceHandle, bool v
   if (entry.visible != visible)
   {
     entry.visible = visible;
-    tlasNeedsRebuild = true;          // in/out of the TLAS pack.
-    tlasStructureChanged = true;      // structural → full rebuild, not refit.
-    instanceMaterialNeedsUpload = true;  // ID gaps must match the new instance set.
+    entity.add<scene::DirtyVisibility>();  // in/out of the TLAS pack → structural rebuild.
+    instanceMaterialNeedsUpload = true;    // ID gaps must match the new instance set.
   }
 }
 
@@ -132,8 +132,9 @@ void GpuScene::Impl::DestroyInstance(InstanceHandle instanceHandle)
   // Free destructs the entity (drops GpuInstanceComponent + MeshOf/MaterialOf pairs +
   // any DirtyTransform tag) + bumps the slot generation.
   instanceSlots.Free(static_cast<uint32_t>(instanceHandle));
-  tlasNeedsRebuild = true;
-  tlasStructureChanged = true;  // structural → full rebuild, not refit.
+  // The instance entity is gone, so tag the sentinel: structural TLAS change → full
+  // rebuild (count differs from the last build → the refit count-guard also forces it).
+  removalSentinel.add<scene::DirtyVisibility>();
   instanceMaterialNeedsUpload = true;
 }
 
