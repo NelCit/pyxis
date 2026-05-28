@@ -187,6 +187,14 @@ struct GpuScene::Impl
   // query is built once in the ctor (§30.11, no per-frame build).
   scene::HandleBimap                lightHandles;
   flecs::query<GpuLightComponent>   lightQuery;
+  // RFC 0009 follow-up — cached queries over the transient Dirty<T> tags, built once
+  // in the ctor (§30.11: never per-frame). Sys_ClearDirty iterates them to remove the
+  // tags at the end of each commit, completing the §30.11 "Dirty<T> cleared after each
+  // phase" contract (replaces the deleted facade's System_ClearDirtyFlags).
+  flecs::query<>                    dirtyTransformQuery;
+  flecs::query<>                    dirtyVisibilityQuery;
+  flecs::query<>                    dirtyMaterialQuery;
+  flecs::query<>                    dirtyLightQuery;
   // RFC 0009 follow-up — CommitResources runs the §30.11 phase pipeline for real via
   // sceneWorld.progress(). The per-commit command list + first-error live here (the
   // registered systems are ctor lambdas that capture `this`, so no FrameContext
@@ -585,6 +593,13 @@ struct GpuScene::Impl
   [[nodiscard]] Expected<void> UploadMeshVertexNormals(nvrhi::ICommandList* commandList);
   [[nodiscard]] Expected<void> UploadMeshTangents(nvrhi::ICommandList* commandList);
   [[nodiscard]] Expected<void> UploadPendingVolumes(nvrhi::ICommandList* commandList);
+
+  // RFC 0009 follow-up — PhaseClearDirty system: removes the transient Dirty<T> tags
+  // consumed this commit (DirtyTransform, DirtyVisibility) so they don't accumulate.
+  // Per-entity tags consumed mid-pipeline (DirtyTopology, DirtyTexture, DirtyMaterial,
+  // DirtyLight) are cleared by their own uploader/builder. Takes the command-list arg
+  // to fit the commit-system signature; ignores it (no GPU work).
+  [[nodiscard]] Expected<void> ClearDirtyFlags(nvrhi::ICommandList* commandList);
 
   // RFC 0009 follow-up — lowest live mesh slot carrying scene::DirtyTopology, or
   // meshSlots.SlotCount() when none are dirty. Drives the incremental side-table

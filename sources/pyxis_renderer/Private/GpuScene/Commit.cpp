@@ -354,6 +354,23 @@ void GpuScene::Impl::RegisterCommitPipeline() noexcept
   // PhaseRebuildTlas — needs the BLAS handles from BuildBlas.
   sceneWorld.system("Sys_RebuildTlas").kind<scene::PhaseRebuildTlas>().run(
       [runStep](flecs::iter&) { runStep(&Impl::RebuildTlasIfDirty); });
+
+  // PhaseClearDirty — remove the transient Dirty<T> tags consumed this commit so they
+  // don't accumulate (the §30.11 "cleared after each phase" contract).
+  sceneWorld.system("Sys_ClearDirty").kind<scene::PhaseClearDirty>().run(
+      [runStep](flecs::iter&) { runStep(&Impl::ClearDirtyFlags); });
+}
+
+Expected<void> GpuScene::Impl::ClearDirtyFlags(nvrhi::ICommandList* /*commandList*/)
+{
+  // Runs inside sceneWorld.progress() (deferred mode), so each remove<>() is queued
+  // and merged after the system — no iterator invalidation while the query iterates.
+  // DirtyTopology/DirtyTexture/DirtyMaterial/DirtyLight are removed by their own
+  // uploader/builder mid-pipeline; this clears the tags nothing else consumes
+  // (DirtyTransform — set by UpdateInstanceTransform — and DirtyVisibility).
+  dirtyTransformQuery.each([](flecs::entity entity) { entity.remove<scene::DirtyTransform>(); });
+  dirtyVisibilityQuery.each([](flecs::entity entity) { entity.remove<scene::DirtyVisibility>(); });
+  return {};
 }
 
 void GpuScene::Impl::RefreshDomeEnvMapCache() noexcept

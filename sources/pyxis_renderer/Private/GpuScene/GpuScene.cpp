@@ -50,6 +50,15 @@ GpuScene::GpuScene(nvrhi::IDevice* device, Profiler& profiler, const GpuSceneCre
   // HandleBimap encodes slot+1 so handle 0 stays Invalid). Build the cached
   // light query ONCE here (§30.11: never inside a per-frame body).
   _impl->lightQuery = _impl->sceneWorld.query<GpuLightComponent>();
+  // RFC 0009 follow-up — cache the Dirty<T> clear/gate queries once (§30.11).
+  _impl->dirtyTransformQuery =
+      _impl->sceneWorld.query_builder().with<scene::DirtyTransform>().build();
+  _impl->dirtyVisibilityQuery =
+      _impl->sceneWorld.query_builder().with<scene::DirtyVisibility>().build();
+  _impl->dirtyMaterialQuery =
+      _impl->sceneWorld.query_builder().with<scene::DirtyMaterial>().build();
+  _impl->dirtyLightQuery =
+      _impl->sceneWorld.query_builder().with<scene::DirtyLight>().build();
 }
 
 // Out-of-line dtor so unique_ptr<Impl>'s deleter sees the complete
