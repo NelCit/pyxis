@@ -35,7 +35,7 @@ LightHandle GpuScene::Impl::AddLight(const LightDesc& lightDesc)
   const flecs::entity entity = sceneWorld.entity();
   const uint32_t handle = lightHandles.Allocate(entity);
   entity.set<GpuLightComponent>({handle, lightDesc});
-  lightsNeedGpuUpload = true;
+  entity.add<scene::DirtyLight>();  // gates the light-buffer re-pack (cleared in ClearDirty).
   return static_cast<LightHandle>(handle);
 }
 
@@ -51,7 +51,7 @@ void GpuScene::Impl::UpdateLight(LightHandle lightHandle, const LightDesc& light
     return;
   }
   entity.set<GpuLightComponent>({static_cast<uint32_t>(lightHandle), lightDesc});
-  lightsNeedGpuUpload = true;
+  entity.add<scene::DirtyLight>();
 }
 
 void GpuScene::Impl::RemoveLight(LightHandle lightHandle)
@@ -67,7 +67,8 @@ void GpuScene::Impl::RemoveLight(LightHandle lightHandle)
   // Bimap bumps the slot generation (or quarantines at 255), matching the old
   // ResolveLight + freeLightSlots behaviour.
   lightHandles.Free(static_cast<uint32_t>(lightHandle));
-  lightsNeedGpuUpload = true;
+  // The removed light's entity is gone, so tag the sentinel to fire the re-pack gate.
+  removalSentinel.add<scene::DirtyLight>();
 }
 
 void GpuScene::Impl::CollectLiveLightsSorted(std::vector<std::pair<uint32_t, LightDesc>>& out)

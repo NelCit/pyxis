@@ -51,7 +51,7 @@ MaterialHandle GpuScene::Impl::AcquireMaterial(const OpenPBRMaterialDesc& materi
 
   const auto materialHandle = static_cast<MaterialHandle>(handle);
   materialDescHashToHandle.emplace(hash, materialHandle);
-  materialsNeedGpuUpload = true;
+  entity.add<scene::DirtyMaterial>();  // gates the material-buffer re-pack (cleared in ClearDirty).
   return materialHandle;
 }
 
@@ -73,7 +73,7 @@ void GpuScene::Impl::UpdateMaterial(MaterialHandle materialHandle,
                          GpuSlotMap::SlotOf(static_cast<uint32_t>(materialHandle)), materialDesc,
                          hash);
   materialDescHashToHandle.emplace(hash, materialHandle);
-  materialsNeedGpuUpload = true;
+  entity.add<scene::DirtyMaterial>();  // gates the material-buffer re-pack (cleared in ClearDirty).
 }
 
 void GpuScene::Impl::DestroyMaterial(MaterialHandle materialHandle)

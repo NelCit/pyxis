@@ -166,27 +166,12 @@ Expected<MeshHandle> GpuScene::Impl::CreateMesh(const MeshDesc& meshDesc)
                                    static_cast<float>(normal.y),
                                    static_cast<float>(normal.z), texelDensity);
   }
-  meshFaceNormalsNeedUpload = true;
 
-  // M8a: any mesh registration also dirties the per-mesh UV +
-  // index flat buffers (re-uploaded next CommitResources). UV array
-  // can be empty when the source authored no `primvars:st`; the
-  // closesthit's HasBaseColorMap flag falls through to the scalar
-  // baseColor in that case.
-  meshUvsNeedUpload     = true;
-  meshIndicesNeedUpload = true;
-  // M9 smooth shading: mesh registration dirties the per-vertex
-  // normal buffer too. Empty `meshDesc.normals` is fine — the closesthit
-  // detects a near-zero magnitude and falls back to the M7 face-normal
-  // path, so meshes that authored no normals still render.
-  meshVertexNormalsNeedUpload = true;
-  // M9 normal mapping: same dirty-flag pattern. Empty `meshDesc.tangents`
-  // is fine — closesthit's normal-mapping branch detects the
-  // zero-magnitude case and skips its TBN sample.
-  meshTangentsNeedUpload = true;
-
-  // Record the descHash + set the mesh component + mark the entity dirty (needs
-  // vertex/index upload + BLAS build). DestroyMesh erases the map entry symmetrically.
+  // Record the descHash + set the mesh component + mark the entity dirty. The single
+  // DirtyTopology tag gates ALL the per-mesh GPU work this commit — vertex/index upload,
+  // BLAS build, and the five concatenated side-table buffers (face normals / UVs /
+  // indices / vertex normals / tangents), which all re-pack when LowestDirtyMeshSlot
+  // finds a dirty mesh. DestroyMesh erases the dedup-map entry symmetrically.
   entry.descHash = descHash;
   entity.set<GpuMeshComponent>({descHash});
   entity.add<scene::DirtyTopology>();

@@ -195,6 +195,11 @@ struct GpuScene::Impl
   flecs::query<>                    dirtyVisibilityQuery;
   flecs::query<>                    dirtyMaterialQuery;
   flecs::query<>                    dirtyLightQuery;
+  // RFC 0009 follow-up — a removal (RemoveLight / DestroyInstance) re-packs the whole
+  // light buffer / TLAS, but the removed entity is gone so it can't carry a Dirty tag.
+  // The verb tags this persistent sentinel instead, so the `count<Dirty*>() > 0` upload
+  // gate still fires; Sys_ClearDirty clears it like any other tagged entity.
+  flecs::entity                     removalSentinel;
   // RFC 0009 follow-up — CommitResources runs the §30.11 phase pipeline for real via
   // sceneWorld.progress(). The per-commit command list + first-error live here (the
   // registered systems are ctor lambdas that capture `this`, so no FrameContext
@@ -288,8 +293,7 @@ struct GpuScene::Impl
   // - bindlessSampler: a single shared linear-clamp sampler. Per-
   //   role samplers (sRGB filtering, anisotropic for tangent maps,
   //   etc.) are an M9 polish item.
-  nvrhi::BufferHandle  materialGpuBuffer;
-  bool                 materialsNeedGpuUpload = false;
+  nvrhi::BufferHandle  materialGpuBuffer;  // re-packed when any DirtyMaterial tag is present.
   nvrhi::BufferHandle  instanceMaterialBuffer;
   nvrhi::SamplerHandle bindlessSampler;
   // M9-fidelity per-role samplers. `bindlessSampler` (above) is
@@ -304,10 +308,9 @@ struct GpuScene::Impl
   // to the count of LIVE LightEntry slots (sparse storage with
   // holes is fine — the closesthit iterates the buffer's full
   // length, but we only emit live lights, so dead slots never
-  // appear in the upload). Re-uploaded whenever the dedicated
-  // dirty flag fires (AddLight / UpdateLight / RemoveLight).
+  // appear in the upload). Re-packed when any DirtyLight tag is present
+  // (AddLight / UpdateLight tag the light; RemoveLight tags removalSentinel).
   nvrhi::BufferHandle  lightsGpuBuffer;
-  bool                 lightsNeedGpuUpload = false;
 
   // M7 NdotL: per-mesh face normals concatenated into one flat
   // buffer + per-mesh-slot starting offsets. Closesthit reads:
@@ -315,15 +318,13 @@ struct GpuScene::Impl
   //                            + PrimitiveIndex()].xyz
   // Then transforms via Vulkan's `ObjectToWorld3x4()` to get
   // world-space N for the Lambert pass. Uploaded alongside BLAS
-  // builds (computed in CreateMesh; flushed at CommitResources
-  // when meshFaceNormalsNeedUpload is set).
+  // builds (computed in CreateMesh; flushed at CommitResources when a
+  // DirtyTopology mesh exists — LowestDirtyMeshSlot gates all 5 side tables).
   // Plus gInstanceMeshBuffer: per-instance mesh slot, indexed by
   // instance slot — the closesthit needs to know which mesh's
-  // face-normal range to look in. Same lifecycle / dirty-flag shape
-  // as instanceMaterialBuffer.
+  // face-normal range to look in.
   nvrhi::BufferHandle  meshFaceNormalsBuffer;
   nvrhi::BufferHandle  meshFaceOffsetsBuffer;
-  bool                 meshFaceNormalsNeedUpload = false;
   // RFC 0009 follow-up — # mesh slots already concatenated into the buffer above.
   // A new upload appends only slots >= this (the tail fast path) when no lower slot
   // changed; see UploadMeshSideTable. One tracker per concatenated buffer (they share
@@ -341,13 +342,11 @@ struct GpuScene::Impl
   //   uv          = barycentric_interp(uv0, uv1, uv2, attribs.bary)
   // Then samples bindless gBindlessTextures[mat.baseColorTex] at uv.
   // Sized + uploaded by UploadMeshUvs / UploadMeshIndices in
-  // Commit.cpp; same dirty-flag shape as meshFaceNormals.
+  // Commit.cpp; gated by DirtyTopology like meshFaceNormals.
   nvrhi::BufferHandle  meshUvsBuffer;
   nvrhi::BufferHandle  meshUvOffsetsBuffer;
   nvrhi::BufferHandle  meshIndicesBuffer;
   nvrhi::BufferHandle  meshIndexOffsetsBuffer;
-  bool                 meshUvsNeedUpload     = false;
-  bool                 meshIndicesNeedUpload = false;
   uint32_t             meshUvsPackedSlots     = 0;  // see meshFaceNormalsPackedSlots.
   uint32_t             meshIndicesPackedSlots = 0;
 
@@ -361,7 +360,6 @@ struct GpuScene::Impl
   // back to the M7 face-normal path.
   nvrhi::BufferHandle  meshVertexNormalsBuffer;
   nvrhi::BufferHandle  meshVertexNormalOffsetsBuffer;
-  bool                 meshVertexNormalsNeedUpload = false;
   uint32_t             meshVertexNormalsPackedSlots = 0;  // see meshFaceNormalsPackedSlots.
 
   // M9 normal mapping: per-vertex tangents from MikkTSpace. float4
@@ -372,7 +370,6 @@ struct GpuScene::Impl
   // falls back to using the vertex-interpolated normal without TBN.
   nvrhi::BufferHandle  meshTangentsBuffer;
   nvrhi::BufferHandle  meshTangentOffsetsBuffer;
-  bool                 meshTangentsNeedUpload = false;
   uint32_t             meshTangentsPackedSlots = 0;  // see meshFaceNormalsPackedSlots.
 
   // Magenta 4x4 fallback texture — slot 0 in the bindless table is

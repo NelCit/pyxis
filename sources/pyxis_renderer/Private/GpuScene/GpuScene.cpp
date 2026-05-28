@@ -59,6 +59,7 @@ GpuScene::GpuScene(nvrhi::IDevice* device, Profiler& profiler, const GpuSceneCre
       _impl->sceneWorld.query_builder().with<scene::DirtyMaterial>().build();
   _impl->dirtyLightQuery =
       _impl->sceneWorld.query_builder().with<scene::DirtyLight>().build();
+  _impl->removalSentinel = _impl->sceneWorld.entity();  // carries removal dirty signals.
 }
 
 // Out-of-line dtor so unique_ptr<Impl>'s deleter sees the complete

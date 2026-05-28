@@ -184,30 +184,32 @@ void GpuScene::Impl::Clear() noexcept
   // GPU buffers: drop refs. CommitResources will lazily re-allocate
   // on the first AcquireMaterial / AppendInstance / AddLight after
   // Clear (the same lazy path used at scene-construction time).
+  // RFC 0009 follow-up — the per-buffer *NeedUpload bools are gone; the upload gates
+  // now read the Dirty<T> tags (DirtyMaterial/DirtyLight/DirtyTopology), which Reset
+  // drops by destructing the entities (*Slots.Reset()/lightHandles) above. The removal
+  // sentinel survives Reset, so clear any pending removal signals it carries.
+  if (removalSentinel)
+  {
+    removalSentinel.remove<scene::DirtyLight>();
+    removalSentinel.remove<scene::DirtyVisibility>();
+  }
   materialGpuBuffer = nullptr;
-  materialsNeedGpuUpload = false;
   instanceMaterialBuffer = nullptr;
   lightsGpuBuffer = nullptr;
-  lightsNeedGpuUpload = false;
   meshFaceNormalsBuffer = nullptr;
   meshFaceOffsetsBuffer = nullptr;
-  meshFaceNormalsNeedUpload = false;
   meshFaceNormalsPackedSlots = 0;
   meshUvsBuffer = nullptr;
   meshUvOffsetsBuffer = nullptr;
   meshIndicesBuffer = nullptr;
   meshIndexOffsetsBuffer = nullptr;
-  meshUvsNeedUpload = false;
-  meshIndicesNeedUpload = false;
   meshUvsPackedSlots = 0;
   meshIndicesPackedSlots = 0;
   meshVertexNormalsBuffer = nullptr;
   meshVertexNormalOffsetsBuffer = nullptr;
-  meshVertexNormalsNeedUpload = false;
   meshVertexNormalsPackedSlots = 0;
   meshTangentsBuffer = nullptr;
   meshTangentOffsetsBuffer = nullptr;
-  meshTangentsNeedUpload = false;
   meshTangentsPackedSlots = 0;
   instanceMeshBuffer = nullptr;
 
@@ -365,11 +367,14 @@ Expected<void> GpuScene::Impl::ClearDirtyFlags(nvrhi::ICommandList* /*commandLis
 {
   // Runs inside sceneWorld.progress() (deferred mode), so each remove<>() is queued
   // and merged after the system — no iterator invalidation while the query iterates.
-  // DirtyTopology/DirtyTexture/DirtyMaterial/DirtyLight are removed by their own
-  // uploader/builder mid-pipeline; this clears the tags nothing else consumes
-  // (DirtyTransform — set by UpdateInstanceTransform — and DirtyVisibility).
+  // These are the COARSE "buffer dirty?" tags — the material/light buffer + the TLAS
+  // re-pack everything when any are present, so the tag is just a per-commit flag we
+  // clear here (DirtyTopology/DirtyTexture are FINE-grained: their uploader processes
+  // and clears only the tagged entities, so they're cleared mid-pipeline, not here).
   dirtyTransformQuery.each([](flecs::entity entity) { entity.remove<scene::DirtyTransform>(); });
   dirtyVisibilityQuery.each([](flecs::entity entity) { entity.remove<scene::DirtyVisibility>(); });
+  dirtyMaterialQuery.each([](flecs::entity entity) { entity.remove<scene::DirtyMaterial>(); });
+  dirtyLightQuery.each([](flecs::entity entity) { entity.remove<scene::DirtyLight>(); });
   return {};
 }
 
@@ -891,8 +896,8 @@ Expected<void> GpuScene::Impl::UploadMaterialBuffer(nvrhi::ICommandList* command
   // (~80 bytes per material × hundreds-of-thousands materials cap
   // = a few MiB worst case) that we always re-upload the whole
   // table rather than tracking dirty ranges.
-  if (!materialsNeedGpuUpload || materialSlots.SlotCount() <= 1)
-    return {};
+  if (dirtyMaterialQuery.count() == 0 || materialSlots.SlotCount() <= 1)
+    return {};  // no material added/updated this commit (DirtyMaterial gates the re-pack).
 
   // RFC 0009 P2 — pack from the Flecs material entities by slot (was: iterate the
   // `materials` vector). buffer[slot] layout unchanged → byte-identical.
@@ -997,8 +1002,7 @@ Expected<void> GpuScene::Impl::UploadMaterialBuffer(nvrhi::ICommandList* command
                                    sizeof(shaderinterop::OpenPBRMaterialGPU),
                                    "scene.materials", "materials"));
   commandList->writeBuffer(materialGpuBuffer.Get(), packed.data(), bufferBytes);
-  materialsNeedGpuUpload = false;
-  return {};
+  return {};  // DirtyMaterial tags cleared by Sys_ClearDirty at commit end.
 }
 
 Expected<void> GpuScene::Impl::UploadLightBuffer(nvrhi::ICommandList* commandList)
@@ -1010,8 +1014,8 @@ Expected<void> GpuScene::Impl::UploadLightBuffer(nvrhi::ICommandList* commandLis
   // simple shading model in closesthit.slang ignores `intensity ==
   // 0` so a fallback 1-element zero buffer (used by PathTracePass
   // when the scene has no lights) contributes nothing.
-  if (!lightsNeedGpuUpload)
-    return {};
+  if (dirtyLightQuery.count() == 0)
+    return {};  // no light added/updated/removed this commit (DirtyLight gates the re-pack).
 
   // RFC 0009 P1 — pack from the slot-sorted Flecs query (was: iterate `lights`).
   // Same order (live lights in slot order) → byte-identical LightGpu buffer.
@@ -1033,8 +1037,7 @@ Expected<void> GpuScene::Impl::UploadLightBuffer(nvrhi::ICommandList* commandLis
                                      "scene.lights", "lights"));
     commandList->writeBuffer(lightsGpuBuffer.Get(), packedLights.data(), lightBytes);
   }
-  lightsNeedGpuUpload = false;
-  return {};
+  return {};  // DirtyLight tags cleared by Sys_ClearDirty at commit end.
 }
 
 Expected<void> GpuScene::Impl::BuildPendingBlas(nvrhi::ICommandList* commandList)
@@ -1326,8 +1329,8 @@ Expected<void> GpuScene::Impl::UploadMeshFaceNormals(nvrhi::ICommandList* comman
   // The +1 in the offsets sizing reserves slot 0 (the §19.7
   // sentinel mesh handle) so the closesthit's "no mesh assigned"
   // path resolves to offset 0 with a black/zero normal entry.
-  if (!meshFaceNormalsNeedUpload || meshSlots.SlotCount() <= 1u)
-    return {};
+  if (commitLowestDirtyMeshSlot >= meshSlots.SlotCount())
+    return {};  // no DirtyTopology mesh this commit (the tag gates all 5 side tables).
 
   PYXIS_TRY(gpuscene_detail::UploadMeshSideTable<hlslpp::float4>(
       device, commandList, meshSlots, commitLowestDirtyMeshSlot, meshFaceNormalsPackedSlots,
@@ -1341,7 +1344,6 @@ Expected<void> GpuScene::Impl::UploadMeshFaceNormals(nvrhi::ICommandList* comman
         const MeshResource& mesh = meshResources[slot];
         out.insert(out.end(), mesh.faceNormals.begin(), mesh.faceNormals.end());
       }));
-  meshFaceNormalsNeedUpload = false;
   return {};
 }
 
@@ -1359,8 +1361,8 @@ Expected<void> GpuScene::Impl::UploadMeshFaceNormals(nvrhi::ICommandList* comman
 // gets a one-element fallback so the bindless layout is valid.
 Expected<void> GpuScene::Impl::UploadMeshUvs(nvrhi::ICommandList* commandList)
 {
-  if (!meshUvsNeedUpload || meshSlots.SlotCount() <= 1u)
-    return {};
+  if (commitLowestDirtyMeshSlot >= meshSlots.SlotCount())
+    return {};  // no DirtyTopology mesh this commit.
 
   // Pack UVs TIGHT (8 bytes/element) to match the shader's
   // `StructuredBuffer<float2>` 8-byte stride. hlslpp::float2 is
@@ -1389,7 +1391,6 @@ Expected<void> GpuScene::Impl::UploadMeshUvs(nvrhi::ICommandList* commandList)
         gpuscene_detail::AppendTightMeshUvs(mesh.uv0.data(), mesh.uv0.size(),
                                             mesh.vertexCount, out);
       }));
-  meshUvsNeedUpload = false;
   return {};
 }
 
@@ -1404,8 +1405,8 @@ Expected<void> GpuScene::Impl::UploadMeshUvs(nvrhi::ICommandList* commandList)
 //   v0/1/2 = gMeshIndices[ofs + PrimitiveIndex()*3 + 0/1/2]
 Expected<void> GpuScene::Impl::UploadMeshIndices(nvrhi::ICommandList* commandList)
 {
-  if (!meshIndicesNeedUpload || meshSlots.SlotCount() <= 1u)
-    return {};
+  if (commitLowestDirtyMeshSlot >= meshSlots.SlotCount())
+    return {};  // no DirtyTopology mesh this commit.
 
   PYXIS_TRY(gpuscene_detail::UploadMeshSideTable<std::uint32_t>(
       device, commandList, meshSlots, commitLowestDirtyMeshSlot, meshIndicesPackedSlots,
@@ -1419,7 +1420,6 @@ Expected<void> GpuScene::Impl::UploadMeshIndices(nvrhi::ICommandList* commandLis
         const MeshResource& mesh = meshResources[slot];
         out.insert(out.end(), mesh.indices.begin(), mesh.indices.end());
       }));
-  meshIndicesNeedUpload = false;
   return {};
 }
 
@@ -1435,8 +1435,8 @@ Expected<void> GpuScene::Impl::UploadMeshIndices(nvrhi::ICommandList* commandLis
 // face-normal path so meshes that authored no normals still render.
 Expected<void> GpuScene::Impl::UploadMeshVertexNormals(nvrhi::ICommandList* commandList)
 {
-  if (!meshVertexNormalsNeedUpload || meshSlots.SlotCount() <= 1u)
-    return {};
+  if (commitLowestDirtyMeshSlot >= meshSlots.SlotCount())
+    return {};  // no DirtyTopology mesh this commit.
 
   // Every mesh contributes EXACTLY vertexCount entries: min(normals,vc) copied,
   // the rest padded with zero (closesthit detects the zero magnitude and falls
@@ -1458,7 +1458,6 @@ Expected<void> GpuScene::Impl::UploadMeshVertexNormals(nvrhi::ICommandList* comm
           out.insert(out.end(), mesh.vertexCount - copyCount,
                      hlslpp::float4{0.0f, 0.0f, 0.0f, 0.0f});
       }));
-  meshVertexNormalsNeedUpload = false;
   return {};
 }
 
@@ -1472,8 +1471,8 @@ Expected<void> GpuScene::Impl::UploadMeshVertexNormals(nvrhi::ICommandList* comm
 // the zero-magnitude case and skips its TBN construction.
 Expected<void> GpuScene::Impl::UploadMeshTangents(nvrhi::ICommandList* commandList)
 {
-  if (!meshTangentsNeedUpload || meshSlots.SlotCount() <= 1u)
-    return {};
+  if (commitLowestDirtyMeshSlot >= meshSlots.SlotCount())
+    return {};  // no DirtyTopology mesh this commit.
 
   // Same vertexCount-per-mesh padding policy as the vertex-normal upload.
   PYXIS_TRY(gpuscene_detail::UploadMeshSideTable<hlslpp::float4>(
@@ -1492,7 +1491,6 @@ Expected<void> GpuScene::Impl::UploadMeshTangents(nvrhi::ICommandList* commandLi
           out.insert(out.end(), mesh.vertexCount - copyCount,
                      hlslpp::float4{0.0f, 0.0f, 0.0f, 0.0f});
       }));
-  meshTangentsNeedUpload = false;
   return {};
 }
 
