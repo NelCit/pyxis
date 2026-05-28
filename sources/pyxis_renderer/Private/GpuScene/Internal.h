@@ -93,6 +93,16 @@ struct GpuTextureComponent
   std::uint64_t  lastAccessTick = 0;
 };
 
+// RFC 0009 P4 — per-mesh Flecs component (POD identity). The heavy CPU/GPU mesh data
+// (positions/indices/attributes/buffers/BLAS/counts) is non-POD or hot-path, so it
+// lives in the slot-indexed `meshResources` side table; this component carries only
+// the content hash so meshes are queryable by identity (and DestroyMesh can drop the
+// dedup-map entry). The DirtyTopology tag marks an entity needing (re)upload + BLAS.
+struct GpuMeshComponent
+{
+  std::uint64_t descHash = 0;
+};
+
 }  // namespace pyxis
 
 namespace pyxis {
@@ -427,16 +437,13 @@ inline shaderinterop::LightGpu PackLightGpu(const LightDesc& desc,
 // NOLINTNEXTLINE(clang-analyzer-optin.performance.Padding)
 struct GpuScene::Impl
 {
-  // Per-mesh entry. Holds the CPU-side input MeshDesc spans + the
-  // NVRHI vertex/index buffers + BLAS handle.
-  struct MeshEntry
+  // RFC 0009 P4 — per-mesh resource record (the heavy CPU/GPU data). Slot-indexed in
+  // `meshResources`, paired with a GpuMeshComponent entity (meshSlots owns
+  // slot/generation/liveness; DirtyTopology marks (re)upload+BLAS). The old
+  // live/quarantined/generation/needsGpuUpload/needsBlasBuild fields moved to
+  // meshSlots + the DirtyTopology tag.
+  struct MeshResource
   {
-    bool         live           = false;
-    bool         quarantined    = false;
-    bool         needsGpuUpload = false;
-    bool         needsBlasBuild = false;
-    std::uint8_t generation     = 0;
-
     std::vector<hlslpp::float3>  positions;
     std::vector<std::uint32_t>   indices;
     std::vector<hlslpp::float3>  normals;
@@ -536,7 +543,6 @@ struct GpuScene::Impl
   // in-progress frame's activity.
   FrameStats lastFrameStats{};
 
-  std::vector<MeshEntry>     meshes;
   std::vector<InstanceEntry> instances;
   std::vector<VolumeEntry>   volumes;
 
@@ -562,6 +568,10 @@ struct GpuScene::Impl
   std::vector<nvrhi::TextureHandle> textureResources;     // the GPU texture per slot.
   std::vector<std::vector<std::uint8_t>> texturePixelData;  // transient; dropped post-upload.
   std::vector<std::string>          textureResolvedPaths;  // owned backing for keyCopy.resolvedPath.
+  // P4 — meshes (GpuMeshComponent). meshResources is the slot-indexed heavy CPU/GPU
+  // data; meshSlots owns slot/generation/liveness; DirtyTopology marks (re)upload+BLAS.
+  GpuSlotMap                        meshSlots{sceneWorld};
+  std::vector<MeshResource>         meshResources;
 
   // O(1) slot recycling. Each Destroy verb pushes the freed slot;
   // each Acquire / Append verb pops the latest one. Stack ordering
@@ -571,7 +581,6 @@ struct GpuScene::Impl
   // per-verb bodies would linear-scan their entry vectors looking
   // for a free slot — quadratic over the lifetime of an
   // append-heavy load.
-  std::vector<std::uint32_t> freeMeshSlots;
   std::vector<std::uint32_t> freeInstanceSlots;
   std::vector<std::uint32_t> freeVolumeSlots;
   // V2.A.5 — set when a fresh AddVolume needs CommitResources to
@@ -772,15 +781,22 @@ struct GpuScene::Impl
     return const_cast<Entry*>(entry);
   }
 
-  [[nodiscard]] const MeshEntry*     LookupMesh(MeshHandle handle) const noexcept
-  { return LookupEntryImpl(static_cast<uint32_t>(handle), meshes); }
   [[nodiscard]] const InstanceEntry* LookupInstance(InstanceHandle handle) const noexcept
   { return LookupEntryImpl(static_cast<uint32_t>(handle), instances); }
   [[nodiscard]] const VolumeEntry*   LookupVolume(VolumeHandle handle) const noexcept
   { return LookupEntryImpl(static_cast<uint32_t>(handle), volumes); }
 
-  [[nodiscard]] MeshEntry*     ResolveMesh(MeshHandle handle) noexcept
-  { return BumpIfStaleAndReturn(handle, LookupMesh(handle)); }
+  // RFC 0009 P4 — resolve a MeshHandle to its slot-indexed MeshResource (or null for
+  // Invalid/stale handles). Mirrors the old ResolveMesh contract via meshSlots.
+  [[nodiscard]] MeshResource* ResolveMeshResource(MeshHandle handle) noexcept
+  {
+    const flecs::entity entity = meshSlots.Resolve(static_cast<uint32_t>(handle));
+    if (entity.id() == 0)
+      return nullptr;
+    const uint32_t slot = GpuSlotMap::SlotOf(static_cast<uint32_t>(handle));
+    return slot < meshResources.size() ? &meshResources[slot] : nullptr;
+  }
+
   [[nodiscard]] InstanceEntry* ResolveInstance(InstanceHandle handle) noexcept
   { return BumpIfStaleAndReturn(handle, LookupInstance(handle)); }
   [[nodiscard]] VolumeEntry*   ResolveVolume(VolumeHandle handle) noexcept

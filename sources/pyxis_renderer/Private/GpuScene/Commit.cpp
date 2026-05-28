@@ -143,9 +143,10 @@ void GpuScene::Impl::Clear() noexcept
 
   // Mesh / instance / light / material / texture tables back to "slot
   // 0 sentinel only", matching ctor.
-  meshes.clear();
-  meshes.emplace_back();
-  meshes[0].quarantined = true;
+  // RFC 0009 P4 — meshes are Flecs entities; Reset destructs them + clears the
+  // slot-indexed resource records.
+  meshSlots.Reset();
+  meshResources.clear();
 
   instances.clear();
   instances.emplace_back();
@@ -179,7 +180,6 @@ void GpuScene::Impl::Clear() noexcept
   // would survive Clear() and the next Acquire/Append would pop a
   // slot that's now out of range for the cleared entry vector →
   // out-of-bounds `entries[slot]` → UB.
-  freeMeshSlots.clear();
   freeInstanceSlots.clear();
   freeVolumeSlots.clear();
   volumesNeedGpuUpload = false;
@@ -293,10 +293,14 @@ Expected<void> GpuScene::Impl::CommitResources(nvrhi::ICommandList* commandList)
 
 Expected<void> GpuScene::Impl::UploadPendingMeshes(nvrhi::ICommandList* commandList)
 {
-  for (MeshEntry& entry : meshes)
+  // RFC 0009 P4 — upload vertex/index buffers for DirtyTopology meshes. The tag is
+  // NOT cleared here: the BLAS-build pass (which runs after, same commit, and needs
+  // these buffers) clears DirtyTopology once the BLAS is built.
+  for (uint32_t slot = 1; slot < meshSlots.SlotCount(); ++slot)
   {
-    if (!entry.live || !entry.needsGpuUpload)
+    if (!meshSlots.IsLive(slot) || !meshSlots.EntityAtSlot(slot).has<scene::DirtyTopology>())
       continue;
+    MeshResource& entry = meshResources[slot];
 
     // Vertex buffer — hlslpp::float3 stride (16 bytes / vertex) on
     // x86_64 SSE. VK_FORMAT_R32G32B32_SFLOAT with that stride is
@@ -342,7 +346,6 @@ Expected<void> GpuScene::Impl::UploadPendingMeshes(nvrhi::ICommandList* commandL
 
     commandList->writeBuffer(entry.vertexBuffer.Get(), entry.positions.data(), vertexBytes);
     commandList->writeBuffer(entry.indexBuffer.Get(), entry.indices.data(), indexBytes);
-    entry.needsGpuUpload = false;
   }
   return {};
 }
@@ -938,10 +941,14 @@ Expected<void> GpuScene::Impl::BuildPendingBlas(nvrhi::ICommandList* commandList
   // the original buffer when its post-build-info read retires. Pyxis
   // does not query post-build sizes, does not allocate compacted
   // copies, does not free originals — RTXMU owns the lifecycle.
-  for (MeshEntry& entry : meshes)
+  // RFC 0009 P4 — build the BLAS for DirtyTopology meshes (vertex/index buffers were
+  // uploaded by the earlier pass this commit), then clear the tag.
+  for (uint32_t slot = 1; slot < meshSlots.SlotCount(); ++slot)
   {
-    if (!entry.live || entry.needsGpuUpload || !entry.needsBlasBuild)
+    const flecs::entity meshEntity = meshSlots.EntityAtSlot(slot);
+    if (!meshSlots.IsLive(slot) || !meshEntity.has<scene::DirtyTopology>())
       continue;
+    MeshResource& entry = meshResources[slot];
     if (!entry.vertexBuffer || !entry.indexBuffer)
     {
       return std::unexpected{
@@ -995,7 +1002,7 @@ Expected<void> GpuScene::Impl::BuildPendingBlas(nvrhi::ICommandList* commandList
 
     commandList->buildBottomLevelAccelStruct(entry.blas.Get(), &geometry, /*numGeometries*/ 1,
                                              buildFlags);
-    entry.needsBlasBuild = false;
+    meshEntity.remove<scene::DirtyTopology>();  // upload + BLAS both done this commit.
   }
   return {};
 }
@@ -1039,10 +1046,10 @@ Expected<void> GpuScene::Impl::RebuildTlasIfDirty(nvrhi::ICommandList* commandLi
       continue;
     const auto meshValue = static_cast<uint32_t>(inst.mesh);
     const uint32_t meshSlot = HandleSlot(meshValue);
-    if (meshSlot == 0 || meshSlot >= meshes.size())
+    if (meshSlot == 0 || meshSlot >= meshSlots.SlotCount() || !meshSlots.IsLive(meshSlot))
       continue;
-    const MeshEntry& mesh = meshes[meshSlot];
-    if (!mesh.live || !mesh.blas)
+    const MeshResource& mesh = meshResources[meshSlot];
+    if (!mesh.blas)
       continue;
 
     nvrhi::rt::InstanceDesc desc;
@@ -1166,16 +1173,16 @@ Expected<void> GpuScene::Impl::UploadMeshFaceNormals(nvrhi::ICommandList* comman
   // The +1 in the offsets sizing reserves slot 0 (the §19.7
   // sentinel mesh handle) so the closesthit's "no mesh assigned"
   // path resolves to offset 0 with a black/zero normal entry.
-  if (!meshFaceNormalsNeedUpload || meshes.empty())
+  if (!meshFaceNormalsNeedUpload || meshSlots.SlotCount() <= 1u)
     return {};
 
   std::vector<hlslpp::float4> packedNormals;
-  std::vector<std::uint32_t>  perMeshOffsets(meshes.size(), 0u);
-  for (std::size_t meshSlot = 0; meshSlot < meshes.size(); ++meshSlot)
+  std::vector<std::uint32_t>  perMeshOffsets(meshSlots.SlotCount(), 0u);
+  for (std::size_t meshSlot = 0; meshSlot < meshSlots.SlotCount(); ++meshSlot)
   {
     perMeshOffsets[meshSlot] = static_cast<std::uint32_t>(packedNormals.size());
-    const MeshEntry& mesh = meshes[meshSlot];
-    if (!mesh.live)
+    const MeshResource& mesh = meshResources[meshSlot];
+    if (!meshSlots.IsLive(static_cast<uint32_t>(meshSlot)))
       continue;
     packedNormals.insert(packedNormals.end(), mesh.faceNormals.begin(),
                          mesh.faceNormals.end());
@@ -1219,7 +1226,7 @@ Expected<void> GpuScene::Impl::UploadMeshFaceNormals(nvrhi::ICommandList* comman
 // gets a one-element fallback so the bindless layout is valid.
 Expected<void> GpuScene::Impl::UploadMeshUvs(nvrhi::ICommandList* commandList)
 {
-  if (!meshUvsNeedUpload || meshes.empty())
+  if (!meshUvsNeedUpload || meshSlots.SlotCount() <= 1u)
     return {};
 
   // Pack UVs TIGHT (8 bytes/element) to match the shader's
@@ -1234,12 +1241,12 @@ Expected<void> GpuScene::Impl::UploadMeshUvs(nvrhi::ICommandList* commandList)
   // contract directly.
   using gpuscene_detail::PackedUv;
   std::vector<PackedUv>       packedUvs;
-  std::vector<std::uint32_t>  perMeshOffsets(meshes.size(), 0u);
-  for (std::size_t meshSlot = 0; meshSlot < meshes.size(); ++meshSlot)
+  std::vector<std::uint32_t>  perMeshOffsets(meshSlots.SlotCount(), 0u);
+  for (std::size_t meshSlot = 0; meshSlot < meshSlots.SlotCount(); ++meshSlot)
   {
     perMeshOffsets[meshSlot] = static_cast<std::uint32_t>(packedUvs.size());
-    const MeshEntry& mesh = meshes[meshSlot];
-    if (!mesh.live)
+    const MeshResource& mesh = meshResources[meshSlot];
+    if (!meshSlots.IsLive(static_cast<uint32_t>(meshSlot)))
       continue;
     // Every mesh contributes EXACTLY vertexCount UV entries to the
     // flat buffer, even if mesh.uv0 is short. The closesthit reads
@@ -1283,16 +1290,16 @@ Expected<void> GpuScene::Impl::UploadMeshUvs(nvrhi::ICommandList* commandList)
 //   v0/1/2 = gMeshIndices[ofs + PrimitiveIndex()*3 + 0/1/2]
 Expected<void> GpuScene::Impl::UploadMeshIndices(nvrhi::ICommandList* commandList)
 {
-  if (!meshIndicesNeedUpload || meshes.empty())
+  if (!meshIndicesNeedUpload || meshSlots.SlotCount() <= 1u)
     return {};
 
   std::vector<std::uint32_t> packedIndices;
-  std::vector<std::uint32_t> perMeshOffsets(meshes.size(), 0u);
-  for (std::size_t meshSlot = 0; meshSlot < meshes.size(); ++meshSlot)
+  std::vector<std::uint32_t> perMeshOffsets(meshSlots.SlotCount(), 0u);
+  for (std::size_t meshSlot = 0; meshSlot < meshSlots.SlotCount(); ++meshSlot)
   {
     perMeshOffsets[meshSlot] = static_cast<std::uint32_t>(packedIndices.size());
-    const MeshEntry& mesh = meshes[meshSlot];
-    if (!mesh.live)
+    const MeshResource& mesh = meshResources[meshSlot];
+    if (!meshSlots.IsLive(static_cast<uint32_t>(meshSlot)))
       continue;
     packedIndices.insert(packedIndices.end(), mesh.indices.begin(), mesh.indices.end());
   }
@@ -1328,16 +1335,16 @@ Expected<void> GpuScene::Impl::UploadMeshIndices(nvrhi::ICommandList* commandLis
 // face-normal path so meshes that authored no normals still render.
 Expected<void> GpuScene::Impl::UploadMeshVertexNormals(nvrhi::ICommandList* commandList)
 {
-  if (!meshVertexNormalsNeedUpload || meshes.empty())
+  if (!meshVertexNormalsNeedUpload || meshSlots.SlotCount() <= 1u)
     return {};
 
   std::vector<hlslpp::float4> packedNormals;
-  std::vector<std::uint32_t>  perMeshOffsets(meshes.size(), 0u);
-  for (std::size_t meshSlot = 0; meshSlot < meshes.size(); ++meshSlot)
+  std::vector<std::uint32_t>  perMeshOffsets(meshSlots.SlotCount(), 0u);
+  for (std::size_t meshSlot = 0; meshSlot < meshSlots.SlotCount(); ++meshSlot)
   {
     perMeshOffsets[meshSlot] = static_cast<std::uint32_t>(packedNormals.size());
-    const MeshEntry& mesh = meshes[meshSlot];
-    if (!mesh.live)
+    const MeshResource& mesh = meshResources[meshSlot];
+    if (!meshSlots.IsLive(static_cast<uint32_t>(meshSlot)))
       continue;
     const std::size_t copyCount =
         std::min<std::size_t>(mesh.normals.size(), mesh.vertexCount);
@@ -1385,16 +1392,16 @@ Expected<void> GpuScene::Impl::UploadMeshVertexNormals(nvrhi::ICommandList* comm
 // the zero-magnitude case and skips its TBN construction.
 Expected<void> GpuScene::Impl::UploadMeshTangents(nvrhi::ICommandList* commandList)
 {
-  if (!meshTangentsNeedUpload || meshes.empty())
+  if (!meshTangentsNeedUpload || meshSlots.SlotCount() <= 1u)
     return {};
 
   std::vector<hlslpp::float4> packedTangents;
-  std::vector<std::uint32_t>  perMeshOffsets(meshes.size(), 0u);
-  for (std::size_t meshSlot = 0; meshSlot < meshes.size(); ++meshSlot)
+  std::vector<std::uint32_t>  perMeshOffsets(meshSlots.SlotCount(), 0u);
+  for (std::size_t meshSlot = 0; meshSlot < meshSlots.SlotCount(); ++meshSlot)
   {
     perMeshOffsets[meshSlot] = static_cast<std::uint32_t>(packedTangents.size());
-    const MeshEntry& mesh = meshes[meshSlot];
-    if (!mesh.live)
+    const MeshResource& mesh = meshResources[meshSlot];
+    if (!meshSlots.IsLive(static_cast<uint32_t>(meshSlot)))
       continue;
     const std::size_t copyCount =
         std::min<std::size_t>(mesh.tangents.size(), mesh.vertexCount);

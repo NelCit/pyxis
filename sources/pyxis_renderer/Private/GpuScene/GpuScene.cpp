@@ -42,16 +42,13 @@ GpuScene::GpuScene(nvrhi::IDevice* device, Profiler& profiler, const GpuSceneCre
   constexpr std::size_t INITIAL_INSTANCE_RESERVE = 4096;
   constexpr std::size_t INITIAL_MATERIAL_RESERVE = 512;
   constexpr std::size_t INITIAL_TEXTURE_RESERVE  = 1024;
-  _impl->meshes.reserve(INITIAL_MESH_RESERVE);
   _impl->instances.reserve(INITIAL_INSTANCE_RESERVE);
   _impl->meshDescHashToHandle.reserve(INITIAL_MESH_RESERVE);
   _impl->materialDescHashToHandle.reserve(INITIAL_MATERIAL_RESERVE);
   _impl->textureKeyHashToHandle.reserve(INITIAL_TEXTURE_RESERVE);
   // Slot 0 is the Invalid sentinel for the vector-backed handle tables — keep
   // each one permanently quarantined so a fabricated handle whose slot decodes
-  // to 0 never resolves.
-  _impl->meshes.emplace_back();
-  _impl->meshes[0].quarantined = true;
+  // to 0 never resolves. (Meshes use meshSlots, whose ctor reserves slot 0.)
   _impl->instances.emplace_back();
   _impl->instances[0].quarantined = true;
   // RFC 0009 P1 — lights live in `sceneWorld`; no sentinel slot needed (the
@@ -452,10 +449,9 @@ FrameStats GpuScene::LastFrameStats() const {
   // approximate from triangle count for the v1 panel. M8 perf-sweep
   // wires the real number via NVRHI's RTXMU pool-stats hook.
   constexpr uint64_t BLAS_BYTES_PER_TRIANGLE_ESTIMATE = 70;
-  for (const Impl::MeshEntry& entry : _impl->meshes)
-  {
-    if (!entry.live)
-      continue;
+  // RFC 0009 P4 — meshes are Flecs entities; walk live slots + their resource record.
+  _impl->meshSlots.ForEachLiveSlot([&](uint32_t slot, flecs::entity) {
+    const Impl::MeshResource& entry = _impl->meshResources[slot];
     ++liveMeshCount;
     if (entry.blas)
     {
@@ -467,7 +463,7 @@ FrameStats GpuScene::LastFrameStats() const {
       vertexBytes += entry.vertexBuffer->getDesc().byteSize;
     if (entry.indexBuffer)
       indexBytes += entry.indexBuffer->getDesc().byteSize;
-  }
+  });
   uint64_t liveInstanceCount = 0;
   for (const Impl::InstanceEntry& entry : _impl->instances)
   {
