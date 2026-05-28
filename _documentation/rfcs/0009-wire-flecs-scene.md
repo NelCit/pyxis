@@ -172,3 +172,26 @@ top of the now-Flecs-resident data, to be done as separate green checkpoints):
   lifecycle. Docs flipped (CLAUDE.md §2 map, plan_final.md §8).
 
 **All deferred follow-ups complete** — RFC 0009 is fully realised.
+
+### Post-review hardening + the real dirty-tag model
+
+A max-effort code review of the migration surfaced fixes (per-frame dome-texture
+alloc, a 5× per-commit mesh-table rescan, a texture-component round-trip, a TLAS
+refit count-mismatch guard, a dangling material `sourcePrim` view, an intra-phase
+ordering dependency, an unchecked `get<>()`), all addressed; `Internal.h` was then
+split into `Components.h` (the component PODs) + `Detail.h` (the `gpuscene_detail`
+helpers).
+
+The §8.1/§30.11 **dirty-tag model is now real** (it had been half-wired: `PhaseClearDirty`
+was empty and `DirtyTransform` was set-but-never-read/cleared). `Sys_ClearDirty` runs on
+`PhaseClearDirty`; the verbs tag `DirtyMaterial`/`DirtyLight`/`DirtyVisibility`/`DirtyTransform`
+(removals tag a persistent `removalSentinel`); and the upload/build gates read the tags
+(`count<Dirty*>()` for the coarse buffers + the TLAS; `LowestDirtyMeshSlot`/`DirtyTopology`
+for meshes) instead of the old `*NeedUpload`/`tlas*` bools, which are deleted. Fine-grained
+tags (`DirtyTopology`/`DirtyTexture`) are cleared by their consuming system; coarse tags by
+`Sys_ClearDirty`. The dead `DirtyTextureGpu` tag was removed; `PhaseUpdateBindless` stays a
+documented reserved no-op (the bindless table is bound by PathTracePass, not GpuScene). The
+instance side-table keeps one bool (`instanceMaterialNeedsUpload`) because its
+`UpdateInstanceMaterial` trigger is side-table-only and must not rebuild the TLAS, so it maps
+to no TLAS tag. Byte-identical throughout (300 unit + 442 golden/integration, incl. M2
+byte-equal EXR + M10 World Lobby).

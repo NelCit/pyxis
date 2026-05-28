@@ -16,7 +16,7 @@ Since RFC 0009 the `flecs::world` is owned by `GpuScene::Impl`, so the ECS now l
 - `sources/pyxis_renderer/Private/GpuScene/GpuSlotMap.h` — the Flecs-backed handle table every entity type uses (slot == GPU buffer index, §19.7)
 - `sources/pyxis_renderer/Private/Scene/Phases.h` — the `PhaseUpload*`/`PhaseExtractMeshes`/… custom pipeline tags + `RegisterPhasePipeline`
 - `sources/pyxis_renderer/Private/Scene/HandleBimap.h` — the light handle table
-- `sources/pyxis_renderer/Private/Scene/Components/Dirty.h` — the `Dirty<T>` zero-size tags (`DirtyTopology`/`DirtyTransform`/`DirtyTexture`)
+- `sources/pyxis_renderer/Private/Scene/Components/Dirty.h` — the `Dirty<T>` zero-size tags (`DirtyTopology`/`DirtyTransform`/`DirtyTexture`/`DirtyMaterial`/`DirtyVisibility`/`DirtyLight`)
 
 ## PR-blocking patterns to grep
 
@@ -36,7 +36,7 @@ Run these from the repo root with Grep:
 
 - Components: PascalCase POD struct (e.g. `GpuMeshComponent` in `GpuScene/Internal.h`); the `Dirty<T>` tags live in `Scene/Components/Dirty.h`, one type per declaration.
 - Systems: registered in `GpuScene/Commit.cpp::RegisterCommitPipeline()` as `Sys_VerbObject` run-callbacks bound to a phase (e.g. `Sys_BuildBlas`, `Sys_RebuildTlas`), each forwarding to an `Impl::Upload*`/`Build*` method.
-- `Dirty<T>` is a zero-size tag. After its phase's work commits, the tag is removed (e.g. `DirtyTopology` is cleared once the BLAS is built; `DirtyTexture` after the texture uploads).
+- `Dirty<T>` is a zero-size tag, cleared two ways: FINE-grained tags whose system processes only the tagged entities clear the tag themselves (`DirtyTopology` once the BLAS is built; `DirtyTexture` after upload); COARSE "buffer dirty?" tags (`DirtyTransform`/`DirtyVisibility`/`DirtyMaterial`/`DirtyLight`) are cleared by `Sys_ClearDirty` on `PhaseClearDirty`. A removal (which can't tag the dead entity) tags the persistent `removalSentinel` instead.
 - Prefer pair relationships `(Instance, MaterialOf, materialEntity)` over entity-field components.
 
 ## Phase pipeline (§30.11)
