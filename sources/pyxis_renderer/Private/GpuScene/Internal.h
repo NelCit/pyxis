@@ -91,7 +91,6 @@ struct GpuTextureComponent
   std::uint32_t  width          = 0;
   std::uint32_t  height         = 0;
   nvrhi::Format  format         = nvrhi::Format::UNKNOWN;
-  std::uint64_t  lastAccessTick = 0;
 };
 
 // RFC 0009 P4 — per-mesh Flecs component (POD identity). The heavy CPU/GPU mesh data
@@ -689,6 +688,9 @@ struct GpuScene::Impl
   nvrhi::ICommandList*              currentCommandList = nullptr;
   Expected<void>                    commitError{};
   bool                              commitPipelineRegistered = false;
+  // Review fix #3 — lowest DirtyTopology mesh slot, computed ONCE per commit so the
+  // five mesh side-table uploaders don't each rescan the whole mesh table.
+  uint32_t                          commitLowestDirtyMeshSlot = 0;
   // P2 — materials (GpuMaterialComponent). GpuSlotMap keeps slot == GPU buffer index
   // (gpuscene_detail encoding) so the packed material buffer + instance side-table
   // are byte-identical. `materialSourcePrims` is the slot-indexed owned-string table
@@ -703,6 +705,10 @@ struct GpuScene::Impl
   std::vector<nvrhi::TextureHandle> textureResources;     // the GPU texture per slot.
   std::vector<std::vector<std::uint8_t>> texturePixelData;  // transient; dropped post-upload.
   std::vector<std::string>          textureResolvedPaths;  // owned backing for keyCopy.resolvedPath.
+  // Review fix #4 — LRU access tick per texture slot. Mutable hot metadata lives in a
+  // side table (not GpuTextureComponent) so a cache hit bumps it with a plain write
+  // instead of a get<>()+set<>() round-trip that also re-persisted a fragile view.
+  std::vector<std::uint64_t>        textureLastAccessTick;
   // P4 — meshes (GpuMeshComponent). meshResources is the slot-indexed heavy CPU/GPU
   // data; meshSlots owns slot/generation/liveness; DirtyTopology marks (re)upload+BLAS.
   GpuSlotMap                        meshSlots{sceneWorld};
@@ -879,6 +885,16 @@ struct GpuScene::Impl
   // created once a transform edit actually needs refit capability.
   bool                         tlasStructureChanged = true;
   bool                         tlasAllowsUpdate     = false;
+  // Review fix #1 — instance count of the last TLAS build. A refit (PerformUpdate)
+  // is only valid against an identical instance count/topology, so a transform-only
+  // tick whose gathered count differs (e.g. DestroyMesh dropped a still-referenced
+  // mesh's BLAS, which does NOT set tlasStructureChanged) must full-rebuild, not refit.
+  uint32_t                     tlasBuiltInstanceCount = 0;
+  // Review fix #2 — cached single-dome env-map texture, refreshed once per commit
+  // (RefreshDomeEnvMapCache). GetDomeEnvMapTexture is read every frame by the
+  // PathTracePass binding path; recomputing there allocated + sorted the live-light
+  // set per frame.
+  nvrhi::ITexture*             domeEnvMapTexture = nullptr;
 
   // M6 audit closeout: separate dirty track for the instance→material
   // side-table buffer (binding 4). Kept distinct from tlasNeedsRebuild
@@ -984,7 +1000,11 @@ struct GpuScene::Impl
     const flecs::entity entity = textureSlots.Resolve(static_cast<uint32_t>(handle));
     if (entity.id() == 0)
       return shaderinterop::INVALID_BINDLESS_TEXTURE;
-    return entity.get<GpuTextureComponent>().bindlessSlot;
+    // Review fix #8 — try_get (not get) so a live entity that somehow lacks the
+    // component returns the fallback instead of dereferencing null: flecs get<T>()'s
+    // presence assert is compiled out under NDEBUG (release).
+    const GpuTextureComponent* component = entity.try_get<GpuTextureComponent>();
+    return component ? component->bindlessSlot : shaderinterop::INVALID_BINDLESS_TEXTURE;
   }
 
   // ---- Verb member functions (defined in per-verb .cpp files) ----------
@@ -1065,6 +1085,11 @@ struct GpuScene::Impl
   // append fast path: when this is >= the buffer's packedSlots, every dirty mesh is
   // a NEW tail slot and only that tail needs re-uploading (see UploadMeshSideTable).
   [[nodiscard]] uint32_t LowestDirtyMeshSlot() const noexcept;
+
+  // Review fix #2 — recompute the cached single-dome env-map texture (the first live
+  // Dome light with a resolved env-map, slot order). Called once at the end of each
+  // CommitResources; GetDomeEnvMapTexture() then returns the cached pointer.
+  void RefreshDomeEnvMapCache() noexcept;
 };
 
 }  // namespace pyxis

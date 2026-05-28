@@ -247,29 +247,13 @@ nvrhi::IBuffer* GpuScene::GetLightBuffer() const noexcept {
 }
 
 nvrhi::ITexture* GpuScene::GetDomeEnvMapTexture() const noexcept {
-  // Walk live LightEntries in slot order; return the first Dome with
-  // a valid + non-quarantined envMap-resolved texture. The miss
-  // shader's lat-long sample uses just one dome (the convention every
-  // production renderer follows — multiple domes is post-v1, §43).
-  // Returns nullptr when no dome with an env-map exists; PathTracePass
-  // binds a 1×1 black fallback in that case.
-  std::vector<std::pair<uint32_t, LightDesc>> liveLights;
-  _impl->CollectLiveLightsSorted(liveLights);
-  for (const auto& entry : liveLights)
-  {
-    if (entry.second.kind != LightDesc::Kind::Dome)
-      continue;
-    // RFC 0009 P3 — resolve the dome's envMap texture via the slot map + the GPU
-    // resource side table.
-    const flecs::entity texEntity =
-        _impl->textureSlots.Resolve(static_cast<uint32_t>(entry.second.envMap));
-    if (texEntity.id() == 0)
-      continue;
-    const uint32_t texSlot = GpuSlotMap::SlotOf(static_cast<uint32_t>(entry.second.envMap));
-    if (texSlot < _impl->textureResources.size() && _impl->textureResources[texSlot])
-      return _impl->textureResources[texSlot].Get();
-  }
-  return nullptr;
+  // The single-dome env-map texture (the first live Dome with a resolved env-map, slot
+  // order — the convention every production renderer follows; multiple domes is post-v1,
+  // §43). Review fix #2 — the selection is computed once per commit in
+  // RefreshDomeEnvMapCache and cached here; this accessor is on the per-frame
+  // PathTracePass binding path, so it must not allocate/sort. nullptr when no dome with
+  // an env-map exists → PathTracePass binds a 1×1 black fallback.
+  return _impl->domeEnvMapTexture;
 }
 
 nvrhi::ISampler* GpuScene::GetBindlessSampler() const noexcept {
@@ -386,10 +370,15 @@ OpenPBRMaterialDesc GpuScene::GetMaterialDescAt(uint32_t liveIndex) const noexce
   uint32_t walked = 0;
   OpenPBRMaterialDesc result{};
   bool found = false;
-  _impl->materialSlots.ForEachLiveSlot([&](uint32_t, flecs::entity entity) {
+  _impl->materialSlots.ForEachLiveSlot([&](uint32_t slot, flecs::entity entity) {
     if (!found && walked++ == liveIndex)
     {
       result = entity.get<GpuMaterialComponent>().desc;
+      // Review fix #5 — the stored desc.sourcePrim views materialSourcePrims[slot],
+      // which can move when that vector reallocates (dangling for SSO-short paths).
+      // Re-point at the CURRENT owned string so the returned view is always valid.
+      if (slot < _impl->materialSourcePrims.size())
+        result.sourcePrim = _impl->materialSourcePrims[slot];
       found = true;
     }
   });

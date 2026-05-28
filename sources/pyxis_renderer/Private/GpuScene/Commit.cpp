@@ -169,6 +169,7 @@ void GpuScene::Impl::Clear() noexcept
   textureResources.clear();
   texturePixelData.clear();
   textureResolvedPaths.clear();
+  textureLastAccessTick.clear();
 
   // RFC 0009 P6 — volumes are Flecs entities; Reset destructs them + clears records.
   volumeSlots.Reset();
@@ -216,12 +217,14 @@ void GpuScene::Impl::Clear() noexcept
   bindlessSampler = nullptr;
   domeSampler = nullptr;
   missingTexture = nullptr;
+  domeEnvMapTexture = nullptr;  // review fix #2 — drop the cached dome pointer.
 
   // TLAS + camera + dirty flags.
   tlas = nullptr;
   tlasNeedsRebuild = false;
   tlasStructureChanged = true;   // RFC 0009 — fresh scene → next build is a full rebuild.
   tlasAllowsUpdate = false;
+  tlasBuiltInstanceCount = 0;    // review fix #1 — no prior build to refit against.
   instanceMaterialNeedsUpload = false;
   hasCamera = false;
   cameraDesc = CameraDesc{};
@@ -275,9 +278,26 @@ Expected<void> GpuScene::Impl::CommitResources(nvrhi::ICommandList* commandList)
   // GPU buffers, so the output is byte-identical (verified against the golden suite).
   RegisterCommitPipeline();  // idempotent.
   currentCommandList = commandList;
-  commitError = {};
+
+  // Review fix #6 — the bindless fallbacks (slot-0 magenta + the samplers) must exist
+  // before any texture decode resolves to them. Run that setup explicitly here rather
+  // than as the first PhaseUploadTextures system, so the invariant no longer rests on
+  // Flecs intra-phase registration order. On failure the phase systems short-circuit
+  // (each checks `commitError` first).
+  commitError = EnsureBindlessFallbacks(commandList);
+
+  // Review fix #3 — compute the lowest DirtyTopology mesh slot ONCE (the five mesh
+  // side-table uploaders read this member instead of each rescanning the mesh table).
+  // DirtyTopology is still set here (BuildPendingBlas clears it later in progress()).
+  commitLowestDirtyMeshSlot = LowestDirtyMeshSlot();
+
   sceneWorld.progress();  // runs the commit systems in phase order.
   currentCommandList = nullptr;
+
+  // Review fix #2 — refresh the cached dome env-map once per commit, after texture
+  // upload has resolved it, so the per-frame PathTracePass binding path reads a cached
+  // pointer instead of allocating + sorting the live-light set every frame.
+  RefreshDomeEnvMapCache();
   return commitError;
 }
 
@@ -297,9 +317,9 @@ void GpuScene::Impl::RegisterCommitPipeline() noexcept
     commitError = (this->*commitFn)(currentCommandList);
   };
 
-  // PhaseUploadTextures — bindless fallbacks (slot-0 magenta) before texture decode.
-  sceneWorld.system("Sys_BindlessFallbacks").kind<scene::PhaseUploadTextures>().run(
-      [runStep](flecs::iter&) { runStep(&Impl::EnsureBindlessFallbacks); });
+  // PhaseUploadTextures — texture decode. The slot-0 magenta fallback + samplers are
+  // created by EnsureBindlessFallbacks, called explicitly before progress() (review
+  // fix #6), so this no longer depends on intra-phase system order.
   sceneWorld.system("Sys_UploadTextures").kind<scene::PhaseUploadTextures>().run(
       [runStep](flecs::iter&) { runStep(&Impl::UploadPendingTextures); });
 
@@ -334,6 +354,31 @@ void GpuScene::Impl::RegisterCommitPipeline() noexcept
   // PhaseRebuildTlas — needs the BLAS handles from BuildBlas.
   sceneWorld.system("Sys_RebuildTlas").kind<scene::PhaseRebuildTlas>().run(
       [runStep](flecs::iter&) { runStep(&Impl::RebuildTlasIfDirty); });
+}
+
+void GpuScene::Impl::RefreshDomeEnvMapCache() noexcept
+{
+  // Single-dome convention (§43): the first live Dome light (slot order) with a
+  // resolved + non-quarantined env-map texture. Computed once per commit; the
+  // per-frame GetDomeEnvMapTexture() accessor returns the cached pointer.
+  domeEnvMapTexture = nullptr;
+  std::vector<std::pair<uint32_t, LightDesc>> liveLights;
+  CollectLiveLightsSorted(liveLights);
+  for (const auto& entry : liveLights)
+  {
+    if (entry.second.kind != LightDesc::Kind::Dome)
+      continue;
+    const flecs::entity texEntity =
+        textureSlots.Resolve(static_cast<uint32_t>(entry.second.envMap));
+    if (texEntity.id() == 0)
+      continue;
+    const uint32_t texSlot = GpuSlotMap::SlotOf(static_cast<uint32_t>(entry.second.envMap));
+    if (texSlot < textureResources.size() && textureResources[texSlot])
+    {
+      domeEnvMapTexture = textureResources[texSlot].Get();
+      return;
+    }
+  }
 }
 
 // ============================================================================
@@ -1160,13 +1205,22 @@ Expected<void> GpuScene::Impl::RebuildTlasIfDirty(nvrhi::ICommandList* commandLi
                     instanceDescs.size(), TLAS_MAX_INSTANCES)};
   }
 
+  // Review fix #1 — a refit (PerformUpdate) is only valid against the SAME instance
+  // count/topology as the build it updates. tlasStructureChanged tracks add/remove/
+  // visibility, but DestroyMesh of a still-referenced mesh drops that instance from
+  // the gather (its BLAS goes away) WITHOUT setting the flag, so the gathered count can
+  // shrink under a transform-only tick. Fall back to a full rebuild when the count
+  // differs from the last build rather than issuing an invalid refit.
+  const bool countMatches =
+      static_cast<uint32_t>(instanceDescs.size()) == tlasBuiltInstanceCount;
   auto buildFlags = nvrhi::rt::AccelStructBuildFlags::PreferFastTrace;
   if (tlasAllowsUpdate)
     buildFlags = buildFlags | nvrhi::rt::AccelStructBuildFlags::AllowUpdate;
-  if (canRefit)
+  if (canRefit && countMatches)
     buildFlags = buildFlags | nvrhi::rt::AccelStructBuildFlags::PerformUpdate;  // refit in place.
   commandList->buildTopLevelAccelStruct(tlas.Get(), instanceDescs.data(),
                                         instanceDescs.size(), buildFlags);
+  tlasBuiltInstanceCount = static_cast<uint32_t>(instanceDescs.size());
   tlasNeedsRebuild = false;
   tlasStructureChanged = false;  // next transform-only edit may refit.
   return {};
@@ -1259,7 +1313,7 @@ Expected<void> GpuScene::Impl::UploadMeshFaceNormals(nvrhi::ICommandList* comman
     return {};
 
   PYXIS_TRY(gpuscene_detail::UploadMeshSideTable<hlslpp::float4>(
-      device, commandList, meshSlots, LowestDirtyMeshSlot(), meshFaceNormalsPackedSlots,
+      device, commandList, meshSlots, commitLowestDirtyMeshSlot, meshFaceNormalsPackedSlots,
       meshFaceNormalsBuffer, meshFaceOffsetsBuffer, hlslpp::float4{0.0f, 0.0f, 0.0f, 0.0f},
       "GpuScene.meshFaceNormalsBuffer", "meshFaceNormalsBuffer",
       "GpuScene.meshFaceOffsetsBuffer", "meshFaceOffsetsBuffer",
@@ -1305,7 +1359,7 @@ Expected<void> GpuScene::Impl::UploadMeshUvs(nvrhi::ICommandList* commandList)
   // stays aligned to its vertex range — countOf must equal that.
   using gpuscene_detail::PackedUv;
   PYXIS_TRY(gpuscene_detail::UploadMeshSideTable<PackedUv>(
-      device, commandList, meshSlots, LowestDirtyMeshSlot(), meshUvsPackedSlots,
+      device, commandList, meshSlots, commitLowestDirtyMeshSlot, meshUvsPackedSlots,
       meshUvsBuffer, meshUvOffsetsBuffer, PackedUv{0.0f, 0.0f},
       "GpuScene.meshUvsBuffer", "meshUvsBuffer",
       "GpuScene.meshUvOffsetsBuffer", "meshUvOffsetsBuffer",
@@ -1337,7 +1391,7 @@ Expected<void> GpuScene::Impl::UploadMeshIndices(nvrhi::ICommandList* commandLis
     return {};
 
   PYXIS_TRY(gpuscene_detail::UploadMeshSideTable<std::uint32_t>(
-      device, commandList, meshSlots, LowestDirtyMeshSlot(), meshIndicesPackedSlots,
+      device, commandList, meshSlots, commitLowestDirtyMeshSlot, meshIndicesPackedSlots,
       meshIndicesBuffer, meshIndexOffsetsBuffer, 0u,
       "GpuScene.meshIndicesBuffer", "meshIndicesBuffer",
       "GpuScene.meshIndexOffsetsBuffer", "meshIndexOffsetsBuffer",
@@ -1371,7 +1425,7 @@ Expected<void> GpuScene::Impl::UploadMeshVertexNormals(nvrhi::ICommandList* comm
   // the rest padded with zero (closesthit detects the zero magnitude and falls
   // back to the M7 face-normal path). countOf must mirror that = vertexCount.
   PYXIS_TRY(gpuscene_detail::UploadMeshSideTable<hlslpp::float4>(
-      device, commandList, meshSlots, LowestDirtyMeshSlot(), meshVertexNormalsPackedSlots,
+      device, commandList, meshSlots, commitLowestDirtyMeshSlot, meshVertexNormalsPackedSlots,
       meshVertexNormalsBuffer, meshVertexNormalOffsetsBuffer,
       hlslpp::float4{0.0f, 0.0f, 0.0f, 0.0f},
       "GpuScene.meshVertexNormalsBuffer", "meshVertexNormalsBuffer",
@@ -1406,7 +1460,7 @@ Expected<void> GpuScene::Impl::UploadMeshTangents(nvrhi::ICommandList* commandLi
 
   // Same vertexCount-per-mesh padding policy as the vertex-normal upload.
   PYXIS_TRY(gpuscene_detail::UploadMeshSideTable<hlslpp::float4>(
-      device, commandList, meshSlots, LowestDirtyMeshSlot(), meshTangentsPackedSlots,
+      device, commandList, meshSlots, commitLowestDirtyMeshSlot, meshTangentsPackedSlots,
       meshTangentsBuffer, meshTangentOffsetsBuffer, hlslpp::float4{0.0f, 0.0f, 0.0f, 0.0f},
       "GpuScene.meshTangentsBuffer", "meshTangentsBuffer",
       "GpuScene.meshTangentOffsetsBuffer", "meshTangentOffsetsBuffer",

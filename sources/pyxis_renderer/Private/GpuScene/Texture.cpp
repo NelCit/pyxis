@@ -23,13 +23,15 @@ namespace {
 // Grow the slot-indexed texture side tables so [slot] is addressable.
 void EnsureTextureSideTables(std::vector<nvrhi::TextureHandle>& resources,
                              std::vector<std::vector<std::uint8_t>>& pixels,
-                             std::vector<std::string>& paths, uint32_t slot)
+                             std::vector<std::string>& paths,
+                             std::vector<std::uint64_t>& accessTicks, uint32_t slot)
 {
   if (resources.size() <= slot)
   {
     resources.resize(slot + 1u);
     pixels.resize(slot + 1u);
     paths.resize(slot + 1u);
+    accessTicks.resize(slot + 1u);
   }
 }
 
@@ -44,12 +46,14 @@ TextureHandle GpuScene::Impl::AcquireTexture(const TextureKey& textureKey)
   ++nextTextureAccessTick;
   if (auto found = textureKeyHashToHandle.find(hash); found != textureKeyHashToHandle.end())
   {
+    // Review fix #4 — bump the LRU tick with a plain side-table write; no
+    // get<>()+set<>() component round-trip (which also re-persisted a fragile view).
     if (const flecs::entity hit = textureSlots.Resolve(static_cast<uint32_t>(found->second));
         hit.id() != 0)
     {
-      GpuTextureComponent component = hit.get<GpuTextureComponent>();
-      component.lastAccessTick = nextTextureAccessTick;
-      hit.set<GpuTextureComponent>(component);
+      const uint32_t slot = GpuSlotMap::SlotOf(static_cast<uint32_t>(found->second));
+      if (slot < textureLastAccessTick.size())
+        textureLastAccessTick[slot] = nextTextureAccessTick;
     }
     ++lruHitCount;
     return found->second;
@@ -61,15 +65,16 @@ TextureHandle GpuScene::Impl::AcquireTexture(const TextureKey& textureKey)
   if (handle == 0)
     return TextureHandle::Invalid;  // slot space exhausted (§18.5).
   const uint32_t slot = GpuSlotMap::SlotOf(handle);
-  EnsureTextureSideTables(textureResources, texturePixelData, textureResolvedPaths, slot);
+  EnsureTextureSideTables(textureResources, texturePixelData, textureResolvedPaths,
+                          textureLastAccessTick, slot);
   textureResolvedPaths[slot].assign(textureKey.resolvedPath);
+  textureLastAccessTick[slot] = nextTextureAccessTick;  // review fix #4 — LRU side table.
 
   GpuTextureComponent component;
   component.keyCopy = textureKey;
   component.keyCopy.resolvedPath = textureResolvedPaths[slot];  // re-point at owned copy.
   component.keyHash = hash;
   component.bindlessSlot = slot;  // bindless slot = handle slot for M5.
-  component.lastAccessTick = nextTextureAccessTick;
   entity.set<GpuTextureComponent>(component);
   entity.add<scene::DirtyTexture>();  // pending decode/upload.
 
@@ -95,6 +100,8 @@ void GpuScene::Impl::DestroyTexture(TextureHandle textureHandle)
     textureResolvedPaths[slot].clear();
     texturePixelData[slot].clear();
     texturePixelData[slot].shrink_to_fit();
+    if (slot < textureLastAccessTick.size())
+      textureLastAccessTick[slot] = 0u;
   }
   textureSlots.Free(static_cast<uint32_t>(textureHandle));  // destructs entity, bumps gen.
 }
@@ -122,7 +129,9 @@ std::uint32_t GpuScene::Impl::EvictColdTextures(std::uint64_t targetBytes) noexc
     const std::uint64_t entryBytes =
         static_cast<std::uint64_t>(component.width) * component.height * 4u;
     totalBytes += entryBytes;
-    candidates.push_back({component.lastAccessTick, slot, entryBytes});
+    const std::uint64_t accessTick =
+        slot < textureLastAccessTick.size() ? textureLastAccessTick[slot] : 0u;  // review fix #4.
+    candidates.push_back({accessTick, slot, entryBytes});
   });
 
   if (totalBytes <= targetBytes)
