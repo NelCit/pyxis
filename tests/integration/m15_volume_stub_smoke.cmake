@@ -42,11 +42,15 @@ if(_exr_bytes LESS 16384)
     message(FATAL_ERROR "m15_volume_stub_smoke: EXR implausibly small (${_exr_bytes} B)")
 endif()
 
-# Volume-skipped warning must fire.
-string(REGEX MATCH "UsdVolVolume[^\n]*detected but not yet rendered" _vol "${_stdout}")
+# Volume detect-warn-skip must fire. This fixture authors a UsdVolVolume with no
+# OpenVDBAsset child (see the .usda), so StageWalker takes the skip branch and warns
+# "has no OpenVDBAsset field-relationships; skipping." (The load branch — used when a
+# .vdb IS bound — instead logs "... bound at VolumeHandle=N"; accept either so the
+# test asserts the volume was detected + handled, not silently dropped.)
+string(REGEX MATCH "UsdVolVolume[^\n]*(has no OpenVDBAsset field-relationships; skipping|bound at VolumeHandle=)" _vol "${_stdout}")
 if(NOT _vol)
     message(FATAL_ERROR
-        "m15_volume_stub_smoke: expected the UsdVolVolume detect-warn log line; "
+        "m15_volume_stub_smoke: expected the UsdVolVolume detect-warn/skip log line; "
         "stub likely regressed.\nSTDOUT:\n${_stdout}")
 endif()
 
