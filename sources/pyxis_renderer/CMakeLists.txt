@@ -64,9 +64,12 @@ target_sources(pyxis_renderer PRIVATE
     # M3 — GpuScene canonical scene-mutation API. PIMPL'd per §18.9;
     # mesh upload + BLAS build + TLAS rebuild are wired here at M3,
     # materials + textures fill in at M5+. Per-verb bodies are split
-    # into sibling files; Internal.h holds the shared `struct Impl` +
-    # hashing/packing helpers every verb file needs.
+    # into sibling files; Internal.h holds the shared `struct Impl`, with
+    # the Flecs component PODs (Components.h) and the gpuscene_detail
+    # hashing/packing/buffer helpers (Detail.h) split into sibling headers.
     Private/GpuScene/Internal.h
+    Private/GpuScene/Components.h
+    Private/GpuScene/Detail.h
     Private/GpuScene/GpuScene.cpp
     Private/GpuScene/Mesh.cpp
     Private/GpuScene/Material.cpp
