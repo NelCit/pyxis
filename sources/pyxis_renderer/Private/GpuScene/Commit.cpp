@@ -151,9 +151,10 @@ void GpuScene::Impl::Clear() noexcept
   instances.emplace_back();
   instances[0].quarantined = true;
 
-  lights.clear();
-  lights.emplace_back();
-  lights[0].quarantined = true;
+  // RFC 0009 P1 — lights are Flecs entities; delete them all + reset the slot map
+  // (no slot-0 sentinel: HandleBimap encodes slot+1 so handle 0 stays Invalid).
+  lightWorld.delete_with<GpuLightComponent>();
+  lightHandles = scene::HandleBimap{};
 
   materials.clear();
   textures.clear();
@@ -172,7 +173,6 @@ void GpuScene::Impl::Clear() noexcept
   freeInstanceSlots.clear();
   freeMaterialSlots.clear();
   freeTextureSlots.clear();
-  freeLightSlots.clear();
   freeVolumeSlots.clear();
   volumesNeedGpuUpload = false;
 
@@ -870,15 +870,16 @@ Expected<void> GpuScene::Impl::UploadLightBuffer(nvrhi::ICommandList* commandLis
   if (!lightsNeedGpuUpload)
     return {};
 
+  // RFC 0009 P1 — pack from the slot-sorted Flecs query (was: iterate `lights`).
+  // Same order (live lights in slot order) → byte-identical LightGpu buffer.
+  std::vector<std::pair<uint32_t, LightDesc>> liveLights;
+  CollectLiveLightsSorted(liveLights);
   std::vector<shaderinterop::LightGpu> packedLights;
-  packedLights.reserve(lights.size());
-  for (const LightEntry& entry : lights)
+  packedLights.reserve(liveLights.size());
+  for (const auto& entry : liveLights)
   {
-    if (!entry.live)
-      continue;
-    const std::uint32_t envMapSlot =
-        ResolveTextureBindlessSlot(entry.descCopy.envMap);
-    packedLights.push_back(PackLightGpu(entry.descCopy, envMapSlot));
+    const std::uint32_t envMapSlot = ResolveTextureBindlessSlot(entry.second.envMap);
+    packedLights.push_back(PackLightGpu(entry.second, envMapSlot));
   }
   if (!packedLights.empty())
   {

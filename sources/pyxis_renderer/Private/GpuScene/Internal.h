@@ -33,13 +33,36 @@
 
 #include <nvrhi/nvrhi.h>
 
+// RFC 0009 — the Flecs SceneWorld is the scene representation. P1 migrates LIGHTS:
+// they live as entities in `lightWorld` (component below) rather than a std::vector,
+// with HandleBimap owning slot/generation. flecs is a PRIVATE renderer dep, so this
+// header (Private only, §18.9) may include it; no Flecs type reaches Public/.
+#include "Scene/HandleBimap.h"
+
+#include <flecs.h>
+
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
+
+namespace pyxis {
+
+// RFC 0009 P1 — per-light Flecs component. Stores the encoded handle (so the editor
+// accessors return it directly) + the canonical LightDesc (no mirror struct: the
+// existing PackLightGpu consumes it unchanged → byte-identical light buffer). The
+// sort key for deterministic packing is HandleBimap::SlotIndex(handle).
+struct GpuLightComponent
+{
+  uint32_t  handle = 0;
+  LightDesc desc{};
+};
+
+}  // namespace pyxis
 
 namespace pyxis {
 
@@ -425,13 +448,9 @@ struct GpuScene::Impl
     std::string      debugName;
   };
 
-  struct LightEntry
-  {
-    bool         live        = false;
-    bool         quarantined = false;
-    std::uint8_t generation  = 0;
-    LightDesc    descCopy{};
-  };
+  // RFC 0009 P1 — lights are no longer a std::vector<LightEntry>; they live as
+  // GpuLightComponent entities in `lightWorld` (see members below). LightEntry,
+  // the `lights` vector, `freeLightSlots`, LookupLight and ResolveLight are gone.
 
   // V2.A.5 — UsdVolVolume / OpenVDBAsset slot. Owns the dense float
   // voxel buffer (CPU-side, dropped after upload) + the NVRHI 3D
@@ -519,10 +538,17 @@ struct GpuScene::Impl
 
   std::vector<MeshEntry>     meshes;
   std::vector<InstanceEntry> instances;
-  std::vector<LightEntry>    lights;
   std::vector<MaterialEntry> materials;
   std::vector<TextureEntry>  textures;
   std::vector<VolumeEntry>   volumes;
+
+  // RFC 0009 P1 — lights live here as GpuLightComponent entities (not a vector).
+  // `lightHandles` owns slot/generation + handle<->entity (§8.2). `lightQuery` is
+  // built once (ctor) so no per-frame query construction (§30.11). Declaration
+  // order matters: the query must destruct before the world it references.
+  flecs::world                      lightWorld;
+  scene::HandleBimap                lightHandles;
+  flecs::query<GpuLightComponent>   lightQuery;
 
   // O(1) slot recycling. Each Destroy verb pushes the freed slot;
   // each Acquire / Append verb pops the latest one. Stack ordering
@@ -536,7 +562,6 @@ struct GpuScene::Impl
   std::vector<std::uint32_t> freeInstanceSlots;
   std::vector<std::uint32_t> freeMaterialSlots;
   std::vector<std::uint32_t> freeTextureSlots;
-  std::vector<std::uint32_t> freeLightSlots;
   std::vector<std::uint32_t> freeVolumeSlots;
   // V2.A.5 — set when a fresh AddVolume needs CommitResources to
   // create the matching nvrhi::TextureHandle + write the dense
@@ -744,8 +769,6 @@ struct GpuScene::Impl
   { return LookupEntryImpl(static_cast<uint32_t>(handle), textures); }
   [[nodiscard]] const InstanceEntry* LookupInstance(InstanceHandle handle) const noexcept
   { return LookupEntryImpl(static_cast<uint32_t>(handle), instances); }
-  [[nodiscard]] const LightEntry*    LookupLight(LightHandle handle) const noexcept
-  { return LookupEntryImpl(static_cast<uint32_t>(handle), lights); }
   [[nodiscard]] const VolumeEntry*   LookupVolume(VolumeHandle handle) const noexcept
   { return LookupEntryImpl(static_cast<uint32_t>(handle), volumes); }
 
@@ -757,10 +780,14 @@ struct GpuScene::Impl
   { return BumpIfStaleAndReturn(handle, LookupTexture(handle)); }
   [[nodiscard]] InstanceEntry* ResolveInstance(InstanceHandle handle) noexcept
   { return BumpIfStaleAndReturn(handle, LookupInstance(handle)); }
-  [[nodiscard]] LightEntry*    ResolveLight(LightHandle handle) noexcept
-  { return BumpIfStaleAndReturn(handle, LookupLight(handle)); }
   [[nodiscard]] VolumeEntry*   ResolveVolume(VolumeHandle handle) noexcept
   { return BumpIfStaleAndReturn(handle, LookupVolume(handle)); }
+
+  // RFC 0009 P1 — collect live lights as (encoded handle, desc) sorted by slot
+  // index, the deterministic order the GPU light buffer + editor accessors need
+  // (replaces iterating the old `lights` vector in slot order). ~30 lights, so the
+  // collect+sort is negligible; called per-commit (packing) + per-frame (editor).
+  void CollectLiveLightsSorted(std::vector<std::pair<uint32_t, LightDesc>>& out);
 
   // Resolve a TextureHandle to its bindless slot index, or to
   // INVALID_BINDLESS_TEXTURE for Invalid / out-of-range / dead

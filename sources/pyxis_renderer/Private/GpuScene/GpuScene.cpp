@@ -42,24 +42,24 @@ GpuScene::GpuScene(nvrhi::IDevice* device, Profiler& profiler, const GpuSceneCre
   constexpr std::size_t INITIAL_INSTANCE_RESERVE = 4096;
   constexpr std::size_t INITIAL_MATERIAL_RESERVE = 512;
   constexpr std::size_t INITIAL_TEXTURE_RESERVE  = 1024;
-  constexpr std::size_t INITIAL_LIGHT_RESERVE    = 256;
   _impl->meshes.reserve(INITIAL_MESH_RESERVE);
   _impl->instances.reserve(INITIAL_INSTANCE_RESERVE);
   _impl->materials.reserve(INITIAL_MATERIAL_RESERVE);
   _impl->textures.reserve(INITIAL_TEXTURE_RESERVE);
-  _impl->lights.reserve(INITIAL_LIGHT_RESERVE);
   _impl->meshDescHashToHandle.reserve(INITIAL_MESH_RESERVE);
   _impl->materialDescHashToHandle.reserve(INITIAL_MATERIAL_RESERVE);
   _impl->textureKeyHashToHandle.reserve(INITIAL_TEXTURE_RESERVE);
-  // Slot 0 is the Invalid sentinel for every handle table — keep
-  // each one permanently quarantined so a fabricated handle whose
-  // slot decodes to 0 never resolves.
+  // Slot 0 is the Invalid sentinel for the vector-backed handle tables — keep
+  // each one permanently quarantined so a fabricated handle whose slot decodes
+  // to 0 never resolves.
   _impl->meshes.emplace_back();
   _impl->meshes[0].quarantined = true;
   _impl->instances.emplace_back();
   _impl->instances[0].quarantined = true;
-  _impl->lights.emplace_back();
-  _impl->lights[0].quarantined = true;
+  // RFC 0009 P1 — lights live in `lightWorld`; no sentinel slot needed (the
+  // HandleBimap encodes slot+1 so handle 0 stays Invalid). Build the cached
+  // light query ONCE here (§30.11: never inside a per-frame body).
+  _impl->lightQuery = _impl->lightWorld.query<GpuLightComponent>();
 }
 
 // Out-of-line dtor so unique_ptr<Impl>'s deleter sees the complete
@@ -265,11 +265,13 @@ nvrhi::ITexture* GpuScene::GetDomeEnvMapTexture() const noexcept {
   // production renderer follows — multiple domes is post-v1, §43).
   // Returns nullptr when no dome with an env-map exists; PathTracePass
   // binds a 1×1 black fallback in that case.
-  for (const Impl::LightEntry& entry : _impl->lights)
+  std::vector<std::pair<uint32_t, LightDesc>> liveLights;
+  _impl->CollectLiveLightsSorted(liveLights);
+  for (const auto& entry : liveLights)
   {
-    if (!entry.live || entry.descCopy.kind != LightDesc::Kind::Dome)
+    if (entry.second.kind != LightDesc::Kind::Dome)
       continue;
-    const Impl::TextureEntry* tex = _impl->LookupTexture(entry.descCopy.envMap);
+    const Impl::TextureEntry* tex = _impl->LookupTexture(entry.second.envMap);
     if (tex != nullptr && tex->texture)
       return tex->texture.Get();
   }
@@ -352,40 +354,23 @@ nvrhi::ITexture* GpuScene::GetBindlessTextureAt(uint32_t bindlessSlot) const noe
 // default-init. v1 uses these only from the viewer's editor panel
 // (call frequency = once per frame) so the linear walk is fine.
 uint32_t GpuScene::GetLiveLightCount() const noexcept {
-  uint32_t count = 0;
-  for (const Impl::LightEntry& entry : _impl->lights)
-  {
-    if (entry.live)
-      ++count;
-  }
-  return count;
+  return _impl->lightHandles.LiveCount();
 }
 
 LightHandle GpuScene::GetLightHandleAt(uint32_t liveIndex) const noexcept {
-  uint32_t walked = 0;
-  for (uint32_t slot = 0; slot < _impl->lights.size(); ++slot)
-  {
-    const Impl::LightEntry& entry = _impl->lights[slot];
-    if (!entry.live)
-      continue;
-    if (walked == liveIndex)
-      return static_cast<LightHandle>(HandleEncode(slot, entry.generation));
-    ++walked;
-  }
-  return LightHandle::Invalid;
+  std::vector<std::pair<uint32_t, LightDesc>> liveLights;
+  _impl->CollectLiveLightsSorted(liveLights);
+  if (liveIndex >= liveLights.size())
+    return LightHandle::Invalid;
+  return static_cast<LightHandle>(liveLights[liveIndex].first);
 }
 
 LightDesc GpuScene::GetLightDescAt(uint32_t liveIndex) const noexcept {
-  uint32_t walked = 0;
-  for (const Impl::LightEntry& entry : _impl->lights)
-  {
-    if (!entry.live)
-      continue;
-    if (walked == liveIndex)
-      return entry.descCopy;
-    ++walked;
-  }
-  return LightDesc{};
+  std::vector<std::pair<uint32_t, LightDesc>> liveLights;
+  _impl->CollectLiveLightsSorted(liveLights);
+  if (liveIndex >= liveLights.size())
+    return LightDesc{};
+  return liveLights[liveIndex].second;
 }
 
 uint32_t GpuScene::GetLiveMaterialCount() const noexcept {
@@ -491,12 +476,8 @@ FrameStats GpuScene::LastFrameStats() const {
     if (entry.live)
       ++liveInstanceCount;
   }
-  uint64_t liveLightCount = 0;
-  for (const Impl::LightEntry& entry : _impl->lights)
-  {
-    if (entry.live)
-      ++liveLightCount;
-  }
+  // RFC 0009 P1 — lights are Flecs entities; the bimap tracks the live count O(1).
+  const uint64_t liveLightCount = _impl->lightHandles.LiveCount();
   uint64_t liveMaterialCount = 0;
   for (const Impl::MaterialEntry& entry : _impl->materials)
   {
