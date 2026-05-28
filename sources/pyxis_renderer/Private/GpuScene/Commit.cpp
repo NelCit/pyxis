@@ -161,7 +161,13 @@ void GpuScene::Impl::Clear() noexcept
   materialSlots.Reset();
   materialSourcePrims.clear();
 
-  textures.clear();
+  // RFC 0009 P3 — textures are Flecs entities; Reset destructs them + clears the
+  // slot-indexed GPU-resource side tables.
+  textureSlots.Reset();
+  textureResources.clear();
+  texturePixelData.clear();
+  textureResolvedPaths.clear();
+
   volumes.clear();
 
   materialDescHashToHandle.clear();
@@ -175,7 +181,6 @@ void GpuScene::Impl::Clear() noexcept
   // out-of-bounds `entries[slot]` → UB.
   freeMeshSlots.clear();
   freeInstanceSlots.clear();
-  freeTextureSlots.clear();
   freeVolumeSlots.clear();
   volumesNeedGpuUpload = false;
 
@@ -438,33 +443,47 @@ Expected<void> GpuScene::Impl::UploadPendingTextures(nvrhi::ICommandList* comman
   //   phase 2 (serial)  : createTexture + writeTexture from that POD
   // Decode dominated first-frame load on the World Lobby (~16 s of the
   // 27 s pass); spreading it over the asset-decode pool is the win.
-  std::vector<TextureEntry*> dirty;
-  dirty.reserve(textures.size());
-  for (TextureEntry& entry : textures)
+  // RFC 0009 P3 — snapshot dirty texture slots (entities tagged DirtyTexture that
+  // have a resolved path) up front. The parallel decode below touches NO Flecs /
+  // component state — only this snapshot + the local prep[] — because flecs is not
+  // safe for concurrent component access. Component metadata is written serially.
+  struct DirtyTex
   {
-    if (!entry.live || !entry.needsGpuUpload || entry.resolvedPath.empty())
-      continue;
-    dirty.push_back(&entry);
-  }
+    uint32_t          slot = 0;
+    std::string       path;
+    TextureKey::Role  role = TextureKey::Role::BaseColor;
+  };
+  std::vector<DirtyTex> dirty;
+  textureSlots.ForEachLiveSlot([&](uint32_t slot, flecs::entity entity) {
+    if (!entity.has<scene::DirtyTexture>())
+      return;
+    if (slot >= textureResolvedPaths.size() || textureResolvedPaths[slot].empty())
+      return;
+    dirty.push_back({slot, textureResolvedPaths[slot],
+                     entity.get<GpuTextureComponent>().keyCopy.role});
+  });
 
   struct PreparedTexUpload
   {
     std::vector<std::vector<std::uint8_t>> levelBytes;
     std::vector<std::size_t>               levelPitch;
     nvrhi::Format                          texFormat = nvrhi::Format::UNKNOWN;
-    bool                                   ready     = false;
+    std::uint32_t                          width     = 0;
+    std::uint32_t                          height    = 0;
+    bool                                   ready     = false;  // false ⇒ decode failed.
   };
   std::vector<PreparedTexUpload> prep(dirty.size());
 
-  // Per-entry CPU preparation. Pure compute + thread-safe library calls
-  // (stb_image, tinyexr LoadEXR, EncodeBCn, DownsampleRgba8Half); each
-  // invocation owns its TextureEntry and PreparedTexUpload slot, so there
-  // is no cross-entry sharing. spdlog (Logging::Get()) is thread-safe.
-  const auto prepareEntry = [this](TextureEntry& entry, PreparedTexUpload& out)
+  // Per-entry CPU preparation. Pure compute + thread-safe library calls (stb_image,
+  // tinyexr LoadEXR, EncodeBCn, DownsampleRgba8Half) over the snapshot; each
+  // invocation owns its DirtyTex + PreparedTexUpload slot, no cross-entry sharing,
+  // no Flecs access. spdlog (Logging::Get()) is thread-safe.
+  const bool compressTextures = desc.compressTextures;
+  const auto prepareEntry = [compressTextures](const DirtyTex& dirtyTex, PreparedTexUpload& out)
   {
     // Sniff extension — `.exr` → tinyexr; `.dds` → V2.A.14 BCn
     // passthrough; everything else → stb_image.
-    const std::string& path = entry.resolvedPath;
+    const std::string& path = dirtyTex.path;
     const bool isExr = path.size() >= 4
         && (path.compare(path.size() - 4, 4, ".exr") == 0
             || path.compare(path.size() - 4, 4, ".EXR") == 0);
@@ -489,8 +508,6 @@ Expected<void> GpuScene::Impl::UploadPendingTextures(nvrhi::ICommandList* comman
         Logging::Get().Warn(log::RENDER,
                             std::string{"TextureCache: DDS open failed for "} + path
                                 + " — falling back to missing-texture (slot 0).");
-        entry.needsGpuUpload = false;
-        entry.bindlessSlot = 0;
         return;
       }
       const auto fileSize = static_cast<std::size_t>(ddsFile.tellg());
@@ -500,14 +517,12 @@ Expected<void> GpuScene::Impl::UploadPendingTextures(nvrhi::ICommandList* comman
                    static_cast<std::streamsize>(fileSize));
       const auto parsed = pyxis::gpuscene_detail::ParseDds(
           std::span<const std::uint8_t>{ddsBytes.data(), ddsBytes.size()},
-          entry.keyCopy.role);
+          dirtyTex.role);
       if (!parsed.success)
       {
         Logging::Get().Warn(log::RENDER,
                             std::string{"TextureCache: DDS parse failed for "} + path
                                 + " (unsupported FourCC / DXGI / truncated).");
-        entry.needsGpuUpload = false;
-        entry.bindlessSlot = 0;
         return;
       }
       width  = static_cast<int>(parsed.width);
@@ -537,8 +552,6 @@ Expected<void> GpuScene::Impl::UploadPendingTextures(nvrhi::ICommandList* comman
           FreeEXRErrorMessage(exrErr);
         if (exrPixels)
           std::free(exrPixels);
-        entry.needsGpuUpload = false;
-        entry.bindlessSlot = 0;
         return;
       }
       const std::size_t pixelByteCount = static_cast<std::size_t>(width) * height * 4u
@@ -558,8 +571,6 @@ Expected<void> GpuScene::Impl::UploadPendingTextures(nvrhi::ICommandList* comman
         Logging::Get().Warn(log::RENDER,
                             std::string{"TextureCache: stbi_load failed for "} + path
                                 + " — falling back to missing-texture (slot 0).");
-        entry.needsGpuUpload = false;
-        entry.bindlessSlot = 0;
         if (decoded)
           stbi_image_free(decoded);
         return;
@@ -570,15 +581,15 @@ Expected<void> GpuScene::Impl::UploadPendingTextures(nvrhi::ICommandList* comman
       // BaseColor + Emission go through the sRGB→linear EOTF on
       // sample; everything else is linear data (normal maps, ORM
       // packs, env-maps via the EXR path above, etc.). §13.
-      pixelFormat = (entry.keyCopy.role == TextureKey::Role::BaseColor
-                     || entry.keyCopy.role == TextureKey::Role::Emission)
+      pixelFormat = (dirtyTex.role == TextureKey::Role::BaseColor
+                     || dirtyTex.role == TextureKey::Role::Emission)
                         ? nvrhi::Format::SRGBA8_UNORM
                         : nvrhi::Format::RGBA8_UNORM;
       rowPitchBytes = static_cast<std::size_t>(width) * 4u;
     }
 
-    entry.width = static_cast<std::uint32_t>(width);
-    entry.height = static_cast<std::uint32_t>(height);
+    out.width = static_cast<std::uint32_t>(width);
+    out.height = static_cast<std::uint32_t>(height);
 
     // Unified mip-chain build + upload. Three decode paths feed here:
     //   * stbi 8-bit RGBA (pixelFormat RGBA8/SRGBA8): build a gamma-
@@ -599,8 +610,8 @@ Expected<void> GpuScene::Impl::UploadPendingTextures(nvrhi::ICommandList* comman
     const bool isRgba8 = (pixelFormat == nvrhi::Format::RGBA8_UNORM
                           || pixelFormat == nvrhi::Format::SRGBA8_UNORM);
     const bool isSrgb  = (pixelFormat == nvrhi::Format::SRGBA8_UNORM);
-    const bool roleIsSRgb = (entry.keyCopy.role == TextureKey::Role::BaseColor)
-                            || (entry.keyCopy.role == TextureKey::Role::Emission);
+    const bool roleIsSRgb = (dirtyTex.role == TextureKey::Role::BaseColor)
+                            || (dirtyTex.role == TextureKey::Role::Emission);
 
     std::vector<std::vector<std::uint8_t>> levelBytes;
     std::vector<std::size_t>               levelPitch;
@@ -619,8 +630,8 @@ Expected<void> GpuScene::Impl::UploadPendingTextures(nvrhi::ICommandList* comman
       std::vector<std::uint32_t>             rgbaMipW;
       std::vector<std::uint32_t>             rgbaMipH;
       rgbaMips.push_back(std::move(decodedPixels));
-      rgbaMipW.push_back(entry.width);
-      rgbaMipH.push_back(entry.height);
+      rgbaMipW.push_back(out.width);
+      rgbaMipH.push_back(out.height);
       while (rgbaMipW.back() > 1u || rgbaMipH.back() > 1u)
       {
         std::uint32_t nextW = 0u;
@@ -634,7 +645,7 @@ Expected<void> GpuScene::Impl::UploadPendingTextures(nvrhi::ICommandList* comman
       }
 
       bool encoded = false;
-      if (desc.compressTextures && !roleIsSRgb)
+      if (compressTextures && !roleIsSRgb)
       {
         for (std::size_t lvl = 0; lvl < rgbaMips.size(); ++lvl)
         {
@@ -645,7 +656,7 @@ Expected<void> GpuScene::Impl::UploadPendingTextures(nvrhi::ICommandList* comman
           nvrhi::Format             bcFormat     = nvrhi::Format::UNKNOWN;
           std::size_t               bcBlockBytes = 0;
           gpuscene_detail::EncodeBCn(rgbaMips[lvl].data(), rgbaMipW[lvl],
-                                     rgbaMipH[lvl], entry.keyCopy.role,
+                                     rgbaMipH[lvl], dirtyTex.role,
                                      blocks, bcFormat, bcBlockBytes);
           if (bcFormat == nvrhi::Format::UNKNOWN || blocks.empty())
             break;
@@ -676,53 +687,70 @@ Expected<void> GpuScene::Impl::UploadPendingTextures(nvrhi::ICommandList* comman
     out.ready      = true;
   };
 
-  // Phase 1 — fan the decode/mip/BCn work across the OpenMP pool. Each
-  // iteration owns a distinct (TextureEntry, PreparedTexUpload) pair.
+  // Phase 1 — fan the decode/mip/BCn work across the OpenMP pool. Each iteration
+  // owns a distinct DirtyTex snapshot + PreparedTexUpload slot; no Flecs access.
 #ifdef _OPENMP
 #  pragma omp parallel for schedule(dynamic)
 #endif
   for (int entryIdx = 0; entryIdx < static_cast<int>(dirty.size()); ++entryIdx)
-    prepareEntry(*dirty[static_cast<std::size_t>(entryIdx)],
+    prepareEntry(dirty[static_cast<std::size_t>(entryIdx)],
                  prep[static_cast<std::size_t>(entryIdx)]);
 
   const auto   prepEnd = std::chrono::steady_clock::now();
   const double prepMs =
       std::chrono::duration<double, std::milli>(prepEnd - texPassStart).count();
 
-  // Phase 2 — serial GPU resource creation + upload on the render thread.
+  // Phase 2 — serial GPU resource creation + upload on the render thread. Writes the
+  // GPU handle into the slot-indexed side table + the component metadata, then drops
+  // the DirtyTexture tag. Decode failures (ready == false) fall back to bindless slot
+  // 0 and also drop the tag (no retry), matching the old needsGpuUpload=false path.
   int texProcessed = 0;
   for (std::size_t slotIdx = 0; slotIdx < dirty.size(); ++slotIdx)
   {
-    TextureEntry&      entry    = *dirty[slotIdx];
+    const DirtyTex&    dirtyTex = dirty[slotIdx];
     PreparedTexUpload& prepared = prep[slotIdx];
+    const flecs::entity entity = textureSlots.EntityAtSlot(dirtyTex.slot);
+    if (entity.id() == 0)
+      continue;  // destroyed mid-commit (single-writer makes this unreachable).
+    GpuTextureComponent component = entity.get<GpuTextureComponent>();
     if (!prepared.ready)
+    {
+      component.bindlessSlot = 0;  // decode failed → magenta fallback (slot 0).
+      entity.set<GpuTextureComponent>(component);
+      entity.remove<scene::DirtyTexture>();
       continue;
-    entry.format = prepared.texFormat;
+    }
+    component.width = prepared.width;
+    component.height = prepared.height;
+    component.format = prepared.texFormat;
+    component.bindlessSlot = dirtyTex.slot;
     const std::uint32_t mipLevels = static_cast<std::uint32_t>(prepared.levelBytes.size());
 
     nvrhi::TextureDesc texDesc;
-    texDesc.width = entry.width;
-    texDesc.height = entry.height;
-    texDesc.format = entry.format;
+    texDesc.width = component.width;
+    texDesc.height = component.height;
+    texDesc.format = component.format;
     texDesc.mipLevels = mipLevels;
     texDesc.dimension = nvrhi::TextureDimension::Texture2D;
-    texDesc.debugName = entry.resolvedPath;
+    texDesc.debugName = textureResolvedPaths[dirtyTex.slot];
     texDesc.initialState = nvrhi::ResourceStates::ShaderResource;
     texDesc.keepInitialState = true;
-    entry.texture = device->createTexture(texDesc);
-    if (!entry.texture)
+    const nvrhi::TextureHandle created = device->createTexture(texDesc);
+    if (!created)
     {
       return std::unexpected{PYXIS_ERROR(ErrorKind::OutOfMemoryGpu,
                                          "CommitResources: createTexture failed for '%s'",
-                                         entry.resolvedPath.c_str())};
+                                         textureResolvedPaths[dirtyTex.slot].c_str())};
     }
     for (std::uint32_t level = 0; level < mipLevels; ++level)
-      commandList->writeTexture(entry.texture.Get(), 0, level,
+      commandList->writeTexture(created.Get(), 0, level,
                                 prepared.levelBytes[level].data(),
                                 prepared.levelPitch[level]);
-    entry.pixelData.clear();
-    entry.pixelData.shrink_to_fit();
-    entry.needsGpuUpload = false;
+    textureResources[dirtyTex.slot] = created;
+    entity.set<GpuTextureComponent>(component);
+    texturePixelData[dirtyTex.slot].clear();
+    texturePixelData[dirtyTex.slot].shrink_to_fit();
+    entity.remove<scene::DirtyTexture>();
     ++texProcessed;
   }
   if (texProcessed > 0)

@@ -38,6 +38,7 @@
 // with HandleBimap owning slot/generation. flecs is a PRIVATE renderer dep, so this
 // header (Private only, §18.9) may include it; no Flecs type reaches Public/.
 #include "GpuScene/GpuSlotMap.h"
+#include "Scene/Components/Dirty.h"
 #include "Scene/HandleBimap.h"
 
 #include <flecs.h>
@@ -71,6 +72,25 @@ struct GpuMaterialComponent
 {
   OpenPBRMaterialDesc desc{};
   std::uint64_t       descHash = 0;
+};
+
+// RFC 0009 P3 — per-texture Flecs component (POD metadata only; §30.11). The GPU
+// resource (nvrhi::TextureHandle), the transient decoded pixels, and the owned
+// resolvedPath string are NOT POD, so they live in the slot-indexed side tables on
+// Impl (textureResources / texturePixelData / textureResolvedPaths) — the §30.11
+// "variable-length data in a GpuScene table, referenced by handle" rule. The decode
+// writes the side tables (slot-indexed → thread-safe under the OpenMP decode); the
+// component metadata (dims/format/bindlessSlot) is written serially. keyCopy's
+// resolvedPath view points into textureResolvedPaths[slot].
+struct GpuTextureComponent
+{
+  TextureKey     keyCopy{};
+  std::uint64_t  keyHash        = 0;
+  std::uint32_t  bindlessSlot   = 0;
+  std::uint32_t  width          = 0;
+  std::uint32_t  height         = 0;
+  nvrhi::Format  format         = nvrhi::Format::UNKNOWN;
+  std::uint64_t  lastAccessTick = 0;
 };
 
 }  // namespace pyxis
@@ -501,31 +521,8 @@ struct GpuScene::Impl
   // synchronous at M5 (the §31 async decode pool wires at M8 when
   // texture-load latency starts to dominate); CPU-side decoded
   // pixels are dropped after the GPU upload retires.
-  struct TextureEntry
-  {
-    bool                 live           = false;
-    bool                 quarantined    = false;
-    bool                 needsGpuUpload = false;
-    std::uint8_t         generation     = 0;
-    TextureKey           keyCopy{};
-    std::uint64_t        keyHash        = 0;
-    std::string          resolvedPath;     // owned copy of keyCopy.resolvedPath
-    nvrhi::TextureHandle texture;
-    std::uint32_t        bindlessSlot   = 0;
-    std::uint32_t        width          = 0;
-    std::uint32_t        height         = 0;
-    nvrhi::Format        format         = nvrhi::Format::UNKNOWN;
-    std::vector<std::uint8_t> pixelData;   // dropped after upload commits
-    // V2.A.12 — LRU bookkeeping. `lastAccessTick` is bumped each time
-    // AcquireTexture returns the entry's handle (cache hit OR fresh
-    // insert); the GpuScene `nextAccessTick` counter monotonically
-    // increases. `evictionPriority` is the inverse age — older
-    // entries (lower `lastAccessTick`) get higher priority when a
-    // future eviction policy lands. Eviction itself is deferred to a
-    // follow-up; the data structure is in place + tracking fires on
-    // every Acquire call.
-    std::uint64_t       lastAccessTick = 0;
-  };
+  // RFC 0009 P3 — textures are GpuTextureComponent entities (textureSlots below)
+  // plus the slot-indexed GPU-resource side tables; the TextureEntry struct is gone.
 
   nvrhi::IDevice*    device   = nullptr;  // borrowed; outlives this scene.
   Profiler*          profiler = nullptr;  // borrowed.
@@ -541,7 +538,6 @@ struct GpuScene::Impl
 
   std::vector<MeshEntry>     meshes;
   std::vector<InstanceEntry> instances;
-  std::vector<TextureEntry>  textures;
   std::vector<VolumeEntry>   volumes;
 
   // RFC 0009 — the Flecs SceneWorld. Entities live here; the per-type handle tables
@@ -558,6 +554,14 @@ struct GpuScene::Impl
   // backing each desc's sourcePrim view (variable-length data → a GpuScene table).
   GpuSlotMap                        materialSlots{sceneWorld};
   std::vector<std::string>          materialSourcePrims;
+  // P3 — textures (GpuTextureComponent). Slot-indexed side tables hold the non-POD
+  // GPU resource + transient decode state (slot == bindless slot for M5). Distinct
+  // slots are written from distinct OpenMP threads during decode (thread-safe);
+  // component metadata is written serially.
+  GpuSlotMap                        textureSlots{sceneWorld};
+  std::vector<nvrhi::TextureHandle> textureResources;     // the GPU texture per slot.
+  std::vector<std::vector<std::uint8_t>> texturePixelData;  // transient; dropped post-upload.
+  std::vector<std::string>          textureResolvedPaths;  // owned backing for keyCopy.resolvedPath.
 
   // O(1) slot recycling. Each Destroy verb pushes the freed slot;
   // each Acquire / Append verb pops the latest one. Stack ordering
@@ -569,7 +573,6 @@ struct GpuScene::Impl
   // append-heavy load.
   std::vector<std::uint32_t> freeMeshSlots;
   std::vector<std::uint32_t> freeInstanceSlots;
-  std::vector<std::uint32_t> freeTextureSlots;
   std::vector<std::uint32_t> freeVolumeSlots;
   // V2.A.5 — set when a fresh AddVolume needs CommitResources to
   // create the matching nvrhi::TextureHandle + write the dense
@@ -771,8 +774,6 @@ struct GpuScene::Impl
 
   [[nodiscard]] const MeshEntry*     LookupMesh(MeshHandle handle) const noexcept
   { return LookupEntryImpl(static_cast<uint32_t>(handle), meshes); }
-  [[nodiscard]] const TextureEntry*  LookupTexture(TextureHandle handle) const noexcept
-  { return LookupEntryImpl(static_cast<uint32_t>(handle), textures); }
   [[nodiscard]] const InstanceEntry* LookupInstance(InstanceHandle handle) const noexcept
   { return LookupEntryImpl(static_cast<uint32_t>(handle), instances); }
   [[nodiscard]] const VolumeEntry*   LookupVolume(VolumeHandle handle) const noexcept
@@ -780,8 +781,6 @@ struct GpuScene::Impl
 
   [[nodiscard]] MeshEntry*     ResolveMesh(MeshHandle handle) noexcept
   { return BumpIfStaleAndReturn(handle, LookupMesh(handle)); }
-  [[nodiscard]] TextureEntry*  ResolveTexture(TextureHandle handle) noexcept
-  { return BumpIfStaleAndReturn(handle, LookupTexture(handle)); }
   [[nodiscard]] InstanceEntry* ResolveInstance(InstanceHandle handle) noexcept
   { return BumpIfStaleAndReturn(handle, LookupInstance(handle)); }
   [[nodiscard]] VolumeEntry*   ResolveVolume(VolumeHandle handle) noexcept
@@ -794,15 +793,15 @@ struct GpuScene::Impl
   void CollectLiveLightsSorted(std::vector<std::pair<uint32_t, LightDesc>>& out);
 
   // Resolve a TextureHandle to its bindless slot index, or to
-  // INVALID_BINDLESS_TEXTURE for Invalid / out-of-range / dead
-  // handles. Used at upload time when packing OpenPBRMaterialGPU
-  // entries. Lives on Impl (rather than gpuscene_detail) so the
-  // nested TextureEntry type stays in-scope without exposing it
-  // outside the private PIMPL boundary.
+  // INVALID_BINDLESS_TEXTURE for Invalid / out-of-range / dead handles. Used when
+  // packing OpenPBRMaterialGPU entries. RFC 0009 P3 — reads the texture entity's
+  // component (bindlessSlot reflects decode success: 0 = decode failed → fallback).
   [[nodiscard]] std::uint32_t ResolveTextureBindlessSlot(TextureHandle handle) const noexcept
   {
-    const TextureEntry* entry = LookupTexture(handle);
-    return entry ? entry->bindlessSlot : shaderinterop::INVALID_BINDLESS_TEXTURE;
+    const flecs::entity entity = textureSlots.Resolve(static_cast<uint32_t>(handle));
+    if (entity.id() == 0)
+      return shaderinterop::INVALID_BINDLESS_TEXTURE;
+    return entity.get<GpuTextureComponent>().bindlessSlot;
   }
 
   // ---- Verb member functions (defined in per-verb .cpp files) ----------

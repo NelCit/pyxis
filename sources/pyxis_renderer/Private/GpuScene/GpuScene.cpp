@@ -44,7 +44,6 @@ GpuScene::GpuScene(nvrhi::IDevice* device, Profiler& profiler, const GpuSceneCre
   constexpr std::size_t INITIAL_TEXTURE_RESERVE  = 1024;
   _impl->meshes.reserve(INITIAL_MESH_RESERVE);
   _impl->instances.reserve(INITIAL_INSTANCE_RESERVE);
-  _impl->textures.reserve(INITIAL_TEXTURE_RESERVE);
   _impl->meshDescHashToHandle.reserve(INITIAL_MESH_RESERVE);
   _impl->materialDescHashToHandle.reserve(INITIAL_MATERIAL_RESERVE);
   _impl->textureKeyHashToHandle.reserve(INITIAL_TEXTURE_RESERVE);
@@ -270,9 +269,15 @@ nvrhi::ITexture* GpuScene::GetDomeEnvMapTexture() const noexcept {
   {
     if (entry.second.kind != LightDesc::Kind::Dome)
       continue;
-    const Impl::TextureEntry* tex = _impl->LookupTexture(entry.second.envMap);
-    if (tex != nullptr && tex->texture)
-      return tex->texture.Get();
+    // RFC 0009 P3 — resolve the dome's envMap texture via the slot map + the GPU
+    // resource side table.
+    const flecs::entity texEntity =
+        _impl->textureSlots.Resolve(static_cast<uint32_t>(entry.second.envMap));
+    if (texEntity.id() == 0)
+      continue;
+    const uint32_t texSlot = GpuSlotMap::SlotOf(static_cast<uint32_t>(entry.second.envMap));
+    if (texSlot < _impl->textureResources.size() && _impl->textureResources[texSlot])
+      return _impl->textureResources[texSlot].Get();
   }
   return nullptr;
 }
@@ -334,16 +339,16 @@ nvrhi::ITexture* GpuScene::GetMissingTexture() const noexcept {
 }
 
 uint32_t GpuScene::GetBindlessTextureCount() const noexcept {
-  return static_cast<uint32_t>(_impl->textures.size());
+  // RFC 0009 P3 — slot count (== old textures.size()); the bindless table is sized to
+  // this so slot == bindless index stays stable.
+  return _impl->textureSlots.SlotCount();
 }
 
 nvrhi::ITexture* GpuScene::GetBindlessTextureAt(uint32_t bindlessSlot) const noexcept {
-  if (bindlessSlot >= _impl->textures.size())
+  // bindlessSlot == texture slot for M5. The GPU resource lives in the side table.
+  if (!_impl->textureSlots.IsLive(bindlessSlot) || bindlessSlot >= _impl->textureResources.size())
     return nullptr;
-  const Impl::TextureEntry& entry = _impl->textures[bindlessSlot];
-  if (!entry.live || !entry.texture)
-    return nullptr;
-  return entry.texture.Get();
+  return _impl->textureResources[bindlessSlot].Get();
 }
 
 // ---- Editor introspection (M7 follow-up) -----------------------------------
@@ -402,13 +407,15 @@ OpenPBRMaterialDesc GpuScene::GetMaterialDescAt(uint32_t liveIndex) const noexce
 }
 
 std::string_view GpuScene::GetTexturePath(TextureHandle textureHandle) const noexcept {
-  // Editor-side path lookup. Returns the owned `resolvedPath` string
-  // backing the texture entry's `keyCopy.resolvedPath` view. Empty
-  // when the handle is Invalid / out-of-range / dead / quarantined.
-  const Impl::TextureEntry* entry = _impl->LookupTexture(textureHandle);
-  if (entry == nullptr || !entry->live || entry->quarantined)
+  // Editor-side path lookup. RFC 0009 P3 — returns the owned resolvedPath string
+  // from the slot-indexed side table. Empty when the handle is Invalid / dead.
+  const flecs::entity entity = _impl->textureSlots.Resolve(static_cast<uint32_t>(textureHandle));
+  if (entity.id() == 0)
     return {};
-  return entry->resolvedPath;
+  const uint32_t slot = GpuSlotMap::SlotOf(static_cast<uint32_t>(textureHandle));
+  if (slot >= _impl->textureResolvedPaths.size())
+    return {};
+  return _impl->textureResolvedPaths[slot];
 }
 
 MaterialHandle GpuScene::LookupInstanceMaterialBySlot(uint32_t instanceSlot) const noexcept {
@@ -472,26 +479,18 @@ FrameStats GpuScene::LastFrameStats() const {
   // RFC 0009 P2 — materials are Flecs entities; the slot map tracks live count O(1)
   // (already excludes the slot-0 sentinel).
   const uint64_t liveMaterialCount = _impl->materialSlots.LiveCount();
+  // RFC 0009 P3 — textures are Flecs entities; walk live slots, read the component
+  // metadata for the byte tally. bytesPerBlock is "bytes per pixel" for the
+  // uncompressed formats the pool holds today (compressed BCn under-counts but isn't
+  // authorized yet — M8 follow-up).
   uint64_t liveTextureCount = 0;
   uint64_t textureBytes = 0;
-  for (const Impl::TextureEntry& entry : _impl->textures)
-  {
-    if (!entry.live)
-      continue;
+  _impl->textureSlots.ForEachLiveSlot([&](uint32_t, flecs::entity entity) {
+    const GpuTextureComponent& component = entity.get<GpuTextureComponent>();
     ++liveTextureCount;
-    // Bytes per pixel via NVRHI's format introspection — covers every
-    // uncompressed format the texture pool can hold. Pre-fix the
-    // switch only knew about RGBA8 / SRGBA8 / RGBA32F and silently
-    // counted everything else (RGBA16F, R32F, R32_UINT, ...) as 0,
-    // making the Stats panel's "Total" row visibly inconsistent
-    // with the per-row sum the user could compute by hand. The
-    // bytesPerBlock convention is "bytes per pixel" for uncompressed
-    // formats; compressed formats (BC1..BC7) report bytes per 4×4
-    // block but Pyxis doesn't authorize compressed textures yet
-    // (M8 follow-up) so this path is exact today.
-    const uint64_t bytesPerPixel = nvrhi::getFormatInfo(entry.format).bytesPerBlock;
-    textureBytes += static_cast<uint64_t>(entry.width) * entry.height * bytesPerPixel;
-  }
+    const uint64_t bytesPerPixel = nvrhi::getFormatInfo(component.format).bytesPerBlock;
+    textureBytes += static_cast<uint64_t>(component.width) * component.height * bytesPerPixel;
+  });
   // V2.A.5 — live volumes + their VRAM footprint. `bytesOnGpu` is
   // computed at AddVolume time as `dim_x * dim_y * dim_z * sizeof(float)`
   // since every volume binds a R32_FLOAT 3D texture. Slot 0 sentinel
