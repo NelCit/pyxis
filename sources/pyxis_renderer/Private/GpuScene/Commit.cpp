@@ -191,18 +191,23 @@ void GpuScene::Impl::Clear() noexcept
   meshFaceNormalsBuffer = nullptr;
   meshFaceOffsetsBuffer = nullptr;
   meshFaceNormalsNeedUpload = false;
+  meshFaceNormalsPackedSlots = 0;
   meshUvsBuffer = nullptr;
   meshUvOffsetsBuffer = nullptr;
   meshIndicesBuffer = nullptr;
   meshIndexOffsetsBuffer = nullptr;
   meshUvsNeedUpload = false;
   meshIndicesNeedUpload = false;
+  meshUvsPackedSlots = 0;
+  meshIndicesPackedSlots = 0;
   meshVertexNormalsBuffer = nullptr;
   meshVertexNormalOffsetsBuffer = nullptr;
   meshVertexNormalsNeedUpload = false;
+  meshVertexNormalsPackedSlots = 0;
   meshTangentsBuffer = nullptr;
   meshTangentOffsetsBuffer = nullptr;
   meshTangentsNeedUpload = false;
+  meshTangentsPackedSlots = 0;
   instanceMeshBuffer = nullptr;
 
   // Sampler + missingTexture are scene-lifetime singletons that the
@@ -1226,6 +1231,20 @@ Expected<void> GpuScene::Impl::UploadInstanceSideTables(nvrhi::ICommandList* com
   return {};
 }
 
+uint32_t GpuScene::Impl::LowestDirtyMeshSlot() const noexcept
+{
+  // DirtyTopology is set on a mesh at CreateMesh and cleared in BuildPendingBlas
+  // (PhaseBuildBlas, after the PhaseExtractMeshes side-table uploads run), so during
+  // those uploads it marks exactly this commit's new/recycled meshes. The lowest such
+  // slot decides append-vs-rebuild: >= packedSlots ⇒ every change is a new tail slot.
+  uint32_t lowest = meshSlots.SlotCount();
+  meshSlots.ForEachLiveSlot([&lowest](uint32_t slot, flecs::entity entity) {
+    if (slot < lowest && entity.has<scene::DirtyTopology>())
+      lowest = slot;
+  });
+  return lowest;
+}
+
 Expected<void> GpuScene::Impl::UploadMeshFaceNormals(nvrhi::ICommandList* commandList)
 {
   // Concatenates every live mesh's per-triangle face normals into one
@@ -1239,38 +1258,18 @@ Expected<void> GpuScene::Impl::UploadMeshFaceNormals(nvrhi::ICommandList* comman
   if (!meshFaceNormalsNeedUpload || meshSlots.SlotCount() <= 1u)
     return {};
 
-  std::vector<hlslpp::float4> packedNormals;
-  std::vector<std::uint32_t>  perMeshOffsets(meshSlots.SlotCount(), 0u);
-  for (std::size_t meshSlot = 0; meshSlot < meshSlots.SlotCount(); ++meshSlot)
-  {
-    perMeshOffsets[meshSlot] = static_cast<std::uint32_t>(packedNormals.size());
-    const MeshResource& mesh = meshResources[meshSlot];
-    if (!meshSlots.IsLive(static_cast<uint32_t>(meshSlot)))
-      continue;
-    packedNormals.insert(packedNormals.end(), mesh.faceNormals.begin(),
-                         mesh.faceNormals.end());
-  }
-  if (packedNormals.empty())
-  {
-    // Empty scene with no meshes registered yet — nothing to
-    // upload. The PathTracePass fallback handles this.
-    packedNormals.emplace_back(0.0f, 0.0f, 0.0f, 0.0f);
-  }
-  const std::size_t normalsBytes = packedNormals.size() * sizeof(hlslpp::float4);
-  const std::size_t offsetsBytes = perMeshOffsets.size() * sizeof(std::uint32_t);
-
-  PYXIS_TRY(EnsureStructuredBuffer(device, meshFaceNormalsBuffer, normalsBytes,
-                                   sizeof(hlslpp::float4),
-                                   "GpuScene.meshFaceNormalsBuffer",
-                                   "meshFaceNormalsBuffer"));
-  PYXIS_TRY(EnsureStructuredBuffer(device, meshFaceOffsetsBuffer, offsetsBytes,
-                                   sizeof(std::uint32_t),
-                                   "GpuScene.meshFaceOffsetsBuffer",
-                                   "meshFaceOffsetsBuffer"));
-  commandList->writeBuffer(meshFaceNormalsBuffer.Get(), packedNormals.data(),
-                           normalsBytes);
-  commandList->writeBuffer(meshFaceOffsetsBuffer.Get(), perMeshOffsets.data(),
-                           offsetsBytes);
+  PYXIS_TRY(gpuscene_detail::UploadMeshSideTable<hlslpp::float4>(
+      device, commandList, meshSlots, LowestDirtyMeshSlot(), meshFaceNormalsPackedSlots,
+      meshFaceNormalsBuffer, meshFaceOffsetsBuffer, hlslpp::float4{0.0f, 0.0f, 0.0f, 0.0f},
+      "GpuScene.meshFaceNormalsBuffer", "meshFaceNormalsBuffer",
+      "GpuScene.meshFaceOffsetsBuffer", "meshFaceOffsetsBuffer",
+      [this](uint32_t slot) -> uint32_t {
+        return static_cast<uint32_t>(meshResources[slot].faceNormals.size());
+      },
+      [this](uint32_t slot, std::vector<hlslpp::float4>& out) {
+        const MeshResource& mesh = meshResources[slot];
+        out.insert(out.end(), mesh.faceNormals.begin(), mesh.faceNormals.end());
+      }));
   meshFaceNormalsNeedUpload = false;
   return {};
 }
@@ -1301,43 +1300,24 @@ Expected<void> GpuScene::Impl::UploadMeshUvs(nvrhi::ICommandList* commandList)
   // float4 mesh buffers (normals/tangents/face-normals) are unaffected
   // because hlslpp::float4 is exactly 16 bytes. The per-mesh pack/pad
   // step lives in MeshUvPack.h so MeshUvPackV2 can pin the stride
-  // contract directly.
+  // contract directly. Every mesh contributes EXACTLY vertexCount UV
+  // entries (short/empty uv0 padded with (0,0)) so each mesh's UV slice
+  // stays aligned to its vertex range — countOf must equal that.
   using gpuscene_detail::PackedUv;
-  std::vector<PackedUv>       packedUvs;
-  std::vector<std::uint32_t>  perMeshOffsets(meshSlots.SlotCount(), 0u);
-  for (std::size_t meshSlot = 0; meshSlot < meshSlots.SlotCount(); ++meshSlot)
-  {
-    perMeshOffsets[meshSlot] = static_cast<std::uint32_t>(packedUvs.size());
-    const MeshResource& mesh = meshResources[meshSlot];
-    if (!meshSlots.IsLive(static_cast<uint32_t>(meshSlot)))
-      continue;
-    // Every mesh contributes EXACTLY vertexCount UV entries to the
-    // flat buffer, even if mesh.uv0 is short. The closesthit reads
-    // `gMeshUvs[gMeshUvOffsets[meshSlot] + v_i]` where v_i is a
-    // vertex index in [0, vertexCount). Padding short UV arrays
-    // with (0,0) keeps each mesh's UV slice aligned to its vertex
-    // range — without it, the next mesh's UV data would overlap and
-    // the closesthit would sample texels that don't belong to the
-    // hit mesh.
-    gpuscene_detail::AppendTightMeshUvs(mesh.uv0.data(), mesh.uv0.size(),
-                                        mesh.vertexCount, packedUvs);
-  }
-  if (packedUvs.empty())
-    packedUvs.push_back(PackedUv{0.0f, 0.0f});  // 1-element fallback
-
-  const std::size_t uvsBytes     = packedUvs.size() * sizeof(PackedUv);
-  const std::size_t offsetsBytes = perMeshOffsets.size() * sizeof(std::uint32_t);
-
-  PYXIS_TRY(EnsureStructuredBuffer(device, meshUvsBuffer, uvsBytes,
-                                   sizeof(PackedUv),
-                                   "GpuScene.meshUvsBuffer",
-                                   "meshUvsBuffer"));
-  PYXIS_TRY(EnsureStructuredBuffer(device, meshUvOffsetsBuffer, offsetsBytes,
-                                   sizeof(std::uint32_t),
-                                   "GpuScene.meshUvOffsetsBuffer",
-                                   "meshUvOffsetsBuffer"));
-  commandList->writeBuffer(meshUvsBuffer.Get(),        packedUvs.data(),       uvsBytes);
-  commandList->writeBuffer(meshUvOffsetsBuffer.Get(),  perMeshOffsets.data(),  offsetsBytes);
+  PYXIS_TRY(gpuscene_detail::UploadMeshSideTable<PackedUv>(
+      device, commandList, meshSlots, LowestDirtyMeshSlot(), meshUvsPackedSlots,
+      meshUvsBuffer, meshUvOffsetsBuffer, PackedUv{0.0f, 0.0f},
+      "GpuScene.meshUvsBuffer", "meshUvsBuffer",
+      "GpuScene.meshUvOffsetsBuffer", "meshUvOffsetsBuffer",
+      [this](uint32_t slot) -> uint32_t {
+        const MeshResource& mesh = meshResources[slot];
+        return std::max(static_cast<uint32_t>(mesh.uv0.size()), mesh.vertexCount);
+      },
+      [this](uint32_t slot, std::vector<PackedUv>& out) {
+        const MeshResource& mesh = meshResources[slot];
+        gpuscene_detail::AppendTightMeshUvs(mesh.uv0.data(), mesh.uv0.size(),
+                                            mesh.vertexCount, out);
+      }));
   meshUvsNeedUpload = false;
   return {};
 }
@@ -1356,32 +1336,18 @@ Expected<void> GpuScene::Impl::UploadMeshIndices(nvrhi::ICommandList* commandLis
   if (!meshIndicesNeedUpload || meshSlots.SlotCount() <= 1u)
     return {};
 
-  std::vector<std::uint32_t> packedIndices;
-  std::vector<std::uint32_t> perMeshOffsets(meshSlots.SlotCount(), 0u);
-  for (std::size_t meshSlot = 0; meshSlot < meshSlots.SlotCount(); ++meshSlot)
-  {
-    perMeshOffsets[meshSlot] = static_cast<std::uint32_t>(packedIndices.size());
-    const MeshResource& mesh = meshResources[meshSlot];
-    if (!meshSlots.IsLive(static_cast<uint32_t>(meshSlot)))
-      continue;
-    packedIndices.insert(packedIndices.end(), mesh.indices.begin(), mesh.indices.end());
-  }
-  if (packedIndices.empty())
-    packedIndices.push_back(0u);  // 1-element fallback
-
-  const std::size_t indicesBytes = packedIndices.size() * sizeof(std::uint32_t);
-  const std::size_t offsetsBytes = perMeshOffsets.size() * sizeof(std::uint32_t);
-
-  PYXIS_TRY(EnsureStructuredBuffer(device, meshIndicesBuffer, indicesBytes,
-                                   sizeof(std::uint32_t),
-                                   "GpuScene.meshIndicesBuffer",
-                                   "meshIndicesBuffer"));
-  PYXIS_TRY(EnsureStructuredBuffer(device, meshIndexOffsetsBuffer, offsetsBytes,
-                                   sizeof(std::uint32_t),
-                                   "GpuScene.meshIndexOffsetsBuffer",
-                                   "meshIndexOffsetsBuffer"));
-  commandList->writeBuffer(meshIndicesBuffer.Get(),       packedIndices.data(),  indicesBytes);
-  commandList->writeBuffer(meshIndexOffsetsBuffer.Get(),  perMeshOffsets.data(), offsetsBytes);
+  PYXIS_TRY(gpuscene_detail::UploadMeshSideTable<std::uint32_t>(
+      device, commandList, meshSlots, LowestDirtyMeshSlot(), meshIndicesPackedSlots,
+      meshIndicesBuffer, meshIndexOffsetsBuffer, 0u,
+      "GpuScene.meshIndicesBuffer", "meshIndicesBuffer",
+      "GpuScene.meshIndexOffsetsBuffer", "meshIndexOffsetsBuffer",
+      [this](uint32_t slot) -> uint32_t {
+        return static_cast<uint32_t>(meshResources[slot].indices.size());
+      },
+      [this](uint32_t slot, std::vector<std::uint32_t>& out) {
+        const MeshResource& mesh = meshResources[slot];
+        out.insert(out.end(), mesh.indices.begin(), mesh.indices.end());
+      }));
   meshIndicesNeedUpload = false;
   return {};
 }
@@ -1401,46 +1367,26 @@ Expected<void> GpuScene::Impl::UploadMeshVertexNormals(nvrhi::ICommandList* comm
   if (!meshVertexNormalsNeedUpload || meshSlots.SlotCount() <= 1u)
     return {};
 
-  std::vector<hlslpp::float4> packedNormals;
-  std::vector<std::uint32_t>  perMeshOffsets(meshSlots.SlotCount(), 0u);
-  for (std::size_t meshSlot = 0; meshSlot < meshSlots.SlotCount(); ++meshSlot)
-  {
-    perMeshOffsets[meshSlot] = static_cast<std::uint32_t>(packedNormals.size());
-    const MeshResource& mesh = meshResources[meshSlot];
-    if (!meshSlots.IsLive(static_cast<uint32_t>(meshSlot)))
-      continue;
-    const std::size_t copyCount =
-        std::min<std::size_t>(mesh.normals.size(), mesh.vertexCount);
-    for (std::size_t i = 0; i < copyCount; ++i)
-    {
-      packedNormals.emplace_back(mesh.normals[i].x, mesh.normals[i].y,
-                                 mesh.normals[i].z, 0.0f);
-    }
-    if (copyCount < mesh.vertexCount)
-    {
-      const std::size_t padCount = mesh.vertexCount - copyCount;
-      packedNormals.insert(packedNormals.end(), padCount,
-                           hlslpp::float4{0.0f, 0.0f, 0.0f, 0.0f});
-    }
-  }
-  if (packedNormals.empty())
-    packedNormals.emplace_back(0.0f, 0.0f, 0.0f, 0.0f);  // 1-element fallback
-
-  const std::size_t normalsBytes = packedNormals.size() * sizeof(hlslpp::float4);
-  const std::size_t offsetsBytes = perMeshOffsets.size() * sizeof(std::uint32_t);
-
-  PYXIS_TRY(EnsureStructuredBuffer(device, meshVertexNormalsBuffer, normalsBytes,
-                                   sizeof(hlslpp::float4),
-                                   "GpuScene.meshVertexNormalsBuffer",
-                                   "meshVertexNormalsBuffer"));
-  PYXIS_TRY(EnsureStructuredBuffer(device, meshVertexNormalOffsetsBuffer, offsetsBytes,
-                                   sizeof(std::uint32_t),
-                                   "GpuScene.meshVertexNormalOffsetsBuffer",
-                                   "meshVertexNormalOffsetsBuffer"));
-  commandList->writeBuffer(meshVertexNormalsBuffer.Get(),
-                           packedNormals.data(), normalsBytes);
-  commandList->writeBuffer(meshVertexNormalOffsetsBuffer.Get(),
-                           perMeshOffsets.data(), offsetsBytes);
+  // Every mesh contributes EXACTLY vertexCount entries: min(normals,vc) copied,
+  // the rest padded with zero (closesthit detects the zero magnitude and falls
+  // back to the M7 face-normal path). countOf must mirror that = vertexCount.
+  PYXIS_TRY(gpuscene_detail::UploadMeshSideTable<hlslpp::float4>(
+      device, commandList, meshSlots, LowestDirtyMeshSlot(), meshVertexNormalsPackedSlots,
+      meshVertexNormalsBuffer, meshVertexNormalOffsetsBuffer,
+      hlslpp::float4{0.0f, 0.0f, 0.0f, 0.0f},
+      "GpuScene.meshVertexNormalsBuffer", "meshVertexNormalsBuffer",
+      "GpuScene.meshVertexNormalOffsetsBuffer", "meshVertexNormalOffsetsBuffer",
+      [this](uint32_t slot) -> uint32_t { return meshResources[slot].vertexCount; },
+      [this](uint32_t slot, std::vector<hlslpp::float4>& out) {
+        const MeshResource& mesh = meshResources[slot];
+        const std::size_t copyCount =
+            std::min<std::size_t>(mesh.normals.size(), mesh.vertexCount);
+        for (std::size_t i = 0; i < copyCount; ++i)
+          out.emplace_back(mesh.normals[i].x, mesh.normals[i].y, mesh.normals[i].z, 0.0f);
+        if (copyCount < mesh.vertexCount)
+          out.insert(out.end(), mesh.vertexCount - copyCount,
+                     hlslpp::float4{0.0f, 0.0f, 0.0f, 0.0f});
+      }));
   meshVertexNormalsNeedUpload = false;
   return {};
 }
@@ -1458,45 +1404,23 @@ Expected<void> GpuScene::Impl::UploadMeshTangents(nvrhi::ICommandList* commandLi
   if (!meshTangentsNeedUpload || meshSlots.SlotCount() <= 1u)
     return {};
 
-  std::vector<hlslpp::float4> packedTangents;
-  std::vector<std::uint32_t>  perMeshOffsets(meshSlots.SlotCount(), 0u);
-  for (std::size_t meshSlot = 0; meshSlot < meshSlots.SlotCount(); ++meshSlot)
-  {
-    perMeshOffsets[meshSlot] = static_cast<std::uint32_t>(packedTangents.size());
-    const MeshResource& mesh = meshResources[meshSlot];
-    if (!meshSlots.IsLive(static_cast<uint32_t>(meshSlot)))
-      continue;
-    const std::size_t copyCount =
-        std::min<std::size_t>(mesh.tangents.size(), mesh.vertexCount);
-    for (std::size_t i = 0; i < copyCount; ++i)
-    {
-      packedTangents.push_back(mesh.tangents[i]);
-    }
-    if (copyCount < mesh.vertexCount)
-    {
-      const std::size_t padCount = mesh.vertexCount - copyCount;
-      packedTangents.insert(packedTangents.end(), padCount,
-                            hlslpp::float4{0.0f, 0.0f, 0.0f, 0.0f});
-    }
-  }
-  if (packedTangents.empty())
-    packedTangents.emplace_back(0.0f, 0.0f, 0.0f, 0.0f);  // 1-element fallback
-
-  const std::size_t tangentsBytes = packedTangents.size() * sizeof(hlslpp::float4);
-  const std::size_t offsetsBytes  = perMeshOffsets.size() * sizeof(std::uint32_t);
-
-  PYXIS_TRY(EnsureStructuredBuffer(device, meshTangentsBuffer, tangentsBytes,
-                                   sizeof(hlslpp::float4),
-                                   "GpuScene.meshTangentsBuffer",
-                                   "meshTangentsBuffer"));
-  PYXIS_TRY(EnsureStructuredBuffer(device, meshTangentOffsetsBuffer, offsetsBytes,
-                                   sizeof(std::uint32_t),
-                                   "GpuScene.meshTangentOffsetsBuffer",
-                                   "meshTangentOffsetsBuffer"));
-  commandList->writeBuffer(meshTangentsBuffer.Get(),
-                           packedTangents.data(), tangentsBytes);
-  commandList->writeBuffer(meshTangentOffsetsBuffer.Get(),
-                           perMeshOffsets.data(), offsetsBytes);
+  // Same vertexCount-per-mesh padding policy as the vertex-normal upload.
+  PYXIS_TRY(gpuscene_detail::UploadMeshSideTable<hlslpp::float4>(
+      device, commandList, meshSlots, LowestDirtyMeshSlot(), meshTangentsPackedSlots,
+      meshTangentsBuffer, meshTangentOffsetsBuffer, hlslpp::float4{0.0f, 0.0f, 0.0f, 0.0f},
+      "GpuScene.meshTangentsBuffer", "meshTangentsBuffer",
+      "GpuScene.meshTangentOffsetsBuffer", "meshTangentOffsetsBuffer",
+      [this](uint32_t slot) -> uint32_t { return meshResources[slot].vertexCount; },
+      [this](uint32_t slot, std::vector<hlslpp::float4>& out) {
+        const MeshResource& mesh = meshResources[slot];
+        const std::size_t copyCount =
+            std::min<std::size_t>(mesh.tangents.size(), mesh.vertexCount);
+        for (std::size_t i = 0; i < copyCount; ++i)
+          out.push_back(mesh.tangents[i]);
+        if (copyCount < mesh.vertexCount)
+          out.insert(out.end(), mesh.vertexCount - copyCount,
+                     hlslpp::float4{0.0f, 0.0f, 0.0f, 0.0f});
+      }));
   meshTangentsNeedUpload = false;
   return {};
 }

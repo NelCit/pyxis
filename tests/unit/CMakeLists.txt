@@ -24,6 +24,7 @@ target_sources(pyxis_unit_tests PRIVATE
     GpuSceneClear.cpp
     GpuSceneLookupInstanceMaterial.cpp
     GpuSlotMapFixture.cpp
+    GpuSceneIncrementalUpload.cpp
     SceneResolver.cpp
     UsdShadeToOpenPBR.cpp
     AnalyticGeomTessellation.cpp

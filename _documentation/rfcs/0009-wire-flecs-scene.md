@@ -148,9 +148,16 @@ top of the now-Flecs-resident data, to be done as separate green checkpoints):
   execution-model change.
 - **TLAS refit** using `DirtyTransform` (per §16) instead of always-rebuild — the tag
   is set; the refit path is the remaining work.
-- **Incremental side-table upload** for meshes using `DirtyTopology` (the audit's
-  quadratic-load fix) — currently the concatenated buffers still full-rebuild when
-  any mesh is dirty (byte-identical, but O(geometry·meshCount)).
+- ~~**Incremental side-table upload** for meshes using `DirtyTopology` (the audit's
+  quadratic-load fix).~~ **Done.** `UploadMeshSideTable` (Internal.h) appends only the
+  new tail slots when every dirty mesh is a new tail (`LowestDirtyMeshSlot()
+  >= packedSlots`) and capacity allows, with geometric buffer growth on the
+  full-rebuild fallback — a run of one-at-a-time commits amortises to O(total) rather
+  than O(geometry·meshCount). Byte-identical to the single full pack; the golden suite
+  only does single bulk commits, so `GpuSceneIncrementalUpload` (device-backed
+  white-box) pins incremental==bulk over the 10 mesh buffers across many commits.
+  NB: no current ingest path commits incrementally (both adapters do one bulk commit);
+  this future-proofs progressive-load / live-edit and removes the latent quadratic.
 - **Refcount-on-destroy / orphan detection** consuming the `MeshOf`/`MaterialOf`
   relationships (release a shared BLAS when its last instance goes away).
 - Remove the now-redundant app-side `SceneWorldFacade` world (its no-op systems /
