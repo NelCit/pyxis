@@ -109,6 +109,12 @@ struct GpuInstanceComponent
 {
 };
 
+// RFC 0009 P6 — per-volume marker component (data in the slot-indexed
+// `volumeResources` side table; V2.A.5 stub — most volumes are detect-warn-skipped).
+struct GpuVolumeComponent
+{
+};
+
 // RFC 0009 P5 — Flecs relationships an instance entity carries: (Instance, MeshOf,
 // meshEntity) and (Instance, MaterialOf, materialEntity). They make "which instances
 // reference this mesh/material" a query — the basis for refcounted BLAS sharing +
@@ -515,12 +521,12 @@ struct GpuScene::Impl
   // a stable per-volume container to bind from. Size + transform
   // metadata is kept on the entry so the future integrator pass can
   // build a per-volume cbuffer without re-reading the source .vdb.
-  struct VolumeEntry
+  // RFC 0009 P6 — per-volume resource record (slot-indexed in `volumeResources`,
+  // paired with a GpuVolumeComponent entity; volumeSlots owns slot/generation).
+  // needsGpuUpload stays per-record (volumes are rare; no DirtyVolume tag needed).
+  struct VolumeResource
   {
-    bool                    live           = false;
-    bool                    quarantined    = false;
     bool                    needsGpuUpload = false;
-    std::uint8_t            generation     = 0;
     std::array<uint32_t, 3> dimensions{0, 0, 0};
     std::array<float, 3>    bboxMin{0, 0, 0};
     std::array<float, 3>    bboxMax{0, 0, 0};
@@ -561,8 +567,6 @@ struct GpuScene::Impl
   // in-progress frame's activity.
   FrameStats lastFrameStats{};
 
-  std::vector<VolumeEntry>   volumes;
-
   // RFC 0009 — the Flecs SceneWorld. Entities live here; the per-type handle tables
   // map handle<->entity. Declaration order matters: tables/queries reference
   // sceneWorld, so it must be declared FIRST (destruct last).
@@ -594,16 +598,13 @@ struct GpuScene::Impl
   // DirtyTransform marks a transform change.
   GpuSlotMap                        instanceSlots{sceneWorld};
   std::vector<InstanceResource>     instanceResources;
+  // P6 — volumes (GpuVolumeComponent). volumeResources is the slot-indexed data;
+  // volumeSlots owns slot/generation/liveness.
+  GpuSlotMap                        volumeSlots{sceneWorld};
+  std::vector<VolumeResource>       volumeResources;
 
-  // O(1) slot recycling. Each Destroy verb pushes the freed slot;
-  // each Acquire / Append verb pops the latest one. Stack ordering
-  // keeps the most-recently-freed slot first, which matches CPU
-  // cache + keeps the §15 dedup-by-content hash stable for repeated
-  // CreateMesh calls with identical geometry. Without these, the
-  // per-verb bodies would linear-scan their entry vectors looking
-  // for a free slot — quadratic over the lifetime of an
-  // append-heavy load.
-  std::vector<std::uint32_t> freeVolumeSlots;
+  // RFC 0009 — all per-type free-slot recycling now lives inside each GpuSlotMap
+  // (gpuscene_detail encoding, LIFO reuse), so the old free-slot vectors are gone.
   // V2.A.5 — set when a fresh AddVolume needs CommitResources to
   // create the matching nvrhi::TextureHandle + write the dense
   // float buffer into it via writeTexture(). Cleared after
@@ -802,8 +803,15 @@ struct GpuScene::Impl
     return const_cast<Entry*>(entry);
   }
 
-  [[nodiscard]] const VolumeEntry*   LookupVolume(VolumeHandle handle) const noexcept
-  { return LookupEntryImpl(static_cast<uint32_t>(handle), volumes); }
+  // RFC 0009 P6 — resolve a VolumeHandle to its slot-indexed VolumeResource.
+  [[nodiscard]] VolumeResource* ResolveVolumeResource(VolumeHandle handle) noexcept
+  {
+    const flecs::entity entity = volumeSlots.Resolve(static_cast<uint32_t>(handle));
+    if (entity.id() == 0)
+      return nullptr;
+    const uint32_t slot = GpuSlotMap::SlotOf(static_cast<uint32_t>(handle));
+    return slot < volumeResources.size() ? &volumeResources[slot] : nullptr;
+  }
 
   // RFC 0009 P5 — resolve an InstanceHandle to its slot-indexed InstanceResource (or
   // null for Invalid/stale). Does NOT bump staleHandleDrops; callers that need the
@@ -827,9 +835,6 @@ struct GpuScene::Impl
     const uint32_t slot = GpuSlotMap::SlotOf(static_cast<uint32_t>(handle));
     return slot < meshResources.size() ? &meshResources[slot] : nullptr;
   }
-
-  [[nodiscard]] VolumeEntry*   ResolveVolume(VolumeHandle handle) noexcept
-  { return BumpIfStaleAndReturn(handle, LookupVolume(handle)); }
 
   // RFC 0009 P1 — collect live lights as (encoded handle, desc) sorted by slot
   // index, the deterministic order the GPU light buffer + editor accessors need

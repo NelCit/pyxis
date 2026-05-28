@@ -15,7 +15,7 @@ README is an index of merged RFCs (one line per RFC).
 | 0006 | Migrate the whole project from vcpkg OpenUSD 26.3 to Kit nv-usd 25.11 | Accepted |
 | 0007 | One Hydra module: delegate ingests via StageWalker; retire pyxis_hydra_omni | Draft |
 | 0008 | Direct GPU color AOV to the Kit viewport (no readback) via Vulkan->GL external-memory interop | Accepted |
-| 0009 | Wire the Flecs SceneWorld as the real scene representation (phased; unify GpuScene + Scene/) | Draft |
+| 0009 | Wire the Flecs SceneWorld as the real scene representation (phased; unify GpuScene + Scene/) | Accepted |
 
 ## Lifecycle (§44.4)
 

@@ -1,10 +1,10 @@
 # RFC 0009: Wire the Flecs SceneWorld as the real scene representation
 
-- Status: Draft
+- Status: Accepted (P1–P6 implemented + green; see "Implementation status")
 - Author(s): Pyxis team
 - Created: 2026-05-28
 - Last updated: 2026-05-28
-- Implementation PRs: (wire-flecs-scene branch — phased)
+- Implementation PRs: (wire-flecs-scene branch — phased, P1–P6)
 - Amends: §8 (SceneWorld), §30.11 (Flecs conventions)
 
 ## Summary
@@ -121,10 +121,38 @@ No public API (§18) change — `GpuScene` / `PyxisRenderer` signatures and the
 internal commit path only. Milestones: unblocks the M8b perf items (per-entity dirty
 tracking, TLAS refit); no milestone exit-criteria change.
 
-## Open questions
+## Implementation status
 
-- Should the app-side `SceneWorldFacade` be removed (its world folded onto
-  `GpuScene`'s) or kept as a tooling affordance? (Resolve at P5.)
-- Promote pack/upload into `world.progress()` systems (needs `FrameContext`) vs.
-  keep them as `CommitResources`-called functions reading Flecs queries? (P5 decides
-  once all data is Flecs-resident.)
+**Done (P1–P6, all green — 291/291 unit + 433/433 golden/integration, byte-identical
+incl. M2 byte-equal EXR + M10 World Lobby):** all six entity types now live in the
+`GpuScene`-owned Flecs `sceneWorld`. `GpuScene::Impl` holds **no** `std::vector<*Entry>`
+— each type is a Flecs entity + a `GpuSlotMap` handle table (gpuscene_detail encoding,
+slot == GPU/buffer index, LIFO free-list) + slot-indexed side tables for non-POD
+GPU/CPU data (§30.11), with the dedup hash maps retained as indices.
+
+| Type | Allocator | Component | Dirty / relationships |
+|---|---|---|---|
+| Lights | `HandleBimap` | `GpuLightComponent` (LightDesc) | — |
+| Materials | `materialSlots` | `GpuMaterialComponent` | dedup index |
+| Textures | `textureSlots` | `GpuTextureComponent` | **`DirtyTexture`** |
+| Meshes | `meshSlots` | `GpuMeshComponent` | **`DirtyTopology`** + BLAS release on destruct |
+| Instances | `instanceSlots` | `GpuInstanceComponent` | **`DirtyTransform`** + **`MeshOf`/`MaterialOf`** pairs |
+| Volumes | `volumeSlots` | `GpuVolumeComponent` | — |
+
+**Deferred follow-ups** (do not block this RFC; each is an optimization or cleanup on
+top of the now-Flecs-resident data, to be done as separate green checkpoints):
+
+- Promote the pack/upload work from `CommitResources`-called functions into
+  `world.progress()` systems via a `FrameContext` singleton (the §30.11 phase
+  pipeline executes for real). The data + `Dirty<T>` tags are in place; this is the
+  execution-model change.
+- **TLAS refit** using `DirtyTransform` (per §16) instead of always-rebuild — the tag
+  is set; the refit path is the remaining work.
+- **Incremental side-table upload** for meshes using `DirtyTopology` (the audit's
+  quadratic-load fix) — currently the concatenated buffers still full-rebuild when
+  any mesh is dirty (byte-identical, but O(geometry·meshCount)).
+- **Refcount-on-destroy / orphan detection** consuming the `MeshOf`/`MaterialOf`
+  relationships (release a shared BLAS when its last instance goes away).
+- Remove the now-redundant app-side `SceneWorldFacade` world (its no-op systems /
+  QueryCache stub) or fold it onto `GpuScene`'s `sceneWorld`; update the
+  `SceneWorldInit` test + the §8/§30.11 docs + the `flecs-conventions-audit` skill.

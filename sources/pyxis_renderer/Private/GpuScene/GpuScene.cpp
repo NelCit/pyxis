@@ -199,17 +199,15 @@ bool GpuScene::HasVolume(VolumeHandle volumeHandle) const
 
 uint32_t GpuScene::GetVolumeCount() const noexcept
 {
-  return static_cast<uint32_t>(_impl->volumes.size());
+  // RFC 0009 P6 — slot count (== old volumes.size()); slot == volume index.
+  return _impl->volumeSlots.SlotCount();
 }
 
 nvrhi::ITexture* GpuScene::GetVolumeTextureAt(uint32_t volumeSlot) const noexcept
 {
-  if (volumeSlot >= _impl->volumes.size())
+  if (!_impl->volumeSlots.IsLive(volumeSlot) || volumeSlot >= _impl->volumeResources.size())
     return nullptr;
-  const Impl::VolumeEntry& entry = _impl->volumes[volumeSlot];
-  if (!entry.live)
-    return nullptr;
-  return entry.texture.Get();
+  return _impl->volumeResources[volumeSlot].texture.Get();
 }
 
 // ---- Scene-wide reset + frame boundary -------------------------------------
@@ -481,15 +479,13 @@ FrameStats GpuScene::LastFrameStats() const {
   // computed at AddVolume time as `dim_x * dim_y * dim_z * sizeof(float)`
   // since every volume binds a R32_FLOAT 3D texture. Slot 0 sentinel
   // is `live=false` so the sum naturally excludes it.
+  // RFC 0009 P6 — volumes are Flecs entities; walk live slots for the byte tally.
   uint64_t liveVolumeCount = 0;
   uint64_t volumeBytes = 0;
-  for (const Impl::VolumeEntry& entry : _impl->volumes)
-  {
-    if (!entry.live)
-      continue;
+  _impl->volumeSlots.ForEachLiveSlot([&](uint32_t slot, flecs::entity) {
     ++liveVolumeCount;
-    volumeBytes += entry.bytesOnGpu;
-  }
+    volumeBytes += _impl->volumeResources[slot].bytesOnGpu;
+  });
   stats.meshCount = liveMeshCount;
   stats.blasCount = liveBlasCount;
   stats.instanceCount = liveInstanceCount;

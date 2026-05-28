@@ -170,18 +170,14 @@ void GpuScene::Impl::Clear() noexcept
   texturePixelData.clear();
   textureResolvedPaths.clear();
 
-  volumes.clear();
+  // RFC 0009 P6 — volumes are Flecs entities; Reset destructs them + clears records.
+  volumeSlots.Reset();
+  volumeResources.clear();
 
   materialDescHashToHandle.clear();
   textureKeyHashToHandle.clear();
   meshDescHashToHandle.clear();
 
-  // Clear the slot-recycle free lists symmetrically with their
-  // entry vectors. Without this, slot indices from the prior scene
-  // would survive Clear() and the next Acquire/Append would pop a
-  // slot that's now out of range for the cleared entry vector →
-  // out-of-bounds `entries[slot]` → UB.
-  freeVolumeSlots.clear();
   volumesNeedGpuUpload = false;
 
   // GPU buffers: drop refs. CommitResources will lazily re-allocate
