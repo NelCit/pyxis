@@ -106,6 +106,10 @@ target_sources(pyxis_unit_tests PRIVATE
     # from pyxis_renderer.dll.
     ${CMAKE_SOURCE_DIR}/sources/pyxis_renderer/Private/RenderGraph/RenderGraph.cpp
 
+    # RFC 0009 — SceneWorldInit pins the §30.11 phase pipeline; Phases.cpp is a
+    # Private symbol not exported from pyxis_renderer.dll, so compile it directly.
+    ${CMAKE_SOURCE_DIR}/sources/pyxis_renderer/Private/Scene/Phases.cpp
+
     # SceneResolver lives in pyxis_app's Private (the executable, not
     # a DLL) so we recompile its .cpp directly here. CliArgs.h /
     # Configuration.h are pure POD declarations — we don't need to

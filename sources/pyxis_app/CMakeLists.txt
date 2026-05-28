@@ -7,9 +7,9 @@ add_executable(Pyxis::App ALIAS pyxis)
 # PUBLIC so transitive consumers (the unit test executable) see the right
 # include paths.
 pyxis_set_target_compile_options(pyxis)
-# The Application owns SceneWorldFacade::Init() which catches Flecs's
-# bad_alloc internally; the renderer/platform perimeter is exception-free.
-# pyxis_app proper has no need for exceptions either, so keep them off.
+# The renderer/platform perimeter is exception-free and GpuScene catches Flecs's
+# bad_alloc internally; pyxis_app proper has no need for exceptions either, so
+# keep them off.
 pyxis_disable_exceptions_and_rtti(pyxis)
 
 target_sources(pyxis PRIVATE

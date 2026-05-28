@@ -57,7 +57,7 @@ sources/pyxis_<module>/Private/...                  # everything else
 
 Renderer's public surface is exhaustive (§18.1) — `Forward.h`, `RendererApi.h`, `Error.h`, `GpuScene.h`, `PyxisRenderer.h`, `Profiler.h`, `Descs/*.h`. **Anything else is `Private/` and inaccessible to ingest adapters or app.** Reviewers reject PRs that widen this.
 
-`SceneWorld` lives in `pyxis_renderer/Private/Scene/` with subfolders `Components/` (one POD per header), `Systems/` (free functions), `Queries/` (cached `flecs::query_t*`), `Observers/`, plus `World.h`, `Phases.h`, `HandleBimap.h`, `Pipeline.cpp`.
+The Flecs `SceneWorld` (a `flecs::world`) is owned by `GpuScene::Impl` (`Private/GpuScene/`) — the scene representation and the GPU-resource layer share one world (RFC 0009). Each entity type gets a `GpuSlotMap` handle table + slot-indexed side tables for its non-POD data. `Private/Scene/` holds the shared ECS primitives `GpuScene` builds on: `Phases.h`/`.cpp` (the §30.11 custom phase pipeline, driven by `CommitResources` via `world.progress()`), `HandleBimap.h`/`.cpp` (light handle table), and `Components/Dirty.h` (the `Dirty<T>` tags). The earlier parallel app-side `SceneWorldFacade` + its no-op `System_*`/`QueryCache` stubs were retired in RFC 0009.
 
 ---
 

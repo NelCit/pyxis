@@ -29,7 +29,6 @@
 #include <Pyxis/Renderer/GpuScene.h>
 #include <Pyxis/Renderer/Profiler.h>
 #include <Pyxis/Renderer/PyxisRenderer.h>
-#include <Pyxis/Renderer/SceneWorldFacade.h>
 
 #include <nvrhi/nvrhi.h>
 
@@ -534,14 +533,6 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
     return EXIT_DEVICE_INIT_FAIL;
   }
 
-  // ---- SceneWorld (M0 carry-over so the phase pipeline still ticks) ---
-  SceneWorldFacade scene;
-  if (scene.Init() != SceneWorldStatus::Ok)
-  {
-    log.Error(log::RENDER, "ViewerMode: SceneWorldFacade::Init failed");
-    return EXIT_DEVICE_INIT_FAIL;
-  }
-
   // ---- Profiler + GpuScene + Renderer ---------------------------------
   // GpuScene is the canonical scene-mutation API (§18.5);
   // PyxisRenderer's ctor takes it by reference per §18.6 and
@@ -869,10 +860,6 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
         imguiHost.SetCameraPose(cameraController.Position(),
                                 cameraController.OrientationQuat());
       }
-    }
-    {
-      const Profiler::CpuScope tick(profiler, "app.scene.tick");
-      scene.Tick();
     }
     {
       // app.dm.acquire is the prime suspect for any "uncapped FPS

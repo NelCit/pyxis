@@ -48,6 +48,5 @@ inline constexpr uint32_t MAX_FRAMES_IN_FLIGHT = 3;
 class GpuScene;
 class PyxisRenderer;
 class Profiler;
-class SceneWorldFacade;
 
 }  // namespace pyxis

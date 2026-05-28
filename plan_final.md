@@ -529,6 +529,20 @@ there is no v1 shim, no plain-tables fallback. Nothing in this section is part o
 public surface (§18); ingest adapters never touch these types. Flecs is linked PRIVATE
 into `pyxis_renderer` and no Flecs header escapes through `Public/`.
 
+> **Amended by RFC 0009 (Accepted).** As shipped, the `flecs::world` is owned directly
+> by `GpuScene::Impl` (not a separate `SceneWorld`/`SceneWorldFacade` wrapper the app
+> constructs + `Tick()`s — that parallel, no-op world was retired). Each entity type has
+> a `GpuSlotMap` handle table (slot == GPU buffer index, §19.7 encoding) plus
+> slot-indexed side tables for its non-POD CPU/GPU data; dedup hash maps are retained as
+> hash→entity indices. The §8.1 component names below are illustrative — the concrete
+> components are `GpuLightComponent`/`GpuMaterialComponent`/`GpuTextureComponent`/
+> `GpuMeshComponent`/`GpuInstanceComponent` + the `MeshOf`/`MaterialOf` pairs + the
+> `Dirty<Topology|Transform|Texture>` tags, all in `Private/GpuScene/Internal.h`. The
+> §8.1 systems run as real Flecs systems on the §30.11 phases, driven by
+> `CommitResources → world.progress()`. `Private/Scene/` retains only the shared
+> primitives: `Phases.*`, `HandleBimap.*`, `Components/Dirty.h`. See RFC 0009 for the
+> full mapping + determinism rules.
+
 ### 8.1 Canonical shape (Flecs ECS)
 
 ```

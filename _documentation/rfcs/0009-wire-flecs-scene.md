@@ -160,6 +160,15 @@ top of the now-Flecs-resident data, to be done as separate green checkpoints):
   this future-proofs progressive-load / live-edit and removes the latent quadratic.
 - **Refcount-on-destroy / orphan detection** consuming the `MeshOf`/`MaterialOf`
   relationships (release a shared BLAS when its last instance goes away).
-- Remove the now-redundant app-side `SceneWorldFacade` world (its no-op systems /
-  QueryCache stub) or fold it onto `GpuScene`'s `sceneWorld`; update the
-  `SceneWorldInit` test + the §8/§30.11 docs + the `flecs-conventions-audit` skill.
+- ~~Remove the now-redundant app-side `SceneWorldFacade` world (its no-op systems /
+  QueryCache stub).~~ **Done.** Deleted `SceneWorldFacade` (public header + impl), the
+  `SceneWorld`/`World` wrapper, the 7 no-op `System_*` stubs + `Systems/Pipeline`, the
+  `QueryCache` stub, and the unused component mirrors (`Geom`/`Transform`/`Visibility`/
+  `MaterialRef`/`MeshRef`/`BlasRef`/`MaterialGpu`/`TextureGpu`/`LightParams`). `Private/
+  Scene/` now holds only what `GpuScene` actually uses: `Phases.*` (the §30.11 pipeline),
+  `HandleBimap.*` (light handles), `Components/Dirty.h`. The app no longer constructs/
+  `Tick()`s a parallel world (HeadlessMode/ViewerMode); `SceneWorldInit` is repointed to
+  pin `RegisterPhasePipeline` (registration + declared phase order) instead of the facade
+  lifecycle. Docs flipped (CLAUDE.md §2 map, plan_final.md §8).
+
+**All deferred follow-ups complete** — RFC 0009 is fully realised.

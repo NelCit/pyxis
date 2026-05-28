@@ -21,7 +21,6 @@ target_sources(pyxis_renderer PUBLIC
     FILES
         Public/Pyxis/Renderer/RendererApi.h
         Public/Pyxis/Renderer/Forward.h
-        Public/Pyxis/Renderer/SceneWorldFacade.h
 
         # M1 public surface.
         Public/Pyxis/Renderer/Profiler.h
@@ -119,39 +118,17 @@ target_sources(pyxis_renderer PRIVATE
     Private/Materials/StbImageRead.cpp
     Private/Materials/MaterialFlag.h
 
-    # Scene/.
-    Private/Scene/World.h
-    Private/Scene/World.cpp
+    # Scene/ — the §8 Flecs scene primitives GpuScene builds on (RFC 0009).
+    # The §30.11 phase pipeline (Phases.*), the light handle table
+    # (HandleBimap.*), and the Dirty<T> tag components are owned + driven by
+    # GpuScene's internal SceneWorld; the former parallel app-side facade
+    # (World/SceneWorldFacade), its no-op System_* stubs, the QueryCache stub,
+    # and the unused component mirrors were retired in RFC 0009's follow-up.
     Private/Scene/Phases.h
     Private/Scene/Phases.cpp
-    Private/Scene/SceneWorldFacade.cpp
-
     Private/Scene/HandleBimap.h
     Private/Scene/HandleBimap.cpp
-
-    Private/Scene/Components/Geom.h
-    Private/Scene/Components/Transform.h
-    Private/Scene/Components/Visibility.h
-    Private/Scene/Components/MaterialRef.h
-    Private/Scene/Components/MeshRef.h
-    Private/Scene/Components/BlasRef.h
-    Private/Scene/Components/MaterialGpu.h
-    Private/Scene/Components/TextureGpu.h
-    Private/Scene/Components/LightParams.h
     Private/Scene/Components/Dirty.h
-
-    Private/Scene/Systems/Pipeline.h
-    Private/Scene/Systems/Pipeline.cpp
-    Private/Scene/Systems/UploadDirtyTextures.cpp
-    Private/Scene/Systems/UploadDirtyMaterials.cpp
-    Private/Scene/Systems/ExtractDirtyMeshes.cpp
-    Private/Scene/Systems/BuildDirtyBlas.cpp
-    Private/Scene/Systems/RebuildTlas.cpp
-    Private/Scene/Systems/UpdateBindlessTable.cpp
-    Private/Scene/Systems/ClearDirtyFlags.cpp
-
-    Private/Scene/Queries/QueryCache.h
-    Private/Scene/Queries/QueryCache.cpp
 )
 
 # ----------------------------------------------------------------------------
