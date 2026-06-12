@@ -98,7 +98,7 @@ hlslpp::float4x4 BuildViewMatrix() noexcept {
 
 // Build a row-major + column-vector GL-convention perspective
 // projection. raygen does its own Y-flip in the NDC mapping (top row
-// of dispatch -> ndc.y = +1, see raygen.slang's ndc construction),
+// of dispatch -> ndc.y = +1, see camera_ray.slang's ndc construction),
 // so the projection itself stays GL-style with +focal in row 1.
 //
 // Pre-fix this matrix had -focal (a Vulkan-style Y-flip), which

@@ -10,14 +10,14 @@
 // (BlitToSrgbPass); this pass does one thing. No jitter, no accumulation —
 // bit-exact reproducible.
 //
-// A render-graph pass (§9): runs after PathTracePass, before BlitToSrgbPass.
+// A render-graph pass (§9): runs after TonemapPass, before BlitToSrgbPass.
 // Reads context.targets->color (super-res LINEAR) + context.colorLinearResolved
 // (base-res LINEAR out) + context.settings->ssaaFactor; no-ops when ssaaFactor < 2
 // or either target is unbound (at factor 1 there is nothing to downsample and
 // BlitToSrgbPass reads `color` directly). Owns its own compute shader + pipeline +
-// binding layout, mirroring PathTracePass's self-contained construction.
+// binding layout, mirroring RaytracedLightingPass's self-contained construction.
 //
-// Bindings (matched to ssaa_downsample.slang):
+// Bindings (matched to ssaa_resolve.slang, renamed from ssaa_downsample at P3):
 //   space=0, t0 : Texture2D<float4>   source super-res LINEAR color
 //   space=0, u1 : RWTexture2D<float4> destination base-res LINEAR color
 //   space=0, b2 : ConstantBuffer<SsaaDownsampleUniforms>
@@ -28,6 +28,8 @@
 
 #include <nvrhi/nvrhi.h>
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <string_view>
 #include <unordered_map>
@@ -61,7 +63,19 @@ class SsaaResolvePass final : public IRenderPass {
   nvrhi::IDevice* _device = nullptr;
   nvrhi::ShaderHandle _shader;
   nvrhi::BindingLayoutHandle _bindingLayout;
-  nvrhi::ComputePipelineHandle _pipeline;
+  // P5 (design D2) — one compute pipeline per supersample factor, the
+  // shader's SSAA_FACTOR specialization constant (SPEC_ID_SSAA_FACTOR)
+  // baked at creation so the box-filter loops are driver-foldable.
+  // Every producer clamps the factor to [1, 4] (CliArgs --ssaa,
+  // EditorPanel's slider, HeadlessMode, ViewerMode), so the full
+  // variant set {2, 3, 4} is created EAGERLY in the ctor (compute
+  // pipelines are cheap) and Execute's selection is a pure array
+  // lookup — no creation, no allocation (§30.10). Index = factor -
+  // SSAA_FACTOR_MIN.
+  static constexpr uint32_t SSAA_FACTOR_MIN = 2u;
+  static constexpr uint32_t SSAA_FACTOR_MAX = 4u;
+  static constexpr std::size_t SSAA_VARIANT_COUNT = SSAA_FACTOR_MAX - SSAA_FACTOR_MIN + 1u;
+  std::array<nvrhi::ComputePipelineHandle, SSAA_VARIANT_COUNT> _pipelines;
   nvrhi::BufferHandle _paramsBuffer;
   std::unordered_map<uint64_t, nvrhi::BindingSetHandle> _bindingSetCache;
   // Cached base-res LINEAR downsample target (see EnsureLinearOutput).

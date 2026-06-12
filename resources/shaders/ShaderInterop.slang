@@ -29,6 +29,7 @@
     using float2   = hlslpp::float2;
     using float3   = hlslpp::float3;
     using float4   = hlslpp::float4;
+    using float3x4 = hlslpp::float3x4;  // 3 SIMD rows = 48 B (InstanceInfoGpu)
     using float4x4 = hlslpp::float4x4;
     using uint     = uint32_t;
 #endif
@@ -60,14 +61,15 @@ struct HitInfo {
     // WorldRayOrigin + RayTCurrent * WorldRayDirection cached so
     // raygen doesn't re-derive it. Miss leaves them at zero.
     //
-    // Payload size note: 68 bytes total — past the 32-byte register-
-    // only payload ceiling for DXR. The runtime spills to the on-
-    // chip ray stack on every TraceRay, costing latency per leaf
-    // traversal step. Acceptable for the M7 AOV inspector (one
-    // primary ray per pixel; AOV writes happen ONCE per dispatch);
-    // when the §9 multi-bounce path tracer + NEE land at M9+ the
-    // BSDF lobes will need to drop the AOV-only fields onto a
-    // payload-attribute attachment instead.
+    // Payload size note: 80 bytes total (the M29 recursionDepth +
+    // V2.B transmittance fields grew it past the original 68) — far
+    // past the 32-byte register-only payload ceiling for DXR. The
+    // runtime spills to the on-chip ray stack on every TraceRay,
+    // costing latency per leaf traversal step. Acceptable for the
+    // M7 AOV inspector (one primary ray per pixel; AOV writes happen
+    // ONCE per dispatch); the pass-split design keeps this payload
+    // for secondary rays only — the visibility pass uses a thin
+    // 20-byte payload instead.
     float3 baseColor;
     uint   materialId;   // material slot from gInstanceMaterial[instanceId]
     float3 worldHit;
@@ -85,8 +87,25 @@ struct HitInfo {
     // leave it at 0. raygen's front-to-back transmission loop folds it
     // into a running throughput instead of tracing a recursive
     // continuation ray, so stacked transparent layers cost loop
-    // iterations rather than hardware recursion depth. See raygen.slang.
+    // iterations rather than hardware recursion depth. See
+    // raytraced_lighting_raygen.slang.
     float3 transmittance;   // 0 = opaque; >0 lets the surface behind show through
+};
+
+// VisibilityPayload — the THIN ray payload of the P4 RaytracedGBufferPass
+// pipeline (20 bytes vs HitInfo's 80 — fits the register-only payload
+// budget, no ray-stack spill). Shader-only for the same float3-trap
+// reason as HitInfo: it never crosses the C++/SPIR-V boundary as a
+// memory blob. The GBuffer raygen converts it into the 32-byte
+// VisibilityGpu buffer record below; the GBuffer closesthit / miss /
+// anyhit are compiled against this type (DXR requires the anyhit's
+// payload type to match the pipeline's TraceRay payload type — see
+// raytraced_anyhit.slang).
+struct VisibilityPayload {
+    float  hitT;            // RayTCurrent() at the closest hit; -1.0 = miss
+    float2 bary;            // BuiltInTriangleIntersectionAttributes.barycentrics
+    uint   instanceId;      // InstanceID(); ~0u on miss
+    uint   primitiveIndex;  // PrimitiveIndex(); ~0u on miss
 };
 #endif
 
@@ -141,8 +160,10 @@ struct CameraUniforms {
     float _camPad1;
 };
 
-// FrameUiUniforms — per-frame viewer-only state the raygen reads
-// (cursor pixel + AOV-inspector mode). Lives in its own cbuffer at
+// FrameUiUniforms — per-frame viewer-only state the lighting raygen
+// reads (cursor pixel for the picker gate; since the P3 split the
+// debugViewMode / worldPosPeriod fields are TonemapUniforms' domain —
+// kept here for the frozen layout, written 0). Lives in its own cbuffer at
 // binding 19 so future per-frame camera knobs (samplesPerPixel,
 // jitter offset, accumulation generation, ...) added to CameraUniforms
 // can grow without colliding with UI state. M7 follow-up: split out
@@ -156,12 +177,11 @@ struct FrameUiUniforms {
     // Row 0 — picker + display selector.
     uint  mousePixelX;          // top-left origin pixel coord, or PICK_PIXEL_NONE if no hover
     uint  mousePixelY;
-    uint  debugViewMode;        // DEBUG_VIEW_COLOR / NORMAL / DEPTH / PRIM_ID / ...
+    uint  debugViewMode;        // P3: dead here (Tonemap's domain); written 0
     uint  _reservedUi0;
     // Row 1 — AOV-specific knobs the editor surfaces as sliders.
-    // worldPosPeriod: scene-units period of the WorldPos AOV's sin
-    // encoding (10 m default for human-scale scenes; bump to ~50 m
-    // for World Lobby). Other fields reserved for future per-AOV display
+    // worldPosPeriod: P3 — dead here (TonemapUniforms carries the live
+    // copy); written 0. Other fields reserved for future per-AOV display
     // knobs.
     float worldPosPeriod;
     uint  _reservedUi1;
@@ -179,10 +199,29 @@ struct SsaaDownsampleUniforms {
     uint _ssaaPad0;
 };
 
+// Tonemap compute-pass uniforms (P3 pass split — the display transform
+// extracted from raygen's inline branch). exposure mirrors
+// CameraUniforms.exposure (photographic stops, applied as 2^exposure
+// before the ACES tonemap); debugViewMode / worldPosPeriod mirror the
+// FrameUiUniforms fields the raygen display branch used to read.
+// 32 bytes (two cbuffer rows).
+struct TonemapUniforms {
+    // Row 0 — display transform inputs.
+    float exposure;        // photographic stops; gain = 2^exposure
+    uint  debugViewMode;   // DEBUG_VIEW_COLOR / NORMAL / DEPTH / ...
+    float worldPosPeriod;  // WorldPos sin-encode period (scene units)
+    uint  destWidth;       // output (display target) dimensions in texels
+    // Row 1 — dims tail + reserved pads.
+    uint  destHeight;
+    uint  _pad0;
+    uint  _pad1;
+    uint  _pad2;
+};
+
 // Debug-view selector mirrored on both sides. The combo in ImGuiHost's
-// Editor panel writes one of these into camera.debugViewMode; raygen
-// branches on it to compute the BGRA8 display output (gOutput) from
-// the raw per-AOV textures.
+// Editor panel writes one of these into camera.debugViewMode; the
+// TonemapPass branches on it to compute the BGRA8 display output
+// (gOutput) from the fp32 linear radiance + the raw per-AOV textures.
 static const uint DEBUG_VIEW_COLOR        = 0;   // post-tonemap radiance
 static const uint DEBUG_VIEW_NORMAL       = 1;   // world normal as (n*0.5+0.5)
 static const uint DEBUG_VIEW_DEPTH        = 2;   // 1/depth grayscale
@@ -199,6 +238,25 @@ static const uint DEBUG_VIEW_WORLD_POS_EYE = 10; // sin-encoded eye-space positi
 // Sentinel for camera.mousePixel{X,Y} meaning "mouse outside viewport".
 // Raygen short-circuits the pick-write when either component matches.
 static const uint PICK_PIXEL_NONE = 0xFFFFFFFFu;
+
+// P5 (passes-split design D2) — Vulkan specialization-constant ids,
+// mirrored here per §23 (single interop file) so the C++ side's
+// nvrhi::ShaderSpecialization::constantID values and the shaders'
+// `[[vk::constant_id(N)]]` declarations can never desync. ALWAYS use
+// these explicit ids — a bare `[SpecializationConstant]` gets an
+// order-dependent auto-assigned SpecId that silently drifts.
+//
+// Ids are scoped PER SPIR-V MODULE (each .spv has its own SpecId
+// namespace), so SSAA_FACTOR in ssaa_resolve.slang reuses id 0 without
+// colliding with PROJECTION_MODE in the RT modules.
+//
+//   RT modules (which module DECLARES each constant):
+static const uint SPEC_ID_PROJECTION_MODE          = 0;  // camera_ray.slang (both raygens via include)
+static const uint SPEC_ID_MAX_RAY_RECURSION        = 1;  // shading.slang (lighting raygen + closesthit)
+static const uint SPEC_ID_MAX_TRANSPARENT_SEGMENTS = 2;  // raytraced_lighting_raygen.slang
+static const uint SPEC_ID_REFL_MAX_SEGMENTS        = 3;  // shading.slang (lighting raygen + closesthit)
+//   Compute modules:
+static const uint SPEC_ID_SSAA_FACTOR              = 0;  // ssaa_resolve.slang
 
 // PickResult — one-element RWStructuredBuffer the raygen writes when
 // the dispatched pixel matches camera.mousePixel. The viewer copies
@@ -343,11 +401,12 @@ struct OpenPBRMaterialGPU {
 // LightGpu — packed light entry the closesthit reads via the
 // structured-buffer light table at binding 5 (M7). Same scalar-only
 // rule as OpenPBRMaterialGPU (avoids the hlslpp::float3 16-vs-12-byte
-// trap). Layout is 80 bytes (5 rows of 16).
+// trap). Layout is 96 bytes (6 rows of 16) — row 5 carries the
+// UsdLuxShapingAPI cone terms added at M9.
 //
 // M7 ships a deliberately **simple shading model** (no NdotL, no
 // shadow rays, no NEE, no MIS, no importance sampling — see
-// closesthit.slang for the full closeup). Each light contributes
+// shading.slang for the full closeup). Each light contributes
 // `color * intensity * weight` where weight is 1.0 for direct
 // (Distant / Rect) and 0.5 for ambient (Dome). The `direction` /
 // `position` / `axisU` / `axisV` fields are stored for the future
@@ -441,7 +500,100 @@ static const uint MATERIAL_FLAG_HAS_UV_TRANSFORM        = 1u << 15;
 static const uint MATERIAL_FLAG_WORLD_PROJECTION        = 1u << 16;
 static const uint MATERIAL_FLAG_OBJECT_PROJECTION       = 1u << 17;
 
-// Bindless texture array capacity at PathTracePass binding 28.
+// InstanceInfoGpu — packed per-instance record at binding 4 (P2 buffer
+// packing; replaces the two parallel per-instance uint side-tables
+// gInstanceMaterial + gInstanceMesh). Indexed by `InstanceID()` (= the
+// §15 instance slot). Layout is 64 bytes (4 rows of 16):
+//   Rows 0-2 — `objectToWorld`, the instance object→world 3×4 affine
+//   (owner-directed: a real float3x4, NOT 12 scalars — the scalar-only
+//   rule below exists for the float3 16-vs-12-byte trap; hlslpp's
+//   float3x4 is 3 SIMD rows = 48 bytes, byte-identical to Slang's
+//   row-major float3x4, same as the float4x4s in CameraUniforms).
+//   Stored row-major with EXACTLY the float values the TLAS instance
+//   desc transform carries (RebuildTlasIfDirty writes both from the
+//   same hlslpp::store). P2 populates it for the P4 visibility-buffer
+//   split (whose lighting raygen has no ObjectToWorld3x4() intrinsic);
+//   no shader reads it yet.
+//   Row 3 — the §15 material slot + the M7-NdotL mesh slot the
+//   closesthit/anyhit table lookups consume today.
+struct InstanceInfoGpu {
+    // Rows 0-2 — object→world 3×4 affine, row-major.
+    float3x4 objectToWorld;
+    // Row 3 — table slots (+ 2 reserved pads).
+    uint  materialSlot;   // material slot for gMaterials (0 = sentinel grey)
+    uint  meshSlot;       // mesh slot for gMeshInfo (0 = sentinel)
+    uint  _pad0;
+    uint  _pad1;
+};
+
+// MeshInfoGpu — packed per-mesh-slot record at binding 6 (P2 buffer
+// packing; replaces the five parallel per-mesh uint offset tables
+// gMeshFaceOffsets / gMeshUvOffsets / gMeshIndexOffsets /
+// gMeshVertexNormalOffsets / gMeshTangentOffsets). One 32-byte cache
+// line per hit instead of five buffer loads. Indexed by the mesh slot
+// from InstanceInfoGpu. Layout is 32 bytes (2 rows of 16).
+//
+// faceOffset / uvOffset / vertexAttribOffset are running sums over the
+// live meshes in ascending slot order (the side-table concatenation
+// order — identical values to the old offset tables). vertexAttribOffset
+// serves BOTH per-vertex streams: the vertex-normal and tangent uploads
+// each pad to exactly vertexCount entries per mesh, so their offsets
+// were equal by construction (verified in UploadMeshVertexAttribs; _r0
+// is reserved as a second offset if they ever diverge). indexOffset is
+// the mesh's element offset into the pooled index buffer (§14.5) —
+// stable across commits because the pool never re-packs.
+struct MeshInfoGpu {
+    uint faceOffset;          // into gMeshFaceNormals (per-triangle)
+    uint uvOffset;            // into gMeshUvs (per-vertex)
+    uint indexOffset;         // into gMeshIndices (index-pool elements)
+    uint vertexAttribOffset;  // into gMeshVertexAttribs (per-vertex)
+    uint vertexCount;
+    uint _r0;
+    uint _r1;
+    uint _r2;
+};
+
+// VertexAttribGpu — interleaved per-vertex shading attributes at
+// binding 29 (P2 buffer packing; merges the two parallel padded float4
+// streams gMeshVertexNormals + gMeshTangents). attrib[i] = {normal[i],
+// tangent[i]}; exactly vertexCount entries per mesh. Owner-directed:
+// real float4 fields, not 8 scalars — hlslpp::float4 is exactly 16
+// bytes on both sides (the scalar-only rule guards the float3 trap
+// only), so the layout matches Slang bit-for-bit just like the old
+// float4 streams did. Layout is 32 bytes (2 rows of 16).
+//
+// normal.w is reserved (the old vertex-normal stream was float4 with w
+// unused); tangent.w is the MikkTSpace bitangent-handedness sign. A
+// zero-magnitude xyz remains the per-field "not authored" sentinel —
+// a mesh can author normals but no tangents (or vice versa), and the
+// closesthit detects each independently exactly as it did against the
+// two separate streams.
+struct VertexAttribGpu {
+    float4 normal;    // xyz normal; w reserved (was the stream's pad)
+    float4 tangent;   // xyz tangent; w = bitangent handedness (±1), MikkTSpace
+};
+
+// VisibilityGpu — one per-pixel record of the P4 visibility buffer
+// (design D1): RWStructuredBuffer written by the RaytracedGBufferPass
+// raygen at binding 2 of ITS layout, read by the RaytracedLightingPass
+// raygen at binding 34. fp32-exact — NEVER quantized: the lighting
+// raygen reconstructs worldHit = origin + hitT·dir and the barycentric
+// attribute interpolation from these floats, and any rounding here
+// would break the §33.7 byte-identical contract. Indexed row-major:
+// `vis[y * width + x]`. Layout is 32 bytes (2 rows of 16); scalar-only
+// per the float3-trap rule above.
+struct VisibilityGpu {
+    float hitT;            // RayTCurrent() of the primary hit; -1.0 = miss
+    float baryX;           // triangle barycentrics (attribs.barycentrics)
+    float baryY;
+    uint  instanceId;      // InstanceID(); ~0u on miss
+    uint  primitiveIndex;  // PrimitiveIndex(); ~0u on miss
+    uint  _pad0;
+    uint  _pad1;
+    uint  _pad2;
+};
+
+// Bindless texture array capacity at RaytracedLightingPass binding 28.
 // Cap chosen to comfortably cover v1 production scenes (Lobby 169,
 // World Lobby ~2K, Moana production sets ~50K is the post-v1 §5 target via
 // true createBindlessLayout). The closesthit indexes via
@@ -466,6 +618,11 @@ static const uint BINDLESS_TEXTURES_CAP = 4096u;
                   "display selector + per-AOV knobs).");
     static_assert(sizeof(FrameUiUniforms) % 16 == 0,
                   "FrameUiUniforms must be 16-byte aligned (cbuffer std140 rule).");
+    static_assert(sizeof(TonemapUniforms) == 32,
+                  "TonemapUniforms must be 32 bytes (2 cbuffer rows: exposure / "
+                  "debug-view selector / WorldPos period / dest dims + pads).");
+    static_assert(sizeof(TonemapUniforms) % 16 == 0,
+                  "TonemapUniforms must be 16-byte aligned (cbuffer std140 rule).");
     static_assert(sizeof(PickResult) == 112,
                   "PickResult must be 112 bytes (7 rows of 16) — original 5 rows + "
                   "Tier 1 Hydra Neye/elementId on row 5, Peye/alpha on row 6. "
@@ -479,6 +636,39 @@ static const uint BINDLESS_TEXTURES_CAP = 4096u;
     static_assert(sizeof(OpenPBRMaterialGPU) % 16 == 0,
                   "OpenPBRMaterialGPU must be 16-byte aligned (§23 cbuffer / "
                   "structured-buffer alignment rule).");
+    static_assert(sizeof(LightGpu) == 96,
+                  "LightGpu must be 96 bytes (6 rows of 16) — row 5 carries the "
+                  "M9 UsdLuxShapingAPI cone terms. The GPU light table at "
+                  "binding 5 is packed with this exact stride; see "
+                  "PackLightGpu in Private/GpuScene/Detail.h.");
+    static_assert(sizeof(LightGpu) % 16 == 0,
+                  "LightGpu must be 16-byte aligned (§23 structured-buffer rule).");
+    static_assert(sizeof(InstanceInfoGpu) == 64,
+                  "InstanceInfoGpu must be 64 bytes (4 rows of 16) — rows 0-2 carry "
+                  "the object→world 3×4 affine, row 3 the material/mesh slots. The "
+                  "packed instance table at binding 4 is uploaded with this exact "
+                  "stride; see RebuildTlasIfDirty / PackInstanceInfo in "
+                  "Private/GpuScene/Commit.cpp.");
+    static_assert(sizeof(InstanceInfoGpu) % 16 == 0,
+                  "InstanceInfoGpu must be 16-byte aligned (§23 structured-buffer rule).");
+    static_assert(sizeof(MeshInfoGpu) == 32,
+                  "MeshInfoGpu must be 32 bytes (2 rows of 16) — the five legacy "
+                  "per-mesh offset tables packed into one record; see UploadMeshInfo "
+                  "in Private/GpuScene/Commit.cpp.");
+    static_assert(sizeof(MeshInfoGpu) % 16 == 0,
+                  "MeshInfoGpu must be 16-byte aligned (§23 structured-buffer rule).");
+    static_assert(sizeof(VertexAttribGpu) == 32,
+                  "VertexAttribGpu must be 32 bytes (2 rows of 16) — interleaved "
+                  "per-vertex normal + tangent; see UploadMeshVertexAttribs in "
+                  "Private/GpuScene/Commit.cpp.");
+    static_assert(sizeof(VertexAttribGpu) % 16 == 0,
+                  "VertexAttribGpu must be 16-byte aligned (§23 structured-buffer rule).");
+    static_assert(sizeof(VisibilityGpu) == 32,
+                  "VisibilityGpu must be 32 bytes (2 rows of 16) — the P4 visibility "
+                  "buffer is allocated at width*height*32 with this exact stride; see "
+                  "RaytracedGBufferPass::EnsureVisibilityBuffer.");
+    static_assert(sizeof(VisibilityGpu) % 16 == 0,
+                  "VisibilityGpu must be 16-byte aligned (§23 structured-buffer rule).");
 
     // Sentinel bindless slot meaning "no texture bound for this lobe".
     // The closesthit checks the matching MaterialFlag bit before

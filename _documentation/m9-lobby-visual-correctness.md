@@ -29,7 +29,8 @@ desk's curved counter).
   arrays pad to `vertexCount` so each mesh's slice stays aligned to
   its vertex range (same defensive pattern as the UV path).
 - New public getters `GpuScene::GetMeshVertexNormalsBuffer()` /
-  `GetMeshVertexNormalOffsetsBuffer()`.
+  `GetMeshVertexNormalOffsetsBuffer()` (retired by the pass-split P2 —
+  render passes use the internal SceneResources view).
 - `PathTracePass`: 2 new structured-buffer bindings (29, 30) +
   matching fallback handles + the slot enum.
 - Closesthit: reads three per-vertex normals via
@@ -117,7 +118,8 @@ brushed steel) was missing entirely.
 - New per-mesh `meshTangentsBuffer` + `meshTangentOffsetsBuffer` on
   `GpuScene::Impl`; `UploadMeshTangents` commit phase + dirty bump
   on `CreateMesh`; new public getters
-  `GetMeshTangentsBuffer()` / `GetMeshTangentOffsetsBuffer()`.
+  `GetMeshTangentsBuffer()` / `GetMeshTangentOffsetsBuffer()` (retired by
+  the pass-split P2 — render passes use the internal SceneResources view).
 - PathTracePass: 2 new structured-buffer bindings (31, 32) +
   fallbacks + slot-enum entries.
 - Closesthit: when `MATERIAL_FLAG_HAS_NORMAL_MAP` is set + the

@@ -137,8 +137,9 @@ foreach(_i RANGE 0 ${_lastIdx})
                     "Two AOVs collapsing to the same content means raygen "
                     "either wired both UAVs to one texture, or the per-format "
                     "ConvertAovRowToRgba32f path normalised both inputs to "
-                    "zero. Inspect the bindings 11..18 / display branch in "
-                    "raygen.slang and the AOV upload paths.")
+                    "zero. Inspect the bindings 11..18 in "
+                    "raytraced_lighting_raygen.slang, the display branch in "
+                    "tonemap.slang, and the AOV upload paths.")
             endif()
         endforeach()
     endif()

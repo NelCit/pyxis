@@ -1,10 +1,10 @@
-// Pyxis renderer — miss shader.
+// Pyxis renderer — shared dome / background sampling (P4 pass split).
 //
-// Plan §41 M7-IBL. Samples the dome HDRI bound at binding 9 via the
-// ray direction's lat-long (equirectangular) UV, modulates by the
-// FIRST authored Dome light's color × intensity, and emits that as
-// the background. Replaces the M3-era hardcoded sky-blue (`0.55,
-// 0.65, 0.85`) and the M7-simple "authored-color-only" fallback.
+// Extracted VERBATIM from the retired miss.slang so the Lighting miss
+// shader (raytraced_lighting_miss.slang — secondary / continuation rays)
+// and the Lighting raygen (raytraced_lighting_raygen.slang — primary-miss
+// pixels resolved from the visibility buffer) compute bit-identical
+// backgrounds (§33.7).
 //
 // Lat-long mapping (right-handed Y-up, USD convention):
 //   u = atan2(dir.x, dir.z) / (2π) + 0.5    // azimuth, wraps in U
@@ -13,17 +13,23 @@
 // -Y at v = 1 (bottom row). Matches Poly Haven HDRI authoring.
 //
 // **Still no IBL importance sampling** — that's the M7-full closesthit
-// replacement (alias-table over the env-map per §7). The miss-shader
-// background here is just visual — the closesthit's dome term
-// continues to use the simple Lambert-against-up approximation
-// until M7-full lands.
+// replacement (alias-table over the env-map per §7). The background here
+// is just visual — the hit-shading dome term (shading.slang) continues
+// to use the fast-diffuse-IBL mip-bias approximation.
+//
+// Declares the light table + dome HDRI + dome sampler — binding numbers
+// (5 / 9 / 33) match the RaytracedLightingPass layout, the only pipeline
+// that consumes this module.
+
+#ifndef PYXIS_DOME_SAMPLE_SLANG
+#define PYXIS_DOME_SAMPLE_SLANG
 
 #include "ShaderInterop.slang"
 
 [[vk::binding(5, 0)]]  StructuredBuffer<LightGpu> gLights;
 [[vk::binding(9, 0)]]  Texture2D<float4>          gDomeEnvMap;
 // M9-fidelity per-role samplers: dome moved to binding 33 (Wrap-Clamp-Wrap).
-// Binding 10 is now the material sampler (Wrap-Wrap-Wrap), used by closesthit.
+// Binding 10 is the material sampler (Wrap-Wrap-Wrap), used by shading.slang.
 [[vk::binding(33, 0)]] SamplerState               gDomeSampler;
 
 static const float PYXIS_PI         = 3.14159265358979323846;
@@ -39,11 +45,12 @@ float2 latLongUv(float3 dir) {
     return float2(u, v);
 }
 
-// Slang emits the SPIR-V `OpEntryPoint` name as `"main"` regardless
-// of the source-side function name; the C++ side passes `"main"` to
-// NVRHI's createShader. See the matching note in raygen.slang.
-[shader("miss")]
-void main(inout HitInfo payload) {
+// Background radiance for a ray that escaped the scene. `rayDir` is the
+// world-space ray direction EXACTLY as it was passed to TraceRay (the
+// miss shader passes WorldRayDirection(); the lighting raygen passes the
+// BuildCameraRay output, which is the same value for the primary ray) —
+// the normalize() below then reproduces the old miss shader bit-for-bit.
+float3 SampleDomeBackground(float3 rayDir) {
     // Find the first authored Dome light — its color × intensity
     // tints / scales the HDRI sample. The fallback (no dome found)
     // keeps the M3-era soft sky-blue.
@@ -71,7 +78,7 @@ void main(inout HitInfo payload) {
     // positive xformOp:rotateY = 30° spins the HDRI horizon 30° to
     // the right (matches usdview / Storm convention). Single-axis
     // rotation matrix: rotates around world-Y, leaves Y unchanged.
-    const float3 dirRaw = normalize(WorldRayDirection());
+    const float3 dirRaw = normalize(rayDir);
     float3 dir = dirRaw;
     if (domeFound && abs(domeRotationY) > 1e-4) {
         const float cosR = cos(-domeRotationY);
@@ -82,8 +89,8 @@ void main(inout HitInfo payload) {
     }
 
     // Sample the HDRI at the (possibly-rotated) miss direction.
-    // PathTracePass's 1×1 WHITE fallback covers the no-HDRI case
-    // (color-only dome OR failed EXR decode) — sample returns
+    // RaytracedLightingPass's 1×1 WHITE fallback covers the no-HDRI
+    // case (color-only dome OR failed EXR decode) — sample returns
     // (1,1,1) so `hdri × tint × scale` collapses to `tint × scale`,
     // i.e. the dome's authored colour.
     const float2 uv  = latLongUv(dir);
@@ -97,17 +104,7 @@ void main(inout HitInfo payload) {
         ? hdri * domeTint * domeScale
         : domeTint;
 
-    payload.color = background;
-    payload.hitT  = -1.0f;  // miss sentinel — raygen branches on this.
-    // M7 follow-up — leave the AOV-inspector fields at sentinel
-    // defaults so a primary-ray miss reads as (zero normal, no
-    // instance) in the Normal / InstanceID AOVs. baseColor /
-    // materialId / worldHit added in the same M7 follow-up batch
-    // for the BaseColor / MaterialID / WorldPos AOVs.
-    payload.normalWorld = float3(0.0, 0.0, 0.0);
-    payload.instanceId  = 0xFFFFFFFFu;
-    payload.baseColor   = float3(0.0, 0.0, 0.0);
-    payload.materialId  = 0xFFFFFFFFu;
-    payload.worldHit    = float3(0.0, 0.0, 0.0);
-    payload.elementId   = 0xFFFFFFFFu;  // Hydra-canonical miss sentinel
+    return background;
 }
+
+#endif  // PYXIS_DOME_SAMPLE_SLANG

@@ -61,7 +61,7 @@ struct RenderTargets {
   nvrhi::ITexture* depthAov = nullptr;
   nvrhi::ITexture* primIdAov = nullptr;
   // Second AOV batch (M7 follow-up) — material id, baseColor,
-  // world-position. Same caller-allocation contract; PathTracePass
+  // world-position. Same caller-allocation contract; RaytracedLightingPass
   // binds 1×1 fallbacks when null.
   //   materialIdAov : R32_UINT (~0u on miss)
   //   baseColorAov  : RGBA16F  raw OpenPBR baseColor pre-shading
@@ -81,7 +81,7 @@ struct RenderTargets {
 
   // 1-element RWStructuredBuffer<PickResult> the raygen writes when
   // the dispatched pixel matches RenderSettings::mousePixel{X,Y}.
-  // Caller-owned; PathTracePass copies this into a staging buffer
+  // Caller-owned; RaytracedLightingPass copies this into a staging buffer
   // each frame for one-frame-stale CPU readback. Null = no picker.
   nvrhi::IBuffer*  pickResult = nullptr;
   // CpuAccessMode::Read staging buffer the renderer copies pickResult

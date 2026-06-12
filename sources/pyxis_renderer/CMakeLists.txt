@@ -102,8 +102,12 @@ target_sources(pyxis_renderer PRIVATE
     Private/RenderGraph/RenderGraph.h
     Private/RenderGraph/RenderGraph.cpp
 
-    Private/Passes/PathTracePass.h
-    Private/Passes/PathTracePass.cpp
+    Private/Passes/RaytracedGBufferPass.h
+    Private/Passes/RaytracedGBufferPass.cpp
+    Private/Passes/RaytracedLightingPass.h
+    Private/Passes/RaytracedLightingPass.cpp
+    Private/Passes/TonemapPass.h
+    Private/Passes/TonemapPass.cpp
     Private/Passes/SsaaResolvePass.h
     Private/Passes/SsaaResolvePass.cpp
     Private/Passes/BlitToSrgbPass.h
@@ -251,62 +255,135 @@ include(Version)
 pyxis_generate_version_header(pyxis_renderer)
 pyxis_generate_version_source(pyxis_renderer)
 
-# Shaders — M3 ray-tracing pipeline (raygen / miss / closesthit)
-# compiled by Slang at build time (plan §10 / §23). The .spv lands in
-# <bin>/Resources/shaders/ and is loaded by PathTracePass at startup.
+# Shaders — the two RT pipelines (P4 pass split) compiled by Slang at
+# build time (plan §10 / §23). The .spv lands in
+# <bin>/Resources/shaders/ and is loaded by RaytracedGBufferPass /
+# RaytracedLightingPass at startup. Shader files are named after the
+# pass that owns them; shared modules (camera_ray / dome_sample /
+# shading / raytraced_anyhit) are NOT compiled standalone — they are
+# #included by the entry files and listed under INCLUDES.
 include(Slang)
+# Every shader lists EVERY .slang module it (transitively) #includes
+# under INCLUDES so a module edit recompiles the dependents (Slang.cmake
+# appends INCLUDES to the custom command's DEPENDS — P2 finding).
+set(PYXIS_SHADER_INTEROP    ${CMAKE_SOURCE_DIR}/resources/shaders/ShaderInterop.slang)
+set(PYXIS_SHADER_CAMERA_RAY ${CMAKE_SOURCE_DIR}/resources/shaders/camera_ray.slang)
+set(PYXIS_SHADER_DOME       ${CMAKE_SOURCE_DIR}/resources/shaders/dome_sample.slang)
+set(PYXIS_SHADER_SHADING    ${CMAKE_SOURCE_DIR}/resources/shaders/shading.slang)
+set(PYXIS_SHADER_ANYHIT     ${CMAKE_SOURCE_DIR}/resources/shaders/raytraced_anyhit.slang)
+
+# --- RT pipeline A: RaytracedGBufferPass (visibility buffer) ---------
 pyxis_compile_slang_shader(
     TARGET      pyxis_renderer
-    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/raygen.slang
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/raytraced_gbuffer_raygen.slang
     ENTRY_POINT main
     STAGE       raygen
-    OUTPUT      raygen.spv
+    OUTPUT      raytraced_gbuffer_raygen.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY}
 )
 pyxis_compile_slang_shader(
     TARGET      pyxis_renderer
-    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/miss.slang
-    ENTRY_POINT main
-    STAGE       miss
-    OUTPUT      miss.spv
-)
-pyxis_compile_slang_shader(
-    TARGET      pyxis_renderer
-    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/closesthit.slang
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/raytraced_gbuffer_closesthit.slang
     ENTRY_POINT main
     STAGE       closesthit
-    OUTPUT      closesthit.spv
+    OUTPUT      raytraced_gbuffer_closesthit.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP}
 )
 pyxis_compile_slang_shader(
     TARGET      pyxis_renderer
-    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/anyhit.slang
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/raytraced_gbuffer_miss.slang
+    ENTRY_POINT main
+    STAGE       miss
+    OUTPUT      raytraced_gbuffer_miss.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP}
+)
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/raytraced_gbuffer_anyhit.slang
     ENTRY_POINT main
     STAGE       anyhit
-    OUTPUT      anyhit.spv
+    OUTPUT      raytraced_gbuffer_anyhit.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_ANYHIT}
+)
+
+# --- RT pipeline B: RaytracedLightingPass (deferred first hit + all
+# secondary rays). The raygen pulls camera_ray + shading (which itself
+# includes camera_ray + dome_sample) — all listed so any module edit
+# recompiles it.
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/raytraced_lighting_raygen.slang
+    ENTRY_POINT main
+    STAGE       raygen
+    OUTPUT      raytraced_lighting_raygen.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
+                ${PYXIS_SHADER_SHADING}
+)
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/raytraced_lighting_closesthit.slang
+    ENTRY_POINT main
+    STAGE       closesthit
+    OUTPUT      raytraced_lighting_closesthit.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
+                ${PYXIS_SHADER_SHADING}
+)
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/raytraced_lighting_miss.slang
+    ENTRY_POINT main
+    STAGE       miss
+    OUTPUT      raytraced_lighting_miss.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_DOME}
 )
 # M9-fidelity shadow rays — second miss shader stitched into the
-# shader binding table at miss-index 1. Closesthit traces a shadow
-# ray per direct light with RAY_FLAG_SKIP_CLOSEST_HIT_SHADER |
+# shader binding table at miss-index 1. The shared shading traces a
+# shadow ray per direct light with RAY_FLAG_SKIP_CLOSEST_HIT_SHADER |
 # RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH; this miss writes
 # payload.color=1.0 (=visible) iff no opaque hit blocks the path.
 pyxis_compile_slang_shader(
     TARGET      pyxis_renderer
-    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/shadow_miss.slang
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/raytraced_lighting_shadow_miss.slang
     ENTRY_POINT main
     STAGE       miss
-    OUTPUT      shadow_miss.spv
+    OUTPUT      raytraced_lighting_shadow_miss.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP}
+)
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/raytraced_lighting_anyhit.slang
+    ENTRY_POINT main
+    STAGE       anyhit
+    OUTPUT      raytraced_lighting_anyhit.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_ANYHIT}
+)
+# Display transform (compute) — P3 pass split. The 11-way debug-view
+# branch (exposure + Narkowicz ACES on COLOR) extracted from raygen;
+# reads the fp32 linearColor scratch + the raw AOVs, writes the BGRA8
+# display target. Runs every frame, before the SSAA resolve.
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/tonemap.slang
+    ENTRY_POINT main
+    STAGE       compute
+    OUTPUT      tonemap.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP}
 )
 # Viewer SSAA box-downsample resolve (compute). Reads the super-res
 # color AOV, writes the backbuffer-resolution resolve. Used by
-# ViewerMode when SSAA > 1 (ImGui toggle / factor).
+# ViewerMode when SSAA > 1 (ImGui toggle / factor). Renamed from
+# ssaa_downsample at P3 (shader files are named after their pass).
 pyxis_compile_slang_shader(
     TARGET      pyxis_renderer
-    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/ssaa_downsample.slang
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/ssaa_resolve.slang
     ENTRY_POINT main
     STAGE       compute
-    OUTPUT      ssaa_downsample.spv
+    OUTPUT      ssaa_resolve.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP}
 )
 # Viewer present blit (compute): linear -> sRGB OETF into the present target.
 # Split out of SsaaResolvePass so each pass has one job; runs every viewer frame.
+# (Declares its cbuffer locally — no ShaderInterop include.)
 pyxis_compile_slang_shader(
     TARGET      pyxis_renderer
     SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/blit_to_srgb.slang

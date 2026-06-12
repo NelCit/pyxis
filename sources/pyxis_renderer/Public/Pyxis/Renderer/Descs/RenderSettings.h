@@ -23,7 +23,7 @@ struct RenderSettings {
   // "did the swapchain even resize?" obvious in the viewer.
   float clearColor[4] = {0.05f, 0.05f, 0.06f, 1.0f};
 
-  // §29.5 feature mask seed. M3 ships PathTracePass as the only
+  // §29.5 feature mask seed. M3 ships RaytracedLightingPass as the only
   // mandatory pass plus the ImGui overlay; the rest of the §29.5
   // toggle table (`accumulation`, `nee`, `mis`, `denoise`,
   // `toneMap`, `taa`, `motionVectors`, `aovs.*`) fills in at M5+.
@@ -60,11 +60,11 @@ struct RenderSettings {
   uint32_t mousePixelY = MOUSE_PIXEL_NONE;
 
   // WorldPos AOV display period (scene units, typically meters).
-  // The display branch in raygen.slang encodes worldPos via
+  // The display transform in tonemap.slang encodes worldPos via
   // sin(p * 2pi / worldPosPeriod) so a smaller value gives finer
   // bands. 10 m is a sensible default for human-scale scenes;
   // crank to ~50 m for World Lobby-scale (or down to ~0.1 m for a unit
-  // cube). 0 falls through to PathTracePass's default of 10.
+  // cube). 0 falls through to TonemapPass's default of 10.
   float worldPosPeriod = 10.0f;
 
   // Deterministic supersampling factor (SSAA). When > 1, the caller

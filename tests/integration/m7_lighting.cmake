@@ -151,7 +151,7 @@ endif()
 # ----- Run color-only-dome (audit closeout) -------------------------
 # Same triangle + sun as m7_lit_scene.usd, but the Dome here has NO
 # `inputs:texture:file` — only an authored color × intensity. Pre-fix
-# (PathTracePass dome fallback texture initialised to BLACK) the
+# (RaytracedLightingPass dome fallback texture initialised to BLACK) the
 # rendered EXR collapsed to a black background because the miss
 # shader's `hdri × tint × scale` chain multiplied 0 × tint × scale.
 # Post-fix (fallback initialised to WHITE) the chain collapses to
@@ -194,7 +194,7 @@ if(_rcCDvsUnlit EQUAL 0)
     message(FATAL_ERROR
         "m7_lighting: color-only-dome EXR is byte-identical to the "
         "unlit-twin EXR. The dome's authored color is not reaching the "
-        "rendered pixels — most likely the PathTracePass dome-texture "
+        "rendered pixels — most likely the RaytracedLightingPass dome-texture "
         "fallback is back to zero-init (black), making the miss shader's "
         "`hdri × tint × scale` collapse to 0, OR the lights buffer wasn't "
         "uploaded.")
@@ -208,9 +208,10 @@ if(_rcCDvsLit EQUAL 0)
         "m7_lighting: color-only-dome EXR is byte-identical to the "
         "HDRI-lit EXR. That can't be right — one fixture has the magenta "
         "color-only dome, the other has the HDRI Sky. Most likely the "
-        "miss shader is reading from a stale bound texture, or "
-        "GetDomeEnvMapTexture mis-resolves which dome's texture is "
-        "active across the two runs.")
+        "miss shader is reading from a stale bound texture, or the dome "
+        "env-map cache (GpuScene's RefreshDomeEnvMapCache feeding "
+        "SceneResources::domeEnvMapTexture) mis-resolves which dome's "
+        "texture is active across the two runs.")
 endif()
 
 message(STATUS

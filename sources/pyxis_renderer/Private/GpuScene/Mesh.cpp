@@ -216,9 +216,23 @@ void GpuScene::Impl::DestroyMesh(MeshHandle meshHandle)
   // §15 content-dedup map cleanup. Erase by stored hash so a future CreateMesh of
   // the same content allocates fresh instead of looking up a dead slot.
   meshDescHashToHandle.erase(entry->descHash);
-  // Drop the GPU resources (the BLAS-release hand-off — NVRHI's deferred-destruction
-  // queue keeps them alive until any in-flight command list referencing them
-  // retires). Resetting the record frees the CPU-side vectors too.
+  // §14.5 pooled pages — the mesh's vertex/index pool ranges LEAK until Clear()
+  // releases the pools wholesale (no per-range free list in v1; whole-scene
+  // load/Clear cycles make leak-until-Clear the cheap correct policy — see the
+  // multicycle VRAM test's lifecycle). Only the BLAS handle is dropped here
+  // (NVRHI's deferred-destruction queue keeps it alive until any in-flight
+  // command list referencing it retires). Resetting the record frees the
+  // CPU-side vectors too.
+  if (entry->residentInPool)
+  {
+    const std::uint64_t leakedBytes =
+        static_cast<std::uint64_t>(entry->vertexCount) * sizeof(hlslpp::float3)
+        + static_cast<std::uint64_t>(entry->indexCount) * sizeof(std::uint32_t);
+    Logging::Get().Debug(log::RENDER,
+                         "GpuScene::DestroyMesh: leaking " + std::to_string(leakedBytes)
+                             + " pooled geometry bytes for '" + entry->debugName
+                             + "' until Clear()");
+  }
   *entry = MeshResource{};
   // meshSlots.Free destructs the entity (dropping GpuMeshComponent + any DirtyTopology
   // tag) + bumps the slot generation (or quarantines at 255).

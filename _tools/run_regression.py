@@ -236,7 +236,9 @@ def _run_pyxis(pyxis_exe: Path, fixture: Fixture, output_exr: Path,
 # _tools/perf_compare.py + perf_dashboard.py (M10 Phase D) can index
 # into them without a schema migration each time we add a metric.
 # When adding a column: APPEND to keep the existing CSV header valid
-# under csv.DictWriter's extrasaction='ignore' default.
+# under csv.DictWriter's extrasaction='ignore' default. If the schema
+# must reshape (as the pass-split did), _rotate_kpi_csv_on_schema_change
+# renames the old file and starts fresh rather than misaligning rows.
 _KPI_COLUMNS = [
     'timestamp_iso',
     'fixture',
@@ -253,9 +255,18 @@ _KPI_COLUMNS = [
     'max_abs_delta',
     'pixel_count',
     'bench_frames',
-    'pathtrace_gpu_p50_ms',
-    'pathtrace_gpu_p99_ms',
-    'pathtrace_gpu_max_ms',
+    # Pass-split (passes-split-design.md P6): pass.PathTrace was split into
+    # pass.RaytracedGBuffer + pass.RaytracedLighting (+ pass.Tonemap). The
+    # rolling KPI history restarts at these columns; rt_total_* is the
+    # closest like-for-like successor of the old pathtrace_gpu_* numbers.
+    'gbuffer_gpu_p50_ms',
+    'gbuffer_gpu_p99_ms',
+    'lighting_gpu_p50_ms',
+    'lighting_gpu_p99_ms',
+    'tonemap_gpu_p50_ms',
+    'tonemap_gpu_p99_ms',
+    'rt_total_gpu_p50_ms',
+    'rt_total_gpu_p99_ms',
     'commit_resources_cpu_p50_ms',
     'commit_resources_cpu_p99_ms',
     'frame_cpu_p50_ms',
@@ -274,6 +285,18 @@ def _extract_pass_metric(passes: list[dict[str, Any]], name: str, kind: str,
             value = entry.get(percentile)
             return float(value) if value is not None else None
     return None
+
+
+def _sum_pass_metrics(passes: list[dict[str, Any]], names: tuple[str, ...],
+                      kind: str, percentile: str) -> Optional[float]:
+    """Sum a percentile across several passes (the pass-split successor of
+    the single pass.PathTrace number). Returns None when none of the
+    scopes are present; missing individual scopes contribute 0 so a
+    partial profile still yields a comparable figure.
+    """
+    values = [_extract_pass_metric(passes, n, kind, percentile) for n in names]
+    present = [v for v in values if v is not None]
+    return sum(present) if present else None
 
 
 def _append_kpi_csv(csv_path: Path, fixture: Fixture, outcome: RunOutcome,
@@ -311,9 +334,16 @@ def _append_kpi_csv(csv_path: Path, fixture: Fixture, outcome: RunOutcome,
         'max_abs_delta': f'{metrics.max_abs_delta:.6f}' if metrics else '',
         'pixel_count': metrics.pixel_count if metrics else '',
         'bench_frames': bench.get('frames', 0) if isinstance(bench, dict) else 0,
-        'pathtrace_gpu_p50_ms': _extract_pass_metric(passes, 'pass.PathTrace', 'Gpu', 'p50_ms'),
-        'pathtrace_gpu_p99_ms': _extract_pass_metric(passes, 'pass.PathTrace', 'Gpu', 'p99_ms'),
-        'pathtrace_gpu_max_ms': _extract_pass_metric(passes, 'pass.PathTrace', 'Gpu', 'max_ms'),
+        'gbuffer_gpu_p50_ms': _extract_pass_metric(passes, 'pass.RaytracedGBuffer', 'Gpu', 'p50_ms'),
+        'gbuffer_gpu_p99_ms': _extract_pass_metric(passes, 'pass.RaytracedGBuffer', 'Gpu', 'p99_ms'),
+        'lighting_gpu_p50_ms': _extract_pass_metric(passes, 'pass.RaytracedLighting', 'Gpu', 'p50_ms'),
+        'lighting_gpu_p99_ms': _extract_pass_metric(passes, 'pass.RaytracedLighting', 'Gpu', 'p99_ms'),
+        'tonemap_gpu_p50_ms': _extract_pass_metric(passes, 'pass.Tonemap', 'Gpu', 'p50_ms'),
+        'tonemap_gpu_p99_ms': _extract_pass_metric(passes, 'pass.Tonemap', 'Gpu', 'p99_ms'),
+        'rt_total_gpu_p50_ms': _sum_pass_metrics(
+            passes, ('pass.RaytracedGBuffer', 'pass.RaytracedLighting'), 'Gpu', 'p50_ms'),
+        'rt_total_gpu_p99_ms': _sum_pass_metrics(
+            passes, ('pass.RaytracedGBuffer', 'pass.RaytracedLighting'), 'Gpu', 'p99_ms'),
         'commit_resources_cpu_p50_ms':
             _extract_pass_metric(passes, 'render.commitResources', 'Cpu', 'p50_ms'),
         'commit_resources_cpu_p99_ms':
@@ -322,13 +352,47 @@ def _append_kpi_csv(csv_path: Path, fixture: Fixture, outcome: RunOutcome,
         'frame_cpu_p99_ms': _extract_pass_metric(passes, 'render.frame.cpu', 'Cpu', 'p99_ms'),
     }
 
-    needs_header = not csv_path.exists()
     csv_path.parent.mkdir(parents=True, exist_ok=True)
+    _rotate_kpi_csv_on_schema_change(csv_path)
+    needs_header = not csv_path.exists()
     with csv_path.open('a', newline='', encoding='utf-8') as fh:
         writer = csv.DictWriter(fh, fieldnames=_KPI_COLUMNS, extrasaction='ignore')
         if needs_header:
             writer.writeheader()
         writer.writerow(row)
+
+
+def _rotate_kpi_csv_on_schema_change(csv_path: Path) -> None:
+    """Guard against silently appending reshaped rows under a stale header.
+
+    The pass-split (passes-split-design.md P6) replaced the three
+    pathtrace_gpu_* columns with eight gbuffer/lighting/tonemap/rt_total
+    columns, so a pre-split rolling kpis.csv would positionally misalign
+    every new row (commit/frame CPU KPIs silently corrupted). If the
+    existing file's header row differs from _KPI_COLUMNS, rename it to
+    ``<stem>-pre-pass-split.csv`` (``.1``/``.2``/... suffix if that
+    rotation already exists, never clobbering) and let the caller start a
+    fresh file with the current header.
+    """
+    if not csv_path.exists():
+        return
+    try:
+        with csv_path.open('r', newline='', encoding='utf-8') as fh:
+            header = next(csv.reader(fh), None)
+    except OSError as exc:
+        print(f'[run_regression] WARNING: could not read {csv_path} header ({exc}); '
+              'leaving it untouched.')
+        return
+    if header == _KPI_COLUMNS:
+        return
+    rotated = csv_path.with_name(f'{csv_path.stem}-pre-pass-split.csv')
+    suffix = 0
+    while rotated.exists():
+        suffix += 1
+        rotated = csv_path.with_name(f'{csv_path.stem}-pre-pass-split.csv.{suffix}')
+    csv_path.rename(rotated)
+    print(f'[run_regression] KPI CSV header changed (pass-split schema): rotated '
+          f'{csv_path} -> {rotated}; starting fresh with the new header.')
 
 
 def main(argv: Optional[list[str]] = None) -> int:

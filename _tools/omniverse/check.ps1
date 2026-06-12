@@ -72,8 +72,8 @@ $rndLib = Join-Path $repoRoot "build\dev\lib\Release\pyxis_renderer.lib"
 Check "pyxis" "pyxis_renderer.lib (Release)" (Test-Path $rndLib) $(if (Test-Path $rndLib) { "present" } else { "cmake --build build/dev --config Release --target pyxis_renderer pyxis_platform" })
 $rndDll = Join-Path $repoRoot "build\dev\bin\Release\pyxis_renderer.dll"
 Check "run" "pyxis_renderer.dll (Release runtime)" (Test-Path $rndDll) $(if (Test-Path $rndDll) { "present" } else { "build pyxis_renderer Release" })
-$spv = Join-Path $repoRoot "build\dev\bin\Release\Resources\shaders\raygen.spv"
-if (-not (Test-Path $spv)) { $spv = Join-Path $repoRoot "build\dev\bin\Debug\Resources\shaders\raygen.spv" }
+$spv = Join-Path $repoRoot "build\dev\bin\Release\Resources\shaders\raytraced_lighting_raygen.spv"
+if (-not (Test-Path $spv)) { $spv = Join-Path $repoRoot "build\dev\bin\Debug\Resources\shaders\raytraced_lighting_raygen.spv" }
 Check "run" "path-tracer shaders (.spv)" (Test-Path $spv) $(if (Test-Path $spv) { "present" } else { "build pyxis_renderer_shaders (ShaderMake)" }) $false
 
 # ---- [run] built delegate + extension (RFC 0007: single build/dev delegate) -

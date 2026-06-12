@@ -42,8 +42,12 @@ from typing import Any
 
 # KPIs to chart on the dashboard. Tuple = (column, label, unit).
 _TRACKED_KPIS: list[tuple[str, str, str]] = [
-    ('pathtrace_gpu_p50_ms',         'pass.PathTrace p50',         'ms'),
-    ('pathtrace_gpu_p99_ms',         'pass.PathTrace p99',         'ms'),
+    # Pass-split successors of pass.PathTrace (passes-split-design.md P6).
+    ('rt_total_gpu_p50_ms',          'RT total p50',               'ms'),
+    ('rt_total_gpu_p99_ms',          'RT total p99',               'ms'),
+    ('gbuffer_gpu_p50_ms',           'pass.RaytracedGBuffer p50',  'ms'),
+    ('lighting_gpu_p50_ms',          'pass.RaytracedLighting p50', 'ms'),
+    ('tonemap_gpu_p50_ms',           'pass.Tonemap p50',           'ms'),
     ('commit_resources_cpu_p50_ms',  'commitResources p50',        'ms'),
     ('commit_resources_cpu_p99_ms',  'commitResources p99',        'ms'),
     ('frame_cpu_p50_ms',             'render.frame.cpu p50',       'ms'),
@@ -230,8 +234,8 @@ def _render(payloads: list[dict[str, Any]]) -> str:
                 row.get('timestamp_iso', ''),
                 f'<span class="{status_class}">{html.escape(status)}</span>',
                 row.get('pyxis_git_sha', '')[:10],
-                row.get('pathtrace_gpu_p50_ms', ''),
-                row.get('pathtrace_gpu_p99_ms', ''),
+                row.get('rt_total_gpu_p50_ms', ''),
+                row.get('rt_total_gpu_p99_ms', ''),
                 row.get('commit_resources_cpu_p50_ms', ''),
                 row.get('frame_cpu_p50_ms', ''),
                 row.get('wall_clock_ms', ''),
@@ -246,7 +250,7 @@ def _render(payloads: list[dict[str, Any]]) -> str:
               <table>
                 <thead><tr>
                   <th>timestamp</th><th>status</th><th>sha</th>
-                  <th>PT p50 (ms)</th><th>PT p99 (ms)</th>
+                  <th>RT total p50 (ms)</th><th>RT total p99 (ms)</th>
                   <th>commit p50 (ms)</th><th>frame cpu p50 (ms)</th>
                   <th>wall (ms)</th><th>rmse</th>
                 </tr></thead>

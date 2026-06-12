@@ -343,22 +343,24 @@ inline shaderinterop::LightGpu PackLightGpu(const LightDesc& desc,
 //
 // Layout (ascending live-slot order):
 //   elemBuffer = [slot1 elems][slot2 elems]…   (StructuredBuffer<Elem>)
-//   offBuffer  = element start-offset per slot  (StructuredBuffer<uint>)
-// The closesthit reads elemBuffer[offBuffer[meshSlot] + …].
+// The closesthit reads elemBuffer[gMeshInfo[meshSlot].<offset field> + …]. P2
+// packing: the per-slot start offsets no longer live in a parallel uint buffer —
+// UploadMeshInfo packs them into the MeshInfoGpu table from the SAME running-sum
+// walk, so this template manages only the element buffer.
 //
 // Fast path (the audit's quadratic-load fix): when every dirty mesh is a NEW tail
-// slot (minDirtySlot >= packedSlots) and the existing buffers still have capacity,
-// writes ONLY the new tail region + the (tiny) offset table — O(new geometry) rather
-// than O(all geometry). Otherwise it full re-packs, growing the element/offset
-// buffers GEOMETRICALLY (doubling) so a run of one-at-a-time appends amortises to
-// O(total), not O(total · meshCount). A first allocation is sized exactly, so the
-// common single-bulk-commit load wastes no VRAM headroom.
+// slot (minDirtySlot >= packedSlots) and the existing buffer still has capacity,
+// writes ONLY the new tail region — O(new geometry) rather than O(all geometry).
+// Otherwise it full re-packs, growing the element buffer GEOMETRICALLY (doubling)
+// so a run of one-at-a-time appends amortises to O(total), not
+// O(total · meshCount). A first allocation is sized exactly, so the common
+// single-bulk-commit load wastes no VRAM headroom.
 //
 // Byte-identical to a single full pack: the concatenation order, per-slot offsets,
 // and element bytes are a deterministic function of the live meshes, so a tail-append
 // reproduces the exact buffer contents a full rebuild would write. `countOf(slot)`
-// returns the element count slot contributes (drives the offset table); `appendOf(
-// slot, out)` appends slot's elements. The two MUST agree on per-slot count.
+// returns the element count slot contributes (drives UploadMeshInfo's offset sums);
+// `appendOf(slot, out)` appends slot's elements. The two MUST agree on per-slot count.
 template <typename Elem, typename CountFn, typename AppendFn>
 [[nodiscard]] inline Expected<void> UploadMeshSideTable(
     nvrhi::IDevice*      device,
@@ -367,37 +369,36 @@ template <typename Elem, typename CountFn, typename AppendFn>
     uint32_t             minDirtySlot,
     uint32_t&            packedSlots,
     nvrhi::BufferHandle& elemBuffer,
-    nvrhi::BufferHandle& offBuffer,
     const Elem&          emptyFallback,
     std::string_view     elemDebugName,
     std::string_view     elemErrorLabel,
-    std::string_view     offDebugName,
-    std::string_view     offErrorLabel,
     CountFn              countOf,
     AppendFn             appendOf) noexcept
 {
   const uint32_t slotCount = slots.SlotCount();
 
-  // Offset table — a cheap count-only pass (no element data copied). Slot 0 (the
-  // §19.7 sentinel) and dead slots contribute 0, so their offset equals the next
-  // live slot's start, exactly as the legacy per-buffer pack produced.
-  std::vector<std::uint32_t> offsets(slotCount, 0u);
-  std::uint32_t running = 0;
+  // Count-only pass (no element data copied): total element count + the tail start
+  // (the element offset of the first slot >= packedSlots). Slot 0 (the §19.7
+  // sentinel) and dead slots contribute 0, so the offsets stay monotone exactly as
+  // the legacy per-buffer pack produced — UploadMeshInfo reproduces the same sums.
+  std::uint32_t running        = 0;
+  std::uint32_t tailStartElems = 0;
   for (uint32_t slot = 0; slot < slotCount; ++slot)
   {
-    offsets[slot] = running;
+    if (slot == packedSlots)
+      tailStartElems = running;
     if (slots.IsLive(slot))
       running += countOf(slot);
   }
-  const std::size_t stride       = sizeof(Elem);
-  const std::size_t totalBytes   = static_cast<std::size_t>(running) * stride;
-  const std::size_t offsetsBytes = offsets.size() * sizeof(std::uint32_t);
+  const std::size_t stride     = sizeof(Elem);
+  const std::size_t totalBytes = static_cast<std::size_t>(running) * stride;
 
-  // Fast path: dirty meshes are all new tail slots + the existing buffers fit.
-  const bool canAppend = elemBuffer && offBuffer && packedSlots <= slotCount
+  // Fast path: dirty meshes are all new tail slots + the existing buffer fits.
+  // packedSlots < slotCount is implied (the caller gates on a dirty slot existing,
+  // and minDirtySlot >= packedSlots), so tailStartElems was assigned above.
+  const bool canAppend = elemBuffer && packedSlots <= slotCount
                          && minDirtySlot >= packedSlots
-                         && totalBytes <= elemBuffer->getDesc().byteSize
-                         && offsetsBytes <= offBuffer->getDesc().byteSize;
+                         && totalBytes <= elemBuffer->getDesc().byteSize;
 
   if (canAppend)
   {
@@ -408,11 +409,10 @@ template <typename Elem, typename CountFn, typename AppendFn>
     if (!tail.empty())
     {
       const std::size_t tailStartBytes =
-          static_cast<std::size_t>(offsets[packedSlots]) * stride;
+          static_cast<std::size_t>(tailStartElems) * stride;
       commandList->writeBuffer(elemBuffer.Get(), tail.data(), tail.size() * stride,
                                tailStartBytes);
     }
-    commandList->writeBuffer(offBuffer.Get(), offsets.data(), offsetsBytes);
     packedSlots = slotCount;
     return {};
   }
@@ -437,10 +437,7 @@ template <typename Elem, typename CountFn, typename AppendFn>
   };
   PYXIS_TRY(EnsureStructuredBuffer(device, elemBuffer, grownSize(elemBuffer, packedBytes),
                                    stride, elemDebugName, elemErrorLabel));
-  PYXIS_TRY(EnsureStructuredBuffer(device, offBuffer, grownSize(offBuffer, offsetsBytes),
-                                   sizeof(std::uint32_t), offDebugName, offErrorLabel));
   commandList->writeBuffer(elemBuffer.Get(), packed.data(), packedBytes);
-  commandList->writeBuffer(offBuffer.Get(), offsets.data(), offsetsBytes);
   packedSlots = slotCount;
   return {};
 }

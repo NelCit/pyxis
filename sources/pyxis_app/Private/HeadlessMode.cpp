@@ -136,7 +136,7 @@ void LogDeterminismPin(const Configuration& config, uint32_t framesInFlight) noe
 }
 
 // Open the command list, drain GpuScene mutations, dispatch one
-// PathTracePass via PyxisRenderer, transition the offscreen RT to
+// RaytracedLightingPass via PyxisRenderer, transition the offscreen RT to
 // CopySource, close + execute. Returns false if CommitResources
 // failed; caller's responsibility to clean up after a false return.
 [[nodiscard]] bool RecordAndExecuteRenderFrame(nvrhi::IDevice* device,
@@ -164,8 +164,8 @@ void LogDeterminismPin(const Configuration& config, uint32_t framesInFlight) noe
   targets.color = renderTarget;
   // M7 follow-up — bind the raw AOV outputs so the user can dump
   // them via --save-aov. Always bound (not just when --save-aov is
-  // set) because PathTracePass's UAV writes are unconditional;
-  // without these the writes go to the 1×1 fallbacks PathTracePass
+  // set) because RaytracedLightingPass's UAV writes are unconditional;
+  // without these the writes go to the 1×1 fallbacks RaytracedLightingPass
   // owns, which is fine but wastes the already-allocated AovTextures
   // memory. Same RenderTargets shape ViewerMode wires.
   targets.colorHdr       = aovs.colorHdr.Get();
@@ -216,7 +216,7 @@ void LogDeterminismPin(const Configuration& config, uint32_t framesInFlight) noe
 
 // Run TextureReadback through phase 1 (record copy) + phase 2 (map
 // the staging buffer), warn if the entire image is black (silent
-// PathTracePass no-op detector), then write the BGRA8 image to disk.
+// RaytracedLightingPass no-op detector), then write the BGRA8 image to disk.
 // File format is selected by the `outputPath` extension: `.png`
 // dispatches to WritePngBgra8 (sRGB-encoded, human-inspectable,
 // golden-test friendly); anything else dispatches to WriteExrBgra8
@@ -316,7 +316,7 @@ void LogDeterminismPin(const Configuration& config, uint32_t framesInFlight) noe
   }
   // Sanity check: a render that worked has SOME non-black pixels
   // (cube colour from closesthit or sky from miss). All-zero output
-  // would mean PathTracePass silently no-op'd; surface that as a
+  // would mean RaytracedLightingPass silently no-op'd; surface that as a
   // log warning so a regression doesn't go quietly.
   {
     const auto* bytes = static_cast<const uint8_t*>(readback->Data());
@@ -335,7 +335,7 @@ void LogDeterminismPin(const Configuration& config, uint32_t framesInFlight) noe
     }
     log.Info(log::APP,
              anyNonBlack ? "headless: render produced non-black pixels (looks valid)"
-                         : "headless: render output is fully black — PathTracePass likely skipped");
+                         : "headless: render output is fully black — RaytracedLightingPass likely skipped");
   }
 
   // SSAA resolve: gamma-aware box-downsample the super-resolution
@@ -540,7 +540,7 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
   // ---- Profiler + GpuScene + Renderer --------------------------------
   // GpuScene is the canonical scene-mutation API (§18.5) and owns the
   // §8 Flecs SceneWorld internally (RFC 0009); PyxisRenderer's ctor
-  // takes it by reference per §18.6 and PathTracePass binds its TLAS +
+  // takes it by reference per §18.6 and RaytracedLightingPass binds its TLAS +
   // camera every frame.
   Profiler profiler{device};
   GpuSceneCreateDesc gpuSceneDesc{};
@@ -575,7 +575,7 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
   // Headless raises FIF to MAX_FRAMES_IN_FLIGHT (= 3) for §33.7
   // byte-equal EXR — propagate so the renderer's PassContext sees
   // the real value. Picker isn't driven in headless so the FIF=1
-  // assert in PathTracePass doesn't fire.
+  // assert in RaytracedLightingPass doesn't fire.
   rendererDesc.framesInFlight = deviceManager->GetFramesInFlight();
   PyxisRenderer renderer{device, gpuScene, profiler, rendererDesc};
 
@@ -583,7 +583,7 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
   nvrhi::ICommandList* const commandList = commandListHandle.Get();
 
   // ---- One render frame ----------------------------------------------
-  // Single render. PathTracePass is one-sample-per-frame with no
+  // Single render. RaytracedLightingPass is one-sample-per-frame with no
   // accumulation today, so iterating buys nothing —
   // `samplesPerFrame * accumulationFrameLimit` wires in once the
   // accumulation buffer lands (post-M7).
@@ -720,7 +720,9 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
   // amortise the first-frame BLAS-build / pipeline-cache / TLAS-bake
   // costs that the single-frame above already paid; the measurement
   // window captures steady-state numbers comparable to the §34.3 KPIs
-  // (pass.PathTrace < 12 ms, frame.cpu.commitResources < 2 ms).
+  // (the RT passes' combined budget < 12 ms, frame.cpu.commitResources
+  // < 2 ms; pass.PathTrace split into pass.RaytracedGBuffer +
+  // pass.RaytracedLighting at P4).
   if (benchFrames > 0)
   {
     // Per-pass min / sorted percentile aggregator. Vectors keep sorted

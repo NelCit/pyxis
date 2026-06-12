@@ -219,7 +219,7 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
       // World Lobby / outdoor environments. ViewerMode pushes the value
       // into RenderSettings::worldPosPeriod each frame; the same
       // slider feeds both world-space + eye-space periodic encodes
-      // (raygen branches both on `gFrameUi.worldPosPeriod`).
+      // (tonemap.slang branches both on `gParams.worldPosPeriod`).
       if (_editorDebugView == RenderSettings::DebugView::WorldPos
           || _editorDebugView == RenderSettings::DebugView::WorldPosEye)
       {

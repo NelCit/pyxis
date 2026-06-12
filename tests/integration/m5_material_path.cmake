@@ -135,7 +135,7 @@ if(_rcSameAsDefault EQUAL 0)
         "Both renders collapsed to the same image, which means the M5 material path "
         "is silently broken — the closesthit isn't picking up per-instance materials. "
         "Most likely culprits: closesthit binding 3 dropped, AcquireMaterial regression, "
-        "TLAS instanceCustomIndex no longer carrying the material slot, or PathTracePass "
+        "TLAS instanceCustomIndex no longer carrying the material slot, or RaytracedLightingPass "
         "fallback buffer overriding the scene's real material buffer.")
 endif()
 

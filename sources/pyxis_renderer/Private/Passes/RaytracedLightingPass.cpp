@@ -1,9 +1,10 @@
-// Pyxis renderer — primary-ray path-trace pass.
+// Pyxis renderer — deferred first-hit lighting pass (P4 pass split).
 
-#include "Passes/PathTracePass.h"
+#include "Passes/RaytracedLightingPass.h"
 
 #include "RenderGraph/PassContext.h"
 #include "RenderGraph/ShaderLoad.h"
+#include "Scene/SceneResources.h"  // RFC 0003 — replaces the public GpuScene getters.
 
 #include <Pyxis/Platform/FileSystem/AssetLocator.h>
 #include <Pyxis/Platform/Logging/Log.h>
@@ -23,6 +24,7 @@
 #include <fstream>
 #include <hlsl++.h>
 #include <ios>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -42,26 +44,162 @@ static_assert(sizeof(CameraUniforms) == 208,
               "(worldFromView / viewFromClip / viewFromWorld + exposure stops, "
               "see resources/shaders/ShaderInterop.slang).");
 static_assert(sizeof(shaderinterop::FrameUiUniforms) == 32,
-              "FrameUiUniforms is 32 bytes (2 cbuffer rows): picker + display "
-              "selector on row 0, per-AOV knobs (worldPosPeriod + reserved) on row 1.");
+              "FrameUiUniforms is 32 bytes (2 cbuffer rows). Since the P3 split only "
+              "the row-0 picker pixel is live here; the debugViewMode / worldPosPeriod "
+              "slots are TonemapUniforms' domain (kept for the frozen layout, written 0).");
 
 // Thin wrapper over the shared LoadSpirvShader (RenderGraph/ShaderLoad.h) that
-// pins the "PathTracePass" log prefix so the call sites below stay terse.
+// pins the "RaytracedLightingPass" log prefix so the call sites below stay terse.
 nvrhi::ShaderHandle LoadSpirv(nvrhi::IDevice* device, std::string_view path,
                               nvrhi::ShaderType stage, const char* entry) noexcept {
-  return LoadSpirvShader(device, path, stage, entry, "PathTracePass");
+  return LoadSpirvShader(device, path, stage, entry, "RaytracedLightingPass");
+}
+
+// P5 (design D2) — one RT pipeline + SBT per camera projection mode.
+// Both default-null on a failed build; the pair is always created
+// together because the SBT derives from its pipeline.
+struct PipelineVariant {
+  nvrhi::rt::PipelineHandle pipeline;
+  nvrhi::rt::ShaderTableHandle shaderTable;
+};
+
+// Build one projection-mode variant from the supplied BASE shader
+// handles. Specialization map (explicit [[vk::constant_id(N)]] ids
+// mirrored in ShaderInterop.slang, 32-bit uint values only — NVRHI's
+// Vulkan backend hardcodes 4-byte map entries):
+//   * raygen — its module includes camera_ray.slang (id 0
+//     PROJECTION_MODE) + shading.slang (id 1 MAX_RAY_RECURSION, id 3
+//     REFL_MAX_SEGMENTS) and declares id 2 MAX_TRANSPARENT_SEGMENTS
+//     itself → all four constants.
+//   * closesthit — includes shading.slang → ids 1 + 3. (Its module
+//     also inherits camera_ray.slang's id 0 via shading.slang, but
+//     BuildCameraRay is never called from a hit shader, so the unset
+//     default 0 is unreachable dead code.)
+//   * miss / shadow-miss / anyhit — declare no spec constants; passed
+//     through unspecialized.
+// projectionMode is the only value that differs between variants, so
+// the specialized closesthit is value-identical across them. Returns a
+// default (null) PipelineVariant on any failure, after logging with
+// the caller-supplied context prefix; the caller keeps its previous
+// state (old-on-failure semantics).
+// §30.5 — more than five inputs, so they ride in a Desc struct (the
+// nvrhi::*Desc idiom this function itself uses internally).
+struct PipelineVariantDesc {
+  nvrhi::IDevice* device = nullptr;
+  nvrhi::IBindingLayout* bindingLayout = nullptr;
+  nvrhi::IShader* raygen = nullptr;
+  nvrhi::IShader* miss = nullptr;
+  nvrhi::IShader* shadowMiss = nullptr;
+  nvrhi::IShader* closestHit = nullptr;
+  nvrhi::IShader* anyHit = nullptr;
+  uint32_t projectionMode = 0;
+  const char* logContext = "";
+};
+
+PipelineVariant BuildPipelineVariant(const PipelineVariantDesc& desc) noexcept {
+  nvrhi::IDevice* const device = desc.device;
+  nvrhi::IBindingLayout* const bindingLayout = desc.bindingLayout;
+  nvrhi::IShader* const raygen = desc.raygen;
+  nvrhi::IShader* const miss = desc.miss;
+  nvrhi::IShader* const shadowMiss = desc.shadowMiss;
+  nvrhi::IShader* const closestHit = desc.closestHit;
+  nvrhi::IShader* const anyHit = desc.anyHit;
+  const uint32_t projectionMode = desc.projectionMode;
+  const char* const logContext = desc.logContext;
+  auto& log = Logging::Get();
+  const nvrhi::ShaderSpecialization raygenConstants[] = {
+      nvrhi::ShaderSpecialization::UInt32(shaderinterop::SPEC_ID_PROJECTION_MODE,
+                                          projectionMode),
+      nvrhi::ShaderSpecialization::UInt32(shaderinterop::SPEC_ID_MAX_RAY_RECURSION,
+                                          RaytracedLightingPass::MAX_RAY_RECURSION),
+      nvrhi::ShaderSpecialization::UInt32(shaderinterop::SPEC_ID_MAX_TRANSPARENT_SEGMENTS,
+                                          RaytracedLightingPass::MAX_TRANSPARENT_SEGMENTS),
+      nvrhi::ShaderSpecialization::UInt32(shaderinterop::SPEC_ID_REFL_MAX_SEGMENTS,
+                                          RaytracedLightingPass::REFL_MAX_SEGMENTS),
+  };
+  const nvrhi::ShaderSpecialization closestHitConstants[] = {
+      nvrhi::ShaderSpecialization::UInt32(shaderinterop::SPEC_ID_MAX_RAY_RECURSION,
+                                          RaytracedLightingPass::MAX_RAY_RECURSION),
+      nvrhi::ShaderSpecialization::UInt32(shaderinterop::SPEC_ID_REFL_MAX_SEGMENTS,
+                                          RaytracedLightingPass::REFL_MAX_SEGMENTS),
+  };
+  const nvrhi::ShaderHandle specRaygen = device->createShaderSpecialization(
+      raygen, raygenConstants, static_cast<uint32_t>(std::size(raygenConstants)));
+  const nvrhi::ShaderHandle specClosestHit = device->createShaderSpecialization(
+      closestHit, closestHitConstants, static_cast<uint32_t>(std::size(closestHitConstants)));
+  if (!specRaygen || !specClosestHit)
+  {
+    log.Error(log::RENDER, std::string{logContext}
+                               + ": createShaderSpecialization failed (projectionMode="
+                               + std::to_string(projectionMode) + ")");
+    return {};
+  }
+
+  // Pipeline state — four shader stages registered by `exportName`,
+  // one hit group bundling closesthit + anyhit. P4: the closesthit is
+  // the retained megakernel serving SECONDARY rays only; the raygen
+  // shades the first hit itself from the visibility buffer.
+  nvrhi::rt::PipelineDesc pipelineDesc;
+  pipelineDesc.shaders = {
+      nvrhi::rt::PipelineShaderDesc{}.setExportName("RayGenMain").setShader(specRaygen),
+      nvrhi::rt::PipelineShaderDesc{}.setExportName("MissMain").setShader(miss),
+      nvrhi::rt::PipelineShaderDesc{}.setExportName("ShadowMissMain").setShader(shadowMiss),
+  };
+  pipelineDesc.hitGroups = {
+      nvrhi::rt::PipelineHitGroupDesc{}
+          .setExportName("HitGroupDefault")
+          .setClosestHitShader(specClosestHit)
+          .setAnyHitShader(anyHit),
+  };
+  pipelineDesc.globalBindingLayouts = {bindingLayout};
+  // V2.B (plan §V2.B.1/B.3) — depth 3, unchanged by P4/P5: the raygen
+  // shades the first hit at depth 0, so the deepest chain is
+  // continuation/reflection closesthit (1) → its reflection ray (2) →
+  // that reflection's shadow/AO ray (3). Opacity transmission doesn't
+  // recurse (front-to-back loop at depth 0). P5: fed from the same
+  // constant the shader's MAX_RAY_RECURSION spec value uses — the
+  // duplicated literal 3 is gone.
+  pipelineDesc.maxRecursionDepth = RaytracedLightingPass::MAX_RAY_RECURSION;
+  PipelineVariant variant;
+  variant.pipeline = device->createRayTracingPipeline(pipelineDesc);
+  if (!variant.pipeline)
+  {
+    log.Error(log::RENDER, std::string{logContext}
+                               + ": createRayTracingPipeline failed (projectionMode="
+                               + std::to_string(projectionMode) + ")");
+    return {};
+  }
+
+  // Shader binding table — one raygen, two misses, one hit group. The
+  // pass dispatches with the selected variant's SBT every frame; the
+  // entries are static across the run.
+  variant.shaderTable = variant.pipeline->createShaderTable();
+  if (!variant.shaderTable)
+  {
+    log.Error(log::RENDER, std::string{logContext}
+                               + ": createShaderTable failed (projectionMode="
+                               + std::to_string(projectionMode) + ")");
+    return {};
+  }
+  variant.shaderTable->setRayGenerationShader("RayGenMain");
+  variant.shaderTable->addMissShader("MissMain");        // miss-index 0: primary rays (sky / dome)
+  variant.shaderTable->addMissShader("ShadowMissMain");  // miss-index 1: shadow rays (visibility)
+  variant.shaderTable->addHitGroup("HitGroupDefault");
+  return variant;
 }
 
 }  // namespace
 
-PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
+RaytracedLightingPass::RaytracedLightingPass(nvrhi::IDevice* device, GpuScene& scene)
     : _device(device), _scene(&scene) {
   const AssetLocator locator;
-  const Path raygenPath = locator.LocateResource("shaders/raygen.spv");
-  const Path missPath = locator.LocateResource("shaders/miss.spv");
-  const Path shadowMissPath = locator.LocateResource("shaders/shadow_miss.spv");
-  const Path closestHitPath = locator.LocateResource("shaders/closesthit.spv");
-  const Path anyHitPath = locator.LocateResource("shaders/anyhit.spv");
+  const Path raygenPath = locator.LocateResource("shaders/raytraced_lighting_raygen.spv");
+  const Path missPath = locator.LocateResource("shaders/raytraced_lighting_miss.spv");
+  const Path shadowMissPath =
+      locator.LocateResource("shaders/raytraced_lighting_shadow_miss.spv");
+  const Path closestHitPath =
+      locator.LocateResource("shaders/raytraced_lighting_closesthit.spv");
+  const Path anyHitPath = locator.LocateResource("shaders/raytraced_lighting_anyhit.spv");
 
   // Slang emits the SPIR-V `OpEntryPoint` name as `"main"` for every
   // [shader(...)]-attributed function regardless of the source-side
@@ -78,14 +216,14 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
   _anyHitShader = LoadSpirv(_device, anyHitPath.View(), nvrhi::ShaderType::AnyHit, "main");
   if (!_raygenShader || !_missShader || !_shadowMissShader || !_closestHitShader || !_anyHitShader)
   {
-    Logging::Get().Error(log::RENDER, "PathTracePass: shader load failed; pass will skip");
+    Logging::Get().Error(log::RENDER, "RaytracedLightingPass: shader load failed; pass will skip");
     return;
   }
 
   // Binding layout — visibility=AllRayTracing covers all five RT
   // stages so we don't have to re-author this for shadow-trace etc.
-  // additions later. Slot indices match the raygen.slang register
-  // assignments (b0 / t0 / u0).
+  // additions later. Slot indices match the raytraced_lighting_*.slang
+  // register assignments (b0 / t0 / u0).
   // Non-volatile ConstantBuffer (= VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)
   // matches Slang's `ConstantBuffer<T>` declaration in the shader.
   //
@@ -104,18 +242,21 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
   layoutDesc.bindingOffsets.sampler = 0;
   layoutDesc.bindingOffsets.constantBuffer = 0;
   layoutDesc.bindingOffsets.unorderedAccess = 0;
+  // P2 buffer packing — bindings 8/25/27/30/31/32 are RETIRED (the five per-mesh
+  // offset tables folded into the MeshInfoGpu record at 6; the per-vertex
+  // normal/tangent streams interleaved into VertexAttribGpu at 29). Vulkan allows
+  // sparse binding numbers, so the survivors keep their numbers exactly.
   layoutDesc.bindings = {
       nvrhi::BindingLayoutItem::ConstantBuffer(0),           // binding 0 CameraUniforms
       nvrhi::BindingLayoutItem::RayTracingAccelStruct(1),    // binding 1 TLAS
-      nvrhi::BindingLayoutItem::Texture_UAV(2),              // binding 2 output (BGRA8 display)
+      nvrhi::BindingLayoutItem::Texture_UAV(2),              // binding 2 linear radiance (RGBA32F, P3)
       nvrhi::BindingLayoutItem::StructuredBuffer_SRV(3),     // binding 3 materials (M5)
-      nvrhi::BindingLayoutItem::StructuredBuffer_SRV(4),     // binding 4 instance→material (M6)
+      nvrhi::BindingLayoutItem::StructuredBuffer_SRV(4),     // binding 4 instance info (P2: InstanceInfoGpu)
       nvrhi::BindingLayoutItem::StructuredBuffer_SRV(5),     // binding 5 lights (M7)
-      nvrhi::BindingLayoutItem::StructuredBuffer_SRV(6),     // binding 6 instance→mesh (M7 NdotL)
+      nvrhi::BindingLayoutItem::StructuredBuffer_SRV(6),     // binding 6 mesh info (P2: MeshInfoGpu)
       nvrhi::BindingLayoutItem::StructuredBuffer_SRV(7),     // binding 7 mesh face normals (M7 NdotL)
-      nvrhi::BindingLayoutItem::StructuredBuffer_SRV(8),     // binding 8 mesh face offsets (M7 NdotL)
       nvrhi::BindingLayoutItem::Texture_SRV(9),              // binding 9 dome env-map (M7-IBL)
-      nvrhi::BindingLayoutItem::Sampler(10),                 // binding 10 dome sampler (M7-IBL)
+      nvrhi::BindingLayoutItem::Sampler(10),                 // binding 10 material sampler
       // M7 follow-up — AOV inspector + picker.
       nvrhi::BindingLayoutItem::Texture_UAV(11),             // binding 11 colorHdr AOV
       nvrhi::BindingLayoutItem::Texture_UAV(12),             // binding 12 normal AOV
@@ -133,9 +274,7 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
       nvrhi::BindingLayoutItem::Texture_UAV(23),             // binding 23 worldPosEye AOV
       // M8a UV pipeline + bindless materials.
       nvrhi::BindingLayoutItem::StructuredBuffer_SRV(24),    // binding 24 mesh UVs
-      nvrhi::BindingLayoutItem::StructuredBuffer_SRV(25),    // binding 25 mesh UV offsets
-      nvrhi::BindingLayoutItem::StructuredBuffer_SRV(26),    // binding 26 mesh indices
-      nvrhi::BindingLayoutItem::StructuredBuffer_SRV(27),    // binding 27 mesh index offsets
+      nvrhi::BindingLayoutItem::StructuredBuffer_SRV(26),    // binding 26 mesh indices (§14.5 index-pool view)
       // Bindless material textures. NVRHI's vulkan backend applies
       // ePartiallyBound to every layout entry (vulkan-resource-bindings
       // .cpp:184), so unbound array slots are safe as long as the
@@ -146,81 +285,54 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
       // v1 production scene.
       nvrhi::BindingLayoutItem::Texture_SRV(28).setSize(
           shaderinterop::BINDLESS_TEXTURES_CAP),             // binding 28 bindless textures
-      // M9 smooth shading — per-vertex normals + per-mesh start offsets.
-      nvrhi::BindingLayoutItem::StructuredBuffer_SRV(29),    // binding 29 mesh vertex normals
-      nvrhi::BindingLayoutItem::StructuredBuffer_SRV(30),    // binding 30 mesh vertex-normal offsets
-      // M9 normal mapping — per-vertex tangents (float4: xyz tangent + w sign).
-      nvrhi::BindingLayoutItem::StructuredBuffer_SRV(31),    // binding 31 mesh tangents
-      nvrhi::BindingLayoutItem::StructuredBuffer_SRV(32),    // binding 32 mesh tangent offsets
+      // P2 — interleaved per-vertex normal+tangent attributes (VertexAttribGpu).
+      nvrhi::BindingLayoutItem::StructuredBuffer_SRV(29),    // binding 29 mesh vertex attribs
       // M9-fidelity per-role samplers — dome (Wrap-Clamp-Wrap) at 33;
       // bindlessSampler at 10 stays as material sampler (Wrap-Wrap-Wrap).
       nvrhi::BindingLayoutItem::Sampler(33),                 // binding 33 dome HDRI sampler
+      // P4 — the GBuffer pass's per-pixel VisibilityGpu records.
+      nvrhi::BindingLayoutItem::StructuredBuffer_SRV(34),    // binding 34 visibility buffer
   };
   _bindingLayout = _device->createBindingLayout(layoutDesc);
   if (!_bindingLayout)
   {
-    Logging::Get().Error(log::RENDER, "PathTracePass: createBindingLayout failed");
+    Logging::Get().Error(log::RENDER, "RaytracedLightingPass: createBindingLayout failed");
     return;
   }
 
-  // Pipeline state — four shader stages registered by `exportName`,
-  // one hit group bundling closesthit + anyhit. M9-fidelity:
-  // maxRecursionDepth=2 (raygen→primary closesthit + closesthit→
-  // shadow ray which only invokes anyhit/miss, but RT pipeline
-  // accounting still counts it as a recursion level).
-  nvrhi::rt::PipelineDesc pipelineDesc;
-  pipelineDesc.shaders = {
-      nvrhi::rt::PipelineShaderDesc{}.setExportName("RayGenMain").setShader(_raygenShader),
-      nvrhi::rt::PipelineShaderDesc{}.setExportName("MissMain").setShader(_missShader),
-      nvrhi::rt::PipelineShaderDesc{}.setExportName("ShadowMissMain").setShader(_shadowMissShader),
-  };
-  pipelineDesc.hitGroups = {
-      nvrhi::rt::PipelineHitGroupDesc{}
-          .setExportName("HitGroupDefault")
-          .setClosestHitShader(_closestHitShader)
-          .setAnyHitShader(_anyHitShader),
-  };
-  pipelineDesc.globalBindingLayouts = {_bindingLayout};
-  // V2.B (plan §V2.B.1/B.3) — depth 3: raygen→primary closesthit (1) →
-  // reflection ray (2) → reflection's shadow/AO ray (3). Opacity
-  // transmission no longer recurses (raygen composites it front-to-back
-  // at depth 0 via its transmission loop), so stacked translucent layers
-  // don't inflate this — the cap stays at the documented 3.
-  pipelineDesc.maxRecursionDepth = 3;
-  _pipeline = _device->createRayTracingPipeline(pipelineDesc);
-  if (!_pipeline)
-  {
-    Logging::Get().Error(log::RENDER, "PathTracePass: createRayTracingPipeline failed");
-    return;
-  }
-
-  // Shader binding table — one raygen, one miss, one hit group.
-  // The pass dispatches with this single SBT every frame; the
-  // entries are static across the run.
-  _shaderTable = _pipeline->createShaderTable();
-  if (!_shaderTable)
-  {
-    Logging::Get().Error(log::RENDER, "PathTracePass: createShaderTable failed");
-    return;
-  }
-  _shaderTable->setRayGenerationShader("RayGenMain");
-  _shaderTable->addMissShader("MissMain");        // miss-index 0: primary rays (sky / dome)
-  _shaderTable->addMissShader("ShadowMissMain");  // miss-index 1: shadow rays (visibility)
-  _shaderTable->addHitGroup("HitGroupDefault");
+  // P5 (design D2) — the PERSPECTIVE pipeline variant (projectionMode
+  // 0, the v1 default) is built eagerly here; the ORTHOGRAPHIC variant
+  // is built lazily by EnsureProjectionPipeline the first time the
+  // camera reports it (PyxisRenderer's CPU frame path — never inside
+  // Execute). BuildPipelineVariant wraps the base shaders with the
+  // spec-constant values and creates pipeline + SBT together.
+  PipelineVariant perspective = BuildPipelineVariant({.device = _device,
+                                                      .bindingLayout = _bindingLayout,
+                                                      .raygen = _raygenShader,
+                                                      .miss = _missShader,
+                                                      .shadowMiss = _shadowMissShader,
+                                                      .closestHit = _closestHitShader,
+                                                      .anyHit = _anyHitShader,
+                                                      .projectionMode = 0u,
+                                                      .logContext = "RaytracedLightingPass"});
+  if (!perspective.pipeline || !perspective.shaderTable)
+    return;  // BuildPipelineVariant already logged the failing step.
+  _pipelines[0]    = std::move(perspective.pipeline);
+  _shaderTables[0] = std::move(perspective.shaderTable);
 
   // Camera uniforms constant buffer — sized for one CameraUniforms
   // struct; rewritten every frame from GpuScene's CameraDesc via
   // commandList->writeBuffer (non-volatile path).
   nvrhi::BufferDesc cbDesc;
   cbDesc.byteSize = sizeof(CameraUniforms);
-  cbDesc.debugName = "PathTrace.CameraUniforms";
+  cbDesc.debugName = "RaytracedLighting.CameraUniforms";
   cbDesc.isConstantBuffer = true;
   cbDesc.initialState = nvrhi::ResourceStates::ConstantBuffer;
   cbDesc.keepInitialState = true;
   _cameraUniformsBuffer = _device->createBuffer(cbDesc);
   if (!_cameraUniformsBuffer)
   {
-    Logging::Get().Error(log::RENDER, "PathTracePass: createBuffer(CameraUniforms) failed");
+    Logging::Get().Error(log::RENDER, "RaytracedLightingPass: createBuffer(CameraUniforms) failed");
     return;
   }
 
@@ -229,95 +341,30 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
   // See ShaderInterop.slang's FrameUiUniforms for the field layout.
   nvrhi::BufferDesc uiCbDesc;
   uiCbDesc.byteSize = sizeof(shaderinterop::FrameUiUniforms);
-  uiCbDesc.debugName = "PathTrace.FrameUiUniforms";
+  uiCbDesc.debugName = "RaytracedLighting.FrameUiUniforms";
   uiCbDesc.isConstantBuffer = true;
   uiCbDesc.initialState = nvrhi::ResourceStates::ConstantBuffer;
   uiCbDesc.keepInitialState = true;
   _frameUiBuffer = _device->createBuffer(uiCbDesc);
   if (!_frameUiBuffer)
   {
-    Logging::Get().Error(log::RENDER, "PathTracePass: createBuffer(FrameUiUniforms) failed");
+    Logging::Get().Error(log::RENDER, "RaytracedLightingPass: createBuffer(FrameUiUniforms) failed");
     return;
   }
 
-  // M5: 1-element fallback material buffer. The closesthit binding
-  // 3 must point at a non-null structured buffer even when the
-  // scene has no materials yet (e.g. the M3 hardcoded cube). The
-  // contents are written every Execute() to a default-init
-  // OpenPBRMaterialGPU (baseColor 0.8 grey) — see the writeBuffer in
-  // Execute below. That keeps the cube-without-materials path
-  // visually consistent with the GpuScene sentinel slot 0 (also a
-  // default OpenPBRMaterialDesc → grey 0.8).
-  nvrhi::BufferDesc fallbackDesc;
-  fallbackDesc.byteSize = sizeof(shaderinterop::OpenPBRMaterialGPU);
-  fallbackDesc.structStride = sizeof(shaderinterop::OpenPBRMaterialGPU);
-  fallbackDesc.canHaveRawViews = false;
-  fallbackDesc.canHaveTypedViews = false;
-  fallbackDesc.format = nvrhi::Format::UNKNOWN;
-  fallbackDesc.debugName = "PathTrace.FallbackMaterial";
-  fallbackDesc.initialState = nvrhi::ResourceStates::ShaderResource;
-  fallbackDesc.keepInitialState = true;
-  _fallbackMaterialBuffer = _device->createBuffer(fallbackDesc);
-  if (!_fallbackMaterialBuffer)
-  {
-    Logging::Get().Error(log::RENDER, "PathTracePass: createBuffer(FallbackMaterial) failed");
-    return;
-  }
-
-  // M6: 1-element fallback instance→material side-table. Same
-  // contract as the material fallback — binding 4 must point at a
-  // non-null structured buffer even when the scene has no instances
-  // of its own (the M3 hardcoded cube path runs through the
-  // hardcoded-cube scene which DOES populate instances, so this
-  // fallback only matters in the truly-empty-scene degenerate case).
-  // Holds a single zero-uint, so any rogue InstanceID() lookup
-  // resolves to material slot 0 = sentinel grey.
-  nvrhi::BufferDesc instanceMatFallbackDesc;
-  instanceMatFallbackDesc.byteSize = sizeof(std::uint32_t);
-  instanceMatFallbackDesc.structStride = sizeof(std::uint32_t);
-  instanceMatFallbackDesc.canHaveRawViews = false;
-  instanceMatFallbackDesc.canHaveTypedViews = false;
-  instanceMatFallbackDesc.format = nvrhi::Format::UNKNOWN;
-  instanceMatFallbackDesc.debugName = "PathTrace.FallbackInstanceMaterial";
-  instanceMatFallbackDesc.initialState = nvrhi::ResourceStates::ShaderResource;
-  instanceMatFallbackDesc.keepInitialState = true;
-  _fallbackInstanceMaterialBuffer = _device->createBuffer(instanceMatFallbackDesc);
-  if (!_fallbackInstanceMaterialBuffer)
-  {
-    Logging::Get().Error(log::RENDER,
-                         "PathTracePass: createBuffer(FallbackInstanceMaterial) failed");
-    return;
-  }
-
-  // M7: 1-element fallback lights buffer. Same shape as the material
-  // fallback — one disabled (intensity=0) LightGpu so the closesthit
-  // per-light loop sees one entry that contributes nothing → falls
-  // through to the M5/M6 baseColor-only path.
-  nvrhi::BufferDesc lightFallbackDesc;
-  lightFallbackDesc.byteSize = sizeof(shaderinterop::LightGpu);
-  lightFallbackDesc.structStride = sizeof(shaderinterop::LightGpu);
-  lightFallbackDesc.canHaveRawViews = false;
-  lightFallbackDesc.canHaveTypedViews = false;
-  lightFallbackDesc.format = nvrhi::Format::UNKNOWN;
-  lightFallbackDesc.debugName = "PathTrace.FallbackLights";
-  lightFallbackDesc.initialState = nvrhi::ResourceStates::ShaderResource;
-  lightFallbackDesc.keepInitialState = true;
-  _fallbackLightBuffer = _device->createBuffer(lightFallbackDesc);
-  if (!_fallbackLightBuffer)
-  {
-    Logging::Get().Error(log::RENDER, "PathTracePass: createBuffer(FallbackLights) failed");
-    return;
-  }
-
-  // M7 NdotL: 1-element fallbacks for the three normal-lookup
-  // buffers. instanceMesh + meshFaceOffsets are uint stride; the
-  // face-normals fallback is one float4 of zero (which the closesthit
-  // reads as nLocal=(0,0,0) → NdotL=0 for any light direction →
-  // unlit, but no OOB).
-  auto makeUintFallback = [&](const char* debugName) {
+  // 1-element fallback structured buffers — P2 collapse: ONE buffer per
+  // distinct element stride instead of one per binding (see the member
+  // comment in RaytracedLightingPass.h for the binding ↔ buffer map). Each scene-
+  // side structured-buffer binding must point at a non-null buffer whose
+  // stride matches the shader's element type even when GpuScene hasn't
+  // allocated the real one yet; contents are written every Execute while
+  // the matching scene buffer is null. The material fallback packs the
+  // same default grey GpuScene reserves at sentinel slot 0, so the
+  // no-materials path stays colour-consistent.
+  auto makeStructuredFallback = [&](std::size_t stride, const char* debugName) {
     nvrhi::BufferDesc desc;
-    desc.byteSize = sizeof(std::uint32_t);
-    desc.structStride = sizeof(std::uint32_t);
+    desc.byteSize = stride;
+    desc.structStride = stride;
     desc.canHaveRawViews = false;
     desc.canHaveTypedViews = false;
     desc.format = nvrhi::Format::UNKNOWN;
@@ -326,121 +373,29 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
     desc.keepInitialState = true;
     return _device->createBuffer(desc);
   };
-  _fallbackInstanceMeshBuffer = makeUintFallback("PathTrace.FallbackInstanceMesh");
-  _fallbackMeshFaceOffsetsBuffer = makeUintFallback("PathTrace.FallbackMeshFaceOffsets");
-  if (!_fallbackInstanceMeshBuffer || !_fallbackMeshFaceOffsetsBuffer)
+  _fallbackMaterialBuffer = makeStructuredFallback(sizeof(shaderinterop::OpenPBRMaterialGPU),
+                                                   "RaytracedLighting.FallbackMaterial");
+  _fallbackLightBuffer = makeStructuredFallback(sizeof(shaderinterop::LightGpu),
+                                                "RaytracedLighting.FallbackLights");
+  _fallbackInstanceInfoBuffer = makeStructuredFallback(sizeof(shaderinterop::InstanceInfoGpu),
+                                                       "RaytracedLighting.FallbackInstanceInfo");
+  static_assert(sizeof(shaderinterop::MeshInfoGpu) == sizeof(shaderinterop::VertexAttribGpu),
+                "bindings 6 + 29 share the 32-byte fallback buffer");
+  _fallbackStride32Buffer = makeStructuredFallback(sizeof(shaderinterop::MeshInfoGpu),
+                                                   "RaytracedLighting.FallbackStride32");
+  _fallbackFloat4Buffer = makeStructuredFallback(sizeof(hlslpp::float4),
+                                                 "RaytracedLighting.FallbackFloat4");
+  // gMeshUvs is a TIGHT 8-byte float2 stride (see MeshUvPack.h) — NOT the
+  // 16-byte hlslpp::float2.
+  _fallbackUvBuffer = makeStructuredFallback(2u * sizeof(float), "RaytracedLighting.FallbackMeshUvs");
+  _fallbackUintBuffer = makeStructuredFallback(sizeof(std::uint32_t),
+                                               "RaytracedLighting.FallbackUint");
+  if (!_fallbackMaterialBuffer || !_fallbackLightBuffer || !_fallbackInstanceInfoBuffer
+      || !_fallbackStride32Buffer || !_fallbackFloat4Buffer || !_fallbackUvBuffer
+      || !_fallbackUintBuffer)
   {
     Logging::Get().Error(log::RENDER,
-                         "PathTracePass: createBuffer(Fallback{InstanceMesh,MeshFaceOffsets}) "
-                         "failed");
-    return;
-  }
-
-  // M8a UV pipeline fallbacks. Same uint-stride shape for the index
-  // and offset buffers; the UV fallback is a single zero float2.
-  _fallbackMeshUvOffsetsBuffer    = makeUintFallback("PathTrace.FallbackMeshUvOffsets");
-  _fallbackMeshIndicesBuffer      = makeUintFallback("PathTrace.FallbackMeshIndices");
-  _fallbackMeshIndexOffsetsBuffer = makeUintFallback("PathTrace.FallbackMeshIndexOffsets");
-  if (!_fallbackMeshUvOffsetsBuffer || !_fallbackMeshIndicesBuffer
-      || !_fallbackMeshIndexOffsetsBuffer)
-  {
-    Logging::Get().Error(log::RENDER,
-                         "PathTracePass: createBuffer(Fallback{MeshUvOffsets,MeshIndices,"
-                         "MeshIndexOffsets}) failed");
-    return;
-  }
-  {
-    nvrhi::BufferDesc uvFallbackDesc;
-    uvFallbackDesc.byteSize = sizeof(hlslpp::float2);
-    uvFallbackDesc.structStride = sizeof(hlslpp::float2);
-    uvFallbackDesc.canHaveRawViews = false;
-    uvFallbackDesc.canHaveTypedViews = false;
-    uvFallbackDesc.format = nvrhi::Format::UNKNOWN;
-    uvFallbackDesc.debugName = "PathTrace.FallbackMeshUvs";
-    uvFallbackDesc.initialState = nvrhi::ResourceStates::ShaderResource;
-    uvFallbackDesc.keepInitialState = true;
-    _fallbackMeshUvsBuffer = _device->createBuffer(uvFallbackDesc);
-  }
-  if (!_fallbackMeshUvsBuffer)
-  {
-    Logging::Get().Error(log::RENDER, "PathTracePass: createBuffer(FallbackMeshUvs) failed");
-    return;
-  }
-
-  // M9 smooth-shading fallbacks. Vertex-normal buffer is one zero
-  // float4; the offset table fallback shares the uint-stride helper
-  // with the index/UV-offset fallbacks above.
-  _fallbackMeshVertexNormalOffsetsBuffer =
-      makeUintFallback("PathTrace.FallbackMeshVertexNormalOffsets");
-  if (!_fallbackMeshVertexNormalOffsetsBuffer)
-  {
-    Logging::Get().Error(log::RENDER,
-                         "PathTracePass: createBuffer(FallbackMeshVertexNormalOffsets) failed");
-    return;
-  }
-  {
-    nvrhi::BufferDesc nFallbackDesc;
-    nFallbackDesc.byteSize = sizeof(hlslpp::float4);
-    nFallbackDesc.structStride = sizeof(hlslpp::float4);
-    nFallbackDesc.canHaveRawViews = false;
-    nFallbackDesc.canHaveTypedViews = false;
-    nFallbackDesc.format = nvrhi::Format::UNKNOWN;
-    nFallbackDesc.debugName = "PathTrace.FallbackMeshVertexNormals";
-    nFallbackDesc.initialState = nvrhi::ResourceStates::ShaderResource;
-    nFallbackDesc.keepInitialState = true;
-    _fallbackMeshVertexNormalsBuffer = _device->createBuffer(nFallbackDesc);
-  }
-  if (!_fallbackMeshVertexNormalsBuffer)
-  {
-    Logging::Get().Error(log::RENDER,
-                         "PathTracePass: createBuffer(FallbackMeshVertexNormals) failed");
-    return;
-  }
-
-  // M9 tangent fallbacks. Same shape as the vertex-normal fallbacks
-  // above; closesthit detects zero-magnitude tangent and skips the
-  // TBN sample.
-  _fallbackMeshTangentOffsetsBuffer =
-      makeUintFallback("PathTrace.FallbackMeshTangentOffsets");
-  if (!_fallbackMeshTangentOffsetsBuffer)
-  {
-    Logging::Get().Error(log::RENDER,
-                         "PathTracePass: createBuffer(FallbackMeshTangentOffsets) failed");
-    return;
-  }
-  {
-    nvrhi::BufferDesc tFallbackDesc;
-    tFallbackDesc.byteSize = sizeof(hlslpp::float4);
-    tFallbackDesc.structStride = sizeof(hlslpp::float4);
-    tFallbackDesc.canHaveRawViews = false;
-    tFallbackDesc.canHaveTypedViews = false;
-    tFallbackDesc.format = nvrhi::Format::UNKNOWN;
-    tFallbackDesc.debugName = "PathTrace.FallbackMeshTangents";
-    tFallbackDesc.initialState = nvrhi::ResourceStates::ShaderResource;
-    tFallbackDesc.keepInitialState = true;
-    _fallbackMeshTangentsBuffer = _device->createBuffer(tFallbackDesc);
-  }
-  if (!_fallbackMeshTangentsBuffer)
-  {
-    Logging::Get().Error(log::RENDER,
-                         "PathTracePass: createBuffer(FallbackMeshTangents) failed");
-    return;
-  }
-
-  nvrhi::BufferDesc faceNormalsFallbackDesc;
-  faceNormalsFallbackDesc.byteSize = sizeof(hlslpp::float4);
-  faceNormalsFallbackDesc.structStride = sizeof(hlslpp::float4);
-  faceNormalsFallbackDesc.canHaveRawViews = false;
-  faceNormalsFallbackDesc.canHaveTypedViews = false;
-  faceNormalsFallbackDesc.format = nvrhi::Format::UNKNOWN;
-  faceNormalsFallbackDesc.debugName = "PathTrace.FallbackMeshFaceNormals";
-  faceNormalsFallbackDesc.initialState = nvrhi::ResourceStates::ShaderResource;
-  faceNormalsFallbackDesc.keepInitialState = true;
-  _fallbackMeshFaceNormalsBuffer = _device->createBuffer(faceNormalsFallbackDesc);
-  if (!_fallbackMeshFaceNormalsBuffer)
-  {
-    Logging::Get().Error(log::RENDER,
-                         "PathTracePass: createBuffer(FallbackMeshFaceNormals) failed");
+                         "RaytracedLightingPass: createBuffer(per-stride scene fallbacks) failed");
     return;
   }
 
@@ -456,13 +411,13 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
   domeFallbackDesc.height = 1;
   domeFallbackDesc.format = nvrhi::Format::RGBA32_FLOAT;
   domeFallbackDesc.dimension = nvrhi::TextureDimension::Texture2D;
-  domeFallbackDesc.debugName = "PathTrace.FallbackDomeTexture";
+  domeFallbackDesc.debugName = "RaytracedLighting.FallbackDomeTexture";
   domeFallbackDesc.initialState = nvrhi::ResourceStates::ShaderResource;
   domeFallbackDesc.keepInitialState = true;
   _fallbackDomeTexture = _device->createTexture(domeFallbackDesc);
   if (!_fallbackDomeTexture)
   {
-    Logging::Get().Error(log::RENDER, "PathTracePass: createTexture(FallbackDomeTexture) failed");
+    Logging::Get().Error(log::RENDER, "RaytracedLightingPass: createTexture(FallbackDomeTexture) failed");
     return;
   }
   // Default linear-clamp sampler — used as fallback when GpuScene
@@ -481,7 +436,7 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
   _fallbackDomeSampler = _device->createSampler(samplerDesc);
   if (!_fallbackDomeSampler)
   {
-    Logging::Get().Error(log::RENDER, "PathTracePass: createSampler(FallbackDomeSampler) failed");
+    Logging::Get().Error(log::RENDER, "RaytracedLightingPass: createSampler(FallbackDomeSampler) failed");
     return;
   }
 
@@ -504,35 +459,35 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
     return _device->createTexture(fbDesc);
   };
   // Iterate over a static fallback-spec table — adding a new AOV is
-  // one row in this table + matching member in PathTracePass.h. Pre-
+  // one row in this table + matching member in RaytracedLightingPass.h. Pre-
   // refactor the seven createTexture calls were spelled out verbatim
   // and the existence check at the bottom was easy to miss when adding
   // a new format.
   struct FallbackSpec {
-    nvrhi::TextureHandle PathTracePass::* member;
+    nvrhi::TextureHandle RaytracedLightingPass::* member;
     nvrhi::Format format;
     const char* debugName;
   };
   const std::array<FallbackSpec, 11> aovFallbacks{{
-      {&PathTracePass::_fallbackColorHdrAov,    nvrhi::Format::RGBA16_FLOAT, "PathTrace.FbColorHdrAov"   },
-      {&PathTracePass::_fallbackNormalAov,      nvrhi::Format::RGBA16_FLOAT, "PathTrace.FbNormalAov"     },
-      {&PathTracePass::_fallbackDepthAov,       nvrhi::Format::R32_FLOAT,    "PathTrace.FbDepthAov"      },
-      {&PathTracePass::_fallbackPrimIdAov,      nvrhi::Format::R32_UINT,     "PathTrace.FbPrimIdAov"     },
-      {&PathTracePass::_fallbackMaterialAov,    nvrhi::Format::R32_UINT,     "PathTrace.FbMaterialAov"   },
-      {&PathTracePass::_fallbackBaseColorAov,   nvrhi::Format::RGBA16_FLOAT, "PathTrace.FbBaseColorAov"  },
-      {&PathTracePass::_fallbackWorldPosAov,    nvrhi::Format::RGBA32_FLOAT, "PathTrace.FbWorldPosAov"   },
+      {&RaytracedLightingPass::_fallbackColorHdrAov,    nvrhi::Format::RGBA16_FLOAT, "RaytracedLighting.FbColorHdrAov"   },
+      {&RaytracedLightingPass::_fallbackNormalAov,      nvrhi::Format::RGBA16_FLOAT, "RaytracedLighting.FbNormalAov"     },
+      {&RaytracedLightingPass::_fallbackDepthAov,       nvrhi::Format::R32_FLOAT,    "RaytracedLighting.FbDepthAov"      },
+      {&RaytracedLightingPass::_fallbackPrimIdAov,      nvrhi::Format::R32_UINT,     "RaytracedLighting.FbPrimIdAov"     },
+      {&RaytracedLightingPass::_fallbackMaterialAov,    nvrhi::Format::R32_UINT,     "RaytracedLighting.FbMaterialAov"   },
+      {&RaytracedLightingPass::_fallbackBaseColorAov,   nvrhi::Format::RGBA16_FLOAT, "RaytracedLighting.FbBaseColorAov"  },
+      {&RaytracedLightingPass::_fallbackWorldPosAov,    nvrhi::Format::RGBA32_FLOAT, "RaytracedLighting.FbWorldPosAov"   },
       // Tier 1 Hydra-canonical fallbacks.
-      {&PathTracePass::_fallbackAlphaAov,       nvrhi::Format::R8_UNORM,     "PathTrace.FbAlphaAov"      },
-      {&PathTracePass::_fallbackElementIdAov,   nvrhi::Format::R32_UINT,     "PathTrace.FbElementIdAov"  },
-      {&PathTracePass::_fallbackNormalEyeAov,   nvrhi::Format::RGBA16_FLOAT, "PathTrace.FbNormalEyeAov"  },
-      {&PathTracePass::_fallbackWorldPosEyeAov, nvrhi::Format::RGBA32_FLOAT, "PathTrace.FbWorldPosEyeAov"},
+      {&RaytracedLightingPass::_fallbackAlphaAov,       nvrhi::Format::R8_UNORM,     "RaytracedLighting.FbAlphaAov"      },
+      {&RaytracedLightingPass::_fallbackElementIdAov,   nvrhi::Format::R32_UINT,     "RaytracedLighting.FbElementIdAov"  },
+      {&RaytracedLightingPass::_fallbackNormalEyeAov,   nvrhi::Format::RGBA16_FLOAT, "RaytracedLighting.FbNormalEyeAov"  },
+      {&RaytracedLightingPass::_fallbackWorldPosEyeAov, nvrhi::Format::RGBA32_FLOAT, "RaytracedLighting.FbWorldPosEyeAov"},
   }};
   for (const FallbackSpec& spec : aovFallbacks)
   {
     this->*spec.member = makeAovFallback(spec.format, spec.debugName);
     if (!(this->*spec.member))
     {
-      Logging::Get().Error(log::RENDER, std::string{"PathTracePass: AOV fallback create failed: "}
+      Logging::Get().Error(log::RENDER, std::string{"RaytracedLightingPass: AOV fallback create failed: "}
                                             + spec.debugName);
       return;
     }
@@ -544,23 +499,63 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
   pickFbDesc.byteSize = sizeof(pyxis::shaderinterop::PickResult);
   pickFbDesc.structStride = sizeof(pyxis::shaderinterop::PickResult);
   pickFbDesc.canHaveUAVs = true;
-  pickFbDesc.debugName = "PathTrace.FbPickResult";
+  pickFbDesc.debugName = "RaytracedLighting.FbPickResult";
   pickFbDesc.initialState = nvrhi::ResourceStates::UnorderedAccess;
   pickFbDesc.keepInitialState = true;
   _fallbackPickResult = _device->createBuffer(pickFbDesc);
   if (!_fallbackPickResult)
   {
-    Logging::Get().Error(log::RENDER, "PathTracePass: createBuffer(FbPickResult) failed");
+    Logging::Get().Error(log::RENDER, "RaytracedLightingPass: createBuffer(FbPickResult) failed");
     return;
   }
 
   _shadersOk = true;
-  Logging::Get().Info(log::RENDER, "PathTracePass: initialised (RT pipeline + SBT ready)");
+  Logging::Get().Info(log::RENDER, "RaytracedLightingPass: initialised (RT pipeline + SBT ready)");
 }
 
-PathTracePass::~PathTracePass() = default;
+RaytracedLightingPass::~RaytracedLightingPass() = default;
 
-bool PathTracePass::ReloadShaders() noexcept {
+nvrhi::ITexture* RaytracedLightingPass::EnsureLinearColor(uint32_t width, uint32_t height) {
+  if (width == 0u || height == 0u)
+    return nullptr;
+  if (_linearColor && _linearColorW == width && _linearColorH == height)
+    return _linearColor;
+  nvrhi::TextureDesc desc;
+  desc.width = width;
+  desc.height = height;
+  // RGBA32F — full fp32 so the TonemapPass display transform reads the exact
+  // bits the old inline raygen branch consumed (RGBA16F would quantize the
+  // display path; the colorHdr AOV stays the quantized inspector copy).
+  desc.format = nvrhi::Format::RGBA32_FLOAT;
+  desc.dimension = nvrhi::TextureDimension::Texture2D;
+  desc.isUAV = true;            // raygen writes gLinearColor (binding 2).
+  desc.isShaderResource = true; // sampled by TonemapPass.
+  desc.debugName = "RaytracedLighting.linearColor";
+  desc.initialState = nvrhi::ResourceStates::UnorderedAccess;
+  desc.keepInitialState = true;
+  _linearColor = _device->createTexture(desc);
+  _linearColorW = width;
+  _linearColorH = height;
+  if (!_linearColor)
+  {
+    // §30.6 — no silent failures: a null handle here degrades the whole
+    // frame chain (lighting + tonemap early-out on null linearColor).
+    // Latched so the per-frame Ensure call doesn't spam.
+    if (!_linearColorCreateFailedLogged)
+    {
+      Logging::Get().Error(log::RENDER,
+                           "RaytracedLightingPass: createTexture(linearColor, " + std::to_string(width)
+                               + "x" + std::to_string(height)
+                               + " RGBA32F) failed; lighting/tonemap will skip");
+      _linearColorCreateFailedLogged = true;
+    }
+    return nullptr;
+  }
+  _linearColorCreateFailedLogged = false;
+  return _linearColor;
+}
+
+bool RaytracedLightingPass::ReloadShaders() noexcept {
   // Editor-driven reload (M7 follow-up). Re-translates Slang -> SPIR-V
   // is NOT done here — the Slang compiler isn't linked into the
   // runtime; the .spv files are produced by ShaderMake at CMake
@@ -575,11 +570,13 @@ bool PathTracePass::ReloadShaders() noexcept {
   // can log it. Without this, a broken .spv would brick the viewer.
   auto& log = Logging::Get();
   const AssetLocator locator;
-  const Path raygenPath     = locator.LocateResource("shaders/raygen.spv");
-  const Path missPath       = locator.LocateResource("shaders/miss.spv");
-  const Path shadowMissPath = locator.LocateResource("shaders/shadow_miss.spv");
-  const Path closestHitPath = locator.LocateResource("shaders/closesthit.spv");
-  const Path anyHitPath     = locator.LocateResource("shaders/anyhit.spv");
+  const Path raygenPath     = locator.LocateResource("shaders/raytraced_lighting_raygen.spv");
+  const Path missPath       = locator.LocateResource("shaders/raytraced_lighting_miss.spv");
+  const Path shadowMissPath =
+      locator.LocateResource("shaders/raytraced_lighting_shadow_miss.spv");
+  const Path closestHitPath =
+      locator.LocateResource("shaders/raytraced_lighting_closesthit.spv");
+  const Path anyHitPath     = locator.LocateResource("shaders/raytraced_lighting_anyhit.spv");
 
   nvrhi::ShaderHandle newRaygen =
       LoadSpirv(_device, raygenPath.View(), nvrhi::ShaderType::RayGeneration, "main");
@@ -593,97 +590,147 @@ bool PathTracePass::ReloadShaders() noexcept {
       LoadSpirv(_device, anyHitPath.View(), nvrhi::ShaderType::AnyHit, "main");
   if (!newRaygen || !newMiss || !newShadowMiss || !newClosestHit || !newAnyHit)
   {
-    log.Error(log::RENDER, "PathTracePass::ReloadShaders: shader load failed; keeping old pipeline");
+    log.Error(log::RENDER, "RaytracedLightingPass::ReloadShaders: shader load failed; keeping old pipeline");
     return false;
   }
 
-  nvrhi::rt::PipelineDesc pipelineDesc;
-  pipelineDesc.shaders = {
-      nvrhi::rt::PipelineShaderDesc{}.setExportName("RayGenMain").setShader(newRaygen),
-      nvrhi::rt::PipelineShaderDesc{}.setExportName("MissMain").setShader(newMiss),
-      nvrhi::rt::PipelineShaderDesc{}.setExportName("ShadowMissMain").setShader(newShadowMiss),
-  };
-  pipelineDesc.hitGroups = {
-      nvrhi::rt::PipelineHitGroupDesc{}
-          .setExportName("HitGroupDefault")
-          .setClosestHitShader(newClosestHit)
-          .setAnyHitShader(newAnyHit),
-  };
-  pipelineDesc.globalBindingLayouts = {_bindingLayout};
-  // V2.B (plan §V2.B.1/B.3) — depth 3: raygen→primary closesthit (1) →
-  // reflection ray (2) → reflection's shadow/AO ray (3). Opacity
-  // transmission no longer recurses (raygen composites it front-to-back
-  // at depth 0 via its transmission loop), so stacked translucent layers
-  // don't inflate this — the cap stays at the documented 3.
-  pipelineDesc.maxRecursionDepth = 3;
-  nvrhi::rt::PipelineHandle newPipeline = _device->createRayTracingPipeline(pipelineDesc);
-  if (!newPipeline)
+  // P5 — rebuild base + specialized handles + pipelines + SBTs
+  // TOGETHER (a spec-value or .spv change invalidates all of them as a
+  // unit). Variant 0 (perspective) always exists; variant 1
+  // (orthographic) is rebuilt only if it had been materialized —
+  // otherwise EnsureProjectionPipeline lazily rebuilds it from the NEW
+  // base shaders on demand.
+  PipelineVariant newPerspective =
+      BuildPipelineVariant({.device = _device,
+                            .bindingLayout = _bindingLayout,
+                            .raygen = newRaygen,
+                            .miss = newMiss,
+                            .shadowMiss = newShadowMiss,
+                            .closestHit = newClosestHit,
+                            .anyHit = newAnyHit,
+                            .projectionMode = 0u,
+                            .logContext = "RaytracedLightingPass::ReloadShaders"});
+  if (!newPerspective.pipeline || !newPerspective.shaderTable)
   {
     log.Error(log::RENDER,
-              "PathTracePass::ReloadShaders: createRayTracingPipeline failed; keeping old pipeline");
+              "RaytracedLightingPass::ReloadShaders: perspective variant rebuild failed; "
+              "keeping old pipeline");
     return false;
   }
-
-  nvrhi::rt::ShaderTableHandle newShaderTable = newPipeline->createShaderTable();
-  if (!newShaderTable)
+  PipelineVariant newOrthographic;
+  if (_pipelines[1])
   {
-    log.Error(log::RENDER,
-              "PathTracePass::ReloadShaders: createShaderTable failed; keeping old pipeline");
-    return false;
+    newOrthographic =
+        BuildPipelineVariant({.device = _device,
+                              .bindingLayout = _bindingLayout,
+                              .raygen = newRaygen,
+                              .miss = newMiss,
+                              .shadowMiss = newShadowMiss,
+                              .closestHit = newClosestHit,
+                              .anyHit = newAnyHit,
+                              .projectionMode = 1u,
+                              .logContext = "RaytracedLightingPass::ReloadShaders"});
+    if (!newOrthographic.pipeline || !newOrthographic.shaderTable)
+    {
+      log.Error(log::RENDER,
+                "RaytracedLightingPass::ReloadShaders: orthographic variant rebuild failed; "
+                "keeping old pipeline");
+      return false;
+    }
   }
-  newShaderTable->setRayGenerationShader("RayGenMain");
-  newShaderTable->addMissShader("MissMain");        // miss-index 0: primary rays
-  newShaderTable->addMissShader("ShadowMissMain");  // miss-index 1: shadow rays
-  newShaderTable->addHitGroup("HitGroupDefault");
 
   // Atomic-ish swap: every reference taken in Execute reads from the
-  // member handles, so once we overwrite all four together (single-
+  // member handles, so once we overwrite them all together (single-
   // threaded — render thread only, gated by waitForIdle on the caller
-  // side) the next Execute picks up the new pipeline + table.
+  // side) the next Execute picks up the new pipelines + tables.
   _raygenShader     = std::move(newRaygen);
   _missShader       = std::move(newMiss);
   _shadowMissShader = std::move(newShadowMiss);
   _closestHitShader = std::move(newClosestHit);
   _anyHitShader     = std::move(newAnyHit);
-  _pipeline         = std::move(newPipeline);
-  _shaderTable      = std::move(newShaderTable);
+  _pipelines[0]     = std::move(newPerspective.pipeline);
+  _shaderTables[0]  = std::move(newPerspective.shaderTable);
+  // Null when the orthographic variant wasn't materialized pre-reload —
+  // the lazy path then rebuilds it from the new shaders if needed.
+  _pipelines[1]     = std::move(newOrthographic.pipeline);
+  _shaderTables[1]  = std::move(newOrthographic.shaderTable);
+  _variantBuildFailed = {};
   _shadersOk = true;
-  log.Info(log::RENDER, "PathTracePass::ReloadShaders: reload OK");
+  log.Info(log::RENDER, "RaytracedLightingPass::ReloadShaders: reload OK");
   return true;
 }
 
-nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(RenderTargets const& targets) {
-  nvrhi::ITexture* output = targets.color;
+void RaytracedLightingPass::EnsureProjectionPipeline() {
+  if (!_shadersOk || _scene == nullptr || !_scene->HasCamera())
+    return;
+  // Same selection Execute uses: anything but 1 (including out-of-range
+  // garbage) falls to perspective — matching the shader branch's
+  // `PROJECTION_MODE == 1u` shape exactly.
+  const std::size_t variant = (_scene->GetCamera().projectionMode == 1u) ? 1u : 0u;
+  if (_pipelines[variant] || _variantBuildFailed[variant])
+    return;
+  // CPU-frame-path creation (PyxisRenderer calls this before the graph
+  // walks) — pipeline variants are NEVER created inside Execute
+  // (§30.10 no allocations in the per-frame pass body).
+  PipelineVariant built = BuildPipelineVariant(
+      {.device = _device,
+       .bindingLayout = _bindingLayout,
+       .raygen = _raygenShader,
+       .miss = _missShader,
+       .shadowMiss = _shadowMissShader,
+       .closestHit = _closestHitShader,
+       .anyHit = _anyHitShader,
+       .projectionMode = static_cast<uint32_t>(variant),
+       .logContext = "RaytracedLightingPass::EnsureProjectionPipeline"});
+  if (!built.pipeline || !built.shaderTable)
+  {
+    // Latched so the per-frame hook doesn't retry (and re-log) forever;
+    // ReloadShaders resets the latch.
+    _variantBuildFailed[variant] = true;
+    return;
+  }
+  _pipelines[variant]    = std::move(built.pipeline);
+  _shaderTables[variant] = std::move(built.shaderTable);
+}
+
+nvrhi::BindingSetHandle RaytracedLightingPass::GetOrCreateBindingSet(
+    nvrhi::ITexture* linearColor, nvrhi::IBuffer* visibility,
+    RenderTargets const& targets, const SceneResources& res) {
+  // P3 pass split — binding 2 is the fp32 linear-radiance scratch (the BGRA8
+  // display target moved to TonemapPass's layout). It doubles as the cache
+  // key, exactly as targets.color did before the split.
+  nvrhi::ITexture* output = linearColor;
   // Capture every borrowed-pointer that participates in a binding into
   // one snapshot, then compare against last frame's. A mismatch on
   // ANY field invalidates the cached binding sets — covers the
   // scene-side lazy-allocation flips (GpuScene's first AcquireMaterial
   // / AppendInstance / AddLight that creates a real buffer where a
-  // 1×1 fallback used to live), the caller-side AOV swaps on resize,
-  // and the dome-texture flip when a USD dome's env-map resolves.
-  // Indexed init keeps slot order in lockstep with the BindingSlot
-  // enum; std::array's element-wise operator== and operator= keep the
-  // compare + assign idiomatic without the multi-level pointer cast
-  // memcmp/memcpy would need.
+  // 1×1 fallback used to live), the §14.5 pool-growth handle swaps,
+  // the caller-side AOV swaps on resize, and the dome-texture flip
+  // when a USD dome's env-map resolves. Indexed init keeps slot order
+  // in lockstep with the BindingSlot enum; std::array's element-wise
+  // operator== and operator= keep the compare + assign idiomatic
+  // without the multi-level pointer cast memcmp/memcpy would need.
   auto slot = [](BindingSlot index) constexpr noexcept { return static_cast<std::size_t>(index); };
   BindingsSnapshot current{};
-  current[slot(BindingSlot::Materials)]        = _scene->GetMaterialBuffer();
-  current[slot(BindingSlot::InstanceMaterial)] = _scene->GetInstanceMaterialBuffer();
-  current[slot(BindingSlot::Lights)]           = _scene->GetLightBuffer();
-  current[slot(BindingSlot::InstanceMesh)]     = _scene->GetInstanceMeshBuffer();
-  current[slot(BindingSlot::MeshFaceNormals)]  = _scene->GetMeshFaceNormalsBuffer();
-  current[slot(BindingSlot::MeshFaceOffsets)]  = _scene->GetMeshFaceOffsetsBuffer();
-  current[slot(BindingSlot::DomeTexture)]      = _scene->GetDomeEnvMapTexture();
-  current[slot(BindingSlot::BindlessSampler)]  = _scene->GetBindlessSampler();
-  current[slot(BindingSlot::MeshUvs)]                = _scene->GetMeshUvsBuffer();
-  current[slot(BindingSlot::MeshUvOffsets)]          = _scene->GetMeshUvOffsetsBuffer();
-  current[slot(BindingSlot::MeshIndices)]            = _scene->GetMeshIndicesBuffer();
-  current[slot(BindingSlot::MeshIndexOffsets)]       = _scene->GetMeshIndexOffsetsBuffer();
-  current[slot(BindingSlot::MeshVertexNormals)]      = _scene->GetMeshVertexNormalsBuffer();
-  current[slot(BindingSlot::MeshVertexNormalOffsets)]= _scene->GetMeshVertexNormalOffsetsBuffer();
-  current[slot(BindingSlot::MeshTangents)]           = _scene->GetMeshTangentsBuffer();
-  current[slot(BindingSlot::MeshTangentOffsets)]     = _scene->GetMeshTangentOffsetsBuffer();
-  current[slot(BindingSlot::DomeSampler)]            = _scene->GetDomeSampler();
+  // P6 review — the TLAS object can be REPLACED mid-run (Commit.cpp's
+  // AllowUpdate upgrade on the first transform-only commit); the handle
+  // flip must invalidate cached sets exactly as RaytracedGBufferPass does.
+  current[slot(BindingSlot::Tlas)]              = res.tlas;
+  current[slot(BindingSlot::Materials)]         = res.materialBuffer;
+  current[slot(BindingSlot::InstanceInfo)]      = res.instanceInfoBuffer;
+  current[slot(BindingSlot::Lights)]            = res.lightBuffer;
+  current[slot(BindingSlot::MeshInfo)]          = res.meshInfoBuffer;
+  current[slot(BindingSlot::MeshFaceNormals)]   = res.meshFaceNormalsBuffer;
+  current[slot(BindingSlot::DomeTexture)]       = res.domeEnvMapTexture;
+  current[slot(BindingSlot::BindlessSampler)]   = res.bindlessSampler;
+  current[slot(BindingSlot::MeshUvs)]           = res.meshUvsBuffer;
+  current[slot(BindingSlot::MeshIndices)]       = res.meshIndicesBuffer;
+  current[slot(BindingSlot::MeshVertexAttribs)] = res.meshVertexAttribsBuffer;
+  current[slot(BindingSlot::DomeSampler)]       = res.domeSampler;
+  // P4 — a resize recreates the GBuffer pass's visibility buffer; the
+  // pointer flip must invalidate cached sets like any other rebind.
+  current[slot(BindingSlot::Visibility)]        = visibility;
   current[slot(BindingSlot::ColorHdrAov)]      = targets.colorHdr;
   current[slot(BindingSlot::NormalAov)]        = targets.normalAov;
   current[slot(BindingSlot::DepthAov)]         = targets.depthAov;
@@ -702,14 +749,14 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(RenderTargets const
   // AcquireTexture reuse a slot with a fresh ITexture*, leaving the
   // count unchanged). Fingerprint = FNV1a-64 over (count, every live
   // ITexture*); on mismatch with the prior frame's, invalidate.
-  const uint32_t bindlessTextureCount = _scene->GetBindlessTextureCount();
+  const uint32_t bindlessTextureCount = res.bindlessTextureCount;
   std::uint64_t bindlessFingerprint = 0xcbf29ce484222325ULL;
   bindlessFingerprint ^= bindlessTextureCount;
   bindlessFingerprint *= 0x100000001b3ULL;
   for (uint32_t bindlessSlot = 0; bindlessSlot < bindlessTextureCount; ++bindlessSlot)
   {
     const auto ptrAsInt =
-        reinterpret_cast<std::uintptr_t>(_scene->GetBindlessTextureAt(bindlessSlot));
+        reinterpret_cast<std::uintptr_t>(res.bindlessTextures[bindlessSlot]);
     bindlessFingerprint ^= static_cast<std::uint64_t>(ptrAsInt);
     bindlessFingerprint *= 0x100000001b3ULL;
   }
@@ -730,70 +777,51 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(RenderTargets const
     _bindingSetCache.clear();
   }
 
-  // Slot numbers match the BindingLayoutDesc above (0..5 with zero
-  // offsets) so NVRHI emits Vulkan bindings 0..5 to match the
-  // shaders' `[[vk::binding(N, 0)]]` declarations.
+  // Slot numbers match the BindingLayoutDesc above (zero offsets) so
+  // NVRHI emits Vulkan binding numbers matching the shaders'
+  // `[[vk::binding(N, 0)]]` declarations.
   // M5: binding 3 is the materials structured buffer — scene's own
   // (when AcquireMaterial has been called + CommitResources has
   // run) or the 1-element fallback grey (used by cube fixtures
   // that have no materials).
-  // M6: binding 4 is the instance→material side-table — scene's
+  // M6/P2: binding 4 is the packed instance-info table — scene's
   // own (when CommitResources has built a TLAS) or the 1-element
-  // fallback (used by truly-empty scenes).
+  // zero fallback (used by truly-empty scenes).
   // M7: binding 5 is the lights buffer — scene's own (when AddLight
   // has been called + CommitResources has run) or the 1-element
   // intensity=0 sentinel fallback (used by unlit M5/M6 fixtures so
   // the closesthit per-light loop falls through to baseColor-only).
-  nvrhi::IBuffer* materialBuffer = _scene->GetMaterialBuffer();
+  nvrhi::IBuffer* materialBuffer = res.materialBuffer;
   if (materialBuffer == nullptr)
     materialBuffer = _fallbackMaterialBuffer.Get();
-  nvrhi::IBuffer* instanceMaterialBuffer = _scene->GetInstanceMaterialBuffer();
-  if (instanceMaterialBuffer == nullptr)
-    instanceMaterialBuffer = _fallbackInstanceMaterialBuffer.Get();
-  nvrhi::IBuffer* lightBuffer = _scene->GetLightBuffer();
+  nvrhi::IBuffer* instanceInfoBuffer = res.instanceInfoBuffer;
+  if (instanceInfoBuffer == nullptr)
+    instanceInfoBuffer = _fallbackInstanceInfoBuffer.Get();
+  nvrhi::IBuffer* lightBuffer = res.lightBuffer;
   if (lightBuffer == nullptr)
     lightBuffer = _fallbackLightBuffer.Get();
-  nvrhi::IBuffer* instanceMeshBuffer = _scene->GetInstanceMeshBuffer();
-  if (instanceMeshBuffer == nullptr)
-    instanceMeshBuffer = _fallbackInstanceMeshBuffer.Get();
-  nvrhi::IBuffer* meshFaceNormalsBuffer = _scene->GetMeshFaceNormalsBuffer();
+  // P2 — packed per-mesh info (binding 6) + the element side tables. The
+  // 32-byte-stride fallback covers both MeshInfoGpu and VertexAttribGpu.
+  nvrhi::IBuffer* meshInfoBuffer = res.meshInfoBuffer;
+  if (meshInfoBuffer == nullptr)
+    meshInfoBuffer = _fallbackStride32Buffer.Get();
+  nvrhi::IBuffer* meshFaceNormalsBuffer = res.meshFaceNormalsBuffer;
   if (meshFaceNormalsBuffer == nullptr)
-    meshFaceNormalsBuffer = _fallbackMeshFaceNormalsBuffer.Get();
-  nvrhi::IBuffer* meshFaceOffsetsBuffer = _scene->GetMeshFaceOffsetsBuffer();
-  if (meshFaceOffsetsBuffer == nullptr)
-    meshFaceOffsetsBuffer = _fallbackMeshFaceOffsetsBuffer.Get();
-  // M8a UV pipeline — same fallback shape as the M7-NdotL buffers.
-  nvrhi::IBuffer* meshUvsBuffer = _scene->GetMeshUvsBuffer();
+    meshFaceNormalsBuffer = _fallbackFloat4Buffer.Get();
+  nvrhi::IBuffer* meshUvsBuffer = res.meshUvsBuffer;
   if (meshUvsBuffer == nullptr)
-    meshUvsBuffer = _fallbackMeshUvsBuffer.Get();
-  nvrhi::IBuffer* meshUvOffsetsBuffer = _scene->GetMeshUvOffsetsBuffer();
-  if (meshUvOffsetsBuffer == nullptr)
-    meshUvOffsetsBuffer = _fallbackMeshUvOffsetsBuffer.Get();
-  nvrhi::IBuffer* meshIndicesBuffer = _scene->GetMeshIndicesBuffer();
+    meshUvsBuffer = _fallbackUvBuffer.Get();
+  nvrhi::IBuffer* meshIndicesBuffer = res.meshIndicesBuffer;
   if (meshIndicesBuffer == nullptr)
-    meshIndicesBuffer = _fallbackMeshIndicesBuffer.Get();
-  nvrhi::IBuffer* meshIndexOffsetsBuffer = _scene->GetMeshIndexOffsetsBuffer();
-  if (meshIndexOffsetsBuffer == nullptr)
-    meshIndexOffsetsBuffer = _fallbackMeshIndexOffsetsBuffer.Get();
-  // M9 smooth shading — per-vertex normals + their offset table.
-  nvrhi::IBuffer* meshVertexNormalsBuffer = _scene->GetMeshVertexNormalsBuffer();
-  if (meshVertexNormalsBuffer == nullptr)
-    meshVertexNormalsBuffer = _fallbackMeshVertexNormalsBuffer.Get();
-  nvrhi::IBuffer* meshVertexNormalOffsetsBuffer = _scene->GetMeshVertexNormalOffsetsBuffer();
-  if (meshVertexNormalOffsetsBuffer == nullptr)
-    meshVertexNormalOffsetsBuffer = _fallbackMeshVertexNormalOffsetsBuffer.Get();
-  // M9 normal mapping — per-vertex tangents + their offset table.
-  nvrhi::IBuffer* meshTangentsBuffer = _scene->GetMeshTangentsBuffer();
-  if (meshTangentsBuffer == nullptr)
-    meshTangentsBuffer = _fallbackMeshTangentsBuffer.Get();
-  nvrhi::IBuffer* meshTangentOffsetsBuffer = _scene->GetMeshTangentOffsetsBuffer();
-  if (meshTangentOffsetsBuffer == nullptr)
-    meshTangentOffsetsBuffer = _fallbackMeshTangentOffsetsBuffer.Get();
+    meshIndicesBuffer = _fallbackUintBuffer.Get();
+  nvrhi::IBuffer* meshVertexAttribsBuffer = res.meshVertexAttribsBuffer;
+  if (meshVertexAttribsBuffer == nullptr)
+    meshVertexAttribsBuffer = _fallbackStride32Buffer.Get();
   // M9-fidelity per-role samplers — dome sampler at binding 33.
   // Falls back to the material sampler when GpuScene hasn't created
   // the dome sampler yet (truly empty scene); identical filter
   // settings, just different addressing modes.
-  nvrhi::ISampler* domeSampler = _scene->GetDomeSampler();
+  nvrhi::ISampler* domeSampler = res.domeSampler;
   if (domeSampler == nullptr)
     domeSampler = _fallbackDomeSampler.Get();
   // M7-IBL: dome HDRI texture + the M9-fidelity material sampler at
@@ -801,10 +829,10 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(RenderTargets const
   // moved to binding 33 above). Scene's first live dome wins; the
   // 1×1 black fallback texture handles "no dome" — miss shader's
   // "use authored color" branch fires when sampling that all-black.
-  nvrhi::ITexture* domeTexture = _scene->GetDomeEnvMapTexture();
+  nvrhi::ITexture* domeTexture = res.domeEnvMapTexture;
   if (domeTexture == nullptr)
     domeTexture = _fallbackDomeTexture.Get();
-  nvrhi::ISampler* materialSampler = _scene->GetBindlessSampler();
+  nvrhi::ISampler* materialSampler = res.bindlessSampler;
   if (materialSampler == nullptr)
     materialSampler = _fallbackDomeSampler.Get();
 
@@ -841,14 +869,13 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(RenderTargets const
   nvrhi::BindingSetDesc setDesc;
   setDesc.bindings = {
       nvrhi::BindingSetItem::ConstantBuffer(0, _cameraUniformsBuffer),
-      nvrhi::BindingSetItem::RayTracingAccelStruct(1, _scene->GetTlas()),
+      nvrhi::BindingSetItem::RayTracingAccelStruct(1, res.tlas),
       nvrhi::BindingSetItem::Texture_UAV(2, output),
       nvrhi::BindingSetItem::StructuredBuffer_SRV(3, materialBuffer),
-      nvrhi::BindingSetItem::StructuredBuffer_SRV(4, instanceMaterialBuffer),
+      nvrhi::BindingSetItem::StructuredBuffer_SRV(4, instanceInfoBuffer),
       nvrhi::BindingSetItem::StructuredBuffer_SRV(5, lightBuffer),
-      nvrhi::BindingSetItem::StructuredBuffer_SRV(6, instanceMeshBuffer),
+      nvrhi::BindingSetItem::StructuredBuffer_SRV(6, meshInfoBuffer),
       nvrhi::BindingSetItem::StructuredBuffer_SRV(7, meshFaceNormalsBuffer),
-      nvrhi::BindingSetItem::StructuredBuffer_SRV(8, meshFaceOffsetsBuffer),
       nvrhi::BindingSetItem::Texture_SRV(9, domeTexture),
       nvrhi::BindingSetItem::Sampler(10, materialSampler),
       nvrhi::BindingSetItem::Texture_UAV(11, colorHdrAov),
@@ -865,17 +892,15 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(RenderTargets const
       nvrhi::BindingSetItem::Texture_UAV(22, normalEyeAov),
       nvrhi::BindingSetItem::Texture_UAV(23, worldPosEyeAov),
       nvrhi::BindingSetItem::StructuredBuffer_SRV(24, meshUvsBuffer),
-      nvrhi::BindingSetItem::StructuredBuffer_SRV(25, meshUvOffsetsBuffer),
+      // §14.5 — the index pool's structured view.
       nvrhi::BindingSetItem::StructuredBuffer_SRV(26, meshIndicesBuffer),
-      nvrhi::BindingSetItem::StructuredBuffer_SRV(27, meshIndexOffsetsBuffer),
-      // M9 smooth shading.
-      nvrhi::BindingSetItem::StructuredBuffer_SRV(29, meshVertexNormalsBuffer),
-      nvrhi::BindingSetItem::StructuredBuffer_SRV(30, meshVertexNormalOffsetsBuffer),
-      // M9 normal mapping.
-      nvrhi::BindingSetItem::StructuredBuffer_SRV(31, meshTangentsBuffer),
-      nvrhi::BindingSetItem::StructuredBuffer_SRV(32, meshTangentOffsetsBuffer),
+      // P2 — interleaved per-vertex normal+tangent attributes.
+      nvrhi::BindingSetItem::StructuredBuffer_SRV(29, meshVertexAttribsBuffer),
       // M9-fidelity per-role samplers — dome at binding 33.
       nvrhi::BindingSetItem::Sampler(33, domeSampler),
+      // P4 — the GBuffer pass's visibility buffer (always non-null here:
+      // Execute early-outs when PassContext::visibility is unbound).
+      nvrhi::BindingSetItem::StructuredBuffer_SRV(34, visibility),
   };
 
   // ---- Bindless texture array (binding 28) -----------------------------
@@ -890,7 +915,7 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(RenderTargets const
   // when a translation succeeded but the decode then failed. NVRHI
   // vulkan applies ePartiallyBound to every layout (vulkan-resource-
   // bindings.cpp:184) so unbound array slots are safe.
-  nvrhi::ITexture* const missingTexture = _scene->GetMissingTexture();
+  nvrhi::ITexture* const missingTexture = res.missingTexture;
   if (missingTexture != nullptr)
   {
     auto missingItem = nvrhi::BindingSetItem::Texture_SRV(28, missingTexture);
@@ -901,7 +926,7 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(RenderTargets const
        bindlessSlot < bindlessTextureCount && bindlessSlot < shaderinterop::BINDLESS_TEXTURES_CAP;
        ++bindlessSlot)
   {
-    nvrhi::ITexture* const sceneTex = _scene->GetBindlessTextureAt(bindlessSlot);
+    nvrhi::ITexture* const sceneTex = res.bindlessTextures[bindlessSlot];
     if (sceneTex == nullptr)
       continue;
     auto item = nvrhi::BindingSetItem::Texture_SRV(28, sceneTex);
@@ -914,25 +939,54 @@ nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(RenderTargets const
   return set;
 }
 
-void PathTracePass::Execute(nvrhi::ICommandList* commandList, const PassContext& context) {
+void RaytracedLightingPass::Execute(nvrhi::ICommandList* commandList, const PassContext& context) {
   if (!_shadersOk)
     return;
   if (commandList == nullptr || context.targets == nullptr)
     return;
-  nvrhi::ITexture* const output = context.targets->color;
+  // P3 pass split — the raygen writes fp32 linear radiance (binding 2,
+  // gLinearColor); the BGRA8 display target is TonemapPass's output now.
+  // PyxisRenderer threads the scratch through the context (null when no
+  // display target is bound — same "nothing to render into" early-out the
+  // old targets->color check provided).
+  nvrhi::ITexture* const output = context.linearColor;
   if (output == nullptr)
     return;
+  // P4 pass split — the per-pixel VisibilityGpu records the
+  // RaytracedGBufferPass wrote earlier this frame. Null exactly when
+  // linearColor is null (PyxisRenderer sizes both off targets->color),
+  // so this early-out mirrors the one above.
+  nvrhi::IBuffer* const visibility = context.visibility;
+  if (visibility == nullptr)
+    return;
+
+  // RFC 0003 — snapshot the scene's borrowed NVRHI resources once per Execute via
+  // the renderer-internal accessor (the public Get* getters are gone). Safe here:
+  // single-writer §31 — CommitResources ran earlier this frame on this thread.
+  const SceneResources res = detail::SceneResourcesAccess::Get(*_scene);
 
   // Need a TLAS + camera before we can trace anything. M3 callers
   // (HeadlessMode / ViewerMode) populate both at startup and call
   // CommitResources before RenderFrame, so the early-out only
   // fires in degenerate "scene with no instances or camera"
   // configurations.
-  const nvrhi::rt::IAccelStruct* const tlas = _scene->GetTlas();
-  if (tlas == nullptr || !_scene->HasCamera())
+  if (res.tlas == nullptr || !_scene->HasCamera())
     return;
 
-  const Profiler::GpuScope gpuScope(*context.profiler, commandList, "pass.PathTrace");
+  // P5 — select the projection-mode pipeline variant. Pure array
+  // lookup (§30.10 — no creation here): EnsureProjectionPipeline ran
+  // on PyxisRenderer's CPU frame path BEFORE the graph walked, so the
+  // active mode's variant exists unless its build failed — then the
+  // slot is null and we skip, exactly like the _shadersOk gate.
+  // CameraDesc::projectionMode is the same source the CameraUniforms
+  // upload below reads, so the spec-constant branch and the cbuffer
+  // field can never disagree within a frame.
+  const CameraDesc& camera = _scene->GetCamera();
+  const std::size_t projectionVariant = (camera.projectionMode == 1u) ? 1u : 0u;
+  if (!_pipelines[projectionVariant] || !_shaderTables[projectionVariant])
+    return;
+
+  const Profiler::GpuScope gpuScope(*context.profiler, commandList, "pass.RaytracedLighting");
 
   // ---- Drain prior-frame pick staging -------------------------------
   // M7 follow-up. The previous Execute() copied pickResult ->
@@ -987,8 +1041,7 @@ void PathTracePass::Execute(nvrhi::ICommandList* commandList, const PassContext&
   // §18.4 contract). hlslpp::inverse handles the row-vector
   // convention correctly because it's a pure linear-algebra
   // operation that doesn't care about row-vector vs column-vector
-  // semantics.
-  const CameraDesc& camera = _scene->GetCamera();
+  // semantics. (`camera` was fetched above for the P5 variant select.)
   CameraUniforms cameraUniforms{};
   cameraUniforms.worldFromView = hlslpp::inverse(camera.viewFromWorld);
   cameraUniforms.viewFromClip = hlslpp::inverse(camera.projFromView);
@@ -1027,9 +1080,12 @@ void PathTracePass::Execute(nvrhi::ICommandList* commandList, const PassContext&
   commandList->writeBuffer(_cameraUniformsBuffer.Get(), &cameraUniforms, sizeof(cameraUniforms));
 
   // ---- Upload viewer-only per-frame UI state -------------------------
-  // M7 follow-up — split out of CameraUniforms after the audit. Mouse
-  // pixel + AOV-inspector debug-view mode live at binding 19 so future
-  // CameraUniforms growth doesn't collide with editor-driven UI knobs.
+  // M7 follow-up — split out of CameraUniforms after the audit. Since the
+  // P3 split, this raygen's ONLY gFrameUi consumer is the picker gate
+  // (mousePixelX/Y); debugViewMode and worldPosPeriod are TonemapPass's
+  // domain now (TonemapUniforms carries its own copies from the same
+  // RenderSettings), so those struct fields stay frozen-layout but are
+  // written as 0 — the GPU never reads them here.
   shaderinterop::FrameUiUniforms frameUi{};
   frameUi.mousePixelX = (context.settings != nullptr)
                             ? context.settings->mousePixelX
@@ -1037,42 +1093,26 @@ void PathTracePass::Execute(nvrhi::ICommandList* commandList, const PassContext&
   frameUi.mousePixelY = (context.settings != nullptr)
                             ? context.settings->mousePixelY
                             : RenderSettings::MOUSE_PIXEL_NONE;
-  frameUi.debugViewMode = (context.settings != nullptr)
-                              ? static_cast<uint32_t>(context.settings->debugView)
-                              : 0u;
+  frameUi.debugViewMode = 0u;   // P3 — Tonemap's domain; dead here.
   frameUi._reservedUi0 = 0u;
-  // Per-AOV knobs (row 1). worldPosPeriod default of 10 m matches the
-  // pre-slider behaviour; the editor's WorldPos display can crank
-  // this up for World Lobby-scale scenes (~50 m) without touching shader.
-  frameUi.worldPosPeriod = (context.settings != nullptr
-                            && context.settings->worldPosPeriod > 0.0f)
-                               ? context.settings->worldPosPeriod
-                               : 10.0f;
+  frameUi.worldPosPeriod = 0.0f;  // P3 — Tonemap's domain; dead here.
   frameUi._reservedUi1 = 0u;
   frameUi._reservedUi2 = 0u;
   frameUi._reservedUi3 = 0u;
   commandList->writeBuffer(_frameUiBuffer.Get(), &frameUi, sizeof(frameUi));
 
-  // M5: write the fallback material if the scene has no materials of
-  // its own. Only matters for the M3-cube path — scenes that
-  // AcquireMaterial bind their own buffer instead. The fallback packs
-  // the same default OpenPBRMaterialDesc that GpuScene reserves at
-  // slot 0 (baseColor 0.8 grey, roughness 0.5, opacity 1, IoR 1.5),
-  // so an instance with `material = MaterialHandle::Invalid` renders
-  // a recognisable visible grey instead of black — and the fallback
-  // path stays color-consistent with the real material buffer's
-  // sentinel slot 0. Cheap (one writeBuffer of 80 bytes per frame
-  // when active).
   // ---- Scene-buffer fallback uploads --------------------------------
-  // 5 lazy-allocated scene-side buffers (materials / instance-material
-  // / lights / instance-mesh / mesh-face-offsets / mesh-face-normals)
-  // share the same shape: "if the scene hasn't allocated yet, write
-  // a tiny default into the 1-element fallback buffer so the binding
-  // point sees something safe." Pre-refactor the five blocks were
-  // spelled out verbatim ~80 lines; one table + loop replaces them.
-  // The default-grey OpenPBR material (baseColor 0.8 grey, roughness
-  // 0.5, IoR 1.5, all texture slots = INVALID_BINDLESS_TEXTURE) is
-  // built on first call and cached in a function-local static.
+  // Lazy-allocated scene-side buffers share the same shape: "if the
+  // scene hasn't allocated yet, write a tiny default into the matching
+  // per-stride 1-element fallback buffer so the binding point sees
+  // something safe." P2 collapsed the old 14 per-binding fallbacks to
+  // one per distinct stride; the table below maps each scene resource
+  // to its fallback + default bytes. The default-grey OpenPBR material
+  // (baseColor 0.8 grey, roughness 0.5, IoR 1.5, all texture slots =
+  // INVALID_BINDLESS_TEXTURE) packs the same default GpuScene reserves
+  // at sentinel slot 0, so an instance with `material = Invalid`
+  // renders a recognisable visible grey instead of black. Built on
+  // first call and cached in a function-local static.
   static const shaderinterop::OpenPBRMaterialGPU FALLBACK_MATERIAL_GREY = []() {
     shaderinterop::OpenPBRMaterialGPU material{};
     material.baseColorR = 0.8f;
@@ -1096,58 +1136,46 @@ void PathTracePass::Execute(nvrhi::ICommandList* commandList, const PassContext&
     material.coatRoughnessTex = shaderinterop::INVALID_BINDLESS_TEXTURE;
     return material;
   }();
-  static const shaderinterop::LightGpu FALLBACK_LIGHT_DISABLED{};
-  static const std::uint32_t           FALLBACK_UINT_ZERO = 0u;
-  static const float                   FALLBACK_FLOAT4_ZERO[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-  static const float                   FALLBACK_FLOAT2_ZERO[2] = {0.0f, 0.0f};
+  static const shaderinterop::LightGpu        FALLBACK_LIGHT_DISABLED{};
+  static const shaderinterop::InstanceInfoGpu FALLBACK_INSTANCE_INFO_ZERO{};
+  static const shaderinterop::MeshInfoGpu     FALLBACK_STRIDE32_ZERO{};
+  static const std::uint32_t                  FALLBACK_UINT_ZERO = 0u;
+  static const float                          FALLBACK_FLOAT4_ZERO[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  static const float                          FALLBACK_FLOAT2_ZERO[2] = {0.0f, 0.0f};
 
   struct BufferFallbackSpec {
-    nvrhi::IBuffer* (GpuScene::*sceneGetter)() const noexcept;
-    nvrhi::BufferHandle PathTracePass::* fallbackMember;
-    const void*  defaultBytes;
-    std::size_t  defaultByteSize;
+    const void*     sceneResource;  // null ⇒ the fallback must carry the default.
+    nvrhi::IBuffer* fallback;
+    const void*     defaultBytes;
+    std::size_t     defaultByteSize;
   };
-  const std::array<BufferFallbackSpec, 14> bufferFallbacks{{
-      {&GpuScene::GetMaterialBuffer,         &PathTracePass::_fallbackMaterialBuffer,
-       &FALLBACK_MATERIAL_GREY,    sizeof(FALLBACK_MATERIAL_GREY)   },
-      {&GpuScene::GetInstanceMaterialBuffer, &PathTracePass::_fallbackInstanceMaterialBuffer,
-       &FALLBACK_UINT_ZERO,        sizeof(FALLBACK_UINT_ZERO)       },
-      {&GpuScene::GetLightBuffer,            &PathTracePass::_fallbackLightBuffer,
-       &FALLBACK_LIGHT_DISABLED,   sizeof(FALLBACK_LIGHT_DISABLED)  },
-      {&GpuScene::GetInstanceMeshBuffer,     &PathTracePass::_fallbackInstanceMeshBuffer,
-       &FALLBACK_UINT_ZERO,        sizeof(FALLBACK_UINT_ZERO)       },
-      {&GpuScene::GetMeshFaceOffsetsBuffer,  &PathTracePass::_fallbackMeshFaceOffsetsBuffer,
-       &FALLBACK_UINT_ZERO,        sizeof(FALLBACK_UINT_ZERO)       },
-      {&GpuScene::GetMeshFaceNormalsBuffer,  &PathTracePass::_fallbackMeshFaceNormalsBuffer,
-       FALLBACK_FLOAT4_ZERO,       sizeof(FALLBACK_FLOAT4_ZERO)     },
-      // M8a UV pipeline.
-      {&GpuScene::GetMeshUvsBuffer,          &PathTracePass::_fallbackMeshUvsBuffer,
-       FALLBACK_FLOAT2_ZERO,       sizeof(FALLBACK_FLOAT2_ZERO)     },
-      {&GpuScene::GetMeshUvOffsetsBuffer,    &PathTracePass::_fallbackMeshUvOffsetsBuffer,
-       &FALLBACK_UINT_ZERO,        sizeof(FALLBACK_UINT_ZERO)       },
-      {&GpuScene::GetMeshIndicesBuffer,      &PathTracePass::_fallbackMeshIndicesBuffer,
-       &FALLBACK_UINT_ZERO,        sizeof(FALLBACK_UINT_ZERO)       },
-      {&GpuScene::GetMeshIndexOffsetsBuffer, &PathTracePass::_fallbackMeshIndexOffsetsBuffer,
-       &FALLBACK_UINT_ZERO,        sizeof(FALLBACK_UINT_ZERO)       },
-      // M9 smooth shading.
-      {&GpuScene::GetMeshVertexNormalsBuffer,        &PathTracePass::_fallbackMeshVertexNormalsBuffer,
-       FALLBACK_FLOAT4_ZERO,       sizeof(FALLBACK_FLOAT4_ZERO)     },
-      {&GpuScene::GetMeshVertexNormalOffsetsBuffer,  &PathTracePass::_fallbackMeshVertexNormalOffsetsBuffer,
-       &FALLBACK_UINT_ZERO,        sizeof(FALLBACK_UINT_ZERO)       },
-      // M9 normal mapping.
-      {&GpuScene::GetMeshTangentsBuffer,             &PathTracePass::_fallbackMeshTangentsBuffer,
-       FALLBACK_FLOAT4_ZERO,       sizeof(FALLBACK_FLOAT4_ZERO)     },
-      {&GpuScene::GetMeshTangentOffsetsBuffer,       &PathTracePass::_fallbackMeshTangentOffsetsBuffer,
-       &FALLBACK_UINT_ZERO,        sizeof(FALLBACK_UINT_ZERO)       },
+  const std::array<BufferFallbackSpec, 7> bufferFallbacks{{
+      {res.materialBuffer, _fallbackMaterialBuffer.Get(),
+       &FALLBACK_MATERIAL_GREY, sizeof(FALLBACK_MATERIAL_GREY)},
+      {res.lightBuffer, _fallbackLightBuffer.Get(),
+       &FALLBACK_LIGHT_DISABLED, sizeof(FALLBACK_LIGHT_DISABLED)},
+      {res.instanceInfoBuffer, _fallbackInstanceInfoBuffer.Get(),
+       &FALLBACK_INSTANCE_INFO_ZERO, sizeof(FALLBACK_INSTANCE_INFO_ZERO)},
+      // Bindings 6 (MeshInfoGpu) + 29 (VertexAttribGpu) share the 32-byte zero
+      // fallback — two table rows so EITHER scene buffer being null re-arms it.
+      {res.meshInfoBuffer, _fallbackStride32Buffer.Get(),
+       &FALLBACK_STRIDE32_ZERO, sizeof(FALLBACK_STRIDE32_ZERO)},
+      {res.meshVertexAttribsBuffer, _fallbackStride32Buffer.Get(),
+       &FALLBACK_STRIDE32_ZERO, sizeof(FALLBACK_STRIDE32_ZERO)},
+      {res.meshFaceNormalsBuffer, _fallbackFloat4Buffer.Get(),
+       FALLBACK_FLOAT4_ZERO, sizeof(FALLBACK_FLOAT4_ZERO)},
+      {res.meshUvsBuffer, _fallbackUvBuffer.Get(),
+       FALLBACK_FLOAT2_ZERO, sizeof(FALLBACK_FLOAT2_ZERO)},
   }};
   for (const BufferFallbackSpec& spec : bufferFallbacks)
   {
-    if ((_scene->*spec.sceneGetter)() == nullptr)
-    {
-      commandList->writeBuffer((this->*spec.fallbackMember).Get(),
-                               spec.defaultBytes, spec.defaultByteSize);
-    }
+    if (spec.sceneResource == nullptr)
+      commandList->writeBuffer(spec.fallback, spec.defaultBytes, spec.defaultByteSize);
   }
+  // Index-pool fallback (binding 26): one zero uint.
+  if (res.meshIndicesBuffer == nullptr)
+    commandList->writeBuffer(_fallbackUintBuffer.Get(), &FALLBACK_UINT_ZERO,
+                             sizeof(FALLBACK_UINT_ZERO));
 
   // M7-IBL: WHITE-init the 1×1 dome fallback texture if the scene
   // hasn't bound a real env-map. RGBA32_FLOAT, 16 bytes — sample
@@ -1160,7 +1188,7 @@ void PathTracePass::Execute(nvrhi::ICommandList* commandList, const PassContext&
   // miss shader's `hdri × tint × scale` branch turns any color-only
   // dome / failed-HDRI into a black sky, dropping the author's
   // intent — see the M7 audit closeout for the exact reproducer.
-  if (_scene->GetDomeEnvMapTexture() == nullptr)
+  if (res.domeEnvMapTexture == nullptr)
   {
     static const float FALLBACK_DOME_PIXEL[4] = {1.0f, 1.0f, 1.0f, 1.0f};
     commandList->writeTexture(_fallbackDomeTexture.Get(), 0, 0, FALLBACK_DOME_PIXEL,
@@ -1168,16 +1196,21 @@ void PathTracePass::Execute(nvrhi::ICommandList* commandList, const PassContext&
   }
 
   // ---- Bind + dispatch ----------------------------------------------
-  const nvrhi::BindingSetHandle bindingSet = GetOrCreateBindingSet(*context.targets);
+  const nvrhi::BindingSetHandle bindingSet =
+      GetOrCreateBindingSet(output, visibility, *context.targets, res);
   if (!bindingSet)
     return;
 
-  // Output image must be in UnorderedAccess so the shader can write
-  // it. The caller (or RenderGraph) is responsible for transitioning
-  // it to a presentable / copy-source state afterward; that happens
-  // in the viewer / headless paths.
+  // Output image (the fp32 linearColor scratch) must be in UnorderedAccess
+  // so the raygen can write it. TonemapPass transitions it to ShaderResource
+  // when it reads it back for the display transform.
   commandList->setTextureState(output, nvrhi::AllSubresources,
                                nvrhi::ResourceStates::UnorderedAccess);
+  // P4 — the visibility buffer was UAV-written by RaytracedGBufferPass in
+  // this same command list; the cross-pass UAV→SRV hazard needs the explicit
+  // transition to be reliable (same finding as SsaaResolvePass on the shared
+  // color AOV — NVRHI auto-tracking missed it).
+  commandList->setBufferState(visibility, nvrhi::ResourceStates::ShaderResource);
   // Same transition for the M7 raw AOV outputs the raygen writes.
   // keepInitialState on the AovTextures side means NVRHI re-syncs to
   // UnorderedAccess automatically — but a no-op explicit barrier here
@@ -1229,7 +1262,7 @@ void PathTracePass::Execute(nvrhi::ICommandList* commandList, const PassContext&
   commandList->commitBarriers();
 
   nvrhi::rt::State state;
-  state.shaderTable = _shaderTable;
+  state.shaderTable = _shaderTables[projectionVariant];
   state.bindings = {bindingSet};
   commandList->setRayTracingState(state);
 

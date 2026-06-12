@@ -3,8 +3,8 @@
 - Status: Accepted
 - Author(s): Pyxis renderer team
 - Created: 2026-05-10
-- Last updated: 2026-05-10
-- Implementation PRs: (not yet — RFC pending acceptance)
+- Last updated: 2026-06-12
+- Implementation PRs: feat/pass-split-spec-const-packing (P2)
 
 ## Summary
 
@@ -50,10 +50,15 @@ have no business binding raw NVRHI resources.
 ## Detailed design
 
 Introduce a new renderer-internal accessor type `SceneResources`,
-declared in `sources/pyxis_renderer/Private/Scene/SceneResources.h`,
-not exported from the DLL. Render passes receive a `SceneResources&`
-via the `PassContext` (already in flight) instead of holding a
-`GpuScene*`.
+declared in `sources/pyxis_renderer/Private/Scene/SceneResources.h`.
+The struct itself never crosses the DLL boundary in product code; as
+implemented, the one deliberate deviation is that the
+`SceneResourcesAccess::Get` accessor IS exported
+(`PYXIS_RENDERER_API`) solely so the out-of-DLL unit-test harness
+(tests/unit/GpuSceneIncrementalUpload.cpp) can snapshot the view —
+no ingest adapter or app code consumes it. Render passes receive a
+`SceneResources&` via the `PassContext` (already in flight) instead
+of holding a `GpuScene*`.
 
 ```cpp
 // sources/pyxis_renderer/Private/Scene/SceneResources.h
