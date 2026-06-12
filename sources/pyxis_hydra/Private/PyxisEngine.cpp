@@ -172,7 +172,7 @@ bool PyxisEngine::Initialize(uint32_t width, uint32_t height) noexcept {
   // <ext>/bin/Resources/shaders) — the host kit.exe is not next to them. The
   // passes resolve shaders through AssetLocator, which by default uses the EXE
   // dir (kit.exe) where our shaders do NOT live; point its Resources/ base at
-  // our bin/Resources so PathTracePass/SsaaResolvePass actually find the .spv.
+  // our bin/Resources so RaytracedLightingPass/SsaaResolvePass actually find the .spv.
   // (rendererDesc.shaderSearchPath is currently unused by the renderer.)
   impl.shaderDir = ThisModuleDir();
   rendererDesc.shaderSearchPath = impl.shaderDir;

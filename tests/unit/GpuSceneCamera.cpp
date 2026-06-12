@@ -50,7 +50,7 @@ CameraDesc DefaultPerspectiveCamera() noexcept {
 }  // namespace
 
 // -----------------------------------------------------------------------------
-// HasCamera — false until the first SetCamera call. PathTracePass
+// HasCamera — false until the first SetCamera call. RaytracedLightingPass
 // keys off this exact bit to early-out on an empty scene (§18.5).
 // -----------------------------------------------------------------------------
 TEST(GpuSceneCamera, HasCameraIsFalseInitially) {
@@ -67,7 +67,7 @@ TEST(GpuSceneCamera, SetCameraFlipsHasCameraTrue) {
 // -----------------------------------------------------------------------------
 // GetCamera — returns the last desc set, by reference. The renderer
 // borrows this for the lifetime of the scene; verifying the round-
-// trip pins the contract that consumers (PathTracePass binding into
+// trip pins the contract that consumers (RaytracedLightingPass binding into
 // CameraUniforms) rely on.
 // -----------------------------------------------------------------------------
 TEST(GpuSceneCamera, GetCameraReturnsLastSetDesc) {

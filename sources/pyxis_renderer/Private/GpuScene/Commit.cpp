@@ -298,7 +298,7 @@ Expected<void> GpuScene::Impl::CommitResources(nvrhi::ICommandList* commandList)
   currentCommandList = nullptr;
 
   // Review fix #2 — refresh the cached dome env-map once per commit, after texture
-  // upload has resolved it, so the per-frame PathTracePass binding path reads a cached
+  // upload has resolved it, so the per-frame RaytracedLightingPass binding path reads a cached
   // pointer instead of allocating + sorting the live-light set every frame.
   RefreshDomeEnvMapCache();
   return commitError;
@@ -1073,11 +1073,11 @@ Expected<void> GpuScene::Impl::UploadMaterialBuffer(nvrhi::ICommandList* command
 Expected<void> GpuScene::Impl::UploadLightBuffer(nvrhi::ICommandList* commandList)
 {
   // Packs every LIVE LightEntry into a tightly-packed LightGpu buffer
-  // bound at PathTracePass binding 5. Sparse / dead slots are
+  // bound at RaytracedLightingPass binding 5. Sparse / dead slots are
   // omitted — the closesthit iterates the buffer's full length, so
   // emitting only live lights keeps the per-hit loop tight. The
   // simple shading model in closesthit.slang ignores `intensity ==
-  // 0` so a fallback 1-element zero buffer (used by PathTracePass
+  // 0` so a fallback 1-element zero buffer (used by RaytracedLightingPass
   // when the scene has no lights) contributes nothing.
   if (dirtyLightQuery.count() == 0)
     return {};  // no light added/updated/removed this commit (DirtyLight gates the re-pack).

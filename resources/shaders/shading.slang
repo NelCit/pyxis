@@ -1,97 +1,48 @@
-// Pyxis renderer — closest-hit shader.
+// Pyxis renderer — shared first-hit surface shading (P4 pass split).
 //
-// Plan §41 M5/M6/M7 + §15. Reads the per-instance OpenPBR material
-// via a two-step lookup: `InstanceID()` (the per-instance slot
-// packed into VkAccelerationStructureInstanceKHR.instanceCustomIndex
-// per §15) indexes the instance→material side-table at binding 4 to
-// get a material slot, which then indexes the material structured
-// buffer at binding 3. The indirection frees the TLAS custom-index
-// for the M6 instanceId AOV + future picking (§19.4).
+// The shading megakernel body extracted VERBATIM from the pre-split
+// closesthit.slang into a parameterized function so BOTH consumers stay
+// in lockstep by construction (§33.7 byte-identical contract):
 //
-// **M7-simple lighting (no NdotL, no shadow rays, no NEE, no MIS,
-// no importance sampling)**. Each light contributes
-// `color * intensity * weight` where weight is 1.0 for direct
-// (Distant / Rect) and 0.5 for ambient (Dome). Final colour is
-// `baseColor * sum_of_contributions`. The no-lights fallback
-// (PathTracePass binds a 1-element intensity=0 sentinel) emits
-// baseColor directly so M5/M6 unlit fixtures stay byte-equal.
+//   * raytraced_lighting_raygen.slang — shades the PRIMARY hit it reads
+//     from the visibility buffer (instanceId / primitiveIndex / bary /
+//     hitT), reconstructing worldHit = origin + hitT·dir and sourcing
+//     the object→world transform from gInstanceInfo (P2 guaranteed the
+//     packed transform carries bit-identical floats to the TLAS
+//     instance desc, hence to ObjectToWorld3x4()).
+//   * raytraced_lighting_closesthit.slang — the retained megakernel,
+//     now serving ONLY secondary rays (transparency continuation +
+//     reflections); it forwards the hit-stage intrinsics
+//     (InstanceID() / PrimitiveIndex() / attribs.barycentrics /
+//     RayTCurrent() / WorldRayDirection() / ObjectToWorld3x4() /
+//     WorldToObject3x4()) into the same function.
 //
-// The user's full OpenPBR + NEE+MIS+IBL impl replaces this body
-// alongside the BSDF lobes per §11.6 — branchless on `mat.flags`
-// bits, sampling lights via NEE, querying the dome via the alias
-// table at §7.
+// Trace-dependent inputs are parameters; every constant / epsilon /
+// clamp / branch order is character-identical to the pre-split
+// closesthit. Shadow / AO / reflection rays TraceRay from whichever
+// stage invoked this (legal in raygen and closesthit alike); the
+// recursion-budget gates take `recursionDepth` as a parameter so they
+// evaluate exactly as they did against payload.recursionDepth (first
+// hit: depth 0).
 //
-// What this shader exercises end-to-end at M5/M6/M7:
-//   * Material buffer binding (binding 3, structured-buffer SRV)
-//   * Instance→material side-table (binding 4, M6 P0)
-//   * Lights buffer (binding 5, M7-simple)
-//   * §11 OpenPBRMaterialGPU layout + LightGpu layout (declared in
-//     ShaderInterop.slang; scalar fields avoid the float3
-//     16-vs-12-byte trap)
-//
-// Bindings — match pyxis::PathTracePass's NVRHI BindingLayout. The
-// raygen / miss shaders share the same set 0; binding numbers stay
-// stable across stages so the single binding set covers all three.
-//
-//   set=0, binding=0  : CameraUniforms cbuffer (raygen-only)
-//   set=0, binding=1  : RaytracingAccelerationStructure TLAS (raygen)
-//   set=0, binding=2  : RWTexture2D<float4> output image (raygen)
-//   set=0, binding=3  : StructuredBuffer<OpenPBRMaterialGPU> materials
-//                       (closesthit — added at M5)
-//   set=0, binding=4  : StructuredBuffer<InstanceInfoGpu> per-instance
-//                       record (P2 packing — object→world rows + the
-//                       §15 material slot + the M7-NdotL mesh slot;
-//                       replaces the two parallel uint side-tables)
-//   set=0, binding=5  : StructuredBuffer<LightGpu> lights
-//                       (closesthit + miss — added at M7-simple)
-//   set=0, binding=6  : StructuredBuffer<MeshInfoGpu> per-mesh record
-//                       (P2 packing — face/UV/index/vertex-attrib
-//                       offsets + vertexCount; replaces the five
-//                       parallel per-mesh uint offset tables)
-//   set=0, binding=7  : StructuredBuffer<float4> mesh face normals
-//                       (closesthit — added at M7 NdotL; flat
-//                        per-mesh concatenation, offset in MeshInfoGpu)
-//   set=0, binding=9  : Texture2D<float4> dome HDRI env-map
-//                       (miss — added at M7 IBL)
-//   set=0, binding=10 : SamplerState dome HDRI sampler — also reused
-//                       here for material bindless texture sampling
-//                       (closesthit — added at M8a)
-//   set=0, binding=24 : StructuredBuffer<float2> per-mesh UVs
-//                       (closesthit — added at M8a UV pipeline)
-//   set=0, binding=26 : StructuredBuffer<uint>   triangle indices
-//                       (§14.5 index-pool structured view; offsets in
-//                       MeshInfoGpu are pool element offsets)
-//   set=0, binding=28 : Texture2D[BINDLESS_TEXTURES_CAP] bindless materials
-//                       (closesthit — added at M8a; indexed by mat.baseColorTex)
-//   set=0, binding=29 : StructuredBuffer<VertexAttribGpu> interleaved
-//                       per-vertex normal+tangent (P2 packing; replaces
-//                       the two parallel padded float4 streams)
-//   (bindings 8/25/27/30/31/32 are RETIRED by the P2 packing —
-//    Vulkan allows sparse binding numbers.)
+// Resource declarations live HERE (one place per translation unit);
+// gCamera comes via camera_ray.slang, the dome/light resources via
+// dome_sample.slang. Binding numbers match the RaytracedLightingPass
+// layout — the only pipeline that consumes this module.
+
+#ifndef PYXIS_SHADING_SLANG
+#define PYXIS_SHADING_SLANG
 
 #include "ShaderInterop.slang"
+#include "camera_ray.slang"   // gCamera (binding 0) — pixelSpreadRadians for ray-cone LOD
+#include "dome_sample.slang"  // gLights (5) + gDomeEnvMap (9) + gDomeSampler (33) + PYXIS_PI/TWO_PI
 
-// V2.B follow-up — bind the dome HDRI + its sampler so the closesthit
-// can evaluate dome irradiance per-surface (the "fast diffuse IBL"
-// trick: sample the HDRI at the surface normal direction with a high
-// mip bias to approximate the cosine-weighted hemisphere convolution).
-// Replaces the M7-simple Lambert-vs-world-up approximation that gave
-// vertical surfaces zero dome contribution. Bindings match the miss
-// shader's layout (binding 9 + sampler 33) — descriptor-set 0 is
-// pipeline-wide, so the existing PathTracePass binding fills both
-// shaders. Deterministic by construction (single texture sample, no
-// RNG, no Monte Carlo).
-[[vk::binding(9, 0)]]  Texture2D<float4>                   gDomeEnvMap;
-[[vk::binding(33, 0)]] SamplerState                        gDomeSampler;
-
-[[vk::binding(0, 0)]]  ConstantBuffer<CameraUniforms>      gCamera;
-// M9-fidelity shadow rays: closesthit re-uses the same TLAS the
-// raygen launched into to TraceRay shadow rays per direct light.
-// Same binding-set entry — no new layout slot needed.
+// Shadow / AO / reflection rays trace against the same TLAS the
+// primary rays traversed. Same binding-set entry as the pre-split
+// pipeline — no new layout slot.
 [[vk::binding(1, 0)]]  RaytracingAccelerationStructure     gTlas;
 [[vk::binding(3, 0)]]  StructuredBuffer<OpenPBRMaterialGPU> gMaterials;
 [[vk::binding(4, 0)]]  StructuredBuffer<InstanceInfoGpu>    gInstanceInfo;
-[[vk::binding(5, 0)]]  StructuredBuffer<LightGpu>           gLights;
 [[vk::binding(6, 0)]]  StructuredBuffer<MeshInfoGpu>        gMeshInfo;
 [[vk::binding(7, 0)]]  StructuredBuffer<float4>             gMeshFaceNormals;
 [[vk::binding(10, 0)]] SamplerState                         gBindlessSampler;
@@ -127,7 +78,7 @@ float4 SampleByConeRGBA(uint texIdx, float2 uv, float coneRadius) {
 
 // Anisotropic sample via hardware SampleGrad. `ddxUv` / `ddyUv` are the
 // UV-space footprint axes (∂uv/∂screenX-equivalent, ∂uv/∂screenY-
-// equivalent) the closesthit derives from the ray-cone ellipse +
+// equivalent) the shading derives from the ray-cone ellipse +
 // surface tangent frame. The HW builds the anisotropic footprint from
 // the two gradient vectors and runs N-tap anisotropic filtering — sharp
 // along the minor axis, filtered along the stretched major axis. This
@@ -141,26 +92,26 @@ float4 SampleByGradRGBA(uint texIdx, float2 uv, float2 ddxUv, float2 ddyUv) {
     return gBindlessTextures[texIdx].SampleGrad(gBindlessSampler, uv, ddxUv, ddyUv);
 }
 
+// PYXIS_PI / PYXIS_TWO_PI come from dome_sample.slang (identical
+// literals to the pre-split closesthit's own copies).
 static const float PYXIS_PI_SAFE = 3.14159265358979323846;
-static const float PYXIS_PI       = 3.14159265358979323846;
-static const float PYXIS_TWO_PI   = 6.28318530717958647692;
 static const float PYXIS_INV_PI   = 0.31830988618379067154;
 
 // V2.B — ray recursion budget. Every secondary TraceRay (reflection,
-// AO, shadow) is gated on `payload.recursionDepth + 1u <
-// MAX_RAY_RECURSION`, and the pipeline's maxRecursionDepth
-// (PathTracePass) is set to the same value. This matches the
-// plan_for_v2.md §V2.B doctrine (direct + shadows + 1 reflection bounce
-// = depth 3) exactly.
+// AO, shadow) is gated on `recursionDepth + 1u < MAX_RAY_RECURSION`,
+// and the pipeline's maxRecursionDepth (RaytracedLightingPass) is set
+// to the same value. This matches the plan_for_v2.md §V2.B doctrine
+// (direct + shadows + 1 reflection bounce = depth 3) exactly.
 //
 // Note: opacity TRANSMISSION no longer spends this budget. An earlier
 // follow-up traced a recursive continuation ray straight through each
 // transparent surface, which forced the cap up to 6 (a glass pane is 2
 // surfaces; two panes = 4, plus a reflection + a shadow level). That
-// see-through is now composited FRONT-TO-BACK by raygen's transmission
-// loop at recursion depth 0 — see raygen.slang — so stacked transparent
-// layers are unbounded and free of recursion cost, and the budget is
-// back to the documented 3.
+// see-through is composited FRONT-TO-BACK by the lighting raygen's
+// transmission loop at recursion depth 0 — see
+// raytraced_lighting_raygen.slang — so stacked transparent layers are
+// unbounded and free of recursion cost, and the budget is the
+// documented 3.
 static const uint MAX_RAY_RECURSION = 3u;
 
 // M9-fidelity Schlick Fresnel. F0 derives per-material:
@@ -220,16 +171,66 @@ float3 GgxSpecular(float3 N, float3 V, float3 L, float3 baseColor,
     return D * G2 * F;  // (NdotL × NdotV) factor cancels with G2's denominator
 }
 
-// Slang emits the SPIR-V `OpEntryPoint` name as `"main"` regardless
-// of the source-side function name; the C++ side passes `"main"` to
-// NVRHI's createShader. See the matching note in raygen.slang.
-[shader("closesthit")]
-void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attribs) {
-    // §15: InstanceID() is the per-instance slot. The packed instance
+// Affine inverse of a row-major 3×4 object→world transform (upper 3×3
+// linear part; translation in the last column — column-vector
+// convention, v' = M·v). Used ONLY by the lighting raygen to feed the
+// `worldToObject` parameter below: raygen has no WorldToObject3x4()
+// intrinsic. The megakernel closesthit keeps passing the hardware
+// WorldToObject3x4() — the shader-computed inverse may differ from the
+// driver's in final ULPs, which only MATERIAL_FLAG_OBJECT_PROJECTION
+// materials can observe (no byte-equal golden fixture authors one; the
+// World Lobby suite that does is RMSE-tolerant).
+float3x4 InvertAffine3x4(float3x4 m) {
+    const float3 r0 = m[0].xyz;
+    const float3 r1 = m[1].xyz;
+    const float3 r2 = m[2].xyz;
+    const float3 x = cross(r1, r2);
+    const float3 y = cross(r2, r0);
+    const float3 z = cross(r0, r1);
+    const float det = dot(r0, x);
+    const float invDet = (abs(det) > 1e-12) ? (1.0 / det) : 0.0;
+    // A⁻¹ = adj(A)ᵀ / det: rows of the inverse gather the component-i
+    // entries of the row cross-products above.
+    const float3 i0 = float3(x.x, y.x, z.x) * invDet;
+    const float3 i1 = float3(x.y, y.y, z.y) * invDet;
+    const float3 i2 = float3(x.z, y.z, z.z) * invDet;
+    const float3 t = float3(m[0].w, m[1].w, m[2].w);
+    return float3x4(float4(i0, -dot(i0, t)),
+                    float4(i1, -dot(i1, t)),
+                    float4(i2, -dot(i2, t)));
+}
+
+// The fields the two callers consume from a shaded surface hit. The
+// remaining HitInfo fields (hitT / instanceId / elementId / worldHit)
+// are inputs the caller already holds.
+struct SurfaceShadeResult {
+    float3 emitted;        // → payload.color (surface-emitted radiance)
+    float3 transmittance;  // → payload.transmittance (light let through from behind)
+    float3 normalWorld;    // → payload.normalWorld (shading normal, post normal-map)
+    float3 baseColor;      // → payload.baseColor (post-texture albedo)
+    uint   materialId;     // → payload.materialId (material slot)
+};
+
+// Shade one surface hit — the pre-split closesthit body, verbatim,
+// with the trace-dependent inputs parameterized:
+//   instanceId      = InstanceID()                 (or VisibilityGpu.instanceId)
+//   primitiveIndex  = PrimitiveIndex()             (or VisibilityGpu.primitiveIndex)
+//   bary            = attribs.barycentrics         (or VisibilityGpu.bary)
+//   worldHit        = WorldRayOrigin() + RayTCurrent() * WorldRayDirection()
+//                                                  (or origin + hitT·dir, reconstructed)
+//   rayDir          = WorldRayDirection()          (or the BuildCameraRay direction)
+//   hitT            = RayTCurrent()                (or VisibilityGpu.hitT)
+//   objectToWorld   = ObjectToWorld3x4()           (or gInstanceInfo[id].objectToWorld)
+//   worldToObject   = WorldToObject3x4()           (or InvertAffine3x4(objectToWorld))
+//   recursionDepth  = payload.recursionDepth       (or 0 for the deferred first hit)
+SurfaceShadeResult ShadeSurfaceHit(uint instanceId, uint primitiveIndex, float2 bary,
+                                   float3 worldHit, float3 rayDir, float hitT,
+                                   float3x4 objectToWorld, float3x4 worldToObject,
+                                   uint recursionDepth) {
+    // §15: instanceId is the per-instance slot. The packed instance
     // record resolves it to a material slot (0 = "no material assigned"
     // → sentinel grey material at materials[0]) + the mesh slot whose
     // packed MeshInfoGpu record carries every side-table offset.
-    const uint instanceId = InstanceID();
     const InstanceInfoGpu instInfo = gInstanceInfo[instanceId];
     const uint materialId = instInfo.materialSlot;
     const OpenPBRMaterialGPU mat = gMaterials[materialId];
@@ -240,14 +241,14 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
     // collapsing to the scalar fallback.
     //
     //   mi = gMeshInfo[meshSlot]
-    //   v0/1/2 = gMeshIndices[mi.indexOffset + PrimitiveIndex()*3 + {0,1,2}]
+    //   v0/1/2 = gMeshIndices[mi.indexOffset + primitiveIndex*3 + {0,1,2}]
     //   uv0/1/2 = gMeshUvs[mi.uvOffset + v_i]
     //   uv = uv0*(1-bary.x-bary.y) + uv1*bary.x + uv2*bary.y
-    // attribs.barycentrics is the (u,v) pair the closesthit input
-    // attribute carries; w0 = 1 - u - v is the third weight.
+    // bary is the (u,v) pair the closesthit input attribute carries
+    // (attribs.barycentrics); w0 = 1 - u - v is the third weight.
     const uint meshSlot = instInfo.meshSlot;
     const MeshInfoGpu mi = gMeshInfo[meshSlot];
-    const uint indexBase = mi.indexOffset + PrimitiveIndex() * 3u;
+    const uint indexBase = mi.indexOffset + primitiveIndex * 3u;
     const uint v0 = gMeshIndices[indexBase + 0u];
     const uint v1 = gMeshIndices[indexBase + 1u];
     const uint v2 = gMeshIndices[indexBase + 2u];
@@ -255,7 +256,6 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
     const float2 uv0 = gMeshUvs[uvBase + v0];
     const float2 uv1 = gMeshUvs[uvBase + v1];
     const float2 uv2 = gMeshUvs[uvBase + v2];
-    const float2 bary = attribs.barycentrics;
     const float  w0   = 1.0 - bary.x - bary.y;
     float2 uv   = uv0 * w0 + uv1 * bary.x + uv2 * bary.y;
 
@@ -300,18 +300,18 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
     const bool objectProj = (mat.flags & MATERIAL_FLAG_OBJECT_PROJECTION) != 0u;
     const bool planarProj = worldProj || objectProj;
     if (planarProj) {
-        const float3 hitW = WorldRayOrigin() + RayTCurrent() * WorldRayDirection();
+        const float3 hitW = worldHit;
         const float3 faceNormalLocal =
-            gMeshFaceNormals[mi.faceOffset + PrimitiveIndex()].xyz;
+            gMeshFaceNormals[mi.faceOffset + primitiveIndex].xyz;
         float3 hp;
         float3 fnP;
         if (objectProj) {
             // Project in the instance's local frame: transform the hit by
             // WorldToObject; the stored face normal is ALREADY object-space.
-            hp  = mul(WorldToObject3x4(), float4(hitW, 1.0)).xyz;
+            hp  = mul(worldToObject, float4(hitW, 1.0)).xyz;
             fnP = abs(normalize(faceNormalLocal));
         } else {
-            const float3x4 o2wp = ObjectToWorld3x4();
+            const float3x4 o2wp = objectToWorld;
             const float3x3 w3   = float3x3(o2wp[0].xyz, o2wp[1].xyz, o2wp[2].xyz);
             hp  = hitW;
             fnP = abs(normalize(mul(w3, faceNormalLocal)));
@@ -338,7 +338,7 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
     // grazing-angle correction (would need the not-yet-computed
     // smooth normal upstream of the baseColor sample). Ref:
     // Akenine-Möller, Ray Tracing Gems Ch 20.
-    const float coneRadius = gCamera.pixelSpreadRadians * RayTCurrent();
+    const float coneRadius = gCamera.pixelSpreadRadians * hitT;
 
     // V2.B.* — UV-density-aware LOD. The cone radius is a WORLD-space
     // length; SampleByCone needs the footprint in UV space to pick the
@@ -352,9 +352,9 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
     // and alias into herringbone moiré even with a full mip chain.
     // Density 0 (degenerate tri / no UVs) → fall back to coneRadius,
     // i.e. the previous "1 UV unit per world unit" assumption.
-    const uint   faceDensitySlot = mi.faceOffset + PrimitiveIndex();
+    const uint   faceDensitySlot = mi.faceOffset + primitiveIndex;
     const float  faceTexelDensity = gMeshFaceNormals[faceDensitySlot].w;
-    const float3x4 instanceXform = ObjectToWorld3x4();
+    const float3x4 instanceXform = objectToWorld;
     const float  objToWorldScale = max(length(instanceXform[0].xyz), 1e-6);
     // The per-material UV transform (texture_scale) multiplies the UV
     // AFTER the mesh-density was measured, so it multiplies the texel
@@ -383,7 +383,7 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
                                               instanceXform[2].xyz);
     const float3 faceNormalW = normalize(mul(worldFromObj3x3,
                                              gMeshFaceNormals[faceDensitySlot].xyz));
-    const float  ndotvLod = max(abs(dot(faceNormalW, normalize(-WorldRayDirection()))), 0.1);
+    const float  ndotvLod = max(abs(dot(faceNormalW, normalize(-rayDir))), 0.1);
     const float  uvFootprint = ((faceTexelDensity > 0.0)
                                    ? coneRadius * faceTexelDensity / objToWorldScale
                                    : coneRadius) * matTileScale / ndotvLod;
@@ -407,7 +407,7 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
         // Isotropic is fine here — world-projected surfaces are flat
         // panels, not the grazing-critical case the tangent-frame aniso
         // targets, and the mesh tangent frame doesn't apply to this UV.
-        const float3 vw  = normalize(-WorldRayDirection());
+        const float3 vw  = normalize(-rayDir);
         const float  nd  = max(abs(dot(faceNormalW, vw)), 0.1);
         const float  fpw = coneRadius * max(abs(mat.uvScaleX), abs(mat.uvScaleY)) / nd;
         ddxUv = float2(fpw, 0.0);
@@ -422,7 +422,7 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
             float3 tanW = normalize(mul(worldFromObj3x3, tanLocal));
             tanW = normalize(tanW - faceNormalW * dot(tanW, faceNormalW));  // Gram-Schmidt
             const float3 bitW  = cross(faceNormalW, tanW) * tan0.w;          // handedness
-            const float3 viewW = normalize(-WorldRayDirection());
+            const float3 viewW = normalize(-rayDir);
             const float  ndv   = clamp(abs(dot(faceNormalW, viewW)), 0.1, 1.0);
             float3 majorDir = viewW - faceNormalW * dot(viewW, faceNormalW); // in-plane view
             const float majLenSq = dot(majorDir, majorDir);
@@ -497,7 +497,6 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
     // upper-3x3 transforms direction vectors. For a uniform-scale
     // + rotation transform this is correct as-is; non-uniform scale
     // needs the inverse-transpose of the upper 3x3 (M11 polish).
-    const float3x4 objectToWorld = ObjectToWorld3x4();
     const float3x3 worldFromObject3x3 = float3x3(
         objectToWorld[0].xyz,
         objectToWorld[1].xyz,
@@ -516,7 +515,7 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
     } else {
         // Mesh authored no normals — fall back to face normal.
         const uint faceOffset = mi.faceOffset;
-        nLocal = gMeshFaceNormals[faceOffset + PrimitiveIndex()].xyz;
+        nLocal = gMeshFaceNormals[faceOffset + primitiveIndex].xyz;
     }
     float3 nWorld = normalize(mul(worldFromObject3x3, nLocal));
 
@@ -531,10 +530,11 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
     // wood grain, but the lit pass zeroed it because the wall normals
     // pointed into the wall.) Standard ray-tracer "facing normal"
     // convention — correct for single-sided geometry viewed from either
-    // side and for double-sided materials alike. WorldRayDirection()
-    // points FROM eye TO surface, so a positive dot means the normal
-    // shares the ray's direction (faces away from the eye) → flip.
-    if (dot(nWorld, WorldRayDirection()) > 0.0)
+    // side and for double-sided materials alike. rayDir (the TraceRay
+    // direction) points FROM eye TO surface, so a positive dot means
+    // the normal shares the ray's direction (faces away from the eye)
+    // → flip.
+    if (dot(nWorld, rayDir) > 0.0)
         nWorld = -nWorld;
 
     // Keep the face-forward GEOMETRIC normal around: the normal-mapped
@@ -553,7 +553,7 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
     // (`bitangent = sign × cross(N, T)`). Tangents stored as float4:
     // xyz = unit tangent in object space, w = handedness sign.
     //
-    // Three guards skip the TBN sample (closesthit keeps the
+    // Three guards skip the TBN sample (shading keeps the
     // smooth-interp normal as the shading normal):
     //   1. Material doesn't flag HAS_NORMAL_MAP (no normal texture).
     //   2. mat.normalTex is the INVALID_BINDLESS_TEXTURE sentinel.
@@ -607,7 +607,7 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
                 nXY.y = -nXY.y;
 
             // V2.A.23 — normal-map strength (OmniPBR bump_factor): scale
-            // the tangent-plane deviation, then reconstruct Z from the
+            // the tangent-space deviation, then reconstruct Z from the
             // scaled XY so a stronger bump tilts the normal more.
             nXY *= mat.normalStrength;
             const float nZ = sqrt(saturate(1.0 - dot(nXY, nXY)));
@@ -633,7 +633,7 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
     // reflection would go below the geometric horizon, project the
     // shading normal onto the safe hemisphere. Cheap + deterministic.
     {
-        const float3 viewW = normalize(-WorldRayDirection());
+        const float3 viewW = normalize(-rayDir);
         const float vdotn = dot(viewW, nWorld);
         if (vdotn < 1e-3) {
             // Reflect the shading normal back across the view-aligned
@@ -648,9 +648,9 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
 
     // M7-simple lighting + NdotL Lambert for direct lights. Loop
     // over every authored light, accumulate the per-light Lambert
-    // contribution. The no-lights case (PathTracePass binds a single
-    // intensity=0 sentinel) leaves `directSum` zero → falls through
-    // to baseColor-only emission, preserving M5/M6 byte-equal.
+    // contribution. The no-lights case (RaytracedLightingPass binds a
+    // single intensity=0 sentinel) leaves `directSum` zero → falls
+    // through to baseColor-only emission, preserving M5/M6 byte-equal.
     //
     // M8a — physical light/exposure pairing (Omniverse RTX convention,
     // shared by RenderMan / Karma / Storm / Cycles). USD authors
@@ -663,8 +663,8 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
     //      light. Without it a 60000-intensity light at 30m reads as
     //      bright as the same light at 1m, blowing out the whole scene
     //      no matter what camera exposure compensates with.
-    //   2. The camera's 2^exposure factor applied at raygen, which we
-    //      already do (CameraUniforms.exposure × ACES tonemap).
+    //   2. The camera's 2^exposure factor applied in the TonemapPass,
+    //      which we already do (TonemapUniforms.exposure × ACES tonemap).
     //
     // - Distant: NO falloff (parallel rays, infinitely far). lightDir
     //   = -L.direction (the world-space direction the light's photons
@@ -686,10 +686,10 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
     float3 directSpecular = float3(0.0, 0.0, 0.0);
     float3 ambientSum     = float3(0.0, 0.0, 0.0);
     float  totalContribution = 0.0;
-    const float3 hitWorld = WorldRayOrigin() + RayTCurrent() * WorldRayDirection();
+    const float3 hitWorld = worldHit;
     // M9-fidelity: view direction (FROM surface TO eye) for the GGX
     // microfacet half-vector + Schlick Fresnel.
-    const float3 viewDir = normalize(-WorldRayDirection());
+    const float3 viewDir = normalize(-rayDir);
     for (uint i = 0; i < lightCount; ++i) {
         LightGpu L = gLights[i];
         if (L.intensity <= 0.0) continue;  // sentinel / disabled
@@ -711,9 +711,9 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
             // contribution from `dot(N, up)`.
             //
             // The 1/π factor is the Lambertian BRDF normalization:
-            // the final composition at line ~574 multiplies
-            // `ambientSum` by `baseColor`, which together form the
-            // diffuse BRDF `baseColor / π` × irradiance.
+            // the final composition below multiplies `ambientSum` by
+            // `baseColor`, which together form the diffuse BRDF
+            // `baseColor / π` × irradiance.
             //
             // Dome rotation: mirror the miss shader's inverse Y-rot
             // so a tinted/rotated dome's structure lines up between
@@ -764,7 +764,7 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
             // made reflections vanish behind translucent surfaces. When
             // out of budget, assume unoccluded (visibility 1).
             float aoVisibility = 1.0;
-            if (payload.recursionDepth + 1u < MAX_RAY_RECURSION)
+            if (recursionDepth + 1u < MAX_RAY_RECURSION)
             {
                 RayDesc aoRay;
                 aoRay.Origin    = hitWorld + nWorld * 1e-3;
@@ -780,7 +780,7 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
                 aoPayload.materialId      = 0xFFFFFFFFu;
                 aoPayload.worldHit        = float3(0.0, 0.0, 0.0);
                 aoPayload.elementId       = 0xFFFFFFFFu;
-                aoPayload.recursionDepth  = payload.recursionDepth + 1u;
+                aoPayload.recursionDepth  = recursionDepth + 1u;
                 aoPayload.transmittance   = float3(0.0, 0.0, 0.0);
                 TraceRay(gTlas,
                          RAY_FLAG_SKIP_CLOSEST_HIT_SHADER
@@ -874,7 +874,7 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
         //
         // Origin offset: push the ray start along the normal by
         // 1e-3 to avoid self-intersection from the surface that
-        // generated this closesthit invocation. TMin also takes
+        // generated this shading invocation. TMin also takes
         // the same eps as a belt-and-braces measure.
         // TMax: for finite-distance lights, cap at the distance to
         // the light's centre so geometry behind the light doesn't
@@ -889,7 +889,7 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
         // assume lit (visibility 1).
         float visibility = 1.0;
         if (NdotL > 0.0 && coneAttenuation > 0.0
-            && payload.recursionDepth + 1u < MAX_RAY_RECURSION) {
+            && recursionDepth + 1u < MAX_RAY_RECURSION) {
             float lightDist = 1e30;
             // Position-based kinds cap the shadow ray at the distance
             // to the light's centre. Distant lights stay at 1e30
@@ -913,7 +913,7 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
             shadowPayload.materialId      = 0xFFFFFFFFu;
             shadowPayload.worldHit        = float3(0.0, 0.0, 0.0);
             shadowPayload.elementId       = 0xFFFFFFFFu;
-            shadowPayload.recursionDepth  = payload.recursionDepth + 1;  // M29
+            shadowPayload.recursionDepth  = recursionDepth + 1;  // M29
             shadowPayload.transmittance   = float3(0.0, 0.0, 0.0);
             TraceRay(gTlas,
                      RAY_FLAG_SKIP_CLOSEST_HIT_SHADER
@@ -1021,17 +1021,18 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
     // and any see-through surface.
     float3 reflColorOut  = float3(0.0, 0.0, 0.0);
     float3 reflWeightOut = float3(0.0, 0.0, 0.0);
-    if (payload.recursionDepth + 1u < MAX_RAY_RECURSION
+    if (recursionDepth + 1u < MAX_RAY_RECURSION
         && (metalness > 0.05 || roughness < 0.5))
     {
-        // Geometric mirror direction. WorldRayDirection() is FROM eye
-        // TO surface; `reflect(d, n)` returns the mirror across `n`
-        // (which is the surface normal). For roughness > 0 we keep the
-        // mirror direction unchanged today — the cone-spreading via
-        // envmap-mip blur lands in the follow-up. Self-intersection
-        // is avoided by pushing the origin out by 1e-3 along the
-        // shading normal, same epsilon shadow rays use above.
-        const float3 reflDir = normalize(reflect(WorldRayDirection(), nWorld));
+        // Geometric mirror direction. rayDir (the TraceRay direction)
+        // is FROM eye TO surface; `reflect(d, n)` returns the mirror
+        // across `n` (which is the surface normal). For roughness > 0
+        // we keep the mirror direction unchanged today — the
+        // cone-spreading via envmap-mip blur lands in the follow-up.
+        // Self-intersection is avoided by pushing the origin out by
+        // 1e-3 along the shading normal, same epsilon shadow rays use
+        // above.
+        const float3 reflDir = normalize(reflect(rayDir, nWorld));
 
         RayDesc reflRay;
         reflRay.Origin    = hitWorld + nWorld * 1e-3;
@@ -1044,13 +1045,14 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
         // surface's emitted radiance: a translucent surface (glass) seen
         // IN a mirror returns its near-black emitted term and drops
         // everything BEHIND it, so glass-in-a-mirror rendered black. This
-        // mirrors raygen's primary transmission loop (raygen.slang) but
-        // runs at the reflection ray's recursion depth. Each segment
-        // re-traces past the previous translucent hit by LOOP iteration
-        // (not hardware recursion), so the §V2.B depth cap of 3 is
-        // untouched; stacked transparent layers in a reflection composite
-        // exactly as they do for the primary ray. 0.999 / 1e-3 thresholds
-        // match the primary loop and the anyhit translucency gate.
+        // mirrors the lighting raygen's primary transmission loop
+        // (raytraced_lighting_raygen.slang) but runs at the reflection
+        // ray's recursion depth. Each segment re-traces past the previous
+        // translucent hit by LOOP iteration (not hardware recursion), so
+        // the §V2.B depth cap of 3 is untouched; stacked transparent
+        // layers in a reflection composite exactly as they do for the
+        // primary ray. 0.999 / 1e-3 thresholds match the primary loop and
+        // the anyhit translucency gate.
         const uint REFL_MAX_SEGMENTS = 16u;
         float3 reflRadiance   = float3(0.0, 0.0, 0.0);
         float3 reflThroughput = float3(1.0, 1.0, 1.0);
@@ -1066,7 +1068,7 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
             reflPayload.materialId      = 0xFFFFFFFFu;
             reflPayload.worldHit        = float3(0.0, 0.0, 0.0);
             reflPayload.elementId       = 0xFFFFFFFFu;
-            reflPayload.recursionDepth  = payload.recursionDepth + 1u;
+            reflPayload.recursionDepth  = recursionDepth + 1u;
             reflPayload.transmittance   = float3(0.0, 0.0, 0.0);
 
             TraceRay(gTlas, RAY_FLAG_NONE, 0xFFu, 0, 0, 0, reflRay, reflPayload);
@@ -1120,11 +1122,12 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
     //   * reflection: a Fresnel-weighted term (reflWeightOut) layered ON
     //     TOP, independent of opacity.
     //   * transmission: the light from BEHIND that the surface lets
-    //     through. This shader does NOT trace a continuation ray for it
-    //     any more — it reports a per-channel `transmittance` and raygen
-    //     composites what's behind front-to-back (re-tracing at recursion
-    //     depth 0). That keeps stacked transparent layers free of
-    //     recursion cost and reproduces the old result exactly.
+    //     through. This shading does NOT trace a continuation ray for it
+    //     any more — it reports a per-channel `transmittance` and the
+    //     lighting raygen composites what's behind front-to-back
+    //     (re-tracing at recursion depth 0). That keeps stacked
+    //     transparent layers free of recursion cost and reproduces the
+    //     old result exactly.
     //
     // The previous single-surface composite was
     //   out = reflWeight·refl + (1-reflWeight)·(lit·opacity + behind·(1-opacity)) + emission
@@ -1144,24 +1147,15 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
                          + oneMinusRefl * lit * mat.opacity
                          + emission;
 
-    payload.color = emitted;
-    payload.transmittance = (mat.opacity < 0.999)
+    SurfaceShadeResult result;
+    result.emitted = emitted;
+    result.transmittance = (mat.opacity < 0.999)
                               ? oneMinusRefl * (1.0 - mat.opacity)
                               : float3(0.0, 0.0, 0.0);
-    payload.hitT  = RayTCurrent();
-    // M7 follow-up — fields the raygen-side AOV inspector reads.
-    // Normal is the world-space face normal we already computed for
-    // the Lambert pass; instanceId is the per-instance slot the
-    // closesthit branched on for material lookup. baseColor /
-    // materialId / worldHit feed the new BaseColor / MaterialID /
-    // WorldPos AOVs respectively — all already in flight as locals.
-    payload.normalWorld = nWorld;
-    payload.instanceId  = instanceId;
-    payload.baseColor   = baseColor;
-    payload.materialId  = materialId;
-    payload.worldHit    = hitWorld;
-    // PrimitiveIndex() is the per-face id within the BLAS — Hydra's
-    // HdAovTokens->elementId. ~0u is the miss sentinel raygen sets
-    // before TraceRay; we overwrite with the real face here.
-    payload.elementId   = PrimitiveIndex();
+    result.normalWorld = nWorld;
+    result.baseColor   = baseColor;
+    result.materialId  = materialId;
+    return result;
 }
+
+#endif  // PYXIS_SHADING_SLANG

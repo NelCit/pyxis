@@ -1,9 +1,9 @@
 // Pyxis renderer — frame rendering API.
 //
 // Plan §18.6. The renderer takes a `GpuScene&` as the canonical scene
-// input. M3 wires the §9 v1 graph's first real pass (PathTracePass);
-// later milestones extend it to PathTrace → Accumulation → ToneMap →
-// AovResolve → DebugView → CopyToHydraBuffer → Present.
+// input. Since the P4 pass split (visibility-buffer architecture) the
+// linear §9 graph is RaytracedGBuffer → RaytracedLighting → Tonemap →
+// SsaaResolve → BlitToSrgb.
 
 #pragma once
 
@@ -81,24 +81,30 @@ class PYXIS_RENDERER_API PyxisRenderer final {
  private:
   Profiler* _profiler = nullptr;
   std::unique_ptr<RenderGraph> _graph;
-  // Borrowed pointer to the PathTracePass the graph owns — kept here
-  // so LastPickResult() can forward without a dynamic_cast or a graph-
-  // walk. Set in the ctor; cleared in the dtor (the RenderGraph
-  // unique_ptr drops its passes first by member-order).
-  // Forward-declared as IRenderPass* so the public header doesn't
-  // pull in the private PathTracePass header — the impl casts on
-  // demand.
-  class IRenderPass* _pathTracePass = nullptr;
+  // Borrowed pointer to the RaytracedGBufferPass the graph owns — kept
+  // here so RenderFrame can ask it for its visibility buffer
+  // (EnsureVisibilityBuffer) and thread it into PassContext::visibility
+  // for the lighting pass (P4 pass split). Forward-declared as
+  // IRenderPass* so the public header doesn't pull in the private pass
+  // header — the impl casts on demand.
+  class IRenderPass* _gbufferPass = nullptr;
+  // Borrowed pointer to the RaytracedLightingPass the graph owns — kept
+  // here so LastPickResult() can forward without a dynamic_cast or a
+  // graph-walk, and so RenderFrame can drive EnsureLinearColor. Set in
+  // the ctor; cleared in the dtor (the RenderGraph unique_ptr drops its
+  // passes first by member-order). Same forward-declared-IRenderPass* +
+  // impl-side cast pattern as _gbufferPass.
+  class IRenderPass* _lightingPass = nullptr;
   // Borrowed pointer to the SsaaResolvePass the graph owns — kept so RenderFrame
   // can ask it for its base-res LINEAR downsample target (EnsureLinearOutput) and
   // thread it into PassContext::colorLinearResolved for BlitToSrgbPass. Same
-  // forward-declared-IRenderPass* + impl-side cast pattern as _pathTracePass.
+  // forward-declared-IRenderPass* + impl-side cast pattern as _lightingPass.
   class IRenderPass* _ssaaPass = nullptr;
   uint64_t _frameIndex = 0;
   // Active frames-in-flight count from RendererCreateDesc. Threaded
   // into every PassContext so passes can size per-FIF rings.
-  // Today only PathTracePass's picker readback consumes it (asserts
-  // FIF == 1; bumping requires EventQuery support).
+  // Today only RaytracedLightingPass's picker readback consumes it
+  // (asserts FIF == 1; bumping requires EventQuery support).
   uint32_t _framesInFlight = 1;
 };
 

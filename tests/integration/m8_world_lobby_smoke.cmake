@@ -21,7 +21,7 @@
 #   4. Stdout contains the "headless: render produced non-black pixels
 #      (looks valid)" log line. The non-black check fires inside
 #      ReadbackAndWriteExr in HeadlessMode and is the cheapest
-#      regression detector for "PathTracePass silently no-op'd".
+#      regression detector for "RaytracedLightingPass silently no-op'd".
 #
 # Logged for the user (NOT asserted):
 #   • Wall-clock time-to-first-image (compare against §34 KPI of <15s).
@@ -29,7 +29,7 @@
 #   • Any "fallback to magenta-missing-texture" warnings (texture
 #     decode failures expected on broken paths).
 #
-# Failure messages spell out the most-likely cause (PathTracePass
+# Failure messages spell out the most-likely cause (RaytracedLightingPass
 # crash, MDL-material gap, USD-feature-not-supported, etc.) so the
 # user has a quick triage path the first few times this runs.
 
@@ -81,7 +81,7 @@ if(NOT _rc EQUAL 0)
         "  - GpuScene::CommitResources createBuffer/createTexture OOM —\n"
         "    1.4 GB of textures may exceed 8 GB VRAM. Check for\n"
         "    'OutOfMemoryGpu' / 'createBuffer ... failed' lines.\n"
-        "  - PathTracePass dispatchRays crashed inside the closesthit on\n"
+        "  - RaytracedLightingPass dispatchRays crashed inside the closesthit on\n"
         "    a rogue InstanceID()/PrimitiveIndex(). Aftermath dump (if\n"
         "    enabled) lands at *.nv-gpudmp.\n"
         "STDOUT:\n${_stdout}\n"

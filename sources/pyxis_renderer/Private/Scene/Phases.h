@@ -21,7 +21,7 @@ struct PhaseExtractMeshes {};    // Sys_UploadMeshes + the 5 mesh side-table sys
 struct PhaseBuildBlas {};        // Sys_BuildBlas
 struct PhaseRebuildTlas {};      // Sys_RebuildTlas
 struct PhaseUpdateBindless {};   // reserved: the bindless descriptor table is bound by
-                                 // PathTracePass (the render graph), not GpuScene, so
+                                 // RaytracedLightingPass (the render graph), not GpuScene, so
                                  // this phase carries no commit system in v1.
 struct PhaseClearDirty {};       // Sys_ClearDirty
 

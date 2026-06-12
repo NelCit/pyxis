@@ -16,7 +16,7 @@
 //   3. TLAS rebuild gathering live + visible instances.
 //
 // Camera-uniform upload + the path-trace dispatch live in
-// PathTracePass (see Private/Passes/PathTracePass.cpp).
+// RaytracedLightingPass (see Private/Passes/RaytracedLightingPass.cpp).
 
 #include "GpuScene/Internal.h"
 
@@ -257,7 +257,7 @@ bool GpuScene::HasCamera() const noexcept {
 
 // ---- SceneResources view (RFC 0003) -----------------------------------------
 // The renderer-internal replacement for the removed public Get* NVRHI getters.
-// PathTracePass (and the §35 unit-test harness) call this each use; every
+// RaytracedLightingPass (and the §35 unit-test harness) call this each use; every
 // pointer is borrowed from Impl with the same lifetimes the getters had.
 SceneResources detail::SceneResourcesAccess::Get(GpuScene& scene) noexcept {
   GpuScene::Impl& impl = *scene._impl;
@@ -287,7 +287,7 @@ SceneResources detail::SceneResourcesAccess::Get(GpuScene& scene) noexcept {
   // slot order — the production-renderer convention; multi-dome is post-v1 §43).
   // Review fix #2 — computed once per commit in RefreshDomeEnvMapCache and cached;
   // this accessor sits on the per-frame binding path, so it must not allocate/sort.
-  // nullptr when no dome exists → PathTracePass binds its 1×1 fallback.
+  // nullptr when no dome exists → RaytracedLightingPass binds its 1×1 fallback.
   view.domeEnvMapTexture       = impl.domeEnvMapTexture;
   view.bindlessSampler         = impl.bindlessSampler.Get();
   view.domeSampler             = impl.domeSampler.Get();

@@ -33,7 +33,7 @@ SsaaResolvePass::SsaaResolvePass(nvrhi::IDevice* device) : _device(device) {
   // Zero NVRHI's default per-type Vulkan binding offsets (SRV+0,
   // sampler+128, CB+256, UAV+384) so the layout's binding numbers map
   // 1:1 to the shader's explicit `[[vk::binding(N, 0)]]` slots — same
-  // convention PathTracePass uses. Without this, Texture_UAV(1) lands
+  // convention RaytracedLightingPass uses. Without this, Texture_UAV(1) lands
   // at Vulkan binding 385 while the shader declares binding 1 →
   // "gDest not declared in pipeline layout" → the dispatch no-ops.
   layoutDesc.bindingOffsets.shaderResource = 0;
@@ -173,8 +173,8 @@ void SsaaResolvePass::Execute(nvrhi::ICommandList* commandList,
   if (!bindingSet)
     return;
 
-  // Explicit barriers: the source was just written by PathTracePass
-  // (UAV / render-target) and must be readable as a shader resource;
+  // Explicit barriers: the source (the display color) was just UAV-written
+  // by TonemapPass and must be readable as a shader resource;
   // the dest must be in UnorderedAccess for the compute write. NVRHI's
   // auto-tracking usually handles this, but the cross-pass UAV→SRV
   // hazard on the shared color AOV needs the explicit transition to be

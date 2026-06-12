@@ -1032,7 +1032,7 @@ void EmitLight(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCache,
     // refs against the .usd's parent directory) and AcquireTexture
     // it. The resulting TextureHandle is stored on LightDesc.envMap;
     // GpuScene::CommitResources resolves it to a bindless slot at
-    // pack time, and PathTracePass reads the first live dome's
+    // pack time, and RaytracedLightingPass reads the first live dome's
     // texture for the miss shader's lat-long sample.
     std::string resolvedPath;
     const pxr::UsdAttribute textureAttr =

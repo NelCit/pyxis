@@ -4,7 +4,7 @@
 
 #include "RenderGraph/PassContext.h"
 #include "RenderGraph/ShaderLoad.h"
-#include "Scene/SceneResources.h"  // RFC 0003 — TLAS gate mirrors PathTracePass.
+#include "Scene/SceneResources.h"  // RFC 0003 — TLAS gate mirrors RaytracedLightingPass.
 
 #include <Pyxis/Platform/FileSystem/AssetLocator.h>
 #include <Pyxis/Platform/Logging/Log.h>
@@ -90,7 +90,7 @@ TonemapPass::TonemapPass(nvrhi::IDevice* device, GpuScene& scene)
   }
 
   // 1×1 SRV fallbacks for the 10 debug-view AOVs — table-driven, one row per
-  // format/member, same shape as PathTracePass's AOV fallback table.
+  // format/member, same shape as RaytracedLightingPass's AOV fallback table.
   struct FallbackSpec {
     nvrhi::TextureHandle TonemapPass::* member;
     nvrhi::Format format;
@@ -182,13 +182,13 @@ void TonemapPass::Execute(nvrhi::ICommandList* commandList, const PassContext& c
       || context.targets == nullptr)
     return;
 
-  // Display target + the fp32 radiance PathTracePass wrote this frame.
+  // Display target + the fp32 radiance RaytracedLightingPass wrote this frame.
   nvrhi::ITexture* const dest = context.targets->color;
   nvrhi::ITexture* const source = context.linearColor;
   if (dest == nullptr || source == nullptr)
     return;
 
-  // Mirror PathTracePass's early-outs: when the trace skipped (no TLAS / no
+  // Mirror RaytracedLightingPass's early-outs: when the trace skipped (no TLAS / no
   // camera) the linearColor scratch holds stale or undefined data and the old
   // inline display branch never ran — leave the display output untouched
   // exactly as before the split.
@@ -206,10 +206,10 @@ void TonemapPass::Execute(nvrhi::ICommandList* commandList, const PassContext& c
 
   const Profiler::GpuScope gpuScope(*context.profiler, commandList, "pass.Tonemap");
 
-  // Exposure from the same GpuScene camera PathTracePass uploads into
+  // Exposure from the same GpuScene camera RaytracedLightingPass uploads into
   // CameraUniforms.exposure (identical float, identical 2^exposure gain);
   // debugViewMode / worldPosPeriod from RenderSettings exactly as
-  // PathTracePass fills FrameUiUniforms (10 m default period).
+  // RaytracedLightingPass fills FrameUiUniforms (10 m default period).
   shaderinterop::TonemapUniforms params{};
   params.exposure = _scene->GetCamera().exposure;
   params.debugViewMode = static_cast<uint32_t>(context.settings->debugView);
@@ -243,7 +243,7 @@ void TonemapPass::Execute(nvrhi::ICommandList* commandList, const PassContext& c
     return;
 
   // Explicit barriers: linearColor + the AOVs were just UAV-written by
-  // PathTracePass and must be readable as shader resources; the display
+  // RaytracedLightingPass and must be readable as shader resources; the display
   // target must be in UnorderedAccess for the compute write. The cross-pass
   // UAV→SRV hazard needs the explicit transition to be reliable (same
   // finding as SsaaResolvePass on the shared color AOV).

@@ -82,7 +82,7 @@ struct AovTextures {
   nvrhi::TextureHandle worldPosEye;
 
   // 1-element RWStructuredBuffer<PickResult> + a host-readable
-  // staging buffer for one-frame-stale CPU readback. PathTracePass
+  // staging buffer for one-frame-stale CPU readback. RaytracedLightingPass
   // copies device→staging at the end of each Execute(); the viewer
   // maps the staging buffer the NEXT frame to read what the GPU
   // wrote (mapping the same frame would block on a fence).

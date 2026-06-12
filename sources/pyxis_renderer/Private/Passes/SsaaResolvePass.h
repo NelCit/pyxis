@@ -10,12 +10,12 @@
 // (BlitToSrgbPass); this pass does one thing. No jitter, no accumulation —
 // bit-exact reproducible.
 //
-// A render-graph pass (§9): runs after PathTracePass, before BlitToSrgbPass.
+// A render-graph pass (§9): runs after TonemapPass, before BlitToSrgbPass.
 // Reads context.targets->color (super-res LINEAR) + context.colorLinearResolved
 // (base-res LINEAR out) + context.settings->ssaaFactor; no-ops when ssaaFactor < 2
 // or either target is unbound (at factor 1 there is nothing to downsample and
 // BlitToSrgbPass reads `color` directly). Owns its own compute shader + pipeline +
-// binding layout, mirroring PathTracePass's self-contained construction.
+// binding layout, mirroring RaytracedLightingPass's self-contained construction.
 //
 // Bindings (matched to ssaa_resolve.slang, renamed from ssaa_downsample at P3):
 //   space=0, t0 : Texture2D<float4>   source super-res LINEAR color

@@ -90,6 +90,22 @@ struct HitInfo {
     // iterations rather than hardware recursion depth. See raygen.slang.
     float3 transmittance;   // 0 = opaque; >0 lets the surface behind show through
 };
+
+// VisibilityPayload — the THIN ray payload of the P4 RaytracedGBufferPass
+// pipeline (20 bytes vs HitInfo's 80 — fits the register-only payload
+// budget, no ray-stack spill). Shader-only for the same float3-trap
+// reason as HitInfo: it never crosses the C++/SPIR-V boundary as a
+// memory blob. The GBuffer raygen converts it into the 32-byte
+// VisibilityGpu buffer record below; the GBuffer closesthit / miss /
+// anyhit are compiled against this type (DXR requires the anyhit's
+// payload type to match the pipeline's TraceRay payload type — see
+// raytraced_anyhit.slang).
+struct VisibilityPayload {
+    float  hitT;            // RayTCurrent() at the closest hit; -1.0 = miss
+    float2 bary;            // BuiltInTriangleIntersectionAttributes.barycentrics
+    uint   instanceId;      // InstanceID(); ~0u on miss
+    uint   primitiveIndex;  // PrimitiveIndex(); ~0u on miss
+};
 #endif
 
 // CameraUniforms — uploaded per-frame to a constant buffer the raygen
@@ -536,7 +552,27 @@ struct VertexAttribGpu {
     float4 tangent;   // xyz tangent; w = bitangent handedness (±1), MikkTSpace
 };
 
-// Bindless texture array capacity at PathTracePass binding 28.
+// VisibilityGpu — one per-pixel record of the P4 visibility buffer
+// (design D1): RWStructuredBuffer written by the RaytracedGBufferPass
+// raygen at binding 2 of ITS layout, read by the RaytracedLightingPass
+// raygen at binding 34. fp32-exact — NEVER quantized: the lighting
+// raygen reconstructs worldHit = origin + hitT·dir and the barycentric
+// attribute interpolation from these floats, and any rounding here
+// would break the §33.7 byte-identical contract. Indexed row-major:
+// `vis[y * width + x]`. Layout is 32 bytes (2 rows of 16); scalar-only
+// per the float3-trap rule above.
+struct VisibilityGpu {
+    float hitT;            // RayTCurrent() of the primary hit; -1.0 = miss
+    float baryX;           // triangle barycentrics (attribs.barycentrics)
+    float baryY;
+    uint  instanceId;      // InstanceID(); ~0u on miss
+    uint  primitiveIndex;  // PrimitiveIndex(); ~0u on miss
+    uint  _pad0;
+    uint  _pad1;
+    uint  _pad2;
+};
+
+// Bindless texture array capacity at RaytracedLightingPass binding 28.
 // Cap chosen to comfortably cover v1 production scenes (Lobby 169,
 // World Lobby ~2K, Moana production sets ~50K is the post-v1 §5 target via
 // true createBindlessLayout). The closesthit indexes via
@@ -606,6 +642,12 @@ static const uint BINDLESS_TEXTURES_CAP = 4096u;
                   "Private/GpuScene/Commit.cpp.");
     static_assert(sizeof(VertexAttribGpu) % 16 == 0,
                   "VertexAttribGpu must be 16-byte aligned (§23 structured-buffer rule).");
+    static_assert(sizeof(VisibilityGpu) == 32,
+                  "VisibilityGpu must be 32 bytes (2 rows of 16) — the P4 visibility "
+                  "buffer is allocated at width*height*32 with this exact stride; see "
+                  "RaytracedGBufferPass::EnsureVisibilityBuffer.");
+    static_assert(sizeof(VisibilityGpu) % 16 == 0,
+                  "VisibilityGpu must be 16-byte aligned (§23 structured-buffer rule).");
 
     // Sentinel bindless slot meaning "no texture bound for this lobe".
     // The closesthit checks the matching MaterialFlag bit before

@@ -3,7 +3,7 @@
 // Plan §9.2. The bag of per-frame state every pass needs in
 // Execute(). Passes never get a *back-pointer* to the RenderGraph or
 // the GpuScene through here — those are wired at construction time
-// (PathTracePass takes `GpuScene&` in its ctor). The fields below
+// (RaytracedLightingPass takes `GpuScene&` in its ctor). The fields below
 // are the minimum every pass shares: command list, profiler scope
 // target, settings, AOV bindings, monotonic frame index, active
 // frames-in-flight depth (for ring sizing inside passes).
@@ -16,6 +16,7 @@
 #include <cstdint>
 
 namespace nvrhi {
+class IBuffer;
 class ICommandList;
 class ITexture;
 }
@@ -37,16 +38,24 @@ struct PassContext {
   nvrhi::ITexture* colorLinearResolved = nullptr;
   // Renderer-internal scratch (NOT a public RenderTargets field): the full-
   // render-resolution fp32 LINEAR radiance (RGBA32F, isUAV + isShaderResource)
-  // PathTracePass writes (binding 2, gLinearColor) and TonemapPass reads to
-  // produce the BGRA8 display output in targets->color (P3 pass split). fp32 so
-  // the display transform sees bit-identical values to the in-kernel
-  // payload.color the old inline raygen branch consumed. PathTracePass owns the
-  // texture (EnsureLinearColor, sized off targets->color, recreated on size
-  // change only — never inside a pass Execute); PyxisRenderer::RenderFrame sets
-  // this each frame. Null when targets->color is unbound — PathTracePass and
-  // TonemapPass then no-op, preserving the old "no display target, no trace"
-  // behaviour.
+  // RaytracedLightingPass writes (binding 2, gLinearColor) and TonemapPass
+  // reads to produce the BGRA8 display output in targets->color (P3 pass
+  // split). fp32 so the display transform sees bit-identical values to the
+  // in-kernel payload.color the old inline raygen branch consumed.
+  // RaytracedLightingPass owns the texture (EnsureLinearColor, sized off
+  // targets->color, recreated on size change only — never inside a pass
+  // Execute); PyxisRenderer::RenderFrame sets this each frame. Null when
+  // targets->color is unbound — the RT passes and TonemapPass then no-op,
+  // preserving the old "no display target, no trace" behaviour.
   nvrhi::ITexture* linearColor = nullptr;
+  // Renderer-internal scratch (P4 pass split): the width*height*32 B
+  // RWStructuredBuffer<VisibilityGpu> RaytracedGBufferPass writes (one
+  // fp32-exact record per pixel) and RaytracedLightingPass reads (binding 34)
+  // to deferred-shade the first hit. RaytracedGBufferPass owns the buffer
+  // (EnsureVisibilityBuffer, sized off targets->color like linearColor above);
+  // PyxisRenderer::RenderFrame sets this each frame. Null when targets->color
+  // is unbound — both RT passes then no-op.
+  nvrhi::IBuffer* visibility = nullptr;
   uint64_t frameIndex = 0;
   // Default 0 to flush out anyone who forgot to wire it through —
   // PyxisRenderer::RenderFrame always sets the real value. A pass

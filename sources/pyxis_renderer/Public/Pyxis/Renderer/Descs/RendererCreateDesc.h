@@ -16,7 +16,7 @@ struct RendererCreateDesc {
   // (= 3, see Forward.h). PyxisRenderer threads this into every
   // PassContext so passes can size per-FIF rings; today only the
   // path-tracer's picker readback uses it (asserts FIF == 1 since
-  // the mapBuffer path lacks an EventQuery — see PathTracePass.cpp).
+  // the mapBuffer path lacks an EventQuery — see RaytracedLightingPass.cpp).
   // Caller (viewer / headless) typically passes
   // IDeviceManager::GetFramesInFlight().
   uint32_t framesInFlight = 1;

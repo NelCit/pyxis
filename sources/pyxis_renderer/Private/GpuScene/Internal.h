@@ -416,7 +416,7 @@ struct GpuScene::Impl
   uint32_t                     tlasBuiltInstanceCount = 0;
   // Review fix #2 — cached single-dome env-map texture, refreshed once per commit
   // (RefreshDomeEnvMapCache). SceneResources::domeEnvMapTexture is read every frame
-  // by the PathTracePass binding path; recomputing there allocated + sorted the
+  // by the RaytracedLightingPass binding path; recomputing there allocated + sorted the
   // live-light set per frame.
   nvrhi::ITexture*             domeEnvMapTexture = nullptr;
 

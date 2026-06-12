@@ -1,7 +1,7 @@
 // Pyxis renderer — shared SPIR-V loading helper (renderer-private).
 //
 // The §9.1 ToneMapPass worked example anticipated a shared "ShaderLibrary" that
-// passes take in their ctor; this is the minimal form of it. PathTracePass and
+// passes take in their ctor; this is the minimal form of it. RaytracedLightingPass and
 // SsaaResolvePass both loaded a .spv from disk into an nvrhi::ShaderHandle with
 // byte-for-byte the same `ifstream(binary|ate) -> read -> createShader` body — the
 // two copies had already drifted (`!stream` vs `!is_open()`). One definition here.
@@ -39,7 +39,7 @@ namespace pyxis {
 // Load a SPIR-V shader from `path` into an nvrhi::ShaderHandle. Returns null and
 // logs (log::RENDER, prefixed with `logPrefix`) on a missing/empty .spv or a
 // createShader failure. `entry` is the SPIR-V entry-point name (Slang emits
-// "main" for every [shader(...)] function — see PathTracePass note).
+// "main" for every [shader(...)] function — see RaytracedLightingPass note).
 [[nodiscard]] inline nvrhi::ShaderHandle LoadSpirvShader(nvrhi::IDevice* device,
                                                          std::string_view path,
                                                          nvrhi::ShaderType stage,

@@ -121,7 +121,7 @@ class ImGuiHost {
   // Loading-time profile snapshot. Latched on the first BuildFpsPanel
   // call where the FrameProfile reports a non-zero CPU time — that's
   // effectively the load profile (mesh upload + BLAS build + TLAS
-  // rebuild + first PathTracePass dispatch all happen on frame 0).
+  // rebuild + first RaytracedLightingPass dispatch all happen on frame 0).
   // Displayed in the Performance panel's "Loading" CollapsingHeader.
   // The full pass breakdown is COPIED into _loadingPasses (the live
   // FrameProfile.passes span gets recycled at every frame's

@@ -559,7 +559,7 @@ void ImGuiHost::BuildFpsPanel(const FrameProfile& frameProfile,
 
     // ----- Loading (one-shot snapshot of the first frame's cost) ------
     // The first frame includes mesh upload + BLAS build + TLAS
-    // rebuild + first PathTracePass dispatch — effectively the load
+    // rebuild + first RaytracedLightingPass dispatch — effectively the load
     // profile. Subsequent frames are steady-state render only, so
     // these values stay frozen after the first non-zero capture.
     // The pass breakdown beneath each total mirrors the live "CPU
@@ -570,7 +570,7 @@ void ImGuiHost::BuildFpsPanel(const FrameProfile& frameProfile,
       {
         ImGui::TextDisabled(
             "(captured on first frame; mesh upload + BLAS / TLAS build +\n"
-            "  first PathTracePass dispatch all happen here)");
+            "  first RaytracedLightingPass dispatch all happen here)");
 
         // Ingest pass — populated by ViewerMode via SetIngestProfile()
         // right after the engine.Load() that ran BEFORE the frame loop

@@ -1,19 +1,25 @@
-// Pyxis renderer — primary-ray path-trace pass.
+// Pyxis renderer — deferred first-hit lighting pass (P4 pass split).
 //
-// Plan §41 M3. M3 simplification per the v1 scope discussion: 1 ray
-// per pixel, no recursion, no NEE, no shadow rays. The closesthit
-// shader returns barycentric colour; the miss shader returns flat
-// sky blue. That's enough to validate the full RT-pipeline plumbing
-// (BLAS / TLAS bound via descriptor set, raygen / miss / closesthit
-// stitched together by a shader binding table, dispatchRays
-// cascading the right shader records per-hit) without wading into
-// the multi-bounce path-tracing integral that M5+ brings.
+// RT pipeline B of the visibility-buffer architecture (design D1).
+// The raygen reads the per-pixel VisibilityGpu record the
+// RaytracedGBufferPass produced (PassContext::visibility, binding 34),
+// reconstructs every input the pre-split primary closesthit consumed,
+// and runs the shared shading (shading.slang) at recursion depth 0 —
+// shadow / AO / mirror-reflection rays and the front-to-back
+// transparency continuation all trace from here. The megakernel
+// closesthit survives as this pipeline's hit shader for SECONDARY rays
+// only (transparent continuation + reflections); miss[0] serves
+// secondary rays the dome background, miss[1] is the shadow-visibility
+// miss. Refactor of the pre-split PathTracePass — it inherits the
+// binding machinery, fallbacks, picker staging and the fp32
+// linear-radiance scratch (P3) unchanged.
 //
-// Bindings (matched to raygen.slang):
+// Bindings (matched to raytraced_lighting_*.slang):
 //   space=0, b0  : CameraUniforms cbuffer  (uploaded per-frame from GpuScene::GetCamera)
-//   space=0, t0  : RaytracingAccelerationStructure (TLAS, SceneResources::tlas)
-//   space=0, u0  : RWTexture2D<float4>     (fp32 linear radiance — PassContext::
+//   space=0, t1  : RaytracingAccelerationStructure (TLAS — secondary rays!)
+//   space=0, u2  : RWTexture2D<float4>     (fp32 linear radiance — PassContext::
 //                  linearColor; the display transform moved to TonemapPass at P3)
+//   space=0, t34 : StructuredBuffer<VisibilityGpu> (PassContext::visibility — P4)
 
 #pragma once
 
@@ -23,6 +29,8 @@
 
 #include <nvrhi/nvrhi.h>
 
+#include <array>
+#include <cstddef>
 #include <string_view>
 #include <unordered_map>
 
@@ -31,15 +39,15 @@ namespace pyxis {
 class GpuScene;
 struct SceneResources;
 
-class PathTracePass final : public IRenderPass {
+class RaytracedLightingPass final : public IRenderPass {
  public:
-  PathTracePass(nvrhi::IDevice* device, GpuScene& scene);
-  ~PathTracePass() override;
-  PathTracePass(const PathTracePass&) = delete;
-  PathTracePass& operator=(const PathTracePass&) = delete;
+  RaytracedLightingPass(nvrhi::IDevice* device, GpuScene& scene);
+  ~RaytracedLightingPass() override;
+  RaytracedLightingPass(const RaytracedLightingPass&) = delete;
+  RaytracedLightingPass& operator=(const RaytracedLightingPass&) = delete;
 
   void Execute(nvrhi::ICommandList* commandList, const PassContext& context) override;
-  [[nodiscard]] std::string_view Name() const override { return "pass.PathTrace"; }
+  [[nodiscard]] std::string_view Name() const override { return "pass.RaytracedLighting"; }
 
   // Re-load raygen / miss / closesthit .spv from disk, recreate the
   // RT pipeline + shader binding table. The binding LAYOUT, the
@@ -72,17 +80,17 @@ class PathTracePass final : public IRenderPass {
   [[nodiscard]] nvrhi::ITexture* EnsureLinearColor(uint32_t width, uint32_t height);
 
  private:
-  // Build the binding set for the supplied linear-radiance output + targets +
-  // scene-resource view (RFC 0003 — the per-Execute SceneResources snapshot
-  // replaces the old public GpuScene getters). Cached per `nvrhi::ITexture*`
-  // identity (the RGBA32F linearColor output at binding 2) so we don't churn
-  // descriptor sets on every frame; a resize invalidates pointers and the
-  // cache is bounded so stale entries get evicted. Takes the full
-  // RenderTargets so the M7 raw AOV outputs + pick buffer get bound alongside
-  // the scene-side buffers.
+  // Build the binding set for the supplied linear-radiance output + the
+  // visibility buffer (P4) + targets + scene-resource view (RFC 0003 — the
+  // per-Execute SceneResources snapshot replaces the old public GpuScene
+  // getters). Cached per `nvrhi::ITexture*` identity (the RGBA32F linearColor
+  // output at binding 2) so we don't churn descriptor sets on every frame; a
+  // resize invalidates pointers and the cache is bounded so stale entries get
+  // evicted. Takes the full RenderTargets so the M7 raw AOV outputs + pick
+  // buffer get bound alongside the scene-side buffers.
   [[nodiscard]] nvrhi::BindingSetHandle GetOrCreateBindingSet(
-      nvrhi::ITexture* linearColor, struct RenderTargets const& targets,
-      const SceneResources& res);
+      nvrhi::ITexture* linearColor, nvrhi::IBuffer* visibility,
+      struct RenderTargets const& targets, const SceneResources& res);
 
   nvrhi::IDevice* _device = nullptr;
   GpuScene* _scene = nullptr;
@@ -91,9 +99,9 @@ class PathTracePass final : public IRenderPass {
   // in the ctor; reused every frame.
   nvrhi::ShaderHandle _raygenShader;
   nvrhi::ShaderHandle _missShader;
-  // M9-fidelity: second miss shader for shadow rays. Closesthit
-  // TraceRays with miss-shader-index=1; this miss writes
-  // payload.color=1.0 = visible. Pre-trace closesthit zeroes the
+  // M9-fidelity: second miss shader for shadow rays. The shared
+  // shading TraceRays with miss-shader-index=1; this miss writes
+  // payload.color=1.0 = visible. Pre-trace the shading zeroes the
   // payload, so any opaque blocker leaves visibility=0 = occluded.
   nvrhi::ShaderHandle _shadowMissShader;
   nvrhi::ShaderHandle _closestHitShader;
@@ -180,6 +188,9 @@ class PathTracePass final : public IRenderPass {
     MeshIndices,
     MeshVertexAttribs,
     DomeSampler,
+    // P4 — the GBuffer pass's visibility buffer (binding 34). A resize
+    // recreates it, so the pointer participates in invalidation.
+    Visibility,
     ColorHdrAov,
     NormalAov,
     DepthAov,
@@ -213,7 +224,7 @@ class PathTracePass final : public IRenderPass {
   // frame, well under 1µs even at World Lobby scale.
   std::uint64_t _lastBindlessTextureFingerprint = 0;
 
-  bool _shadersOk = false;  // true if ctor loaded all three shaders + built pipeline.
+  bool _shadersOk = false;  // true if ctor loaded all five shaders + built pipeline.
   // Tiny no-UAV fallback textures for each raw AOV format. Bound when
   // the caller doesn't supply that AOV (headless mode + the M2-era
   // color-only paths). Same lifetime as the existing fallbacks above.

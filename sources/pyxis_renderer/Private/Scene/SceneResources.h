@@ -17,7 +17,7 @@
 //
 // All pointers are BORROWED — valid until the next GpuScene mutation /
 // CommitResources on the render thread (§31 single-writer). Passes that
-// cache binding sets must snapshot-compare these pointers (PathTracePass's
+// cache binding sets must snapshot-compare these pointers (RaytracedLightingPass's
 // BindingsSnapshot) exactly as they did against the old getters.
 //
 // PRIVATE header (§18.9) — `SceneResourcesAccess::Get` is exported from the

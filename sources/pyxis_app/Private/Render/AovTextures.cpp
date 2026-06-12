@@ -25,7 +25,7 @@ std::expected<AovTextures, std::string> AovTextures::Create(nvrhi::IDevice* devi
   // BGRA8_UNORM (linear) — NVRHI's `SBGRA8_UNORM` maps to
   // `VK_FORMAT_B8G8R8A8_SRGB` which does NOT support
   // `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT` (sRGB encoding can't be
-  // written by an unordered RW image write). M3's PathTracePass
+  // written by an unordered RW image write). M3's RaytracedLightingPass
   // binds this AOV as `RWTexture2D<float4>`, so storage is
   // mandatory; swap to the linear variant. M5+ promotes color to
   // RGBA16_FLOAT per plan §18.4 once HDR fidelity is needed and
@@ -35,7 +35,7 @@ std::expected<AovTextures, std::string> AovTextures::Create(nvrhi::IDevice* devi
   desc.height = height;
   desc.dimension = nvrhi::TextureDimension::Texture2D;
   desc.isRenderTarget = true;
-  desc.isUAV = true;  // M3 PathTracePass writes via RWTexture2D<float4>.
+  desc.isUAV = true;  // M3 RaytracedLightingPass writes via RWTexture2D<float4>.
   // SSAA: the SsaaResolvePass binds `color` as a Texture2D SRV to
   // box-downsample it into the resolve target, so it must be shader-
   // resource-capable too. Additive (no effect on the UAV-write /

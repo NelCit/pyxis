@@ -2,21 +2,21 @@
 //
 // P3 of the pass-split design (_documentation/passes-split-design.md D1): the
 // 11-way display branch extracted VERBATIM from raygen.slang. Reads the fp32
-// LINEAR radiance PathTracePass writes (PassContext::linearColor, RGBA32F —
+// LINEAR radiance RaytracedLightingPass writes (PassContext::linearColor, RGBA32F —
 // the display path never sees RGBA16F quantization) plus the 10 raw debug-view
 // AOVs, applies exposure (2^stops) + Narkowicz ACES on the COLOR path (or the
 // matching debug encode), and writes the BGRA8 display output
 // (RenderTargets::color) the SSAA resolve / sRGB blit / headless writer / Kit
 // export consume exactly as before.
 //
-// A render-graph pass (§9): runs after PathTracePass, before SsaaResolvePass
+// A render-graph pass (§9): runs after RaytracedLightingPass, before SsaaResolvePass
 // (the resolve downsamples the TONEMAPPED LINEAR display color, same as when
 // raygen wrote it inline). No-ops when targets->color or context.linearColor
-// is unbound, and mirrors PathTracePass's TLAS/camera gates so a skipped trace
+// is unbound, and mirrors RaytracedLightingPass's TLAS/camera gates so a skipped trace
 // leaves the display output untouched (matching the old inline behaviour).
-// Exposure comes from the same GpuScene camera PathTracePass uploads into
+// Exposure comes from the same GpuScene camera RaytracedLightingPass uploads into
 // CameraUniforms.exposure; debugViewMode / worldPosPeriod from RenderSettings
-// exactly as PathTracePass fills FrameUiUniforms.
+// exactly as RaytracedLightingPass fills FrameUiUniforms.
 //
 // Bindings (matched to tonemap.slang):
 //   space=0, t0      : Texture2D<float4>  fp32 LINEAR radiance (gLinearColor)
@@ -69,7 +69,7 @@ class TonemapPass final : public IRenderPass {
   // 1×1 SRV fallbacks for the 10 debug-view AOVs, one per format — bound when
   // the caller doesn't supply that AOV (Kit binds only color/colorHdr) so the
   // binding stays valid; only read if the matching debug view is selected,
-  // which those callers never do. Same shape as PathTracePass's AOV fallbacks.
+  // which those callers never do. Same shape as RaytracedLightingPass's AOV fallbacks.
   nvrhi::TextureHandle _fallbackNormalAov;
   nvrhi::TextureHandle _fallbackDepthAov;
   nvrhi::TextureHandle _fallbackPrimIdAov;

@@ -259,7 +259,7 @@ void HandleShaderReloadStateMachine(ShaderRebuildLatch& latch,
 // Per-frame log line for the load profile, fired once after the
 // first complete frame. M3+: that frame's spend is effectively the
 // LOAD profile (mesh upload, BLAS build, TLAS rebuild, first
-// PathTracePass dispatch); the steady-state per-frame cost is
+// RaytracedLightingPass dispatch); the steady-state per-frame cost is
 // captured by the ImGui Performance panel from then on.
 void LogFirstFrameProfile(const PyxisRenderer& renderer) noexcept
 {
@@ -536,7 +536,7 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
   // ---- Profiler + GpuScene + Renderer ---------------------------------
   // GpuScene is the canonical scene-mutation API (§18.5);
   // PyxisRenderer's ctor takes it by reference per §18.6 and
-  // PathTracePass binds its TLAS + camera every frame.
+  // RaytracedLightingPass binds its TLAS + camera every frame.
   Profiler profiler{device};
   // V2.A.14 — opt-in BCn encoding for the viewer's texture decode
   // path. Default off so viewer-mode renders byte-equal to the
@@ -629,7 +629,7 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
     pendingIngestSource = "cube_fallback";
   }
 
-  // PathTracePass writes via UAV (RWTexture2D<float4>) which the
+  // RaytracedLightingPass writes via UAV (RWTexture2D<float4>) which the
   // swapchain image can't accept (VK_FORMAT_B8G8R8A8_SRGB doesn't
   // support storage). Render into an intermediate AOV color
   // texture (BGRA8_UNORM, storage-capable) and copy to the
@@ -642,7 +642,7 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
     return EXIT_DEVICE_INIT_FAIL;
   }
   // Non-const so the swapchain-rebuilt branch below can recreate it
-  // when the OS window resizes. PathTracePass dispatches against
+  // when the OS window resizes. RaytracedLightingPass dispatches against
   // aovs.{width,height} and we copyTexture aovs.color -> backbuffer
   // afterwards, so a stale AOV would render a clipped picture into a
   // resized backbuffer.
@@ -653,7 +653,7 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
   rendererDesc.initialHeight = winDesc.height;
   // Thread the device-manager's active FIF so the renderer's
   // PassContext carries it through to passes that care (today only
-  // PathTracePass's picker readback). Viewer pins FIF=1 today via
+  // RaytracedLightingPass's picker readback). Viewer pins FIF=1 today via
   // its device-creation params.
   rendererDesc.framesInFlight = deviceManager->GetFramesInFlight();
   PyxisRenderer renderer{device, gpuScene, profiler, rendererDesc};
@@ -875,7 +875,7 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
     // it's safe to:
     //   - notify ImGui (image-count + per-frame ring),
     //   - re-create the AOV color texture at the new backbuffer size
-    //     (PathTracePass dispatches at aovs.{width,height} and we
+    //     (RaytracedLightingPass dispatches at aovs.{width,height} and we
     //     copyTexture aovs.color -> backbuffer afterwards; a stale
     //     AOV renders a clipped image into the resized backbuffer),
     //   - tell PyxisRenderer (its Resize is currently a no-op for M3
@@ -996,7 +996,7 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
 
       // Drain pending GpuScene mutations (mesh upload + BLAS
       // build + TLAS rebuild) onto the open command list before
-      // RenderFrame consumes the TLAS via PathTracePass. After
+      // RenderFrame consumes the TLAS via RaytracedLightingPass. After
       // the M3 startup tick the scene is static, so all
       // subsequent frames find nothing dirty and CommitResources
       // is effectively a no-op.
@@ -1219,7 +1219,7 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
 
     // One-shot profile dump after the first complete frame — this
     // frame's CPU + GPU spend is effectively the LOAD profile (mesh
-    // upload, BLAS build, TLAS rebuild, first PathTracePass dispatch).
+    // upload, BLAS build, TLAS rebuild, first RaytracedLightingPass dispatch).
     // Subsequent frames are just steady-state render work; logging
     // them every 120 frames was the previous behaviour, which spammed
     // the console. The Performance panel's Loading section keeps the
