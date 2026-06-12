@@ -45,16 +45,63 @@
 [CmdletBinding()]
 param(
     [string]$VcpkgRoot           = (Join-Path $HOME 'vcpkg'),
-    [string]$VulkanSdkVersion    = '1.3.296.0',
+    # NVRHI is pinned (Thirdparty.cmake) to a commit that uses Vulkan 1.4
+    # cooperative-vector / cluster-AS / linear-swept-spheres types and #errors
+    # out below "Vulkan SDK 1.4.318 or later". So the floor is 1.4.318; we pin
+    # the current LunarG release. (Plan §5 still reads "1.3.x" — stale vs the
+    # NVRHI bump; the code requirement wins.)
+    [string]$VulkanSdkVersion    = '1.4.350.0',
     [switch]$Install,
-    [switch]$DryRun
+    [switch]$DryRun,
+    # Internal: set when the script re-launched itself elevated (see below).
+    [switch]$Relaunched,
+    [string]$LogFile
 )
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference    = 'SilentlyContinue'
 
-# Vulkan SDK download URL - LunarG's stable pattern.
-$VULKAN_INSTALLER_URL = "https://sdk.lunarg.com/sdk/download/$VulkanSdkVersion/windows/VulkanSDK-$VulkanSdkVersion-Installer.exe"
+# ----------------------------------------------------------------------------
+# Self-elevation. The install pass needs admin: the LunarG Vulkan SDK installer
+# writes to C:\VulkanSDK and sets the machine VULKAN_SDK env var + PATH. Rather
+# than ask the user to "open an elevated PowerShell" (a manual step), relaunch
+# this script elevated exactly once. The single UAC prompt the user approves
+# then covers every install below. The elevated child writes a transcript so the
+# non-elevated parent (and CI logs / Claude) can read what happened.
+# ----------------------------------------------------------------------------
+$__pyxisIsAdmin = ([Security.Principal.WindowsPrincipal]`
+    [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator)
+
+if ($Install -and -not $DryRun -and -not $Relaunched -and -not $__pyxisIsAdmin) {
+    if (-not $LogFile) { $LogFile = Join-Path $env:TEMP 'pyxis-bootstrap-install.log' }
+    Write-Host "Install pass needs administrator rights - relaunching elevated." -ForegroundColor Yellow
+    Write-Host "  Approve the Windows UAC prompt that appears." -ForegroundColor Yellow
+    Write-Host "  transcript: $LogFile"
+    Remove-Item $LogFile -ErrorAction SilentlyContinue
+    $argList = @(
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"",
+        '-Install', '-Relaunched', '-LogFile', "`"$LogFile`"",
+        '-VcpkgRoot', "`"$VcpkgRoot`"", '-VulkanSdkVersion', "`"$VulkanSdkVersion`""
+    )
+    if ($DryRun) { $argList += '-DryRun' }
+    $proc = Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $argList -Wait -PassThru
+    Write-Host "Elevated install pass exited with code $($proc.ExitCode). Transcript: $LogFile"
+    exit $proc.ExitCode
+}
+
+# In the elevated child, mirror everything to the transcript the parent reads.
+if ($Relaunched -and $LogFile) {
+    try { Start-Transcript -Path $LogFile -Force | Out-Null } catch {}
+}
+
+# Vulkan SDK download URLs. LunarG renamed the Windows installer: current SDKs
+# ship vulkansdk-windows-X64-<ver>.exe; older ones used VulkanSDK-<ver>-Installer.exe.
+# Try the current name first and fall back to the legacy one.
+$VULKAN_INSTALLER_URLS = @(
+    "https://sdk.lunarg.com/sdk/download/$VulkanSdkVersion/windows/vulkansdk-windows-X64-$VulkanSdkVersion.exe",
+    "https://sdk.lunarg.com/sdk/download/$VulkanSdkVersion/windows/VulkanSDK-$VulkanSdkVersion-Installer.exe"
+)
 
 # VS Build Tools args - Microsoft's documented unattended workload set
 # (https://learn.microsoft.com/en-us/visualstudio/install/use-command-line-parameters-to-install-visual-studio).
@@ -83,6 +130,38 @@ function Test-IsAdmin {
 
 function Test-CommandExists([string]$name) {
     $null -ne (Get-Command $name -ErrorAction SilentlyContinue)
+}
+
+function Add-PathOnce([string]$dir, [switch]$Persist) {
+    if (-not $dir -or -not (Test-Path $dir)) { return }
+    if (($env:PATH -split ';') -notcontains $dir) { $env:PATH = "$dir;$env:PATH" }
+    if ($Persist) {
+        $userPath = [Environment]::GetEnvironmentVariable('PATH', 'User')
+        if (-not $userPath) { $userPath = '' }
+        if (($userPath -split ';') -notcontains $dir) {
+            $newUser = if ($userPath) { "$userPath;$dir" } else { $dir }
+            [Environment]::SetEnvironmentVariable('PATH', $newUser, 'User')
+            Write-Info "persisted to User PATH: $dir"
+        }
+    }
+}
+
+function Resolve-VsBundledBuildTools([switch]$Persist) {
+    # CMake + Ninja ship inside every modern Visual Studio install under
+    # Common7\IDE\CommonExtensions\Microsoft\CMake. If they're not already on
+    # PATH, wire VS's copies in (process PATH always; User PATH when -Install) so
+    # we never need a separate winget CMake/Ninja install or admin for them.
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+    if (-not (Test-Path $vswhere)) { return }
+    $vsPath = & $vswhere -latest -products '*' -property installationPath 2>$null | Select-Object -First 1
+    if (-not $vsPath) { return }
+    $cmakeRoot = Join-Path $vsPath 'Common7\IDE\CommonExtensions\Microsoft\CMake'
+    if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
+        Add-PathOnce (Join-Path $cmakeRoot 'CMake\bin') -Persist:$Persist
+    }
+    if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) {
+        Add-PathOnce (Join-Path $cmakeRoot 'Ninja') -Persist:$Persist
+    }
 }
 
 function Get-CommandPath([string]$name) {
@@ -117,21 +196,30 @@ function Invoke-WingetVsBuildTools {
 function Invoke-VulkanSdkInstall {
     $tempDir = Join-Path $env:TEMP "pyxis-vulkan-$VulkanSdkVersion"
     New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
-    $installer = Join-Path $tempDir "VulkanSDK-$VulkanSdkVersion-Installer.exe"
+    $installer = Join-Path $tempDir "vulkansdk-$VulkanSdkVersion.exe"
 
-    Write-Info "downloading $VULKAN_INSTALLER_URL"
-    Write-Info "          → $installer"
     if ($DryRun) {
-        Write-Info '[dry-run] Invoke-WebRequest …'
+        Write-Info '[dry-run] download the first reachable of:'
+        $VULKAN_INSTALLER_URLS | ForEach-Object { Write-Info "          $_" }
         Write-Info "[dry-run] $installer --accept-licenses --default-answer --confirm-command install"
         return
     }
 
-    if (-not (Test-Path $installer)) {
-        try {
-            Invoke-WebRequest -Uri $VULKAN_INSTALLER_URL -OutFile $installer -UseBasicParsing
-        } catch {
-            Write-Bad "Vulkan SDK download failed: $_"
+    if (-not (Test-Path $installer) -or (Get-Item $installer).Length -lt 1MB) {
+        $downloaded = $false
+        foreach ($url in $VULKAN_INSTALLER_URLS) {
+            Write-Info "downloading $url"
+            Write-Info "          -> $installer"
+            try {
+                Invoke-WebRequest -Uri $url -OutFile $installer -UseBasicParsing
+                $downloaded = $true; break
+            } catch {
+                Write-Warn "  not available here ($($_.Exception.Message))"
+                Remove-Item $installer -ErrorAction SilentlyContinue
+            }
+        }
+        if (-not $downloaded) {
+            Write-Bad "Vulkan SDK download failed for every known URL pattern (version $VulkanSdkVersion)."
             return
         }
     }
@@ -247,15 +335,14 @@ function Test-ComponentVulkanSdk {
     $leaf = Split-Path -Leaf $sdkDir
     if ($leaf -match '^(\d+\.\d+\.\d+(?:\.\d+)?)$') {
         $ver = $Matches[1]
-        $minor = ([version]$ver).Minor
-        if ($minor -eq 3) {
+        # Gate on the pinned floor ($VulkanSdkVersion). NVRHI's pinned commit
+        # #errors below 1.4.318, so an older SDK (e.g. a stale 1.3.x) must be
+        # upgraded, not accepted.
+        if ([version]$ver -ge [version]$VulkanSdkVersion) {
             Write-Ok "Vulkan SDK $ver  ($sdkDir)"
             return @{ ok=$true; required=$true; install_kind='none' }
-        } elseif ($minor -gt 3) {
-            Write-Warn "Vulkan SDK $ver - newer than the plan-5-pinned 1.3.x; M0 builds OK but expect drift later"
-            return @{ ok=$true; required=$true; install_kind='none' }
         } else {
-            Write-Bad "Vulkan SDK $ver - too old (need 1.3.x per plan-5)"
+            Write-Bad "Vulkan SDK $ver - older than the pinned $VulkanSdkVersion (NVRHI needs >= 1.4.318); will upgrade"
             return @{ ok=$false; required=$true; install_kind='vulkan' }
         }
     }
@@ -332,6 +419,9 @@ function Test-ComponentGh {
 Write-Heading "Pyxis dev-box doctor (Install=$Install, DryRun=$DryRun)"
 Write-Info "$env:USERNAME on $env:COMPUTERNAME - admin: $(Test-IsAdmin)"
 Write-Info "Vulkan SDK target: $VulkanSdkVersion (override with -VulkanSdkVersion)"
+
+# Wire VS-bundled CMake/Ninja onto PATH before probing (persist on -Install).
+Resolve-VsBundledBuildTools -Persist:$Install
 
 $results = [ordered]@{
     'git'         = (Test-ComponentGit)
@@ -426,12 +516,11 @@ foreach ($entry in $results.GetEnumerator()) {
 Write-Host ''
 if ($allOk) {
     Write-Host 'All required components present. Pyxis builds with `cmake --preset dev`.' -ForegroundColor Green
-    exit 0
+} elseif (-not $Install) {
+    Write-Host 'Required components missing. Re-run with -Install to bootstrap (self-elevates).' -ForegroundColor Red
 } else {
-    if (-not $Install) {
-        Write-Host 'Required components missing. Re-run with -Install (elevated) to bootstrap.' -ForegroundColor Red
-    } else {
-        Write-Host 'Required components still missing after the install pass. Open a new shell and re-run the doctor.' -ForegroundColor Red
-    }
-    exit 1
+    Write-Host 'Required components still missing after the install pass. Open a new shell and re-run the doctor.' -ForegroundColor Red
 }
+
+if ($Relaunched -and $LogFile) { try { Stop-Transcript | Out-Null } catch {} }
+if ($allOk) { exit 0 } else { exit 1 }
