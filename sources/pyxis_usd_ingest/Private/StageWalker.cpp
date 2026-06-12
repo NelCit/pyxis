@@ -1410,6 +1410,80 @@ void EmitPointInstancer(const pxr::UsdPrim& instancerPrim,
   }
 }
 
+// Guarded flatten for indexed primvars (§M9 normals/tangents fallbacks).
+//
+// UsdGeomPrimvar::ComputeFlattened() sizes its output to
+// `indices.size() * elementSize` BEFORE validating a single index
+// (pxr/usd/usdGeom/primvar.h, _ComputeFlattenedHelper). Production
+// scenes ship malformed primvars — the OpenPBR Shader Playground
+// authors `primvars:normals` with elementSize == values.size() on 48
+// meshes — turning that resize into a multi-hundred-GB VtArray
+// allocation. The resulting std::bad_alloc escapes PrepareMesh's
+// noexcept and fail-fasts the process (0xc0000409). Validate
+// elementSize + every index BEFORE expanding; on any violation return
+// false with a reason so the caller warns and treats the channel as
+// unauthored (normals → computed face normals, st → no UVs,
+// displayColor → no fallback colour).
+template <typename ScalarType>
+[[nodiscard]] bool ComputeFlattenedChecked(const pxr::UsdGeomPrimvar& primvar,
+                                           pxr::VtArray<ScalarType>* flattened,
+                                           std::string* whyInvalid)
+{
+  if (!primvar.IsIndexed())
+  {
+    // Non-indexed path is a plain typed Get() — no index expansion.
+    if (!primvar.ComputeFlattened(flattened))
+    {
+      *whyInvalid = "value read failed (type mismatch or no value)";
+      return false;
+    }
+    return true;
+  }
+
+  // elementSize > 1 means each index addresses a *block* of N values
+  // (array-of-struct primvars). No Pyxis channel consumes blocked
+  // primvars — downstream length checks expect one value per face-
+  // vertex / point — and the malformed assets above live here, so
+  // reject outright instead of expanding.
+  const int elementSize = primvar.GetElementSize();
+  if (elementSize != 1)
+  {
+    *whyInvalid = "indexed with elementSize " + std::to_string(elementSize)
+                  + " (only 1 supported)";
+    return false;
+  }
+
+  pxr::VtArray<ScalarType> authored;
+  if (!primvar.Get(&authored) || authored.empty())
+  {
+    *whyInvalid = "indexed but value array is missing or empty";
+    return false;
+  }
+  pxr::VtIntArray primvarIndices;
+  if (!primvar.GetIndices(&primvarIndices) || primvarIndices.empty())
+  {
+    *whyInvalid = "indexed but indices array is missing or empty";
+    return false;
+  }
+  for (const int index : primvarIndices)
+  {
+    if (index < 0 || static_cast<std::size_t>(index) >= authored.size())
+    {
+      *whyInvalid = "index " + std::to_string(index) + " out of bounds for "
+                    + std::to_string(authored.size()) + " authored values";
+      return false;
+    }
+  }
+
+  // Indices fully validated — flatten manually (same semantics as
+  // ComputeFlattened for elementSize 1, minus the re-read).
+  flattened->clear();
+  flattened->resize(primvarIndices.size());
+  for (std::size_t i = 0; i < primvarIndices.size(); ++i)
+    (*flattened)[i] = authored[static_cast<std::size_t>(primvarIndices[i])];
+  return true;
+}
+
 // Emit a single UsdGeomMesh into `scene`. Returns the number of
 // (mesh, instance) pairs successfully emitted — typically 1 for a
 // plain mesh; N for a mesh with N face-bound UsdGeomSubsets (each
@@ -1553,8 +1627,14 @@ PreparedMesh PrepareMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xform
     if (displayPrimvar.HasValue())
     {
       pxr::VtArray<pxr::GfVec3f> displayColorArr;
-      displayPrimvar.ComputeFlattened(&displayColorArr);
-      if (!displayColorArr.empty())
+      std::string                whyInvalid;
+      if (!ComputeFlattenedChecked(displayPrimvar, &displayColorArr, &whyInvalid))
+      {
+        log.Warn(log::APP, "StageWalker: " + prim.GetPath().GetString()
+                               + " primvars:displayColor invalid (" + whyInvalid
+                               + "); ignoring.");
+      }
+      else if (!displayColorArr.empty())
       {
         fallbackDisplayColor = hlslpp::float3{
             displayColorArr[0][0], displayColorArr[0][1], displayColorArr[0][2]};
@@ -1681,16 +1761,25 @@ PreparedMesh PrepareMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xform
     const pxr::UsdGeomPrimvar     stPrimvar = primvarsApi.GetPrimvar(pxr::TfToken("st"));
     if (stPrimvar.HasValue())
     {
-      // ComputeFlattened (NOT plain Get) so indexed primvars expand
-      // through their `primvars:st:indices` side-table. Production
-      // USD (Omniverse, Animal Logic, Disney) authors UV islands as
+      // Flatten (NOT plain Get) so indexed primvars expand through
+      // their `primvars:st:indices` side-table. Production USD
+      // (Omniverse, Animal Logic, Disney) authors UV islands as
       // `values=[N unique uvs] + indices=[per-faceVertex int]` to
       // dedupe, and Get() would return just the N unique values —
       // tripping our `size == fvCount` length check below and
       // silently dropping every mesh's UVs.
-      stPrimvar.ComputeFlattened(&stUvs);
-      stInterpolation = stPrimvar.GetInterpolation();
-      stHasValue = true;
+      std::string whyInvalid;
+      if (ComputeFlattenedChecked(stPrimvar, &stUvs, &whyInvalid))
+      {
+        stInterpolation = stPrimvar.GetInterpolation();
+        stHasValue = true;
+      }
+      else
+      {
+        log.Warn(log::APP, "StageWalker: " + prim.GetPath().GetString()
+                               + " primvars:st invalid (" + whyInvalid
+                               + "); dropping UVs for this mesh.");
+      }
     }
   }
 
@@ -1805,8 +1894,14 @@ PreparedMesh PrepareMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xform
           primvarsApi.GetPrimvar(pxr::TfToken("normals"));
       if (normalsPrimvar.HasValue())
       {
-        normalsPrimvar.ComputeFlattened(&normalsArr);
-        if (!normalsArr.empty())
+        std::string whyInvalid;
+        if (!ComputeFlattenedChecked(normalsPrimvar, &normalsArr, &whyInvalid))
+        {
+          log.Warn(log::APP, "StageWalker: " + prim.GetPath().GetString()
+                                 + " primvars:normals invalid (" + whyInvalid
+                                 + "); falling back to computed face normals.");
+        }
+        else if (!normalsArr.empty())
         {
           normalsInterpolation = normalsPrimvar.GetInterpolation();
           normalsHasValue = true;
@@ -1860,6 +1955,33 @@ PreparedMesh PrepareMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xform
   const bool uvsConstant      = hasUvs
                                 && (stInterpolation == pxr::UsdGeomTokens->constant
                                     || stInterpolation == pxr::UsdGeomTokens->uniform);
+
+  // Surface the drop when an authored channel failed every length
+  // check above — silent fallback hides authoring bugs (§M9
+  // normals/tangents fallbacks). Refined subdiv meshes are exempt:
+  // cage-sized primvars legitimately mismatch the refined topology
+  // (see the RefineSubdivMesh block above — normals are not refined
+  // by design).
+  if (hasNormals && !emitNormals && !refined.refined)
+  {
+    log.Warn(log::APP, "StageWalker: " + primPath + " authored normals ("
+                           + normalsInterpolation.GetString() + ", "
+                           + std::to_string(normalsArr.size())
+                           + " values) don't match topology (faceVertices "
+                           + std::to_string(usdIndices.size()) + ", points "
+                           + std::to_string(usdPoints.size())
+                           + "); falling back to computed face normals.");
+  }
+  if (hasUvs && !uvsFv && !uvsVertex && !uvsConstant && !refined.refined)
+  {
+    log.Warn(log::APP, "StageWalker: " + primPath + " primvars:st ("
+                           + stInterpolation.GetString() + ", "
+                           + std::to_string(stUvs.size())
+                           + " values) doesn't match topology (faceVertices "
+                           + std::to_string(usdIndices.size()) + ", points "
+                           + std::to_string(usdPoints.size())
+                           + "); dropping UVs for this mesh.");
+  }
 
   for (const SubsetEmitInfo& subset : subsetInfos)
   {
@@ -2212,7 +2334,14 @@ PreparedMesh PrepareMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xform
   if (dcPrimvar.HasValue())
   {
     pxr::VtArray<pxr::GfVec3f> dcArr;
-    if (dcPrimvar.ComputeFlattened(&dcArr) && !dcArr.empty())
+    std::string                whyInvalid;
+    if (!ComputeFlattenedChecked(dcPrimvar, &dcArr, &whyInvalid))
+    {
+      Logging::Get().Warn(log::APP, "StageWalker: " + prim.GetPath().GetString()
+                                        + " primvars:displayColor invalid ("
+                                        + whyInvalid + "); ignoring.");
+    }
+    else if (!dcArr.empty())
     {
       const pxr::GfVec3f& firstDc = dcArr[0];
       subMesh.displayColor = hlslpp::float3{firstDc[0], firstDc[1], firstDc[2]};
