@@ -87,7 +87,8 @@ struct HitInfo {
     // leave it at 0. raygen's front-to-back transmission loop folds it
     // into a running throughput instead of tracing a recursive
     // continuation ray, so stacked transparent layers cost loop
-    // iterations rather than hardware recursion depth. See raygen.slang.
+    // iterations rather than hardware recursion depth. See
+    // raytraced_lighting_raygen.slang.
     float3 transmittance;   // 0 = opaque; >0 lets the surface behind show through
 };
 
@@ -159,8 +160,10 @@ struct CameraUniforms {
     float _camPad1;
 };
 
-// FrameUiUniforms — per-frame viewer-only state the raygen reads
-// (cursor pixel + AOV-inspector mode). Lives in its own cbuffer at
+// FrameUiUniforms — per-frame viewer-only state the lighting raygen
+// reads (cursor pixel for the picker gate; since the P3 split the
+// debugViewMode / worldPosPeriod fields are TonemapUniforms' domain —
+// kept here for the frozen layout, written 0). Lives in its own cbuffer at
 // binding 19 so future per-frame camera knobs (samplesPerPixel,
 // jitter offset, accumulation generation, ...) added to CameraUniforms
 // can grow without colliding with UI state. M7 follow-up: split out
@@ -174,12 +177,11 @@ struct FrameUiUniforms {
     // Row 0 — picker + display selector.
     uint  mousePixelX;          // top-left origin pixel coord, or PICK_PIXEL_NONE if no hover
     uint  mousePixelY;
-    uint  debugViewMode;        // DEBUG_VIEW_COLOR / NORMAL / DEPTH / PRIM_ID / ...
+    uint  debugViewMode;        // P3: dead here (Tonemap's domain); written 0
     uint  _reservedUi0;
     // Row 1 — AOV-specific knobs the editor surfaces as sliders.
-    // worldPosPeriod: scene-units period of the WorldPos AOV's sin
-    // encoding (10 m default for human-scale scenes; bump to ~50 m
-    // for World Lobby). Other fields reserved for future per-AOV display
+    // worldPosPeriod: P3 — dead here (TonemapUniforms carries the live
+    // copy); written 0. Other fields reserved for future per-AOV display
     // knobs.
     float worldPosPeriod;
     uint  _reservedUi1;
@@ -404,7 +406,7 @@ struct OpenPBRMaterialGPU {
 //
 // M7 ships a deliberately **simple shading model** (no NdotL, no
 // shadow rays, no NEE, no MIS, no importance sampling — see
-// closesthit.slang for the full closeup). Each light contributes
+// shading.slang for the full closeup). Each light contributes
 // `color * intensity * weight` where weight is 1.0 for direct
 // (Distant / Rect) and 0.5 for ambient (Dome). The `direction` /
 // `position` / `axisU` / `axisV` fields are stored for the future

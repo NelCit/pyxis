@@ -262,17 +262,6 @@ bool GpuScene::HasCamera() const noexcept {
 SceneResources detail::SceneResourcesAccess::Get(GpuScene& scene) noexcept {
   GpuScene::Impl& impl = *scene._impl;
 
-  // Refresh the slot-indexed ITexture* scratch behind `bindlessTextures`.
-  // bindlessSlot == texture slot (RFC 0009 P3); nullptr for the sentinel slot 0
-  // and dead / not-yet-decoded slots — identical to the old GetBindlessTextureAt.
-  // `assign` reuses capacity, so steady-state frames are allocation-free.
-  const uint32_t textureSlotCount = impl.textureSlots.SlotCount();
-  impl.bindlessTextureScratch.assign(textureSlotCount, nullptr);
-  impl.textureSlots.ForEachLiveSlot([&impl](uint32_t slot, flecs::entity) {
-    if (slot < impl.textureResources.size())
-      impl.bindlessTextureScratch[slot] = impl.textureResources[slot].Get();
-  });
-
   SceneResources view;
   view.tlas                    = impl.tlas.Get();
   view.materialBuffer          = impl.materialGpuBuffer.Get();
@@ -292,7 +281,13 @@ SceneResources detail::SceneResourcesAccess::Get(GpuScene& scene) noexcept {
   view.bindlessSampler         = impl.bindlessSampler.Get();
   view.domeSampler             = impl.domeSampler.Get();
   view.missingTexture          = impl.missingTexture.Get();
-  view.bindlessTextureCount    = textureSlotCount;
+  // P6 review — the slot-indexed ITexture* scratch is rebuilt once per
+  // commit (Impl::RefreshBindlessTextureScratch, CommitResources tail —
+  // texture content only changes during a commit); this accessor sits on
+  // every pass's Execute binding path, so it must return the cached
+  // pointer+count without allocating (§30.10). Count = the scratch's size
+  // so pointer and count always describe the same array.
+  view.bindlessTextureCount    = static_cast<uint32_t>(impl.bindlessTextureScratch.size());
   view.bindlessTextures        = impl.bindlessTextureScratch.data();
   return view;
 }

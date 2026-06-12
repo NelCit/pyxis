@@ -31,6 +31,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <memory>  // std::addressof (RefCountPtr overloads unary operator&).
 #include <utility>
 #include <vector>
 
@@ -170,6 +171,10 @@ void GpuScene::Impl::Clear() noexcept
   texturePixelData.clear();
   textureResolvedPaths.clear();
   textureLastAccessTick.clear();
+  // P6 review — the scratch is refreshed at each CommitResources tail; clear
+  // it here so the cached SceneResources view never carries pointers into a
+  // cleared scene between Clear() and the next commit.
+  bindlessTextureScratch.clear();
 
   // RFC 0009 P6 — volumes are Flecs entities; Reset destructs them + clears records.
   volumeSlots.Reset();
@@ -301,6 +306,12 @@ Expected<void> GpuScene::Impl::CommitResources(nvrhi::ICommandList* commandList)
   // upload has resolved it, so the per-frame RaytracedLightingPass binding path reads a cached
   // pointer instead of allocating + sorting the live-light set every frame.
   RefreshDomeEnvMapCache();
+  // P6 review — same regime for the bindless ITexture* scratch: texture
+  // content only changes during a commit (decode resolves here; destroys /
+  // evictions are picked up by the next commit), so rebuilding once here
+  // keeps SceneResourcesAccess::Get allocation-free on the pass Execute
+  // path (§30.10).
+  RefreshBindlessTextureScratch();
   return commitError;
 }
 
@@ -378,6 +389,20 @@ Expected<void> GpuScene::Impl::ClearDirtyFlags(nvrhi::ICommandList* /*commandLis
   return {};
 }
 
+void GpuScene::Impl::RefreshBindlessTextureScratch()
+{
+  // bindlessSlot == texture slot (RFC 0009 P3); nullptr for the sentinel
+  // slot 0 and dead / not-yet-decoded slots — identical to the old
+  // GetBindlessTextureAt. `assign` reuses capacity; any growth happens here
+  // on the commit path, never inside a pass Execute (§30.10).
+  const uint32_t textureSlotCount = textureSlots.SlotCount();
+  bindlessTextureScratch.assign(textureSlotCount, nullptr);
+  textureSlots.ForEachLiveSlot([this](uint32_t slot, flecs::entity) {
+    if (slot < textureResources.size())
+      bindlessTextureScratch[slot] = textureResources[slot].Get();
+  });
+}
+
 void GpuScene::Impl::RefreshDomeEnvMapCache() noexcept
 {
   // Single-dome convention (§43): the first live Dome light (slot order) with a
@@ -415,11 +440,26 @@ namespace {
 // PhaseExtractMeshes — strictly BEFORE BuildPendingBlas records builds against the
 // pool, so every BLAS input captures the post-growth handle at build-record time.
 // Replaces the old per-mesh createBuffer OOM paths with an equivalent Expected<>.
-[[nodiscard]] Expected<void> EnsureGeometryPoolCapacity(
-    nvrhi::IDevice* device, nvrhi::ICommandList* commandList,
-    nvrhi::BufferHandle& pool, std::uint64_t usedBytes, std::uint64_t neededBytes,
-    const nvrhi::BufferDesc& descTemplate, const char* errorLabel) noexcept
+// §30.5 — more than five inputs, so they ride in a Desc struct.
+struct GeometryPoolGrowDesc {
+  nvrhi::IDevice* device = nullptr;
+  nvrhi::ICommandList* commandList = nullptr;
+  nvrhi::BufferHandle* pool = nullptr;  // in/out — swapped to the grown buffer.
+  std::uint64_t usedBytes = 0;
+  std::uint64_t neededBytes = 0;
+  const nvrhi::BufferDesc* descTemplate = nullptr;
+  const char* errorLabel = "";
+};
+
+[[nodiscard]] Expected<void> EnsureGeometryPoolCapacity(const GeometryPoolGrowDesc& grow) noexcept
 {
+  nvrhi::IDevice* const device = grow.device;
+  nvrhi::ICommandList* const commandList = grow.commandList;
+  nvrhi::BufferHandle& pool = *grow.pool;
+  const std::uint64_t usedBytes = grow.usedBytes;
+  const std::uint64_t neededBytes = grow.neededBytes;
+  const nvrhi::BufferDesc& descTemplate = *grow.descTemplate;
+  const char* const errorLabel = grow.errorLabel;
   if (pool && pool->getDesc().byteSize >= neededBytes)
     return {};
   nvrhi::BufferDesc grownDesc = descTemplate;
@@ -478,10 +518,16 @@ Expected<void> GpuScene::Impl::UploadPendingMeshes(nvrhi::ICommandList* commandL
     vertexPoolDesc.isAccelStructBuildInput = true;
     vertexPoolDesc.initialState = nvrhi::ResourceStates::CopyDest;
     vertexPoolDesc.keepInitialState = true;
-    PYXIS_TRY(EnsureGeometryPoolCapacity(device, commandList, vertexPoolBuffer,
-                                         vertexPoolUsedBytes,
-                                         vertexPoolUsedBytes + newVertexBytes,
-                                         vertexPoolDesc, "vertexPool"));
+    // std::addressof: RefCountPtr overloads unary operator& (ComPtr idiom,
+    // returns IBuffer**), so plain &handle would not yield BufferHandle*.
+    PYXIS_TRY(EnsureGeometryPoolCapacity(
+        {.device = device,
+         .commandList = commandList,
+         .pool = std::addressof(vertexPoolBuffer),
+         .usedBytes = vertexPoolUsedBytes,
+         .neededBytes = vertexPoolUsedBytes + newVertexBytes,
+         .descTemplate = &vertexPoolDesc,
+         .errorLabel = "vertexPool"}));
 
     // Index pool — R32 indices; ALSO the gMeshIndices structured view (binding 26,
     // structStride = 4), which deletes the old flat duplicate buffer + its upload
@@ -498,10 +544,13 @@ Expected<void> GpuScene::Impl::UploadPendingMeshes(nvrhi::ICommandList* commandL
     indexPoolDesc.initialState = nvrhi::ResourceStates::ShaderResource;
     indexPoolDesc.keepInitialState = true;
     PYXIS_TRY(EnsureGeometryPoolCapacity(
-        device, commandList, indexPoolBuffer,
-        indexPoolUsedElements * sizeof(std::uint32_t),
-        (indexPoolUsedElements + newIndexElements) * sizeof(std::uint32_t),
-        indexPoolDesc, "indexPool"));
+        {.device = device,
+         .commandList = commandList,
+         .pool = std::addressof(indexPoolBuffer),
+         .usedBytes = indexPoolUsedElements * sizeof(std::uint32_t),
+         .neededBytes = (indexPoolUsedElements + newIndexElements) * sizeof(std::uint32_t),
+         .descTemplate = &indexPoolDesc,
+         .errorLabel = "indexPool"}));
 
     // Append pass — ascending slot order (deterministic; matches the old per-mesh
     // upload order, so a bulk load's pool bytes equal the old buffers concatenated).
@@ -1076,7 +1125,7 @@ Expected<void> GpuScene::Impl::UploadLightBuffer(nvrhi::ICommandList* commandLis
   // bound at RaytracedLightingPass binding 5. Sparse / dead slots are
   // omitted — the closesthit iterates the buffer's full length, so
   // emitting only live lights keeps the per-hit loop tight. The
-  // simple shading model in closesthit.slang ignores `intensity ==
+  // simple shading model in shading.slang ignores `intensity ==
   // 0` so a fallback 1-element zero buffer (used by RaytracedLightingPass
   // when the scene has no lights) contributes nothing.
   if (dirtyLightQuery.count() == 0)

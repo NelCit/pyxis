@@ -4,6 +4,8 @@
 
 #include "RenderGraph/PassContext.h"
 
+#include <Pyxis/Platform/Logging/Log.h>
+#include <Pyxis/Platform/Logging/LogCategories.h>
 #include <Pyxis/Renderer/Profiler.h>
 
 namespace pyxis {
@@ -24,6 +26,22 @@ bool RenderGraph::ReloadShaders() noexcept {
   {
     if (!pass->ReloadShaders())
       allOk = false;
+  }
+  if (!allOk)
+  {
+    // P6 review — the per-pass reload is old-on-failure but NOT
+    // transactional across passes: a partial reload can leave the two RT
+    // pipelines (RaytracedGBuffer + RaytracedLighting) built from
+    // DIFFERENT generations of the shared camera_ray / shading modules,
+    // breaking the "both raygens compute bit-identical primary rays"
+    // contract the visibility-buffer split depends on (the lighting pass
+    // reconstructs worldHit from a hitT the GBuffer pipeline traced).
+    Logging::Get().Error(
+        log::RENDER,
+        "RenderGraph::ReloadShaders: partial reload — at least one pass kept its old "
+        "pipeline while others may have swapped. The two RT pipelines can now be built "
+        "from different generations of the shared camera_ray/shading modules (mismatched "
+        "primary-ray math). Fix the failing shader and reload again.");
   }
   return allOk;
 }

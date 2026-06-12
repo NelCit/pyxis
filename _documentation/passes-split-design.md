@@ -97,6 +97,13 @@ AssetLocator/ReloadShaders path strings move in the same phase as each rename
 - Output: gOutput (BGRA8) — the exact display branch from raygen.slang:330-442
   (exposure exp2 + Narkowicz ACES on COLOR; the 10 debug encodings verbatim).
 
+Caveat: `ReloadShaders` is per-pass old-on-failure but not transactional
+across passes — a partial reload (one pass's .spv unreadable) can leave the
+two RT pipelines built from different generations of the shared
+`camera_ray.slang` / `shading.slang` modules; the RenderGraph logs an error
+when this happens, and the remedy is to fix the failing shader and reload
+again.
+
 ### D2. Specialization constants (NVRHI `ShaderSpecialization`, 32-bit, explicit `[[vk::constant_id(N)]]`)
 
 Per §34.3 these ship with profile evidence (before/after in the PR).
@@ -139,8 +146,13 @@ static_asserts):
   buffer+offset). The index pool doubles as `gMeshIndices` (binding 26)
   via structured view — deleting the flat duplicate (~12 MB at Lobby scale)
   and its separate upload path. Pool ranges from destroyed meshes leak until
-  `Clear()` (matches the multicycle VRAM test's whole-scene lifecycle; a
-  FrameStats counter tracks leaked bytes).
+  `Clear()` (matches the multicycle VRAM test's whole-scene lifecycle).
+  Leak observability is a Debug-level log line in `DestroyMesh` only — the
+  public `FrameStats` POD has no trailing `_reserved` slot to consume
+  (§22.3), so a leaked-bytes counter would be a layout break; demoted to
+  debug-log-only. `LastFrameStats` consequently reports live-range bytes,
+  not the pool's actual allocation (which also carries up to ~2x growth
+  slack).
 - Fallback consolidation: PathTracePass's 14 one-element fallback buffers
   collapse to one per distinct stride.
 - `SceneResources` (RFC 0003): internal view in `Private/Scene/`, populated
@@ -148,12 +160,18 @@ static_asserts):
   getters are removed (consumers: PathTracePass + one unit test — both
   in-repo). version.txt: 1.0.0 -> 2.0.0 (§22 MAJOR: public symbol removal).
 
-Final RT binding table (set 0): 0 gCamera, 1 gTlas, 3 gMaterials,
-4 gInstanceInfo, 5 gLights, 6 gMeshInfo, 7 gMeshFaceNormals, 9 gDomeEnvMap,
-10 gBindlessSampler, 11-23 AOVs/FrameUi (unchanged), 24 gMeshUvs,
-26 gMeshIndices (pool view), 28 gBindlessTextures[4096],
-29 gMeshVertexAttribs, 33 gDomeSampler, 34 gVisibility, 35 gLinearColor.
-(2 gOutput moves to TonemapPass's layout; 8/25/27/30/31/32 retired.)
+Final RT binding table — lighting pipeline B (set 0, as shipped in the
+`raytraced_lighting_*` / `shading` / `dome_sample` / `camera_ray` .slang
+`[[vk::binding]]` declarations): 0 gCamera, 1 gTlas, 2 gLinearColor (RGBA32F
+UAV — reuses the slot gOutput vacated), 3 gMaterials, 4 gInstanceInfo,
+5 gLights, 6 gMeshInfo, 7 gMeshFaceNormals, 9 gDomeEnvMap,
+10 gBindlessSampler, 11-18 AOVs/pick, 19 gFrameUi, 20-23 Tier-1 AOVs,
+24 gMeshUvs, 26 gMeshIndices (pool view), 28 gBindlessTextures[4096],
+29 gMeshVertexAttribs, 33 gDomeSampler, 34 gVisibility (SRV).
+GBuffer pipeline A has its own slim layout: 0 gCamera, 1 gTlas,
+2 gVisibility (UAV), 3 gMaterials, 4 gInstanceInfo (anyhit alpha test).
+(gOutput moves to TonemapPass's compute layout at binding 12;
+8/25/27/30/31/32 retired.)
 
 ## Determinism (the hard constraint)
 
@@ -207,12 +225,20 @@ World Lobby EXR (rmse 0.02 / mae 0.01 / maxAbs 0.50).
 ## Drawbacks / risks
 
 - Golden rebake risk from FP contraction (mitigated/owned above).
-- VRAM: +32 B/px visibility + 16 B/px linearColor (~48 MB at 1080p, ~190 MB
-  at SSAA 2x) — within §17 on 8 GB-class targets at 1080p; SSAA 4x on 8 GB
-  is already memory-hostile and unchanged in spirit.
+- VRAM: +48 B/px of new scratch (32 B/px visibility + 16 B/px linearColor),
+  sized off the display target: ~99.5 MB at 1920x1080 and ~398 MB at viewer
+  SSAA 2x (3840x2160 dispatch dims). A real cost on 8 GB-class targets —
+  acceptable at plain 1080p against the §17 budgets, but SSAA 2x spends a
+  noticeable slice of the budget on it, and SSAA 4x on 8 GB (already
+  memory-hostile pre-split) gets ~1.6 GB worse.
 - Perf-history discontinuity: pass.PathTrace disappears from nightly CSVs;
   perf_compare baselines restart (documented in the PR).
 - Public-surface removal (RFC 0003) is a MAJOR version bump.
+- Pooled-geometry leak bytes (destroyed meshes' ranges, held until `Clear()`)
+  are NOT surfaced in `FrameStats` — the POD has no `_reserved` slot left
+  (§22.3) — so within a destroy-heavy scene lifecycle actual pool VRAM
+  exceeds the reported vertex/index bytes; the only signal is the
+  Debug-level `DestroyMesh` log line.
 - Two RT pipelines + SBTs (GBuffer/Lighting) roughly double pipeline-create
   time at startup (one-time, small).
 

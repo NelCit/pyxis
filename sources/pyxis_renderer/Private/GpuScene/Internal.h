@@ -234,10 +234,12 @@ struct GpuScene::Impl
   // side table (not GpuTextureComponent) so a cache hit bumps it with a plain write
   // instead of a get<>()+set<>() round-trip that also re-persisted a fragile view.
   std::vector<std::uint64_t>        textureLastAccessTick;
-  // RFC 0003 — slot-indexed ITexture* scratch behind SceneResources::bindlessTextures.
-  // Refreshed by SceneResourcesAccess::Get each call (nullptr for sentinel / dead /
-  // not-yet-decoded slots — the old GetBindlessTextureAt semantics); reuses capacity,
-  // so steady-state frames are allocation-free.
+  // RFC 0003 — slot-indexed ITexture* scratch behind SceneResources::bindlessTextures
+  // (nullptr for sentinel / dead / not-yet-decoded slots — the old
+  // GetBindlessTextureAt semantics). P6 review — refreshed once per commit by
+  // RefreshBindlessTextureScratch (CommitResources tail); SceneResourcesAccess::Get
+  // sits on the per-pass Execute binding path, so it must return the cached
+  // pointer+count without allocating (§30.10).
   std::vector<nvrhi::ITexture*>     bindlessTextureScratch;
   // P4 — meshes (GpuMeshComponent). meshResources is the slot-indexed heavy CPU/GPU
   // data; meshSlots owns slot/generation/liveness; DirtyTopology marks (re)upload+BLAS.
@@ -632,6 +634,13 @@ struct GpuScene::Impl
   // Dome light with a resolved env-map, slot order). Called once at the end of each
   // CommitResources; SceneResources then carries the cached pointer.
   void RefreshDomeEnvMapCache() noexcept;
+
+  // P6 review — rebuild the slot-indexed ITexture* scratch behind
+  // SceneResources::bindlessTextures. Called once at the end of each
+  // CommitResources (texture content only changes during a commit), so the
+  // per-frame SceneResourcesAccess::Get on the pass Execute path returns the
+  // cached pointer+count without allocating (§30.10).
+  void RefreshBindlessTextureScratch();
 };
 
 }  // namespace pyxis

@@ -58,12 +58,29 @@ struct PipelineVariant {
 // only, so the lighting pass's recursion budget doesn't apply here.
 // Returns a default (null) PipelineVariant on any failure, after
 // logging with the caller-supplied context prefix.
-PipelineVariant BuildPipelineVariant(nvrhi::IDevice* device,
-                                     nvrhi::IBindingLayout* bindingLayout,
-                                     nvrhi::IShader* raygen, nvrhi::IShader* miss,
-                                     nvrhi::IShader* closestHit, nvrhi::IShader* anyHit,
-                                     uint32_t projectionMode,
-                                     const char* logContext) noexcept {
+// §30.5 — more than five inputs, so they ride in a Desc struct (the
+// nvrhi::*Desc idiom this function itself uses internally). No
+// shadowMiss: this pipeline has no shadow rays.
+struct PipelineVariantDesc {
+  nvrhi::IDevice* device = nullptr;
+  nvrhi::IBindingLayout* bindingLayout = nullptr;
+  nvrhi::IShader* raygen = nullptr;
+  nvrhi::IShader* miss = nullptr;
+  nvrhi::IShader* closestHit = nullptr;
+  nvrhi::IShader* anyHit = nullptr;
+  uint32_t projectionMode = 0;
+  const char* logContext = "";
+};
+
+PipelineVariant BuildPipelineVariant(const PipelineVariantDesc& desc) noexcept {
+  nvrhi::IDevice* const device = desc.device;
+  nvrhi::IBindingLayout* const bindingLayout = desc.bindingLayout;
+  nvrhi::IShader* const raygen = desc.raygen;
+  nvrhi::IShader* const miss = desc.miss;
+  nvrhi::IShader* const closestHit = desc.closestHit;
+  nvrhi::IShader* const anyHit = desc.anyHit;
+  const uint32_t projectionMode = desc.projectionMode;
+  const char* const logContext = desc.logContext;
   auto& log = Logging::Get();
   const nvrhi::ShaderSpecialization raygenConstants[] = {
       nvrhi::ShaderSpecialization::UInt32(shaderinterop::SPEC_ID_PROJECTION_MODE,
@@ -181,9 +198,14 @@ RaytracedGBufferPass::RaytracedGBufferPass(nvrhi::IDevice* device, GpuScene& sce
   // camera reports it (PyxisRenderer's CPU frame path — never inside
   // Execute). maxRecursionDepth = 1: this pipeline traces the primary
   // ray only (no shading, no secondary rays).
-  PipelineVariant perspective = BuildPipelineVariant(
-      _device, _bindingLayout, _raygenShader, _missShader, _closestHitShader,
-      _anyHitShader, /*projectionMode*/ 0u, "RaytracedGBufferPass");
+  PipelineVariant perspective = BuildPipelineVariant({.device = _device,
+                                                      .bindingLayout = _bindingLayout,
+                                                      .raygen = _raygenShader,
+                                                      .miss = _missShader,
+                                                      .closestHit = _closestHitShader,
+                                                      .anyHit = _anyHitShader,
+                                                      .projectionMode = 0u,
+                                                      .logContext = "RaytracedGBufferPass"});
   if (!perspective.pipeline || !perspective.shaderTable)
     return;  // BuildPipelineVariant already logged the failing step.
   _pipelines[0]    = std::move(perspective.pipeline);
@@ -259,6 +281,34 @@ nvrhi::IBuffer* RaytracedGBufferPass::EnsureVisibilityBuffer(uint32_t width, uin
   _visibility = _device->createBuffer(desc);
   _visibilityW = width;
   _visibilityH = height;
+  // P6 review — the binding-set cache keys on the visibility pointer, and
+  // NVRHI binding sets hold STRONG refs to every bound resource: without
+  // this clear, each resize would leave a cached set pinning the retired
+  // width*height*32 B buffer in VRAM (up to MAX_CACHE_ENTRIES-1 stale
+  // buffers). CPU frame path (PyxisRenderer calls this before the graph
+  // walks), so dropping descriptor sets here is legal.
+  _bindingSetCache.clear();
+  _lastBindings = {};
+  if (!_visibility)
+  {
+    // §30.6 — no silent failures: a null handle here degrades the whole
+    // frame chain (both RT passes early-out on null visibility). Latched
+    // so the per-frame Ensure call doesn't spam.
+    if (!_visibilityCreateFailedLogged)
+    {
+      Logging::Get().Error(log::RENDER,
+                           "RaytracedGBufferPass: createBuffer(visibility, "
+                               + std::to_string(desc.byteSize)
+                               + " bytes) failed; RT passes will skip");
+      _visibilityCreateFailedLogged = true;
+    }
+    return nullptr;
+  }
+  _visibilityCreateFailedLogged = false;
+  // Fresh buffer ⇒ contents undefined; Execute clears it to the miss
+  // pattern before anything else can read it (belt-and-braces for
+  // asymmetric pass failures — see IsOperational).
+  _visibilityNeedsClear = true;
   return _visibility;
 }
 
@@ -294,9 +344,15 @@ bool RaytracedGBufferPass::ReloadShaders() noexcept {
   // rebuilt only if it had been materialized — otherwise
   // EnsureProjectionPipeline lazily rebuilds it from the NEW base
   // shaders on demand.
-  PipelineVariant newPerspective = BuildPipelineVariant(
-      _device, _bindingLayout, newRaygen, newMiss, newClosestHit, newAnyHit,
-      /*projectionMode*/ 0u, "RaytracedGBufferPass::ReloadShaders");
+  PipelineVariant newPerspective =
+      BuildPipelineVariant({.device = _device,
+                            .bindingLayout = _bindingLayout,
+                            .raygen = newRaygen,
+                            .miss = newMiss,
+                            .closestHit = newClosestHit,
+                            .anyHit = newAnyHit,
+                            .projectionMode = 0u,
+                            .logContext = "RaytracedGBufferPass::ReloadShaders"});
   if (!newPerspective.pipeline || !newPerspective.shaderTable)
   {
     log.Error(log::RENDER,
@@ -307,9 +363,15 @@ bool RaytracedGBufferPass::ReloadShaders() noexcept {
   PipelineVariant newOrthographic;
   if (_pipelines[1])
   {
-    newOrthographic = BuildPipelineVariant(
-        _device, _bindingLayout, newRaygen, newMiss, newClosestHit, newAnyHit,
-        /*projectionMode*/ 1u, "RaytracedGBufferPass::ReloadShaders");
+    newOrthographic =
+        BuildPipelineVariant({.device = _device,
+                              .bindingLayout = _bindingLayout,
+                              .raygen = newRaygen,
+                              .miss = newMiss,
+                              .closestHit = newClosestHit,
+                              .anyHit = newAnyHit,
+                              .projectionMode = 1u,
+                              .logContext = "RaytracedGBufferPass::ReloadShaders"});
     if (!newOrthographic.pipeline || !newOrthographic.shaderTable)
     {
       log.Error(log::RENDER,
@@ -350,9 +412,14 @@ void RaytracedGBufferPass::EnsureProjectionPipeline() {
   // walks) — pipeline variants are NEVER created inside Execute
   // (§30.10 no allocations in the per-frame pass body).
   PipelineVariant built = BuildPipelineVariant(
-      _device, _bindingLayout, _raygenShader, _missShader, _closestHitShader,
-      _anyHitShader, static_cast<uint32_t>(variant),
-      "RaytracedGBufferPass::EnsureProjectionPipeline");
+      {.device = _device,
+       .bindingLayout = _bindingLayout,
+       .raygen = _raygenShader,
+       .miss = _missShader,
+       .closestHit = _closestHitShader,
+       .anyHit = _anyHitShader,
+       .projectionMode = static_cast<uint32_t>(variant),
+       .logContext = "RaytracedGBufferPass::EnsureProjectionPipeline"});
   if (!built.pipeline || !built.shaderTable)
   {
     // Latched so the per-frame hook doesn't retry (and re-log) forever;
@@ -416,8 +483,6 @@ nvrhi::BindingSetHandle RaytracedGBufferPass::GetOrCreateBindingSet(
 
 void RaytracedGBufferPass::Execute(nvrhi::ICommandList* commandList,
                                    const PassContext& context) {
-  if (!_shadersOk)
-    return;
   if (commandList == nullptr || context.targets == nullptr)
     return;
   // P4 — the visibility buffer this pass owns, threaded back through the
@@ -428,6 +493,23 @@ void RaytracedGBufferPass::Execute(nvrhi::ICommandList* commandList,
   // mismatch only happens on a stale context.
   nvrhi::IBuffer* const visibility = context.visibility;
   if (visibility == nullptr || visibility != _visibility.Get())
+    return;
+
+  // P6 review — consume the fresh-buffer clear BEFORE any pipeline/
+  // shader early-out below: a freshly created buffer has undefined
+  // contents, and the gates from here on are pass-LOCAL (_shadersOk,
+  // variant pipeline), so this pass can skip its dispatch while the
+  // lighting pass still runs. 0xBF800000 is the bit pattern of
+  // float -1.0f — every unwritten VisibilityGpu record reads
+  // hitT = -1.0, which the lighting raygen treats as a miss instead of
+  // shading from garbage (and indexing gInstanceInfo out of bounds).
+  if (_visibilityNeedsClear)
+  {
+    commandList->clearBufferUInt(visibility, 0xBF800000u);
+    _visibilityNeedsClear = false;
+  }
+
+  if (!_shadersOk)
     return;
 
   // RFC 0003 — snapshot the scene's borrowed NVRHI resources once per Execute.

@@ -1,7 +1,8 @@
 // Pyxis renderer — display-transform (tonemap + debug-view encode) pass.
 //
 // P3 of the pass-split design (_documentation/passes-split-design.md D1): the
-// 11-way display branch extracted VERBATIM from raygen.slang. Reads the fp32
+// 11-way display branch extracted VERBATIM from the retired raygen.slang
+// (now tonemap.slang). Reads the fp32
 // LINEAR radiance RaytracedLightingPass writes (PassContext::linearColor, RGBA32F —
 // the display path never sees RGBA16F quantization) plus the 10 raw debug-view
 // AOVs, applies exposure (2^stops) + Narkowicz ACES on the COLOR path (or the

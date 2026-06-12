@@ -28,8 +28,9 @@ Exit codes:
     1  warn      — at least one metric regressed past threshold
     2  invocation / IO failure
 
-The KPIs compared today are: ``pathtrace_gpu_p50_ms``,
-``pathtrace_gpu_p99_ms``, ``commit_resources_cpu_p50_ms``,
+The KPIs compared today are: ``rt_total_gpu_p50_ms``/``p99`` (pass-split
+successors of the retired ``pathtrace_gpu_*`` columns), the per-pass
+``gbuffer/lighting/tonemap_gpu_p50_ms``, ``commit_resources_cpu_p50_ms``,
 ``frame_cpu_p50_ms``, ``wall_clock_ms``. Adding a metric: append to
 ``_TRACKED_KPIS`` below and the rolling-median pipeline picks it up.
 """
@@ -48,8 +49,13 @@ from typing import Optional
 # KPI columns we run regression checks on. Order = display order in
 # the report. (column_name, human_label, lower_is_better).
 _TRACKED_KPIS: list[tuple[str, str, bool]] = [
-    ('pathtrace_gpu_p50_ms',         'pass.PathTrace p50',           True),
-    ('pathtrace_gpu_p99_ms',         'pass.PathTrace p99',           True),
+    # Pass-split successors of pass.PathTrace (passes-split-design.md P6);
+    # the rolling history restarts at the split.
+    ('rt_total_gpu_p50_ms',          'RT total (GBuffer+Lighting) p50', True),
+    ('rt_total_gpu_p99_ms',          'RT total (GBuffer+Lighting) p99', True),
+    ('gbuffer_gpu_p50_ms',           'pass.RaytracedGBuffer p50',    True),
+    ('lighting_gpu_p50_ms',          'pass.RaytracedLighting p50',   True),
+    ('tonemap_gpu_p50_ms',           'pass.Tonemap p50',             True),
     ('commit_resources_cpu_p50_ms',  'commitResources p50',          True),
     ('commit_resources_cpu_p99_ms',  'commitResources p99',          True),
     ('frame_cpu_p50_ms',             'render.frame.cpu p50',         True),

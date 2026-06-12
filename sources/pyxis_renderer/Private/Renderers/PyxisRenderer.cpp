@@ -26,6 +26,7 @@ namespace pyxis {
 PyxisRenderer::PyxisRenderer(nvrhi::IDevice* device, GpuScene& scene, Profiler& profiler,
                              const RendererCreateDesc& desc)
     : _profiler(&profiler),
+      _scene(&scene),
       _graph(std::make_unique<RenderGraph>(device, &profiler)),
       _framesInFlight(desc.framesInFlight) {
   // RaytracedGBufferPass runs first (P4 pass split): one primary ray per
@@ -123,6 +124,28 @@ void PyxisRenderer::RenderFrame(nvrhi::ICommandList* commandList, const RenderSe
   if (_lightingPass != nullptr) {
     static_cast<RaytracedLightingPass*>(_lightingPass)->EnsureProjectionPipeline();
   }
+  // P6 review — pass-health degradation. The per-pass gates (_shadersOk,
+  // latched variant-build failures) are pass-LOCAL and can fail
+  // asymmetrically (one pipeline's .spv missing/corrupt, one lazy ortho
+  // build failing): without this, the lighting pass would shade from a
+  // visibility buffer the GBuffer pass never wrote, and Tonemap would
+  // display a linearColor the lighting pass never wrote. Nulling the
+  // scratch pointers here makes every downstream consumer take its
+  // existing null early-out, degrading to the pre-split behavior of an
+  // untouched display output instead of garbage frames.
+  const uint32_t projectionMode = _scene != nullptr && _scene->HasCamera()
+                                      ? _scene->GetCamera().projectionMode
+                                      : 0u;
+  const bool gbufferOk = _gbufferPass != nullptr
+                         && static_cast<RaytracedGBufferPass*>(_gbufferPass)
+                                ->IsOperational(projectionMode);
+  const bool lightingOk = _lightingPass != nullptr
+                          && static_cast<RaytracedLightingPass*>(_lightingPass)
+                                 ->IsOperational(projectionMode);
+  if (!gbufferOk)
+    context.visibility = nullptr;
+  if (!gbufferOk || !lightingOk)
+    context.linearColor = nullptr;
   // At SSAA factor > 1, give SsaaResolvePass its base-res LINEAR downsample target
   // (it owns the texture) and thread it to BlitToSrgbPass via the context. At
   // factor 1 it stays null and BlitToSrgbPass reads `color` directly.

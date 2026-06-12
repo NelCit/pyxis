@@ -208,9 +208,10 @@ if(_rcCDvsLit EQUAL 0)
         "m7_lighting: color-only-dome EXR is byte-identical to the "
         "HDRI-lit EXR. That can't be right — one fixture has the magenta "
         "color-only dome, the other has the HDRI Sky. Most likely the "
-        "miss shader is reading from a stale bound texture, or "
-        "GetDomeEnvMapTexture mis-resolves which dome's texture is "
-        "active across the two runs.")
+        "miss shader is reading from a stale bound texture, or the dome "
+        "env-map cache (GpuScene's RefreshDomeEnvMapCache feeding "
+        "SceneResources::domeEnvMapTexture) mis-resolves which dome's "
+        "texture is active across the two runs.")
 endif()
 
 message(STATUS

@@ -3,7 +3,7 @@
     defaultPrim = "World"
     metersPerUnit = 1
     upAxis = "Y"
-    doc = "Pyxis golden mat_mirror_translucent — a polished chrome floor (the World Lobby mirror case) reflects a clear glass sphere with an opaque red ball behind it. The floor's reflection bounce must run the front-to-back transmission composite (closesthit.slang), so the glass seen IN the floor shows what is behind it instead of collapsing to its near-black emitted term (glass-in-a-mirror rendered black before the fix). Opaque/miss reflected hits still break after one segment, so this golden is the dedicated guard for the translucent-reflection path."
+    doc = "Pyxis golden mat_mirror_translucent — a polished chrome floor (the World Lobby mirror case) reflects a clear glass sphere with an opaque red ball behind it. The floor's reflection bounce must run the front-to-back transmission composite (shading.slang), so the glass seen IN the floor shows what is behind it instead of collapsing to its near-black emitted term (glass-in-a-mirror rendered black before the fix). Opaque/miss reflected hits still break after one segment, so this golden is the dedicated guard for the translucent-reflection path."
 )
 def Xform "World"
 {

@@ -108,6 +108,24 @@ class RaytracedLightingPass final : public IRenderPass {
   // ReloadShaders; Execute skips while the selected variant is null.
   void EnsureProjectionPipeline();
 
+  // P6 review — pass-health probe for PyxisRenderer's frame path,
+  // mirroring RaytracedGBufferPass::IsOperational. True iff the ctor
+  // loaded all shaders AND the requested projection-mode variant's
+  // pipeline+SBT exist or can still be lazily built (i.e. the lazy
+  // build hasn't latched a failure). PyxisRenderer calls this AFTER
+  // EnsureProjectionPipeline each frame: when false, it nulls
+  // PassContext::linearColor so TonemapPass degrades to the pre-split
+  // untouched-output no-op instead of tonemapping a never-written
+  // linearColor.
+  [[nodiscard]] bool IsOperational(uint32_t projectionMode) const noexcept {
+    if (!_shadersOk)
+      return false;
+    const std::size_t variant = (projectionMode == 1u) ? 1u : 0u;
+    if (_pipelines[variant] && _shaderTables[variant])
+      return true;
+    return !_variantBuildFailed[variant];  // lazy build still possible.
+  }
+
  private:
   // Build the binding set for the supplied linear-radiance output + the
   // visibility buffer (P4) + targets + scene-resource view (RFC 0003 — the
@@ -203,6 +221,9 @@ class RaytracedLightingPass final : public IRenderPass {
   nvrhi::TextureHandle _linearColor;
   uint32_t _linearColorW = 0;
   uint32_t _linearColorH = 0;
+  // P6 review — latched after the first logged createTexture failure so
+  // the per-resize allocation path doesn't spam the log every frame.
+  bool _linearColorCreateFailedLogged = false;
 
   // Output binding-set cache, keyed on the output texture pointer.
   // Bounded — a swapchain rebuild churns through up to ~3 swapchain
@@ -218,7 +239,15 @@ class RaytracedLightingPass final : public IRenderPass {
   // indices below; the construction site documents which scene/target
   // getter feeds each slot.
   enum class BindingSlot : std::size_t {
-    Materials = 0,
+    // P6 review — the TLAS handle itself. GpuScene replaces the TLAS
+    // OBJECT on the first transform-only commit after an append-built
+    // TLAS (Commit.cpp upgrades it to AllowUpdate with a new
+    // nvrhi handle); without this slot the cached set would keep the
+    // orphaned pre-upgrade accel struct bound while the GBuffer pass
+    // (which snapshots res.tlas) traces the new one — cross-pass
+    // scene divergence for every secondary ray.
+    Tlas = 0,
+    Materials,
     InstanceInfo,
     Lights,
     MeshInfo,

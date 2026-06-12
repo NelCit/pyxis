@@ -80,6 +80,12 @@ class PYXIS_RENDERER_API PyxisRenderer final {
 
  private:
   Profiler* _profiler = nullptr;
+  // Borrowed pointer to the scene the ctor received — RenderFrame reads
+  // the active camera's projectionMode to drive the per-variant
+  // IsOperational pass-health probes (P6 review). Same lifetime contract
+  // as the pass pointers below: the caller keeps the GpuScene alive for
+  // the renderer's lifetime (§18.6).
+  GpuScene* _scene = nullptr;
   std::unique_ptr<RenderGraph> _graph;
   // Borrowed pointer to the RaytracedGBufferPass the graph owns — kept
   // here so RenderFrame can ask it for its visibility buffer

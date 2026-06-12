@@ -79,9 +79,13 @@ TonemapPass::TonemapPass(nvrhi::IDevice* device, GpuScene& scene)
   cbDesc.isConstantBuffer = true;
   // Volatile: writeBuffer'd once per Execute on the open command list (NVRHI
   // auto-versions volatile cbuffers so the dispatch sees the just-written
-  // params — same finding as SsaaResolve.Params).
+  // params — same finding as SsaaResolve.Params). maxVersions sizes the
+  // version ring PER OPEN COMMAND LIST: the headless --bench-frames loop
+  // records hundreds of frames into one list, so 16 versions starved and
+  // NVRHI spammed "maxVersions is insufficient" (P5 bench finding). 512
+  // covers a 480-frame bench window at 32 B/version (16 KB) — trivial.
   cbDesc.isVolatile = true;
-  cbDesc.maxVersions = 16;
+  cbDesc.maxVersions = 512;
   cbDesc.debugName = "Tonemap.Params";
   _paramsBuffer = _device->createBuffer(cbDesc);
   if (!_paramsBuffer) {
@@ -169,8 +173,18 @@ nvrhi::BindingSetHandle TonemapPass::GetOrCreateBindingSet(
       nvrhi::BindingSetItem::Texture_UAV(12, dest),
   };
   nvrhi::BindingSetHandle set = _device->createBindingSet(setDesc, _bindingLayout);
-  // Bounded cache — resizes / AOV rebinds churn a handful of pointer tuples;
-  // cap so stale dangling-pointer entries don't accumulate across re-inits.
+  // P6 review — a key miss means at least one bound pointer changed, i.e.
+  // a resize / SSAA-factor change retired the previous AOV + linearColor +
+  // display-target generation. NVRHI binding sets hold STRONG refs to
+  // every bound resource, so keeping the old entries would pin entire
+  // retired generations (~190 MB each at 1080p, x4 under SSAA 2x) in
+  // VRAM. Clear on miss: steady state keeps exactly 1 live entry, and
+  // retired generations are released the frame their replacement is
+  // first used.
+  if (!_bindingSetCache.empty())
+    _bindingSetCache.clear();
+  // Bounded cache — kept as belt-and-braces (unreachable after the
+  // clear-on-miss above, but harmless).
   if (_bindingSetCache.size() > 8)
     _bindingSetCache.clear();
   _bindingSetCache.emplace(key, set);

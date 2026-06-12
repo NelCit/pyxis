@@ -214,8 +214,11 @@ public:
   // RFC 0003 — the raw-NVRHI-resource getters (TLAS, packed scene
   // buffers, samplers, bindless table) moved to the renderer-internal
   // `SceneResources` view (Private/Scene/SceneResources.h), reached via
-  // the friended `detail::SceneResourcesAccess` hook below. Only
-  // non-NVRHI introspection remains public.
+  // the friended `detail::SceneResourcesAccess` hook below. The camera
+  // introspection below is NVRHI-free; the V2.A.5 volume getters are the
+  // one surviving raw-NVRHI exception (retained as-is: no render pass
+  // consumes them yet — the volume-integrator follow-up decides whether
+  // they migrate into SceneResources or stay).
   [[nodiscard]] const CameraDesc&        GetCamera() const noexcept;
   [[nodiscard]] bool                     HasCamera() const noexcept;
 

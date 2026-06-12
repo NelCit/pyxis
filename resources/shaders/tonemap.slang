@@ -1,12 +1,12 @@
 // Pyxis renderer -- display-transform compute shader (TonemapPass).
 //
 // P3 of the pass-split design: the 11-way debug-view display branch extracted
-// VERBATIM from raygen.slang (exposure 2^stops + Narkowicz ACES on the COLOR
-// path; the 10 debug encodings unchanged). Inputs are the fp32 LINEAR radiance
-// PathTracePass writes (gLinearColor, RGBA32F -- bit-identical to the
-// in-kernel payload.color the old inline branch consumed; NOT the RGBA16F
-// colorHdr AOV, which would quantize the display path) plus the 10 raw
-// debug-view AOV textures. Output is the BGRA8 display target (gOutput) the
+// VERBATIM from the retired raygen.slang (exposure 2^stops + Narkowicz ACES on
+// the COLOR path; the 10 debug encodings unchanged). Inputs are the fp32
+// LINEAR radiance RaytracedLightingPass writes (gLinearColor, RGBA32F --
+// bit-identical to the in-kernel payload.color the old inline branch consumed;
+// NOT the RGBA16F colorHdr AOV, which would quantize the display path) plus
+// the 10 raw debug-view AOV textures. Output is the BGRA8 display target (gOutput) the
 // SSAA resolve / sRGB blit / headless writer / Kit export consume exactly as
 // before.
 //

@@ -44,8 +44,9 @@ static_assert(sizeof(CameraUniforms) == 208,
               "(worldFromView / viewFromClip / viewFromWorld + exposure stops, "
               "see resources/shaders/ShaderInterop.slang).");
 static_assert(sizeof(shaderinterop::FrameUiUniforms) == 32,
-              "FrameUiUniforms is 32 bytes (2 cbuffer rows): picker + display "
-              "selector on row 0, per-AOV knobs (worldPosPeriod + reserved) on row 1.");
+              "FrameUiUniforms is 32 bytes (2 cbuffer rows). Since the P3 split only "
+              "the row-0 picker pixel is live here; the debugViewMode / worldPosPeriod "
+              "slots are TonemapUniforms' domain (kept for the frozen layout, written 0).");
 
 // Thin wrapper over the shared LoadSpirvShader (RenderGraph/ShaderLoad.h) that
 // pins the "RaytracedLightingPass" log prefix so the call sites below stay terse.
@@ -81,12 +82,30 @@ struct PipelineVariant {
 // default (null) PipelineVariant on any failure, after logging with
 // the caller-supplied context prefix; the caller keeps its previous
 // state (old-on-failure semantics).
-PipelineVariant BuildPipelineVariant(nvrhi::IDevice* device,
-                                     nvrhi::IBindingLayout* bindingLayout,
-                                     nvrhi::IShader* raygen, nvrhi::IShader* miss,
-                                     nvrhi::IShader* shadowMiss, nvrhi::IShader* closestHit,
-                                     nvrhi::IShader* anyHit, uint32_t projectionMode,
-                                     const char* logContext) noexcept {
+// §30.5 — more than five inputs, so they ride in a Desc struct (the
+// nvrhi::*Desc idiom this function itself uses internally).
+struct PipelineVariantDesc {
+  nvrhi::IDevice* device = nullptr;
+  nvrhi::IBindingLayout* bindingLayout = nullptr;
+  nvrhi::IShader* raygen = nullptr;
+  nvrhi::IShader* miss = nullptr;
+  nvrhi::IShader* shadowMiss = nullptr;
+  nvrhi::IShader* closestHit = nullptr;
+  nvrhi::IShader* anyHit = nullptr;
+  uint32_t projectionMode = 0;
+  const char* logContext = "";
+};
+
+PipelineVariant BuildPipelineVariant(const PipelineVariantDesc& desc) noexcept {
+  nvrhi::IDevice* const device = desc.device;
+  nvrhi::IBindingLayout* const bindingLayout = desc.bindingLayout;
+  nvrhi::IShader* const raygen = desc.raygen;
+  nvrhi::IShader* const miss = desc.miss;
+  nvrhi::IShader* const shadowMiss = desc.shadowMiss;
+  nvrhi::IShader* const closestHit = desc.closestHit;
+  nvrhi::IShader* const anyHit = desc.anyHit;
+  const uint32_t projectionMode = desc.projectionMode;
+  const char* const logContext = desc.logContext;
   auto& log = Logging::Get();
   const nvrhi::ShaderSpecialization raygenConstants[] = {
       nvrhi::ShaderSpecialization::UInt32(shaderinterop::SPEC_ID_PROJECTION_MODE,
@@ -287,9 +306,15 @@ RaytracedLightingPass::RaytracedLightingPass(nvrhi::IDevice* device, GpuScene& s
   // camera reports it (PyxisRenderer's CPU frame path — never inside
   // Execute). BuildPipelineVariant wraps the base shaders with the
   // spec-constant values and creates pipeline + SBT together.
-  PipelineVariant perspective = BuildPipelineVariant(
-      _device, _bindingLayout, _raygenShader, _missShader, _shadowMissShader,
-      _closestHitShader, _anyHitShader, /*projectionMode*/ 0u, "RaytracedLightingPass");
+  PipelineVariant perspective = BuildPipelineVariant({.device = _device,
+                                                      .bindingLayout = _bindingLayout,
+                                                      .raygen = _raygenShader,
+                                                      .miss = _missShader,
+                                                      .shadowMiss = _shadowMissShader,
+                                                      .closestHit = _closestHitShader,
+                                                      .anyHit = _anyHitShader,
+                                                      .projectionMode = 0u,
+                                                      .logContext = "RaytracedLightingPass"});
   if (!perspective.pipeline || !perspective.shaderTable)
     return;  // BuildPipelineVariant already logged the failing step.
   _pipelines[0]    = std::move(perspective.pipeline);
@@ -511,6 +536,22 @@ nvrhi::ITexture* RaytracedLightingPass::EnsureLinearColor(uint32_t width, uint32
   _linearColor = _device->createTexture(desc);
   _linearColorW = width;
   _linearColorH = height;
+  if (!_linearColor)
+  {
+    // §30.6 — no silent failures: a null handle here degrades the whole
+    // frame chain (lighting + tonemap early-out on null linearColor).
+    // Latched so the per-frame Ensure call doesn't spam.
+    if (!_linearColorCreateFailedLogged)
+    {
+      Logging::Get().Error(log::RENDER,
+                           "RaytracedLightingPass: createTexture(linearColor, " + std::to_string(width)
+                               + "x" + std::to_string(height)
+                               + " RGBA32F) failed; lighting/tonemap will skip");
+      _linearColorCreateFailedLogged = true;
+    }
+    return nullptr;
+  }
+  _linearColorCreateFailedLogged = false;
   return _linearColor;
 }
 
@@ -559,9 +600,16 @@ bool RaytracedLightingPass::ReloadShaders() noexcept {
   // (orthographic) is rebuilt only if it had been materialized —
   // otherwise EnsureProjectionPipeline lazily rebuilds it from the NEW
   // base shaders on demand.
-  PipelineVariant newPerspective = BuildPipelineVariant(
-      _device, _bindingLayout, newRaygen, newMiss, newShadowMiss, newClosestHit,
-      newAnyHit, /*projectionMode*/ 0u, "RaytracedLightingPass::ReloadShaders");
+  PipelineVariant newPerspective =
+      BuildPipelineVariant({.device = _device,
+                            .bindingLayout = _bindingLayout,
+                            .raygen = newRaygen,
+                            .miss = newMiss,
+                            .shadowMiss = newShadowMiss,
+                            .closestHit = newClosestHit,
+                            .anyHit = newAnyHit,
+                            .projectionMode = 0u,
+                            .logContext = "RaytracedLightingPass::ReloadShaders"});
   if (!newPerspective.pipeline || !newPerspective.shaderTable)
   {
     log.Error(log::RENDER,
@@ -572,9 +620,16 @@ bool RaytracedLightingPass::ReloadShaders() noexcept {
   PipelineVariant newOrthographic;
   if (_pipelines[1])
   {
-    newOrthographic = BuildPipelineVariant(
-        _device, _bindingLayout, newRaygen, newMiss, newShadowMiss, newClosestHit,
-        newAnyHit, /*projectionMode*/ 1u, "RaytracedLightingPass::ReloadShaders");
+    newOrthographic =
+        BuildPipelineVariant({.device = _device,
+                              .bindingLayout = _bindingLayout,
+                              .raygen = newRaygen,
+                              .miss = newMiss,
+                              .shadowMiss = newShadowMiss,
+                              .closestHit = newClosestHit,
+                              .anyHit = newAnyHit,
+                              .projectionMode = 1u,
+                              .logContext = "RaytracedLightingPass::ReloadShaders"});
     if (!newOrthographic.pipeline || !newOrthographic.shaderTable)
     {
       log.Error(log::RENDER,
@@ -618,9 +673,15 @@ void RaytracedLightingPass::EnsureProjectionPipeline() {
   // walks) — pipeline variants are NEVER created inside Execute
   // (§30.10 no allocations in the per-frame pass body).
   PipelineVariant built = BuildPipelineVariant(
-      _device, _bindingLayout, _raygenShader, _missShader, _shadowMissShader,
-      _closestHitShader, _anyHitShader, static_cast<uint32_t>(variant),
-      "RaytracedLightingPass::EnsureProjectionPipeline");
+      {.device = _device,
+       .bindingLayout = _bindingLayout,
+       .raygen = _raygenShader,
+       .miss = _missShader,
+       .shadowMiss = _shadowMissShader,
+       .closestHit = _closestHitShader,
+       .anyHit = _anyHitShader,
+       .projectionMode = static_cast<uint32_t>(variant),
+       .logContext = "RaytracedLightingPass::EnsureProjectionPipeline"});
   if (!built.pipeline || !built.shaderTable)
   {
     // Latched so the per-frame hook doesn't retry (and re-log) forever;
@@ -652,6 +713,10 @@ nvrhi::BindingSetHandle RaytracedLightingPass::GetOrCreateBindingSet(
   // without the multi-level pointer cast memcmp/memcpy would need.
   auto slot = [](BindingSlot index) constexpr noexcept { return static_cast<std::size_t>(index); };
   BindingsSnapshot current{};
+  // P6 review — the TLAS object can be REPLACED mid-run (Commit.cpp's
+  // AllowUpdate upgrade on the first transform-only commit); the handle
+  // flip must invalidate cached sets exactly as RaytracedGBufferPass does.
+  current[slot(BindingSlot::Tlas)]              = res.tlas;
   current[slot(BindingSlot::Materials)]         = res.materialBuffer;
   current[slot(BindingSlot::InstanceInfo)]      = res.instanceInfoBuffer;
   current[slot(BindingSlot::Lights)]            = res.lightBuffer;
@@ -1015,9 +1080,12 @@ void RaytracedLightingPass::Execute(nvrhi::ICommandList* commandList, const Pass
   commandList->writeBuffer(_cameraUniformsBuffer.Get(), &cameraUniforms, sizeof(cameraUniforms));
 
   // ---- Upload viewer-only per-frame UI state -------------------------
-  // M7 follow-up — split out of CameraUniforms after the audit. Mouse
-  // pixel + AOV-inspector debug-view mode live at binding 19 so future
-  // CameraUniforms growth doesn't collide with editor-driven UI knobs.
+  // M7 follow-up — split out of CameraUniforms after the audit. Since the
+  // P3 split, this raygen's ONLY gFrameUi consumer is the picker gate
+  // (mousePixelX/Y); debugViewMode and worldPosPeriod are TonemapPass's
+  // domain now (TonemapUniforms carries its own copies from the same
+  // RenderSettings), so those struct fields stay frozen-layout but are
+  // written as 0 — the GPU never reads them here.
   shaderinterop::FrameUiUniforms frameUi{};
   frameUi.mousePixelX = (context.settings != nullptr)
                             ? context.settings->mousePixelX
@@ -1025,17 +1093,9 @@ void RaytracedLightingPass::Execute(nvrhi::ICommandList* commandList, const Pass
   frameUi.mousePixelY = (context.settings != nullptr)
                             ? context.settings->mousePixelY
                             : RenderSettings::MOUSE_PIXEL_NONE;
-  frameUi.debugViewMode = (context.settings != nullptr)
-                              ? static_cast<uint32_t>(context.settings->debugView)
-                              : 0u;
+  frameUi.debugViewMode = 0u;   // P3 — Tonemap's domain; dead here.
   frameUi._reservedUi0 = 0u;
-  // Per-AOV knobs (row 1). worldPosPeriod default of 10 m matches the
-  // pre-slider behaviour; the editor's WorldPos display can crank
-  // this up for World Lobby-scale scenes (~50 m) without touching shader.
-  frameUi.worldPosPeriod = (context.settings != nullptr
-                            && context.settings->worldPosPeriod > 0.0f)
-                               ? context.settings->worldPosPeriod
-                               : 10.0f;
+  frameUi.worldPosPeriod = 0.0f;  // P3 — Tonemap's domain; dead here.
   frameUi._reservedUi1 = 0u;
   frameUi._reservedUi2 = 0u;
   frameUi._reservedUi3 = 0u;

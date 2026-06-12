@@ -79,6 +79,23 @@ class RaytracedGBufferPass final : public IRenderPass {
   // RaytracedLightingPass::EnsureProjectionPipeline.
   void EnsureProjectionPipeline();
 
+  // P6 review — pass-health probe for PyxisRenderer's frame path. True
+  // iff the ctor loaded all shaders AND the requested projection-mode
+  // variant's pipeline+SBT exist or can still be lazily built (i.e. the
+  // lazy build hasn't latched a failure). PyxisRenderer calls this
+  // AFTER EnsureProjectionPipeline each frame: when false, it nulls
+  // PassContext::visibility (and linearColor) so the downstream passes
+  // degrade to the pre-split untouched-output no-op instead of shading
+  // from a never-written visibility buffer.
+  [[nodiscard]] bool IsOperational(uint32_t projectionMode) const noexcept {
+    if (!_shadersOk)
+      return false;
+    const std::size_t variant = (projectionMode == 1u) ? 1u : 0u;
+    if (_pipelines[variant] && _shaderTables[variant])
+      return true;
+    return !_variantBuildFailed[variant];  // lazy build still possible.
+  }
+
  private:
   // Build the binding set for the supplied visibility buffer + scene-resource
   // view. Cached per `nvrhi::IBuffer*` identity (the visibility buffer at
@@ -128,6 +145,14 @@ class RaytracedGBufferPass final : public IRenderPass {
   nvrhi::BufferHandle _visibility;
   uint32_t _visibilityW = 0;
   uint32_t _visibilityH = 0;
+  // P6 review — latched when EnsureVisibilityBuffer creates a FRESH
+  // buffer; Execute then clears it to the miss pattern (hitT = -1.0f
+  // bits) before any early-out, so a consumer can never read
+  // uninitialized records even if this pass later skips its dispatch.
+  bool _visibilityNeedsClear = false;
+  // P6 review — latched after the first logged createBuffer failure so
+  // the per-resize allocation path doesn't spam the log every frame.
+  bool _visibilityCreateFailedLogged = false;
 
   // Binding-set cache, keyed on the visibility buffer pointer (recreated
   // on resize). Bounded; eviction-on-overflow keeps stale dangling
