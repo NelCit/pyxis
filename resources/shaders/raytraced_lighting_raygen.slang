@@ -78,6 +78,13 @@
 // (one fp32-exact VisibilityGpu record per pixel, row-major).
 [[vk::binding(34, 0)]] StructuredBuffer<VisibilityGpu> gVisibility;
 
+// P5 (design D2) — cap of the front-to-back transparency composite in
+// main() below (per-segment LOOP iterations at recursion depth 0, not
+// hardware recursion). Hoisted from a main() local to module scope as
+// a specialization constant; same value (16), now C++-fed
+// (RaytracedLightingPass::MAX_TRANSPARENT_SEGMENTS).
+[[vk::constant_id(SPEC_ID_MAX_TRANSPARENT_SEGMENTS)]] const uint MAX_TRANSPARENT_SEGMENTS = 16u;
+
 // Slang emits the SPIR-V `OpEntryPoint` name as `"main"` regardless
 // of the source-side function name (verified via spirv-dis); the C++
 // side passes `"main"` to NVRHI's createShader so we keep the function
@@ -113,7 +120,8 @@ void main() {
     // iteration order, fixed cap) so the headless byte-identical-EXR
     // contract (§33.7) holds. RAY_FLAG_NONE + instanceMask 0xFF matches
     // GpuScene's TLAS so every instance is visible to the primary ray.
-    const uint MAX_TRANSPARENT_SEGMENTS = 16u;
+    // MAX_TRANSPARENT_SEGMENTS is the P5 module-scope specialization
+    // constant (declared above; value unchanged at 16).
     float3  radiance   = float3(0, 0, 0);
     float3  throughput = float3(1, 1, 1);
     HitInfo firstHit;

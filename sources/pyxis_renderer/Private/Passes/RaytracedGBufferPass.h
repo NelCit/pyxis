@@ -66,6 +66,19 @@ class RaytracedGBufferPass final : public IRenderPass {
   // RenderFrame and threads the result through PassContext::visibility.
   [[nodiscard]] nvrhi::IBuffer* EnsureVisibilityBuffer(uint32_t width, uint32_t height);
 
+  // P5 (design D2) — make sure the RT pipeline variant for the ACTIVE
+  // camera projection mode exists. The raygen's PROJECTION_MODE
+  // specialization constant (its module includes camera_ray.slang) is
+  // the only difference between variants: [0] = perspective (eager,
+  // ctor), [1] = orthographic (lazy, first frame the camera reports
+  // it). Called by PyxisRenderer each RenderFrame on the CPU frame
+  // path BEFORE the graph walks — never creates inside Execute
+  // (§30.10). Both RT passes select by the same
+  // GpuScene::GetCamera().projectionMode source each frame, so they
+  // always run the same variant. Same contract as
+  // RaytracedLightingPass::EnsureProjectionPipeline.
+  void EnsureProjectionPipeline();
+
  private:
   // Build the binding set for the supplied visibility buffer + scene-resource
   // view. Cached per `nvrhi::IBuffer*` identity (the visibility buffer at
@@ -79,15 +92,24 @@ class RaytracedGBufferPass final : public IRenderPass {
   nvrhi::IDevice* _device = nullptr;
   GpuScene* _scene = nullptr;
 
-  // Compiled shaders + pipeline + shader binding table. Built once
-  // in the ctor; reused every frame.
+  // Compiled BASE shaders (unspecialized .spv-backed handles). Built
+  // once in the ctor; the per-variant specialized raygen derives from
+  // _raygenShader via createShaderSpecialization and lives inside the
+  // pipeline objects below.
   nvrhi::ShaderHandle _raygenShader;
   nvrhi::ShaderHandle _missShader;
   nvrhi::ShaderHandle _closestHitShader;
   nvrhi::ShaderHandle _anyHitShader;
   nvrhi::BindingLayoutHandle _bindingLayout;
-  nvrhi::rt::PipelineHandle _pipeline;
-  nvrhi::rt::ShaderTableHandle _shaderTable;
+  // P5 (design D2) — one RT pipeline + SBT per camera projection mode
+  // (see EnsureProjectionPipeline). Index = 0 perspective /
+  // 1 orthographic; Execute selects by GpuScene::GetCamera()'s
+  // projectionMode — a pure array lookup, no creation. Same shape +
+  // failure latch as the lighting pass's variants.
+  static constexpr std::size_t PROJECTION_VARIANT_COUNT = 2;
+  std::array<nvrhi::rt::PipelineHandle, PROJECTION_VARIANT_COUNT> _pipelines;
+  std::array<nvrhi::rt::ShaderTableHandle, PROJECTION_VARIANT_COUNT> _shaderTables;
+  std::array<bool, PROJECTION_VARIANT_COUNT> _variantBuildFailed{};
 
   // Per-frame constant buffer carrying CameraUniforms — same values the
   // lighting pass uploads (the raygen only reads worldFromView /

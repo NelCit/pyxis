@@ -23,13 +23,26 @@
 [[vk::binding(1, 0)]] RWTexture2D<float4> gDest;     // base-res LINEAR output
 [[vk::binding(2, 0)]] ConstantBuffer<SsaaDownsampleUniforms> gParams;
 
+// P5 (design D2) — the supersample factor as a Vulkan specialization
+// constant: the box-filter loops below become driver-foldable
+// (unrollable) per-factor instead of a volatile-cbuffer-driven runtime
+// bound. SsaaResolvePass builds one compute pipeline per factor
+// (2/3/4 — every producer clamps to that range) and selects by factor
+// each Execute. gParams.factor is NO LONGER READ here, but the field
+// stays in SsaaDownsampleUniforms (frozen interop layout) and the C++
+// keeps writing it — removing it would break the struct shape for no
+// gain. Default 2 matches the eager first variant.
+[[vk::constant_id(SPEC_ID_SSAA_FACTOR)]] const uint SSAA_FACTOR = 2u;
+
 [shader("compute")]
 [numthreads(8, 8, 1)]
 void main(uint3 tid : SV_DispatchThreadID) {
     if (tid.x >= gParams.destWidth || tid.y >= gParams.destHeight)
         return;
 
-    const uint factor = max(1u, gParams.factor);
+    // Pre-P5 this read max(1u, gParams.factor); value-identical for the
+    // reachable factors (2..4) since max(1, f) == f there.
+    const uint factor = SSAA_FACTOR;
     const float invSamples = 1.0f / float(factor * factor);
 
     // Source is LINEAR -- average it directly and write LINEAR (no OETF here).

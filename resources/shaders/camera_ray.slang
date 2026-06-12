@@ -19,6 +19,17 @@
 
 [[vk::binding(0, 0)]] ConstantBuffer<CameraUniforms> gCamera;
 
+// P5 (design D2) — camera projection mode as a Vulkan specialization
+// constant. The C++ pass builds one pipeline VARIANT per mode
+// (0 = perspective, 1 = orthographic; Raytraced{GBuffer,Lighting}Pass::
+// EnsureProjectionPipeline) and selects per frame from GpuScene::
+// GetCamera().projectionMode — the exact source the gCamera cbuffer
+// field is uploaded from. The cbuffer field STAYS in CameraUniforms
+// (frozen interop layout; other code may read it); only the branch in
+// BuildCameraRay moved to the spec constant so the driver folds it at
+// pipeline-creation time. Default 0 = perspective (the v1 default).
+[[vk::constant_id(SPEC_ID_PROJECTION_MODE)]] const uint PROJECTION_MODE = 0u;
+
 // Build the world-space primary ray for `launchIndex` of a
 // `launchDim`-sized dispatch. Origin/direction land in the two out
 // params; TMin/TMax stay at the call sites (0.001 / 10000 for the
@@ -55,7 +66,7 @@ void BuildCameraRay(uint2 launchIndex, uint2 launchDim,
     // to the far plane on the perspective path (matrix-divide gives
     // the per-pixel ray direction); ndc.z = -1 maps to the near plane
     // on the ortho path (the per-pixel origin in view space).
-    if (gCamera.projectionMode == 1u)  // orthographic
+    if (PROJECTION_MODE == 1u)  // orthographic (P5: spec constant, was gCamera.projectionMode)
     {
         const float4 ndcOnNear   = float4(ndc.x, ndc.y, -1.0f, 1.0f);
         const float4 viewOrigin  = mul(gCamera.viewFromClip, ndcOnNear);

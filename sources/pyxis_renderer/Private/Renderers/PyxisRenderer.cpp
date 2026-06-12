@@ -111,6 +111,18 @@ void PyxisRenderer::RenderFrame(nvrhi::ICommandList* commandList, const RenderSe
                                 ->EnsureLinearColor(colorDesc.width, colorDesc.height);
     }
   }
+  // P5 (design D2) — spec-constant pipeline variants: make sure the
+  // ACTIVE camera projection mode's RT pipelines exist before the graph
+  // walks. The perspective variant is built in each pass's ctor; the
+  // orthographic one materializes here the first frame the camera
+  // reports it. Creation happens on this CPU frame path only — never
+  // inside a pass Execute (§30.10); both hooks no-op once built.
+  if (_gbufferPass != nullptr) {
+    static_cast<RaytracedGBufferPass*>(_gbufferPass)->EnsureProjectionPipeline();
+  }
+  if (_lightingPass != nullptr) {
+    static_cast<RaytracedLightingPass*>(_lightingPass)->EnsureProjectionPipeline();
+  }
   // At SSAA factor > 1, give SsaaResolvePass its base-res LINEAR downsample target
   // (it owns the texture) and thread it to BlitToSrgbPass via the context. At
   // factor 1 it stays null and BlitToSrgbPass reads `color` directly.

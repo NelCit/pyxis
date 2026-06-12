@@ -31,6 +31,7 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <string_view>
 #include <unordered_map>
 
@@ -41,6 +42,22 @@ struct SceneResources;
 
 class RaytracedLightingPass final : public IRenderPass {
  public:
+  // P5 (design D2) — the C++ single source of truth for the RT
+  // recursion / loop budgets. Feeds BOTH nvrhi::rt::PipelineDesc::
+  // maxRecursionDepth (ctor + ReloadShaders) AND the Vulkan
+  // specialization-constant values (SPEC_ID_MAX_RAY_RECURSION /
+  // SPEC_ID_MAX_TRANSPARENT_SEGMENTS / SPEC_ID_REFL_MAX_SEGMENTS in
+  // ShaderInterop.slang) — pre-P5 the 3 was a literal duplicated in
+  // shading.slang AND twice in this .cpp, and the 16s were shader-local
+  // consts. V2.B doctrine: depth 3 = first-hit shade (0) →
+  // reflection/continuation closesthit (1) → its reflection ray (2) →
+  // that ray's shadow/AO ray (3); the 16-segment caps bound the
+  // front-to-back transparency composites (loop iterations, not
+  // hardware recursion).
+  static constexpr uint32_t MAX_RAY_RECURSION        = 3u;
+  static constexpr uint32_t MAX_TRANSPARENT_SEGMENTS = 16u;
+  static constexpr uint32_t REFL_MAX_SEGMENTS        = 16u;
+
   RaytracedLightingPass(nvrhi::IDevice* device, GpuScene& scene);
   ~RaytracedLightingPass() override;
   RaytracedLightingPass(const RaytracedLightingPass&) = delete;
@@ -79,6 +96,18 @@ class RaytracedLightingPass final : public IRenderPass {
   // result through PassContext::linearColor.
   [[nodiscard]] nvrhi::ITexture* EnsureLinearColor(uint32_t width, uint32_t height);
 
+  // P5 (design D2) — make sure the RT pipeline variant for the ACTIVE
+  // camera projection mode exists. The raygen's PROJECTION_MODE
+  // specialization constant (SPEC_ID_PROJECTION_MODE) is the only
+  // difference between variants: [0] = perspective (built eagerly in
+  // the ctor — the v1 default), [1] = orthographic (built lazily the
+  // first time the camera reports projectionMode == 1). Called by
+  // PyxisRenderer each RenderFrame on the CPU frame path, BEFORE the
+  // graph walks — pipeline creation never happens inside Execute
+  // (§30.10). A failed build is latched and not retried until the next
+  // ReloadShaders; Execute skips while the selected variant is null.
+  void EnsureProjectionPipeline();
+
  private:
   // Build the binding set for the supplied linear-radiance output + the
   // visibility buffer (P4) + targets + scene-resource view (RFC 0003 — the
@@ -95,8 +124,10 @@ class RaytracedLightingPass final : public IRenderPass {
   nvrhi::IDevice* _device = nullptr;
   GpuScene* _scene = nullptr;
 
-  // Compiled shaders + pipeline + shader binding table. Built once
-  // in the ctor; reused every frame.
+  // Compiled BASE shaders (unspecialized .spv-backed handles). Built
+  // once in the ctor; the per-variant specialized handles derive from
+  // these via createShaderSpecialization and live inside the pipeline
+  // objects below (NVRHI rt pipelines keep their desc's shader refs).
   nvrhi::ShaderHandle _raygenShader;
   nvrhi::ShaderHandle _missShader;
   // M9-fidelity: second miss shader for shadow rays. The shared
@@ -107,8 +138,18 @@ class RaytracedLightingPass final : public IRenderPass {
   nvrhi::ShaderHandle _closestHitShader;
   nvrhi::ShaderHandle _anyHitShader;
   nvrhi::BindingLayoutHandle _bindingLayout;
-  nvrhi::rt::PipelineHandle _pipeline;
-  nvrhi::rt::ShaderTableHandle _shaderTable;
+  // P5 (design D2) — one RT pipeline + SBT per camera projection mode
+  // (see EnsureProjectionPipeline). Index = 0 perspective /
+  // 1 orthographic; Execute selects by GpuScene::GetCamera()'s
+  // projectionMode — a pure array lookup, no creation. The SBT is
+  // derived from its pipeline (createShaderTable), so the pair is
+  // always created/swapped together. _variantBuildFailed latches a
+  // failed lazy build so the CPU-path hook doesn't retry (and re-log)
+  // every frame; reset by ReloadShaders.
+  static constexpr std::size_t PROJECTION_VARIANT_COUNT = 2;
+  std::array<nvrhi::rt::PipelineHandle, PROJECTION_VARIANT_COUNT> _pipelines;
+  std::array<nvrhi::rt::ShaderTableHandle, PROJECTION_VARIANT_COUNT> _shaderTables;
+  std::array<bool, PROJECTION_VARIANT_COUNT> _variantBuildFailed{};
 
   // Per-frame constant buffer carrying CameraUniforms (worldFromView
   // + viewFromClip inverses).

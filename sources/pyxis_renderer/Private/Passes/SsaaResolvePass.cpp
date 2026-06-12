@@ -15,6 +15,7 @@
 #include "ShaderInterop.slang"
 
 #include <algorithm>
+#include <string>
 
 namespace pyxis {
 
@@ -51,13 +52,33 @@ SsaaResolvePass::SsaaResolvePass(nvrhi::IDevice* device) : _device(device) {
     return;
   }
 
-  nvrhi::ComputePipelineDesc pipelineDesc;
-  pipelineDesc.CS = _shader;
-  pipelineDesc.bindingLayouts = {_bindingLayout};
-  _pipeline = _device->createComputePipeline(pipelineDesc);
-  if (!_pipeline) {
-    log.Error(log::RENDER, "SsaaResolvePass: createComputePipeline failed");
-    return;
+  // P5 (design D2) — one pipeline per supersample factor: the shader's
+  // SSAA_FACTOR specialization constant (SPEC_ID_SSAA_FACTOR, 32-bit
+  // uint) replaces the volatile-cbuffer factor read, so the driver can
+  // fold/unroll the factor×factor box-filter loops per variant. All
+  // factors the app can produce ({2, 3, 4} — every entry point clamps
+  // to that range) are created EAGERLY here; Execute only looks up.
+  for (uint32_t factor = SSAA_FACTOR_MIN; factor <= SSAA_FACTOR_MAX; ++factor) {
+    const nvrhi::ShaderSpecialization factorConstant[] = {
+        nvrhi::ShaderSpecialization::UInt32(shaderinterop::SPEC_ID_SSAA_FACTOR, factor),
+    };
+    const nvrhi::ShaderHandle specShader =
+        _device->createShaderSpecialization(_shader, factorConstant, 1u);
+    if (!specShader) {
+      log.Error(log::RENDER, "SsaaResolvePass: createShaderSpecialization failed (factor="
+                                 + std::to_string(factor) + ")");
+      return;
+    }
+    nvrhi::ComputePipelineDesc pipelineDesc;
+    pipelineDesc.CS = specShader;
+    pipelineDesc.bindingLayouts = {_bindingLayout};
+    nvrhi::ComputePipelineHandle pipeline = _device->createComputePipeline(pipelineDesc);
+    if (!pipeline) {
+      log.Error(log::RENDER, "SsaaResolvePass: createComputePipeline failed (factor="
+                                 + std::to_string(factor) + ")");
+      return;
+    }
+    _pipelines[factor - SSAA_FACTOR_MIN] = std::move(pipeline);
   }
 
   nvrhi::BufferDesc cbDesc;
@@ -78,7 +99,8 @@ SsaaResolvePass::SsaaResolvePass(nvrhi::IDevice* device) : _device(device) {
   }
 
   _ready = true;
-  log.Info(log::RENDER, "SsaaResolvePass: initialised (box-downsample compute)");
+  log.Info(log::RENDER,
+           "SsaaResolvePass: initialised (box-downsample compute; factor variants 2..4)");
 }
 
 nvrhi::BindingSetHandle SsaaResolvePass::GetOrCreateBindingSet(
@@ -162,6 +184,19 @@ void SsaaResolvePass::Execute(nvrhi::ICommandList* commandList,
 
   const Profiler::GpuScope gpuScope(*context.profiler, commandList, "pass.SsaaResolve");
 
+  // P5 — select the pre-built per-factor pipeline (pure array lookup,
+  // no creation §30.10). Every producer clamps the factor to [1, 4]
+  // (CliArgs --ssaa, EditorPanel slider, HeadlessMode, ViewerMode), so
+  // the defensive min() below documents the cap rather than handling a
+  // reachable case.
+  const uint32_t clampedFactor = (factor > SSAA_FACTOR_MAX) ? SSAA_FACTOR_MAX : factor;
+  nvrhi::IComputePipeline* const pipeline = _pipelines[clampedFactor - SSAA_FACTOR_MIN];
+  if (pipeline == nullptr)
+    return;
+
+  // gParams.factor is still written for layout/back-compat, but the
+  // shader no longer reads it — the SSAA_FACTOR spec constant baked
+  // into `pipeline` drives the box-filter loops (see ssaa_resolve.slang).
   shaderinterop::SsaaDownsampleUniforms params{};
   params.destWidth = destWidth;
   params.destHeight = destHeight;
@@ -186,7 +221,7 @@ void SsaaResolvePass::Execute(nvrhi::ICommandList* commandList,
   commandList->commitBarriers();
 
   nvrhi::ComputeState state;
-  state.pipeline = _pipeline;
+  state.pipeline = pipeline;
   state.bindings = {bindingSet};
   commandList->setComputeState(state);
 

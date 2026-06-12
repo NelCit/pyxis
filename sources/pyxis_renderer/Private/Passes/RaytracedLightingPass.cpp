@@ -24,6 +24,7 @@
 #include <fstream>
 #include <hlsl++.h>
 #include <ios>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -51,6 +52,121 @@ static_assert(sizeof(shaderinterop::FrameUiUniforms) == 32,
 nvrhi::ShaderHandle LoadSpirv(nvrhi::IDevice* device, std::string_view path,
                               nvrhi::ShaderType stage, const char* entry) noexcept {
   return LoadSpirvShader(device, path, stage, entry, "RaytracedLightingPass");
+}
+
+// P5 (design D2) — one RT pipeline + SBT per camera projection mode.
+// Both default-null on a failed build; the pair is always created
+// together because the SBT derives from its pipeline.
+struct PipelineVariant {
+  nvrhi::rt::PipelineHandle pipeline;
+  nvrhi::rt::ShaderTableHandle shaderTable;
+};
+
+// Build one projection-mode variant from the supplied BASE shader
+// handles. Specialization map (explicit [[vk::constant_id(N)]] ids
+// mirrored in ShaderInterop.slang, 32-bit uint values only — NVRHI's
+// Vulkan backend hardcodes 4-byte map entries):
+//   * raygen — its module includes camera_ray.slang (id 0
+//     PROJECTION_MODE) + shading.slang (id 1 MAX_RAY_RECURSION, id 3
+//     REFL_MAX_SEGMENTS) and declares id 2 MAX_TRANSPARENT_SEGMENTS
+//     itself → all four constants.
+//   * closesthit — includes shading.slang → ids 1 + 3. (Its module
+//     also inherits camera_ray.slang's id 0 via shading.slang, but
+//     BuildCameraRay is never called from a hit shader, so the unset
+//     default 0 is unreachable dead code.)
+//   * miss / shadow-miss / anyhit — declare no spec constants; passed
+//     through unspecialized.
+// projectionMode is the only value that differs between variants, so
+// the specialized closesthit is value-identical across them. Returns a
+// default (null) PipelineVariant on any failure, after logging with
+// the caller-supplied context prefix; the caller keeps its previous
+// state (old-on-failure semantics).
+PipelineVariant BuildPipelineVariant(nvrhi::IDevice* device,
+                                     nvrhi::IBindingLayout* bindingLayout,
+                                     nvrhi::IShader* raygen, nvrhi::IShader* miss,
+                                     nvrhi::IShader* shadowMiss, nvrhi::IShader* closestHit,
+                                     nvrhi::IShader* anyHit, uint32_t projectionMode,
+                                     const char* logContext) noexcept {
+  auto& log = Logging::Get();
+  const nvrhi::ShaderSpecialization raygenConstants[] = {
+      nvrhi::ShaderSpecialization::UInt32(shaderinterop::SPEC_ID_PROJECTION_MODE,
+                                          projectionMode),
+      nvrhi::ShaderSpecialization::UInt32(shaderinterop::SPEC_ID_MAX_RAY_RECURSION,
+                                          RaytracedLightingPass::MAX_RAY_RECURSION),
+      nvrhi::ShaderSpecialization::UInt32(shaderinterop::SPEC_ID_MAX_TRANSPARENT_SEGMENTS,
+                                          RaytracedLightingPass::MAX_TRANSPARENT_SEGMENTS),
+      nvrhi::ShaderSpecialization::UInt32(shaderinterop::SPEC_ID_REFL_MAX_SEGMENTS,
+                                          RaytracedLightingPass::REFL_MAX_SEGMENTS),
+  };
+  const nvrhi::ShaderSpecialization closestHitConstants[] = {
+      nvrhi::ShaderSpecialization::UInt32(shaderinterop::SPEC_ID_MAX_RAY_RECURSION,
+                                          RaytracedLightingPass::MAX_RAY_RECURSION),
+      nvrhi::ShaderSpecialization::UInt32(shaderinterop::SPEC_ID_REFL_MAX_SEGMENTS,
+                                          RaytracedLightingPass::REFL_MAX_SEGMENTS),
+  };
+  const nvrhi::ShaderHandle specRaygen = device->createShaderSpecialization(
+      raygen, raygenConstants, static_cast<uint32_t>(std::size(raygenConstants)));
+  const nvrhi::ShaderHandle specClosestHit = device->createShaderSpecialization(
+      closestHit, closestHitConstants, static_cast<uint32_t>(std::size(closestHitConstants)));
+  if (!specRaygen || !specClosestHit)
+  {
+    log.Error(log::RENDER, std::string{logContext}
+                               + ": createShaderSpecialization failed (projectionMode="
+                               + std::to_string(projectionMode) + ")");
+    return {};
+  }
+
+  // Pipeline state — four shader stages registered by `exportName`,
+  // one hit group bundling closesthit + anyhit. P4: the closesthit is
+  // the retained megakernel serving SECONDARY rays only; the raygen
+  // shades the first hit itself from the visibility buffer.
+  nvrhi::rt::PipelineDesc pipelineDesc;
+  pipelineDesc.shaders = {
+      nvrhi::rt::PipelineShaderDesc{}.setExportName("RayGenMain").setShader(specRaygen),
+      nvrhi::rt::PipelineShaderDesc{}.setExportName("MissMain").setShader(miss),
+      nvrhi::rt::PipelineShaderDesc{}.setExportName("ShadowMissMain").setShader(shadowMiss),
+  };
+  pipelineDesc.hitGroups = {
+      nvrhi::rt::PipelineHitGroupDesc{}
+          .setExportName("HitGroupDefault")
+          .setClosestHitShader(specClosestHit)
+          .setAnyHitShader(anyHit),
+  };
+  pipelineDesc.globalBindingLayouts = {bindingLayout};
+  // V2.B (plan §V2.B.1/B.3) — depth 3, unchanged by P4/P5: the raygen
+  // shades the first hit at depth 0, so the deepest chain is
+  // continuation/reflection closesthit (1) → its reflection ray (2) →
+  // that reflection's shadow/AO ray (3). Opacity transmission doesn't
+  // recurse (front-to-back loop at depth 0). P5: fed from the same
+  // constant the shader's MAX_RAY_RECURSION spec value uses — the
+  // duplicated literal 3 is gone.
+  pipelineDesc.maxRecursionDepth = RaytracedLightingPass::MAX_RAY_RECURSION;
+  PipelineVariant variant;
+  variant.pipeline = device->createRayTracingPipeline(pipelineDesc);
+  if (!variant.pipeline)
+  {
+    log.Error(log::RENDER, std::string{logContext}
+                               + ": createRayTracingPipeline failed (projectionMode="
+                               + std::to_string(projectionMode) + ")");
+    return {};
+  }
+
+  // Shader binding table — one raygen, two misses, one hit group. The
+  // pass dispatches with the selected variant's SBT every frame; the
+  // entries are static across the run.
+  variant.shaderTable = variant.pipeline->createShaderTable();
+  if (!variant.shaderTable)
+  {
+    log.Error(log::RENDER, std::string{logContext}
+                               + ": createShaderTable failed (projectionMode="
+                               + std::to_string(projectionMode) + ")");
+    return {};
+  }
+  variant.shaderTable->setRayGenerationShader("RayGenMain");
+  variant.shaderTable->addMissShader("MissMain");        // miss-index 0: primary rays (sky / dome)
+  variant.shaderTable->addMissShader("ShadowMissMain");  // miss-index 1: shadow rays (visibility)
+  variant.shaderTable->addHitGroup("HitGroupDefault");
+  return variant;
 }
 
 }  // namespace
@@ -165,51 +281,19 @@ RaytracedLightingPass::RaytracedLightingPass(nvrhi::IDevice* device, GpuScene& s
     return;
   }
 
-  // Pipeline state — four shader stages registered by `exportName`,
-  // one hit group bundling closesthit + anyhit. P4: the closesthit is
-  // the retained megakernel serving SECONDARY rays only; the raygen
-  // shades the first hit itself from the visibility buffer.
-  nvrhi::rt::PipelineDesc pipelineDesc;
-  pipelineDesc.shaders = {
-      nvrhi::rt::PipelineShaderDesc{}.setExportName("RayGenMain").setShader(_raygenShader),
-      nvrhi::rt::PipelineShaderDesc{}.setExportName("MissMain").setShader(_missShader),
-      nvrhi::rt::PipelineShaderDesc{}.setExportName("ShadowMissMain").setShader(_shadowMissShader),
-  };
-  pipelineDesc.hitGroups = {
-      nvrhi::rt::PipelineHitGroupDesc{}
-          .setExportName("HitGroupDefault")
-          .setClosestHitShader(_closestHitShader)
-          .setAnyHitShader(_anyHitShader),
-  };
-  pipelineDesc.globalBindingLayouts = {_bindingLayout};
-  // V2.B (plan §V2.B.1/B.3) — depth 3, unchanged by P4: the raygen now
-  // shades the first hit at depth 0, so the deepest chain is
-  // continuation/reflection closesthit (1) → its reflection ray (2) →
-  // that reflection's shadow/AO ray (3) — the same software
-  // recursionDepth bookkeeping as before the split. Opacity
-  // transmission still doesn't recurse (the raygen composites it
-  // front-to-back at depth 0 via its transmission loop).
-  pipelineDesc.maxRecursionDepth = 3;
-  _pipeline = _device->createRayTracingPipeline(pipelineDesc);
-  if (!_pipeline)
-  {
-    Logging::Get().Error(log::RENDER, "RaytracedLightingPass: createRayTracingPipeline failed");
-    return;
-  }
-
-  // Shader binding table — one raygen, one miss, one hit group.
-  // The pass dispatches with this single SBT every frame; the
-  // entries are static across the run.
-  _shaderTable = _pipeline->createShaderTable();
-  if (!_shaderTable)
-  {
-    Logging::Get().Error(log::RENDER, "RaytracedLightingPass: createShaderTable failed");
-    return;
-  }
-  _shaderTable->setRayGenerationShader("RayGenMain");
-  _shaderTable->addMissShader("MissMain");        // miss-index 0: primary rays (sky / dome)
-  _shaderTable->addMissShader("ShadowMissMain");  // miss-index 1: shadow rays (visibility)
-  _shaderTable->addHitGroup("HitGroupDefault");
+  // P5 (design D2) — the PERSPECTIVE pipeline variant (projectionMode
+  // 0, the v1 default) is built eagerly here; the ORTHOGRAPHIC variant
+  // is built lazily by EnsureProjectionPipeline the first time the
+  // camera reports it (PyxisRenderer's CPU frame path — never inside
+  // Execute). BuildPipelineVariant wraps the base shaders with the
+  // spec-constant values and creates pipeline + SBT together.
+  PipelineVariant perspective = BuildPipelineVariant(
+      _device, _bindingLayout, _raygenShader, _missShader, _shadowMissShader,
+      _closestHitShader, _anyHitShader, /*projectionMode*/ 0u, "RaytracedLightingPass");
+  if (!perspective.pipeline || !perspective.shaderTable)
+    return;  // BuildPipelineVariant already logged the failing step.
+  _pipelines[0]    = std::move(perspective.pipeline);
+  _shaderTables[0] = std::move(perspective.shaderTable);
 
   // Camera uniforms constant buffer — sized for one CameraUniforms
   // struct; rewritten every frame from GpuScene's CameraDesc via
@@ -469,61 +553,83 @@ bool RaytracedLightingPass::ReloadShaders() noexcept {
     return false;
   }
 
-  nvrhi::rt::PipelineDesc pipelineDesc;
-  pipelineDesc.shaders = {
-      nvrhi::rt::PipelineShaderDesc{}.setExportName("RayGenMain").setShader(newRaygen),
-      nvrhi::rt::PipelineShaderDesc{}.setExportName("MissMain").setShader(newMiss),
-      nvrhi::rt::PipelineShaderDesc{}.setExportName("ShadowMissMain").setShader(newShadowMiss),
-  };
-  pipelineDesc.hitGroups = {
-      nvrhi::rt::PipelineHitGroupDesc{}
-          .setExportName("HitGroupDefault")
-          .setClosestHitShader(newClosestHit)
-          .setAnyHitShader(newAnyHit),
-  };
-  pipelineDesc.globalBindingLayouts = {_bindingLayout};
-  // V2.B (plan §V2.B.1/B.3) — depth 3, unchanged by P4: the raygen now
-  // shades the first hit at depth 0, so the deepest chain is
-  // continuation/reflection closesthit (1) → its reflection ray (2) →
-  // that reflection's shadow/AO ray (3) — the same software
-  // recursionDepth bookkeeping as before the split. Opacity
-  // transmission still doesn't recurse (the raygen composites it
-  // front-to-back at depth 0 via its transmission loop).
-  pipelineDesc.maxRecursionDepth = 3;
-  nvrhi::rt::PipelineHandle newPipeline = _device->createRayTracingPipeline(pipelineDesc);
-  if (!newPipeline)
+  // P5 — rebuild base + specialized handles + pipelines + SBTs
+  // TOGETHER (a spec-value or .spv change invalidates all of them as a
+  // unit). Variant 0 (perspective) always exists; variant 1
+  // (orthographic) is rebuilt only if it had been materialized —
+  // otherwise EnsureProjectionPipeline lazily rebuilds it from the NEW
+  // base shaders on demand.
+  PipelineVariant newPerspective = BuildPipelineVariant(
+      _device, _bindingLayout, newRaygen, newMiss, newShadowMiss, newClosestHit,
+      newAnyHit, /*projectionMode*/ 0u, "RaytracedLightingPass::ReloadShaders");
+  if (!newPerspective.pipeline || !newPerspective.shaderTable)
   {
     log.Error(log::RENDER,
-              "RaytracedLightingPass::ReloadShaders: createRayTracingPipeline failed; keeping old pipeline");
+              "RaytracedLightingPass::ReloadShaders: perspective variant rebuild failed; "
+              "keeping old pipeline");
     return false;
   }
-
-  nvrhi::rt::ShaderTableHandle newShaderTable = newPipeline->createShaderTable();
-  if (!newShaderTable)
+  PipelineVariant newOrthographic;
+  if (_pipelines[1])
   {
-    log.Error(log::RENDER,
-              "RaytracedLightingPass::ReloadShaders: createShaderTable failed; keeping old pipeline");
-    return false;
+    newOrthographic = BuildPipelineVariant(
+        _device, _bindingLayout, newRaygen, newMiss, newShadowMiss, newClosestHit,
+        newAnyHit, /*projectionMode*/ 1u, "RaytracedLightingPass::ReloadShaders");
+    if (!newOrthographic.pipeline || !newOrthographic.shaderTable)
+    {
+      log.Error(log::RENDER,
+                "RaytracedLightingPass::ReloadShaders: orthographic variant rebuild failed; "
+                "keeping old pipeline");
+      return false;
+    }
   }
-  newShaderTable->setRayGenerationShader("RayGenMain");
-  newShaderTable->addMissShader("MissMain");        // miss-index 0: primary rays
-  newShaderTable->addMissShader("ShadowMissMain");  // miss-index 1: shadow rays
-  newShaderTable->addHitGroup("HitGroupDefault");
 
   // Atomic-ish swap: every reference taken in Execute reads from the
-  // member handles, so once we overwrite all four together (single-
+  // member handles, so once we overwrite them all together (single-
   // threaded — render thread only, gated by waitForIdle on the caller
-  // side) the next Execute picks up the new pipeline + table.
+  // side) the next Execute picks up the new pipelines + tables.
   _raygenShader     = std::move(newRaygen);
   _missShader       = std::move(newMiss);
   _shadowMissShader = std::move(newShadowMiss);
   _closestHitShader = std::move(newClosestHit);
   _anyHitShader     = std::move(newAnyHit);
-  _pipeline         = std::move(newPipeline);
-  _shaderTable      = std::move(newShaderTable);
+  _pipelines[0]     = std::move(newPerspective.pipeline);
+  _shaderTables[0]  = std::move(newPerspective.shaderTable);
+  // Null when the orthographic variant wasn't materialized pre-reload —
+  // the lazy path then rebuilds it from the new shaders if needed.
+  _pipelines[1]     = std::move(newOrthographic.pipeline);
+  _shaderTables[1]  = std::move(newOrthographic.shaderTable);
+  _variantBuildFailed = {};
   _shadersOk = true;
   log.Info(log::RENDER, "RaytracedLightingPass::ReloadShaders: reload OK");
   return true;
+}
+
+void RaytracedLightingPass::EnsureProjectionPipeline() {
+  if (!_shadersOk || _scene == nullptr || !_scene->HasCamera())
+    return;
+  // Same selection Execute uses: anything but 1 (including out-of-range
+  // garbage) falls to perspective — matching the shader branch's
+  // `PROJECTION_MODE == 1u` shape exactly.
+  const std::size_t variant = (_scene->GetCamera().projectionMode == 1u) ? 1u : 0u;
+  if (_pipelines[variant] || _variantBuildFailed[variant])
+    return;
+  // CPU-frame-path creation (PyxisRenderer calls this before the graph
+  // walks) — pipeline variants are NEVER created inside Execute
+  // (§30.10 no allocations in the per-frame pass body).
+  PipelineVariant built = BuildPipelineVariant(
+      _device, _bindingLayout, _raygenShader, _missShader, _shadowMissShader,
+      _closestHitShader, _anyHitShader, static_cast<uint32_t>(variant),
+      "RaytracedLightingPass::EnsureProjectionPipeline");
+  if (!built.pipeline || !built.shaderTable)
+  {
+    // Latched so the per-frame hook doesn't retry (and re-log) forever;
+    // ReloadShaders resets the latch.
+    _variantBuildFailed[variant] = true;
+    return;
+  }
+  _pipelines[variant]    = std::move(built.pipeline);
+  _shaderTables[variant] = std::move(built.shaderTable);
 }
 
 nvrhi::BindingSetHandle RaytracedLightingPass::GetOrCreateBindingSet(
@@ -802,6 +908,19 @@ void RaytracedLightingPass::Execute(nvrhi::ICommandList* commandList, const Pass
   if (res.tlas == nullptr || !_scene->HasCamera())
     return;
 
+  // P5 — select the projection-mode pipeline variant. Pure array
+  // lookup (§30.10 — no creation here): EnsureProjectionPipeline ran
+  // on PyxisRenderer's CPU frame path BEFORE the graph walked, so the
+  // active mode's variant exists unless its build failed — then the
+  // slot is null and we skip, exactly like the _shadersOk gate.
+  // CameraDesc::projectionMode is the same source the CameraUniforms
+  // upload below reads, so the spec-constant branch and the cbuffer
+  // field can never disagree within a frame.
+  const CameraDesc& camera = _scene->GetCamera();
+  const std::size_t projectionVariant = (camera.projectionMode == 1u) ? 1u : 0u;
+  if (!_pipelines[projectionVariant] || !_shaderTables[projectionVariant])
+    return;
+
   const Profiler::GpuScope gpuScope(*context.profiler, commandList, "pass.RaytracedLighting");
 
   // ---- Drain prior-frame pick staging -------------------------------
@@ -857,8 +976,7 @@ void RaytracedLightingPass::Execute(nvrhi::ICommandList* commandList, const Pass
   // §18.4 contract). hlslpp::inverse handles the row-vector
   // convention correctly because it's a pure linear-algebra
   // operation that doesn't care about row-vector vs column-vector
-  // semantics.
-  const CameraDesc& camera = _scene->GetCamera();
+  // semantics. (`camera` was fetched above for the P5 variant select.)
   CameraUniforms cameraUniforms{};
   cameraUniforms.worldFromView = hlslpp::inverse(camera.viewFromWorld);
   cameraUniforms.viewFromClip = hlslpp::inverse(camera.projFromView);
@@ -1084,7 +1202,7 @@ void RaytracedLightingPass::Execute(nvrhi::ICommandList* commandList, const Pass
   commandList->commitBarriers();
 
   nvrhi::rt::State state;
-  state.shaderTable = _shaderTable;
+  state.shaderTable = _shaderTables[projectionVariant];
   state.bindings = {bindingSet};
   commandList->setRayTracingState(state);
 

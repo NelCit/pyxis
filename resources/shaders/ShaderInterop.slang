@@ -237,6 +237,25 @@ static const uint DEBUG_VIEW_WORLD_POS_EYE = 10; // sin-encoded eye-space positi
 // Raygen short-circuits the pick-write when either component matches.
 static const uint PICK_PIXEL_NONE = 0xFFFFFFFFu;
 
+// P5 (passes-split design D2) — Vulkan specialization-constant ids,
+// mirrored here per §23 (single interop file) so the C++ side's
+// nvrhi::ShaderSpecialization::constantID values and the shaders'
+// `[[vk::constant_id(N)]]` declarations can never desync. ALWAYS use
+// these explicit ids — a bare `[SpecializationConstant]` gets an
+// order-dependent auto-assigned SpecId that silently drifts.
+//
+// Ids are scoped PER SPIR-V MODULE (each .spv has its own SpecId
+// namespace), so SSAA_FACTOR in ssaa_resolve.slang reuses id 0 without
+// colliding with PROJECTION_MODE in the RT modules.
+//
+//   RT modules (which module DECLARES each constant):
+static const uint SPEC_ID_PROJECTION_MODE          = 0;  // camera_ray.slang (both raygens via include)
+static const uint SPEC_ID_MAX_RAY_RECURSION        = 1;  // shading.slang (lighting raygen + closesthit)
+static const uint SPEC_ID_MAX_TRANSPARENT_SEGMENTS = 2;  // raytraced_lighting_raygen.slang
+static const uint SPEC_ID_REFL_MAX_SEGMENTS        = 3;  // shading.slang (lighting raygen + closesthit)
+//   Compute modules:
+static const uint SPEC_ID_SSAA_FACTOR              = 0;  // ssaa_resolve.slang
+
 // PickResult — one-element RWStructuredBuffer the raygen writes when
 // the dispatched pixel matches camera.mousePixel. The viewer copies
 // this into a staging buffer each frame and reads back the previous

@@ -112,7 +112,20 @@ static const float PYXIS_INV_PI   = 0.31830988618379067154;
 // raytraced_lighting_raygen.slang — so stacked transparent layers are
 // unbounded and free of recursion cost, and the budget is the
 // documented 3.
-static const uint MAX_RAY_RECURSION = 3u;
+// P5 (design D2): a Vulkan specialization constant — the C++ side
+// (RaytracedLightingPass::MAX_RAY_RECURSION) is the single source of
+// truth feeding BOTH this value and the pipeline's maxRecursionDepth,
+// killing the literal-3-duplicated-shader+C++ hazard. The default
+// below matches it; the driver folds the provided value at
+// pipeline-creation time.
+[[vk::constant_id(SPEC_ID_MAX_RAY_RECURSION)]] const uint MAX_RAY_RECURSION = 3u;
+
+// P5 (design D2) — cap of the reflection branch's front-to-back
+// transmission composite below (per-segment LOOP iterations, not
+// hardware recursion). Hoisted from a ShadeSurfaceHit local to module
+// scope as a specialization constant; same value (16), now C++-fed
+// (RaytracedLightingPass::REFL_MAX_SEGMENTS).
+[[vk::constant_id(SPEC_ID_REFL_MAX_SEGMENTS)]] const uint REFL_MAX_SEGMENTS = 16u;
 
 // M9-fidelity Schlick Fresnel. F0 derives per-material:
 //   dielectrics: F0 = ((ior - 1) / (ior + 1))² — typically ~0.04
@@ -1052,8 +1065,9 @@ SurfaceShadeResult ShadeSurfaceHit(uint instanceId, uint primitiveIndex, float2 
         // the §V2.B depth cap of 3 is untouched; stacked transparent
         // layers in a reflection composite exactly as they do for the
         // primary ray. 0.999 / 1e-3 thresholds match the primary loop and
-        // the anyhit translucency gate.
-        const uint REFL_MAX_SEGMENTS = 16u;
+        // the anyhit translucency gate. REFL_MAX_SEGMENTS is the P5
+        // module-scope specialization constant (declared next to
+        // MAX_RAY_RECURSION above; value unchanged at 16).
         float3 reflRadiance   = float3(0.0, 0.0, 0.0);
         float3 reflThroughput = float3(1.0, 1.0, 1.0);
         [loop]
