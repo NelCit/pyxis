@@ -30,21 +30,40 @@ Pyxis targets Windows 10/11 x64 with clang-cl 17+, Vulkan SDK 1.3.x, vcpkg
 manifest mode, CMake 3.27+. See `_documentation/getting_started.md` (post-M11)
 for the canonical walkthrough.
 
-For a fresh dev box, `_tools/required_install.ps1` installs every required
-dependency (Visual Studio Build Tools, LLVM, CMake, Vulkan SDK, Python).
+**One command, fully automatic.** From a clean clone, `_tools/init.ps1` drives
+the whole pipeline — bootstrap missing prerequisites (it self-elevates for the
+Vulkan SDK install; approve the one UAC prompt), acquire nv-usd 25.11 via Packman,
+configure, and build to a runnable `pyxis.exe`:
 
 ```pwsh
-# elevated PowerShell
-.\_tools\required_install.ps1
+pwsh _tools/init.ps1            # prereqs -> nv-usd -> scenes -> configure -> build
+pwsh _tools/init.ps1 -Stage configure   # just (re)configure
+pwsh _tools/init.ps1 -WithClangTidy     # build with the §37 clang-tidy gate on
+```
+
+The `scenes` stage fetches the optional regression scenes into
+`resources/scenes/` (gitignored): the OpenPBR Shader Playground downloads
+automatically from the ASWF DPEL GitHub (~1.9 GB); the World Lobby has no
+stable public URL — drop `Collected_World_Lobby.zip` into `Downloads\` or pass
+`-WorldLobbyUrl <mirror>` (or set `PYXIS_WORLD_LOBBY_URL`). Missing scenes only
+skip their fixtures; the build is unaffected.
+
+Or run the steps by hand. `_tools/required_install.ps1` is a read-only dev-box
+doctor; add `-Install` to bootstrap every missing piece (Visual Studio Build
+Tools, LLVM, CMake, Ninja, Vulkan SDK, Python, vcpkg) — it self-elevates as
+needed:
+
+```pwsh
+.\_tools\required_install.ps1            # doctor (green/red checklist)
+.\_tools\required_install.ps1 -Install   # bootstrap missing deps
 ```
 
 Then:
 
 ```pwsh
-git clone <repo>
-cd pyxis
+pwsh _tools/omniverse/setup.ps1   # one-time nv-usd 25.11 + Python 3.12 (Packman)
 cmake --preset dev
-cmake --build --preset dev
+cmake --build --preset dev-release
 ```
 
 ## Layout

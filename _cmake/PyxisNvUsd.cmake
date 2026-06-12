@@ -28,6 +28,27 @@ set(PXR_USD_ROOT "${PYXIS_REPO_ROOT_FOR_USD}/build/omniverse/usd-deps/usd"
 set(PYXIS_NV_USD_PYTHON_ROOT "D:/packman-repo/chk/python/3.12.13+nv1-windows-x86_64"
     CACHE PATH "Kit Python 3.12 root (nv-usd 25.11 is a py312 build: pyconfig.h + python312.lib)")
 
+# The hardcoded default above is a convenience for the original author's box + the
+# CI image. On any other machine the py312 build lives in the repo-local Packman
+# cache that _tools/omniverse/setup.ps1 populates (PM_PACKAGES_ROOT =
+# <repo>/build/omniverse/packman). When the default doesn't resolve, auto-discover
+# the newest 3.12.* there — mirroring setup.ps1's own discovery — so a clean
+# `cmake --preset dev` works without a manual -DPYXIS_NV_USD_PYTHON_ROOT override.
+if(NOT EXISTS "${PYXIS_NV_USD_PYTHON_ROOT}/include/pyconfig.h")
+    file(GLOB _pyxis_py312_candidates
+        "${PYXIS_REPO_ROOT_FOR_USD}/build/omniverse/packman/chk/python/3.12.*")
+    list(SORT _pyxis_py312_candidates ORDER DESCENDING)
+    foreach(_cand IN LISTS _pyxis_py312_candidates)
+        if(EXISTS "${_cand}/include/pyconfig.h")
+            set(PYXIS_NV_USD_PYTHON_ROOT "${_cand}" CACHE PATH
+                "Kit Python 3.12 root (auto-discovered from the repo-local Packman cache)" FORCE)
+            message(STATUS "PyxisNvUsd: auto-discovered Python 3.12 at ${_cand}")
+            break()
+        endif()
+    endforeach()
+    unset(_pyxis_py312_candidates)
+endif()
+
 if(NOT EXISTS "${PXR_USD_ROOT}/include/pxr/pxr.h")
     message(FATAL_ERROR
         "PyxisNvUsd: nv-usd not found at PXR_USD_ROOT='${PXR_USD_ROOT}'.\n"
