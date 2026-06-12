@@ -78,6 +78,17 @@ RaytracedGBufferPass -> RaytracedLightingPass -> TonemapPass -> SsaaResolvePass 
   secondary rays (transparent continuation + reflections); only its
   primary-hit role is replaced.
 
+**Shader file naming (owner-directed)**: shader files are named after the pass
+that owns them — `raytraced_gbuffer_{raygen,closesthit,miss}.slang`,
+`raytraced_lighting_{raygen,closesthit,miss,shadow_miss}.slang` (the lighting
+closesthit is today's megakernel, retained for secondary rays),
+`raytraced_anyhit.slang` (one module bound into both RT pipelines),
+`tonemap.slang`, `ssaa_resolve.slang` (renamed from ssaa_downsample),
+`blit_to_srgb.slang`; shared modules `camera_ray.slang` / `shading.slang` /
+`dome_sample.slang` / `ShaderInterop.slang`. CMake registrations and
+AssetLocator/ReloadShaders path strings move in the same phase as each rename
+(P3: tonemap + ssaa_resolve; P4: the RT families).
+
 **TonemapPass** (`pass.Tonemap`) — compute.
 - Input: `linearColor` (fp32 — NOT the RGBA16F colorHdr AOV, to avoid
   quantizing the display path), AOVs for the 10 debug views, gCamera
@@ -105,9 +116,13 @@ debugViewMode stays runtime (interactive). MaterialFlag branches stay runtime
 New interop structs (ShaderInterop.slang, scalar-only, 16-byte rows,
 static_asserts):
 
-- `InstanceInfoGpu` (64 B): rows 0-2 = object->world 3x4 transform (row-major
-  rows as float4s; replaces the hit-stage-only `ObjectToWorld3x4()` for the
-  lighting raygen); row 3 = `{uint materialSlot; uint meshSlot; uint _r0; uint _r1}`.
+- `InstanceInfoGpu` (64 B): `float3x4 objectToWorld` (owner-directed: matrix
+  type, not 12 scalars — hlslpp::float3x4 is 3 SIMD rows = 48 B, matching
+  Slang row-major; add the `using float3x4` alias to the interop C++ block;
+  replaces the hit-stage-only `ObjectToWorld3x4()` for the lighting raygen);
+  row 3 = `{uint materialSlot; uint meshSlot; uint _r0; uint _r1}`.
+  Likewise `VertexAttribGpu` uses `float4 normal; float4 tangent;` (not 8
+  scalars). static_asserts (64/32) stay as layout tripwires.
   Replaces bindings 4 (gInstanceMaterial) + 6 (gInstanceMesh). Written by the
   existing UploadInstanceSideTables walk + the TLAS instance-desc transform
   (identical values).

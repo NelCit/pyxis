@@ -11,7 +11,7 @@
 //
 // Bindings (matched to raygen.slang):
 //   space=0, b0  : CameraUniforms cbuffer  (uploaded per-frame from GpuScene::GetCamera)
-//   space=0, t0  : RaytracingAccelerationStructure (TLAS, GpuScene::GetTlas)
+//   space=0, t0  : RaytracingAccelerationStructure (TLAS, SceneResources::tlas)
 //   space=0, u0  : RWTexture2D<float4>     (output colour AOV)
 
 #pragma once
@@ -28,6 +28,7 @@
 namespace pyxis {
 
 class GpuScene;
+struct SceneResources;
 
 class PathTracePass final : public IRenderPass {
  public:
@@ -58,13 +59,15 @@ class PathTracePass final : public IRenderPass {
   [[nodiscard]] PickResult GetLastPickResult() const noexcept { return _lastPickResult; }
 
  private:
-  // Build the binding set for the supplied targets. Cached per
-  // `nvrhi::ITexture*` identity (the BGRA8 output) so we don't churn
-  // descriptor sets on every frame; a swapchain rebuild invalidates
-  // pointers and the cache is bounded so stale entries get evicted.
-  // Takes the full RenderTargets so the M7 raw AOV outputs + pick
-  // buffer get bound alongside the existing scene-side buffers.
-  [[nodiscard]] nvrhi::BindingSetHandle GetOrCreateBindingSet(struct RenderTargets const& targets);
+  // Build the binding set for the supplied targets + scene-resource view
+  // (RFC 0003 — the per-Execute SceneResources snapshot replaces the old
+  // public GpuScene getters). Cached per `nvrhi::ITexture*` identity (the
+  // BGRA8 output) so we don't churn descriptor sets on every frame; a
+  // swapchain rebuild invalidates pointers and the cache is bounded so
+  // stale entries get evicted. Takes the full RenderTargets so the M7 raw
+  // AOV outputs + pick buffer get bound alongside the scene-side buffers.
+  [[nodiscard]] nvrhi::BindingSetHandle GetOrCreateBindingSet(
+      struct RenderTargets const& targets, const SceneResources& res);
 
   nvrhi::IDevice* _device = nullptr;
   GpuScene* _scene = nullptr;
@@ -94,62 +97,36 @@ class PathTracePass final : public IRenderPass {
   // changes the picked AOV or the cursor moves.
   nvrhi::BufferHandle _frameUiBuffer;
 
-  // M5: 1-element fallback material buffer (the closesthit reads
-  // `materials[instanceMaterial[InstanceID()]]` so binding 3 must
-  // always be a non-null buffer even when the scene has no materials
-  // yet). GpuScene's own materials buffer takes precedence at
-  // binding-set creation time when present; this fallback covers
-  // cube-fixture scenes that never call AcquireMaterial.
+  // 1-element fallback structured buffers — one per DISTINCT ELEMENT STRIDE
+  // (P2 collapse of the old 14 per-binding fallbacks). Each scene-side
+  // structured-buffer binding must point at a non-null buffer whose stride
+  // matches the shader's declared element type even when GpuScene hasn't
+  // allocated the real buffer yet (empty scenes / first frames). Contents
+  // are (re)written every Execute while the matching scene buffer is null:
+  //   * _fallbackMaterialBuffer  (128 B OpenPBRMaterialGPU) — binding 3,
+  //     default grey so `material = Invalid` renders the same recognisable
+  //     grey as GpuScene's sentinel slot 0.
+  //   * _fallbackLightBuffer     (96 B LightGpu) — binding 5, one disabled
+  //     (intensity = 0) light so the per-light loop falls through to the
+  //     M5/M6 baseColor-only path (byte-equal unlit fixtures).
+  //   * _fallbackInstanceInfoBuffer (64 B InstanceInfoGpu) — binding 4,
+  //     zero record: any rogue InstanceID() resolves to material/mesh
+  //     slot 0 (the sentinels), exactly as the old zero-uint tables did.
+  //   * _fallbackStride32Buffer  (32 B) — bindings 6 (MeshInfoGpu) + 29
+  //     (VertexAttribGpu) share it: both fallback contents are all-zero
+  //     (offsets 0 / zero-magnitude sentinel attributes).
+  //   * _fallbackFloat4Buffer    (16 B) — binding 7 face normals, zero ⇒
+  //     NdotL = 0, unlit but no out-of-bounds read.
+  //   * _fallbackUvBuffer        (8 B tight float2) — binding 24 (the
+  //     gMeshUvs stride contract; see MeshUvPack.h).
+  //   * _fallbackUintBuffer      (4 B) — binding 26 mesh indices.
   nvrhi::BufferHandle _fallbackMaterialBuffer;
-
-  // M6: 1-element fallback instance→material side-table. Same role
-  // as `_fallbackMaterialBuffer` but for binding 4 — the closesthit's
-  // `instanceMaterial[InstanceID()]` lookup must point at a non-null
-  // buffer even before GpuScene has built its first TLAS. Holds one
-  // zero-uint so any rogue InstanceID resolves to material slot 0
-  // (the sentinel grey material).
-  nvrhi::BufferHandle _fallbackInstanceMaterialBuffer;
-
-  // M7: 1-element fallback light buffer. Bound at binding 5 when
-  // GpuScene has no lights (no AddLight call yet). Holds a single
-  // LightGpu with intensity = 0 so the closesthit's per-light
-  // contribution loop sees one disabled entry and falls through to
-  // the M5/M6 baseColor-only path — preserving byte-equal across
-  // M5 + M6 fixtures that don't author lights.
   nvrhi::BufferHandle _fallbackLightBuffer;
-
-  // M7 NdotL: fallbacks for the three new normal-lookup buffers.
-  // Each holds a single zero-init element so an empty / not-yet-
-  // committed scene's closesthit invocations (rare — scenes with
-  // no meshes can't have hits anyway) resolve to face-normal (0,0,0)
-  // → NdotL=0 → unlit, but no out-of-bounds reads.
-  nvrhi::BufferHandle _fallbackInstanceMeshBuffer;
-  nvrhi::BufferHandle _fallbackMeshFaceNormalsBuffer;
-  nvrhi::BufferHandle _fallbackMeshFaceOffsetsBuffer;
-
-  // M8a UV pipeline: 1-element fallbacks for the four new mesh-data
-  // buffers (UVs, UV offsets, indices, index offsets). Closesthit
-  // never indexes through these on an empty scene (no hits → no
-  // closesthit invocations) but the binding slots must point at a
-  // non-null structured buffer for the descriptor set to validate.
-  nvrhi::BufferHandle _fallbackMeshUvsBuffer;
-  nvrhi::BufferHandle _fallbackMeshUvOffsetsBuffer;
-  nvrhi::BufferHandle _fallbackMeshIndicesBuffer;
-  nvrhi::BufferHandle _fallbackMeshIndexOffsetsBuffer;
-
-  // M9 smooth shading: 1-element fallbacks for the per-vertex normal
-  // buffer + offset table. Closesthit's bary-interp path detects an
-  // empty mesh by reading a zero-magnitude normal; falls back to the
-  // M7 face-normal path. Same lifetime + create rationale as the UV
-  // fallbacks above.
-  nvrhi::BufferHandle _fallbackMeshVertexNormalsBuffer;
-  nvrhi::BufferHandle _fallbackMeshVertexNormalOffsetsBuffer;
-
-  // M9 normal mapping: same shape, for the per-vertex tangent buffer.
-  // Closesthit's normal-mapping branch checks for zero-magnitude
-  // tangent and skips its TBN sample.
-  nvrhi::BufferHandle _fallbackMeshTangentsBuffer;
-  nvrhi::BufferHandle _fallbackMeshTangentOffsetsBuffer;
+  nvrhi::BufferHandle _fallbackInstanceInfoBuffer;
+  nvrhi::BufferHandle _fallbackStride32Buffer;
+  nvrhi::BufferHandle _fallbackFloat4Buffer;
+  nvrhi::BufferHandle _fallbackUvBuffer;
+  nvrhi::BufferHandle _fallbackUintBuffer;
 
   // M7-IBL: 1×1 black RGBA32F fallback texture + a default linear-
   // clamp sampler. Bound at bindings 9/10 when the scene has no dome
@@ -173,21 +150,15 @@ class PathTracePass final : public IRenderPass {
   // getter feeds each slot.
   enum class BindingSlot : std::size_t {
     Materials = 0,
-    InstanceMaterial,
+    InstanceInfo,
     Lights,
-    InstanceMesh,
+    MeshInfo,
     MeshFaceNormals,
-    MeshFaceOffsets,
     DomeTexture,
     BindlessSampler,
     MeshUvs,
-    MeshUvOffsets,
     MeshIndices,
-    MeshIndexOffsets,
-    MeshVertexNormals,
-    MeshVertexNormalOffsets,
-    MeshTangents,
-    MeshTangentOffsets,
+    MeshVertexAttribs,
     DomeSampler,
     ColorHdrAov,
     NormalAov,

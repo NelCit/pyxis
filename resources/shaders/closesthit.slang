@@ -38,17 +38,19 @@
 //   set=0, binding=2  : RWTexture2D<float4> output image (raygen)
 //   set=0, binding=3  : StructuredBuffer<OpenPBRMaterialGPU> materials
 //                       (closesthit — added at M5)
-//   set=0, binding=4  : StructuredBuffer<uint> instance→material slot
-//                       (closesthit — added at M6, plan §15)
+//   set=0, binding=4  : StructuredBuffer<InstanceInfoGpu> per-instance
+//                       record (P2 packing — object→world rows + the
+//                       §15 material slot + the M7-NdotL mesh slot;
+//                       replaces the two parallel uint side-tables)
 //   set=0, binding=5  : StructuredBuffer<LightGpu> lights
 //                       (closesthit + miss — added at M7-simple)
-//   set=0, binding=6  : StructuredBuffer<uint> instance→mesh slot
-//                       (closesthit — added at M7 NdotL)
+//   set=0, binding=6  : StructuredBuffer<MeshInfoGpu> per-mesh record
+//                       (P2 packing — face/UV/index/vertex-attrib
+//                       offsets + vertexCount; replaces the five
+//                       parallel per-mesh uint offset tables)
 //   set=0, binding=7  : StructuredBuffer<float4> mesh face normals
 //                       (closesthit — added at M7 NdotL; flat
-//                        per-mesh concatenation, indexed via offset 8)
-//   set=0, binding=8  : StructuredBuffer<uint> mesh face-normal offsets
-//                       (closesthit — added at M7 NdotL)
+//                        per-mesh concatenation, offset in MeshInfoGpu)
 //   set=0, binding=9  : Texture2D<float4> dome HDRI env-map
 //                       (miss — added at M7 IBL)
 //   set=0, binding=10 : SamplerState dome HDRI sampler — also reused
@@ -56,11 +58,16 @@
 //                       (closesthit — added at M8a)
 //   set=0, binding=24 : StructuredBuffer<float2> per-mesh UVs
 //                       (closesthit — added at M8a UV pipeline)
-//   set=0, binding=25 : StructuredBuffer<uint>   per-mesh UV offsets
-//   set=0, binding=26 : StructuredBuffer<uint>   per-mesh triangle indices
-//   set=0, binding=27 : StructuredBuffer<uint>   per-mesh index offsets
+//   set=0, binding=26 : StructuredBuffer<uint>   triangle indices
+//                       (§14.5 index-pool structured view; offsets in
+//                       MeshInfoGpu are pool element offsets)
 //   set=0, binding=28 : Texture2D[BINDLESS_TEXTURES_CAP] bindless materials
 //                       (closesthit — added at M8a; indexed by mat.baseColorTex)
+//   set=0, binding=29 : StructuredBuffer<VertexAttribGpu> interleaved
+//                       per-vertex normal+tangent (P2 packing; replaces
+//                       the two parallel padded float4 streams)
+//   (bindings 8/25/27/30/31/32 are RETIRED by the P2 packing —
+//    Vulkan allows sparse binding numbers.)
 
 #include "ShaderInterop.slang"
 
@@ -83,21 +90,15 @@
 // Same binding-set entry — no new layout slot needed.
 [[vk::binding(1, 0)]]  RaytracingAccelerationStructure     gTlas;
 [[vk::binding(3, 0)]]  StructuredBuffer<OpenPBRMaterialGPU> gMaterials;
-[[vk::binding(4, 0)]]  StructuredBuffer<uint>               gInstanceMaterial;
+[[vk::binding(4, 0)]]  StructuredBuffer<InstanceInfoGpu>    gInstanceInfo;
 [[vk::binding(5, 0)]]  StructuredBuffer<LightGpu>           gLights;
-[[vk::binding(6, 0)]]  StructuredBuffer<uint>               gInstanceMesh;
+[[vk::binding(6, 0)]]  StructuredBuffer<MeshInfoGpu>        gMeshInfo;
 [[vk::binding(7, 0)]]  StructuredBuffer<float4>             gMeshFaceNormals;
-[[vk::binding(8, 0)]]  StructuredBuffer<uint>               gMeshFaceOffsets;
 [[vk::binding(10, 0)]] SamplerState                         gBindlessSampler;
 [[vk::binding(24, 0)]] StructuredBuffer<float2>             gMeshUvs;
-[[vk::binding(25, 0)]] StructuredBuffer<uint>               gMeshUvOffsets;
 [[vk::binding(26, 0)]] StructuredBuffer<uint>               gMeshIndices;
-[[vk::binding(27, 0)]] StructuredBuffer<uint>               gMeshIndexOffsets;
 [[vk::binding(28, 0)]] Texture2D                            gBindlessTextures[BINDLESS_TEXTURES_CAP];
-[[vk::binding(29, 0)]] StructuredBuffer<float4>             gMeshVertexNormals;
-[[vk::binding(30, 0)]] StructuredBuffer<uint>               gMeshVertexNormalOffsets;
-[[vk::binding(31, 0)]] StructuredBuffer<float4>             gMeshTangents;
-[[vk::binding(32, 0)]] StructuredBuffer<uint>               gMeshTangentOffsets;
+[[vk::binding(29, 0)]] StructuredBuffer<VertexAttribGpu>    gMeshVertexAttribs;
 
 // Per-texture LOD-aware sample. Picks a mip level from the ray-cone
 // footprint (radius at the hit, in world units) × the texture's own
@@ -224,11 +225,13 @@ float3 GgxSpecular(float3 N, float3 V, float3 L, float3 baseColor,
 // NVRHI's createShader. See the matching note in raygen.slang.
 [shader("closesthit")]
 void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attribs) {
-    // §15: InstanceID() is the per-instance slot. The side-table
-    // resolves it to a material slot (0 = "no material assigned" →
-    // sentinel grey material at materials[0]).
+    // §15: InstanceID() is the per-instance slot. The packed instance
+    // record resolves it to a material slot (0 = "no material assigned"
+    // → sentinel grey material at materials[0]) + the mesh slot whose
+    // packed MeshInfoGpu record carries every side-table offset.
     const uint instanceId = InstanceID();
-    const uint materialId = gInstanceMaterial[instanceId];
+    const InstanceInfoGpu instInfo = gInstanceInfo[instanceId];
+    const uint materialId = instInfo.materialSlot;
     const OpenPBRMaterialGPU mat = gMaterials[materialId];
 
     // M8a UV pipeline: interpolate per-vertex UV via barycentrics,
@@ -236,18 +239,19 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
     // textured materials actually pick up their texels instead of
     // collapsing to the scalar fallback.
     //
-    //   ofs = gMeshIndexOffsets[meshSlot]
-    //   v0/1/2 = gMeshIndices[ofs + PrimitiveIndex()*3 + {0,1,2}]
-    //   uv0/1/2 = gMeshUvs[gMeshUvOffsets[meshSlot] + v_i]
+    //   mi = gMeshInfo[meshSlot]
+    //   v0/1/2 = gMeshIndices[mi.indexOffset + PrimitiveIndex()*3 + {0,1,2}]
+    //   uv0/1/2 = gMeshUvs[mi.uvOffset + v_i]
     //   uv = uv0*(1-bary.x-bary.y) + uv1*bary.x + uv2*bary.y
     // attribs.barycentrics is the (u,v) pair the closesthit input
     // attribute carries; w0 = 1 - u - v is the third weight.
-    const uint meshSlot = gInstanceMesh[instanceId];
-    const uint indexBase = gMeshIndexOffsets[meshSlot] + PrimitiveIndex() * 3u;
+    const uint meshSlot = instInfo.meshSlot;
+    const MeshInfoGpu mi = gMeshInfo[meshSlot];
+    const uint indexBase = mi.indexOffset + PrimitiveIndex() * 3u;
     const uint v0 = gMeshIndices[indexBase + 0u];
     const uint v1 = gMeshIndices[indexBase + 1u];
     const uint v2 = gMeshIndices[indexBase + 2u];
-    const uint uvBase = gMeshUvOffsets[meshSlot];
+    const uint uvBase = mi.uvOffset;
     const float2 uv0 = gMeshUvs[uvBase + v0];
     const float2 uv1 = gMeshUvs[uvBase + v1];
     const float2 uv2 = gMeshUvs[uvBase + v2];
@@ -298,7 +302,7 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
     if (planarProj) {
         const float3 hitW = WorldRayOrigin() + RayTCurrent() * WorldRayDirection();
         const float3 faceNormalLocal =
-            gMeshFaceNormals[gMeshFaceOffsets[meshSlot] + PrimitiveIndex()].xyz;
+            gMeshFaceNormals[mi.faceOffset + PrimitiveIndex()].xyz;
         float3 hp;
         float3 fnP;
         if (objectProj) {
@@ -348,7 +352,7 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
     // and alias into herringbone moiré even with a full mip chain.
     // Density 0 (degenerate tri / no UVs) → fall back to coneRadius,
     // i.e. the previous "1 UV unit per world unit" assumption.
-    const uint   faceDensitySlot = gMeshFaceOffsets[meshSlot] + PrimitiveIndex();
+    const uint   faceDensitySlot = mi.faceOffset + PrimitiveIndex();
     const float  faceTexelDensity = gMeshFaceNormals[faceDensitySlot].w;
     const float3x4 instanceXform = ObjectToWorld3x4();
     const float  objToWorldScale = max(length(instanceXform[0].xyz), 1e-6);
@@ -409,11 +413,11 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
         ddxUv = float2(fpw, 0.0);
         ddyUv = float2(0.0, fpw);
     } else {
-        const uint   tanBase  = gMeshTangentOffsets[meshSlot];
-        const float4 tan0     = gMeshTangents[tanBase + v0];
+        const uint   tanBase  = mi.vertexAttribOffset;
+        const float4 tan0     = gMeshVertexAttribs[tanBase + v0].tangent;
         const float3 tanLocal = tan0.xyz * w0
-                              + gMeshTangents[tanBase + v1].xyz * bary.x
-                              + gMeshTangents[tanBase + v2].xyz * bary.y;
+                              + gMeshVertexAttribs[tanBase + v1].tangent.xyz * bary.x
+                              + gMeshVertexAttribs[tanBase + v2].tangent.xyz * bary.y;
         if (dot(tanLocal, tanLocal) > 1e-8 && faceTexelDensity > 0.0) {
             float3 tanW = normalize(mul(worldFromObj3x3, tanLocal));
             tanW = normalize(tanW - faceNormalW * dot(tanW, faceNormalW));  // Gram-Schmidt
@@ -499,10 +503,10 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
         objectToWorld[1].xyz,
         objectToWorld[2].xyz);
 
-    const uint vertexNormalBase = gMeshVertexNormalOffsets[meshSlot];
-    const float3 nv0 = gMeshVertexNormals[vertexNormalBase + v0].xyz;
-    const float3 nv1 = gMeshVertexNormals[vertexNormalBase + v1].xyz;
-    const float3 nv2 = gMeshVertexNormals[vertexNormalBase + v2].xyz;
+    const uint vertexNormalBase = mi.vertexAttribOffset;
+    const float3 nv0 = gMeshVertexAttribs[vertexNormalBase + v0].normal.xyz;
+    const float3 nv1 = gMeshVertexAttribs[vertexNormalBase + v1].normal.xyz;
+    const float3 nv2 = gMeshVertexAttribs[vertexNormalBase + v2].normal.xyz;
     const float3 smoothLocal = nv0 * w0 + nv1 * bary.x + nv2 * bary.y;
     const float  smoothLenSq = dot(smoothLocal, smoothLocal);
 
@@ -511,7 +515,7 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
         nLocal = smoothLocal * rsqrt(smoothLenSq);
     } else {
         // Mesh authored no normals — fall back to face normal.
-        const uint faceOffset = gMeshFaceOffsets[meshSlot];
+        const uint faceOffset = mi.faceOffset;
         nLocal = gMeshFaceNormals[faceOffset + PrimitiveIndex()].xyz;
     }
     float3 nWorld = normalize(mul(worldFromObject3x3, nLocal));
@@ -558,10 +562,10 @@ void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attrib
     //      UVs / normals where MikkTSpace can't generate them).
     if ((mat.flags & MATERIAL_FLAG_HAS_NORMAL_MAP) != 0u
         && mat.normalTex < BINDLESS_TEXTURES_CAP) {
-        const uint   tangentBase = gMeshTangentOffsets[meshSlot];
-        const float4 tv0 = gMeshTangents[tangentBase + v0];
-        const float4 tv1 = gMeshTangents[tangentBase + v1];
-        const float4 tv2 = gMeshTangents[tangentBase + v2];
+        const uint   tangentBase = mi.vertexAttribOffset;
+        const float4 tv0 = gMeshVertexAttribs[tangentBase + v0].tangent;
+        const float4 tv1 = gMeshVertexAttribs[tangentBase + v1].tangent;
+        const float4 tv2 = gMeshVertexAttribs[tangentBase + v2].tangent;
         const float3 tangentLocal = tv0.xyz * w0 + tv1.xyz * bary.x + tv2.xyz * bary.y;
         const float  tangentLenSq = dot(tangentLocal, tangentLocal);
         if (tangentLenSq > 1e-6) {

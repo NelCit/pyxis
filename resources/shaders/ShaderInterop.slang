@@ -29,6 +29,7 @@
     using float2   = hlslpp::float2;
     using float3   = hlslpp::float3;
     using float4   = hlslpp::float4;
+    using float3x4 = hlslpp::float3x4;  // 3 SIMD rows = 48 B (InstanceInfoGpu)
     using float4x4 = hlslpp::float4x4;
     using uint     = uint32_t;
 #endif
@@ -60,14 +61,15 @@ struct HitInfo {
     // WorldRayOrigin + RayTCurrent * WorldRayDirection cached so
     // raygen doesn't re-derive it. Miss leaves them at zero.
     //
-    // Payload size note: 68 bytes total — past the 32-byte register-
-    // only payload ceiling for DXR. The runtime spills to the on-
-    // chip ray stack on every TraceRay, costing latency per leaf
-    // traversal step. Acceptable for the M7 AOV inspector (one
-    // primary ray per pixel; AOV writes happen ONCE per dispatch);
-    // when the §9 multi-bounce path tracer + NEE land at M9+ the
-    // BSDF lobes will need to drop the AOV-only fields onto a
-    // payload-attribute attachment instead.
+    // Payload size note: 80 bytes total (the M29 recursionDepth +
+    // V2.B transmittance fields grew it past the original 68) — far
+    // past the 32-byte register-only payload ceiling for DXR. The
+    // runtime spills to the on-chip ray stack on every TraceRay,
+    // costing latency per leaf traversal step. Acceptable for the
+    // M7 AOV inspector (one primary ray per pixel; AOV writes happen
+    // ONCE per dispatch); the pass-split design keeps this payload
+    // for secondary rays only — the visibility pass uses a thin
+    // 20-byte payload instead.
     float3 baseColor;
     uint   materialId;   // material slot from gInstanceMaterial[instanceId]
     float3 worldHit;
@@ -343,7 +345,8 @@ struct OpenPBRMaterialGPU {
 // LightGpu — packed light entry the closesthit reads via the
 // structured-buffer light table at binding 5 (M7). Same scalar-only
 // rule as OpenPBRMaterialGPU (avoids the hlslpp::float3 16-vs-12-byte
-// trap). Layout is 80 bytes (5 rows of 16).
+// trap). Layout is 96 bytes (6 rows of 16) — row 5 carries the
+// UsdLuxShapingAPI cone terms added at M9.
 //
 // M7 ships a deliberately **simple shading model** (no NdotL, no
 // shadow rays, no NEE, no MIS, no importance sampling — see
@@ -441,6 +444,79 @@ static const uint MATERIAL_FLAG_HAS_UV_TRANSFORM        = 1u << 15;
 static const uint MATERIAL_FLAG_WORLD_PROJECTION        = 1u << 16;
 static const uint MATERIAL_FLAG_OBJECT_PROJECTION       = 1u << 17;
 
+// InstanceInfoGpu — packed per-instance record at binding 4 (P2 buffer
+// packing; replaces the two parallel per-instance uint side-tables
+// gInstanceMaterial + gInstanceMesh). Indexed by `InstanceID()` (= the
+// §15 instance slot). Layout is 64 bytes (4 rows of 16):
+//   Rows 0-2 — `objectToWorld`, the instance object→world 3×4 affine
+//   (owner-directed: a real float3x4, NOT 12 scalars — the scalar-only
+//   rule below exists for the float3 16-vs-12-byte trap; hlslpp's
+//   float3x4 is 3 SIMD rows = 48 bytes, byte-identical to Slang's
+//   row-major float3x4, same as the float4x4s in CameraUniforms).
+//   Stored row-major with EXACTLY the float values the TLAS instance
+//   desc transform carries (RebuildTlasIfDirty writes both from the
+//   same hlslpp::store). P2 populates it for the P4 visibility-buffer
+//   split (whose lighting raygen has no ObjectToWorld3x4() intrinsic);
+//   no shader reads it yet.
+//   Row 3 — the §15 material slot + the M7-NdotL mesh slot the
+//   closesthit/anyhit table lookups consume today.
+struct InstanceInfoGpu {
+    // Rows 0-2 — object→world 3×4 affine, row-major.
+    float3x4 objectToWorld;
+    // Row 3 — table slots (+ 2 reserved pads).
+    uint  materialSlot;   // material slot for gMaterials (0 = sentinel grey)
+    uint  meshSlot;       // mesh slot for gMeshInfo (0 = sentinel)
+    uint  _pad0;
+    uint  _pad1;
+};
+
+// MeshInfoGpu — packed per-mesh-slot record at binding 6 (P2 buffer
+// packing; replaces the five parallel per-mesh uint offset tables
+// gMeshFaceOffsets / gMeshUvOffsets / gMeshIndexOffsets /
+// gMeshVertexNormalOffsets / gMeshTangentOffsets). One 32-byte cache
+// line per hit instead of five buffer loads. Indexed by the mesh slot
+// from InstanceInfoGpu. Layout is 32 bytes (2 rows of 16).
+//
+// faceOffset / uvOffset / vertexAttribOffset are running sums over the
+// live meshes in ascending slot order (the side-table concatenation
+// order — identical values to the old offset tables). vertexAttribOffset
+// serves BOTH per-vertex streams: the vertex-normal and tangent uploads
+// each pad to exactly vertexCount entries per mesh, so their offsets
+// were equal by construction (verified in UploadMeshVertexAttribs; _r0
+// is reserved as a second offset if they ever diverge). indexOffset is
+// the mesh's element offset into the pooled index buffer (§14.5) —
+// stable across commits because the pool never re-packs.
+struct MeshInfoGpu {
+    uint faceOffset;          // into gMeshFaceNormals (per-triangle)
+    uint uvOffset;            // into gMeshUvs (per-vertex)
+    uint indexOffset;         // into gMeshIndices (index-pool elements)
+    uint vertexAttribOffset;  // into gMeshVertexAttribs (per-vertex)
+    uint vertexCount;
+    uint _r0;
+    uint _r1;
+    uint _r2;
+};
+
+// VertexAttribGpu — interleaved per-vertex shading attributes at
+// binding 29 (P2 buffer packing; merges the two parallel padded float4
+// streams gMeshVertexNormals + gMeshTangents). attrib[i] = {normal[i],
+// tangent[i]}; exactly vertexCount entries per mesh. Owner-directed:
+// real float4 fields, not 8 scalars — hlslpp::float4 is exactly 16
+// bytes on both sides (the scalar-only rule guards the float3 trap
+// only), so the layout matches Slang bit-for-bit just like the old
+// float4 streams did. Layout is 32 bytes (2 rows of 16).
+//
+// normal.w is reserved (the old vertex-normal stream was float4 with w
+// unused); tangent.w is the MikkTSpace bitangent-handedness sign. A
+// zero-magnitude xyz remains the per-field "not authored" sentinel —
+// a mesh can author normals but no tangents (or vice versa), and the
+// closesthit detects each independently exactly as it did against the
+// two separate streams.
+struct VertexAttribGpu {
+    float4 normal;    // xyz normal; w reserved (was the stream's pad)
+    float4 tangent;   // xyz tangent; w = bitangent handedness (±1), MikkTSpace
+};
+
 // Bindless texture array capacity at PathTracePass binding 28.
 // Cap chosen to comfortably cover v1 production scenes (Lobby 169,
 // World Lobby ~2K, Moana production sets ~50K is the post-v1 §5 target via
@@ -479,6 +555,33 @@ static const uint BINDLESS_TEXTURES_CAP = 4096u;
     static_assert(sizeof(OpenPBRMaterialGPU) % 16 == 0,
                   "OpenPBRMaterialGPU must be 16-byte aligned (§23 cbuffer / "
                   "structured-buffer alignment rule).");
+    static_assert(sizeof(LightGpu) == 96,
+                  "LightGpu must be 96 bytes (6 rows of 16) — row 5 carries the "
+                  "M9 UsdLuxShapingAPI cone terms. The GPU light table at "
+                  "binding 5 is packed with this exact stride; see "
+                  "PackLightGpu in Private/GpuScene/Detail.h.");
+    static_assert(sizeof(LightGpu) % 16 == 0,
+                  "LightGpu must be 16-byte aligned (§23 structured-buffer rule).");
+    static_assert(sizeof(InstanceInfoGpu) == 64,
+                  "InstanceInfoGpu must be 64 bytes (4 rows of 16) — rows 0-2 carry "
+                  "the object→world 3×4 affine, row 3 the material/mesh slots. The "
+                  "packed instance table at binding 4 is uploaded with this exact "
+                  "stride; see RebuildTlasIfDirty / PackInstanceInfo in "
+                  "Private/GpuScene/Commit.cpp.");
+    static_assert(sizeof(InstanceInfoGpu) % 16 == 0,
+                  "InstanceInfoGpu must be 16-byte aligned (§23 structured-buffer rule).");
+    static_assert(sizeof(MeshInfoGpu) == 32,
+                  "MeshInfoGpu must be 32 bytes (2 rows of 16) — the five legacy "
+                  "per-mesh offset tables packed into one record; see UploadMeshInfo "
+                  "in Private/GpuScene/Commit.cpp.");
+    static_assert(sizeof(MeshInfoGpu) % 16 == 0,
+                  "MeshInfoGpu must be 16-byte aligned (§23 structured-buffer rule).");
+    static_assert(sizeof(VertexAttribGpu) == 32,
+                  "VertexAttribGpu must be 32 bytes (2 rows of 16) — interleaved "
+                  "per-vertex normal + tangent; see UploadMeshVertexAttribs in "
+                  "Private/GpuScene/Commit.cpp.");
+    static_assert(sizeof(VertexAttribGpu) % 16 == 0,
+                  "VertexAttribGpu must be 16-byte aligned (§23 structured-buffer rule).");
 
     // Sentinel bindless slot meaning "no texture bound for this lobe".
     // The closesthit checks the matching MaterialFlag bit before

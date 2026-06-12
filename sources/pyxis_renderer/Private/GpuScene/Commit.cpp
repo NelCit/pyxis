@@ -194,24 +194,24 @@ void GpuScene::Impl::Clear() noexcept
     removalSentinel.remove<scene::DirtyVisibility>();
   }
   materialGpuBuffer = nullptr;
-  instanceMaterialBuffer = nullptr;
+  instanceInfoBuffer = nullptr;
+  instanceInfo.clear();
+  instanceInfoNeedsUpload = false;
   lightsGpuBuffer = nullptr;
   meshFaceNormalsBuffer = nullptr;
-  meshFaceOffsetsBuffer = nullptr;
   meshFaceNormalsPackedSlots = 0;
   meshUvsBuffer = nullptr;
-  meshUvOffsetsBuffer = nullptr;
-  meshIndicesBuffer = nullptr;
-  meshIndexOffsetsBuffer = nullptr;
   meshUvsPackedSlots = 0;
-  meshIndicesPackedSlots = 0;
-  meshVertexNormalsBuffer = nullptr;
-  meshVertexNormalOffsetsBuffer = nullptr;
-  meshVertexNormalsPackedSlots = 0;
-  meshTangentsBuffer = nullptr;
-  meshTangentOffsetsBuffer = nullptr;
-  meshTangentsPackedSlots = 0;
-  instanceMeshBuffer = nullptr;
+  meshVertexAttribsBuffer = nullptr;
+  meshVertexAttribsPackedSlots = 0;
+  meshInfoBuffer = nullptr;
+  // §14.5 pooled geometry pages — Clear() is the ONE place pool memory comes back
+  // (DestroyMesh leaks its ranges by design); release the pools + reset the cursors
+  // so the next scene's first commit re-allocates fresh.
+  vertexPoolBuffer = nullptr;
+  indexPoolBuffer = nullptr;
+  vertexPoolUsedBytes = 0;
+  indexPoolUsedElements = 0;
 
   // Sampler + missingTexture are scene-lifetime singletons that the
   // first CommitResources after Clear will re-create on demand. Drop
@@ -289,7 +289,7 @@ Expected<void> GpuScene::Impl::CommitResources(nvrhi::ICommandList* commandList)
   // (each checks `commitError` first).
   commitError = EnsureBindlessFallbacks(commandList);
 
-  // Review fix #3 — compute the lowest DirtyTopology mesh slot ONCE (the five mesh
+  // Review fix #3 — compute the lowest DirtyTopology mesh slot ONCE (the mesh
   // side-table uploaders read this member instead of each rescanning the mesh table).
   // DirtyTopology is still set here (BuildPendingBlas clears it later in progress()).
   commitLowestDirtyMeshSlot = LowestDirtyMeshSlot();
@@ -331,24 +331,23 @@ void GpuScene::Impl::RegisterCommitPipeline() noexcept
       [runStep](flecs::iter&) { runStep(&Impl::UploadMaterialBuffer); });
   sceneWorld.system("Sys_UploadLights").kind<scene::PhaseUploadMaterials>().run(
       [runStep](flecs::iter&) { runStep(&Impl::UploadLightBuffer); });
-  sceneWorld.system("Sys_InstanceSideTables").kind<scene::PhaseUploadMaterials>().run(
-      [runStep](flecs::iter&) { runStep(&Impl::UploadInstanceSideTables); });
+  // P2 packing — fills the slot halves of the instanceInfo mirror; the GPU upload
+  // happens at the end of RebuildTlasIfDirty (after the transform rows are written).
+  sceneWorld.system("Sys_PackInstanceInfo").kind<scene::PhaseUploadMaterials>().run(
+      [runStep](flecs::iter&) { runStep(&Impl::PackInstanceInfo); });
   sceneWorld.system("Sys_UploadVolumes").kind<scene::PhaseUploadMaterials>().run(
       [runStep](flecs::iter&) { runStep(&Impl::UploadPendingVolumes); });
 
-  // PhaseExtractMeshes — vertex/index + the per-mesh side-table buffers.
+  // PhaseExtractMeshes — geometry-pool appends (+ the packed MeshInfo table, called
+  // directly from UploadPendingMeshes' tail) and the per-mesh element side tables.
   sceneWorld.system("Sys_UploadMeshes").kind<scene::PhaseExtractMeshes>().run(
       [runStep](flecs::iter&) { runStep(&Impl::UploadPendingMeshes); });
   sceneWorld.system("Sys_MeshFaceNormals").kind<scene::PhaseExtractMeshes>().run(
       [runStep](flecs::iter&) { runStep(&Impl::UploadMeshFaceNormals); });
   sceneWorld.system("Sys_MeshUvs").kind<scene::PhaseExtractMeshes>().run(
       [runStep](flecs::iter&) { runStep(&Impl::UploadMeshUvs); });
-  sceneWorld.system("Sys_MeshIndices").kind<scene::PhaseExtractMeshes>().run(
-      [runStep](flecs::iter&) { runStep(&Impl::UploadMeshIndices); });
-  sceneWorld.system("Sys_MeshVertexNormals").kind<scene::PhaseExtractMeshes>().run(
-      [runStep](flecs::iter&) { runStep(&Impl::UploadMeshVertexNormals); });
-  sceneWorld.system("Sys_MeshTangents").kind<scene::PhaseExtractMeshes>().run(
-      [runStep](flecs::iter&) { runStep(&Impl::UploadMeshTangents); });
+  sceneWorld.system("Sys_MeshVertexAttribs").kind<scene::PhaseExtractMeshes>().run(
+      [runStep](flecs::iter&) { runStep(&Impl::UploadMeshVertexAttribs); });
 
   // PhaseBuildBlas — needs the vertex/index buffers from ExtractMeshes.
   sceneWorld.system("Sys_BuildBlas").kind<scene::PhaseBuildBlas>().run(
@@ -383,7 +382,7 @@ void GpuScene::Impl::RefreshDomeEnvMapCache() noexcept
 {
   // Single-dome convention (§43): the first live Dome light (slot order) with a
   // resolved + non-quarantined env-map texture. Computed once per commit; the
-  // per-frame GetDomeEnvMapTexture() accessor returns the cached pointer.
+  // per-frame SceneResources view carries the cached pointer.
   domeEnvMapTexture = nullptr;
   std::vector<std::pair<uint32_t, LightDesc>> liveLights;
   CollectLiveLightsSorted(liveLights);
@@ -408,62 +407,127 @@ void GpuScene::Impl::RefreshDomeEnvMapCache() noexcept
 // Per-resource-type uploaders
 // ============================================================================
 
+namespace {
+
+// §14.5 pooled geometry pages — grow-only capacity ensure. When the pool is too
+// small for `neededBytes`, create a replacement sized max(need, 2× current), copy
+// the live [0, usedBytes) range across, and swap the handle. Growth runs here in
+// PhaseExtractMeshes — strictly BEFORE BuildPendingBlas records builds against the
+// pool, so every BLAS input captures the post-growth handle at build-record time.
+// Replaces the old per-mesh createBuffer OOM paths with an equivalent Expected<>.
+[[nodiscard]] Expected<void> EnsureGeometryPoolCapacity(
+    nvrhi::IDevice* device, nvrhi::ICommandList* commandList,
+    nvrhi::BufferHandle& pool, std::uint64_t usedBytes, std::uint64_t neededBytes,
+    const nvrhi::BufferDesc& descTemplate, const char* errorLabel) noexcept
+{
+  if (pool && pool->getDesc().byteSize >= neededBytes)
+    return {};
+  nvrhi::BufferDesc grownDesc = descTemplate;
+  // First allocation is exact (the common single-bulk-commit load wastes no VRAM
+  // headroom); a grow doubles so incremental appends amortise to O(total).
+  grownDesc.byteSize = pool ? std::max<std::uint64_t>(neededBytes,
+                                                      pool->getDesc().byteSize * 2u)
+                            : neededBytes;
+  nvrhi::BufferHandle grown = device->createBuffer(grownDesc);
+  if (!grown)
+  {
+    return std::unexpected{
+        PYXIS_ERROR(ErrorKind::OutOfMemoryGpu,
+                    "CommitResources: createBuffer(%s, %llu bytes) failed",
+                    errorLabel, static_cast<unsigned long long>(grownDesc.byteSize))};
+  }
+  if (pool && usedBytes > 0)
+    commandList->copyBuffer(grown.Get(), 0, pool.Get(), 0, usedBytes);
+  pool = grown;
+  return {};
+}
+
+}  // namespace
+
 Expected<void> GpuScene::Impl::UploadPendingMeshes(nvrhi::ICommandList* commandList)
 {
-  // RFC 0009 P4 — upload vertex/index buffers for DirtyTopology meshes. The tag is
-  // NOT cleared here: the BLAS-build pass (which runs after, same commit, and needs
-  // these buffers) clears DirtyTopology once the BLAS is built.
+  // RFC 0009 P4 / §14.5 pooled pages — append DirtyTopology meshes' vertex/index
+  // data to the two grow-only pools (replaces per-mesh buffers; BLAS builds take
+  // buffer+offset). The tag is NOT cleared here: the BLAS-build pass (which runs
+  // after, same commit, and needs these ranges) clears DirtyTopology once built.
+  //
+  // Pre-pass: total bytes this commit so each pool grows AT MOST once per commit —
+  // and a single bulk load's first allocation is exact-fit.
+  std::uint64_t newVertexBytes   = 0;
+  std::uint64_t newIndexElements = 0;
+  bool          anyDirty         = false;
   for (uint32_t slot = 1; slot < meshSlots.SlotCount(); ++slot)
   {
     if (!meshSlots.IsLive(slot) || !meshSlots.EntityAtSlot(slot).has<scene::DirtyTopology>())
       continue;
-    MeshResource& entry = meshResources[slot];
-
-    // Vertex buffer — hlslpp::float3 stride (16 bytes / vertex) on
-    // x86_64 SSE. VK_FORMAT_R32G32B32_SFLOAT with that stride is
-    // valid ray-tracing geometry input under
-    // VK_KHR_ray_tracing_pipeline.
-    const std::size_t vertexBytes = entry.positions.size() * sizeof(hlslpp::float3);
-    nvrhi::BufferDesc vertexDesc;
-    vertexDesc.byteSize = vertexBytes;
-    vertexDesc.debugName =
-        entry.debugName.empty() ? std::string{"mesh.vertex"} : entry.debugName + ".vertex";
-    vertexDesc.isVertexBuffer = true;
-    vertexDesc.isAccelStructBuildInput = true;
-    vertexDesc.initialState = nvrhi::ResourceStates::CopyDest;
-    vertexDesc.keepInitialState = true;
-    entry.vertexBuffer = device->createBuffer(vertexDesc);
-    if (!entry.vertexBuffer)
-    {
-      return std::unexpected{
-          PYXIS_ERROR(ErrorKind::OutOfMemoryGpu,
-                      "CommitResources: createBuffer(vertex, %zu bytes) failed for '%s'",
-                      vertexBytes, entry.debugName.c_str())};
-    }
-
-    const std::size_t indexBytes = entry.indices.size() * sizeof(uint32_t);
-    nvrhi::BufferDesc indexDesc;
-    indexDesc.byteSize = indexBytes;
-    indexDesc.debugName =
-        entry.debugName.empty() ? std::string{"mesh.index"} : entry.debugName + ".index";
-    indexDesc.isIndexBuffer = true;
-    indexDesc.isAccelStructBuildInput = true;
-    indexDesc.format = nvrhi::Format::R32_UINT;
-    indexDesc.initialState = nvrhi::ResourceStates::CopyDest;
-    indexDesc.keepInitialState = true;
-    entry.indexBuffer = device->createBuffer(indexDesc);
-    if (!entry.indexBuffer)
-    {
-      entry.vertexBuffer = nullptr;
-      return std::unexpected{
-          PYXIS_ERROR(ErrorKind::OutOfMemoryGpu,
-                      "CommitResources: createBuffer(index, %zu bytes) failed for '%s'",
-                      indexBytes, entry.debugName.c_str())};
-    }
-
-    commandList->writeBuffer(entry.vertexBuffer.Get(), entry.positions.data(), vertexBytes);
-    commandList->writeBuffer(entry.indexBuffer.Get(), entry.indices.data(), indexBytes);
+    const MeshResource& entry = meshResources[slot];
+    newVertexBytes += entry.positions.size() * sizeof(hlslpp::float3);
+    newIndexElements += entry.indices.size();
+    anyDirty = true;
   }
+
+  if (anyDirty)
+  {
+    // Vertex pool — hlslpp::float3 stride (16 bytes / vertex) on x86_64 SSE, the
+    // SAME bytes the old per-mesh buffers held. VK_FORMAT_R32G32B32_SFLOAT with
+    // that stride is valid ray-tracing geometry input under
+    // VK_KHR_ray_tracing_pipeline. AS-build input only, never shader-bound.
+    nvrhi::BufferDesc vertexPoolDesc;
+    vertexPoolDesc.debugName = "GpuScene.vertexPool";
+    vertexPoolDesc.isVertexBuffer = true;
+    vertexPoolDesc.isAccelStructBuildInput = true;
+    vertexPoolDesc.initialState = nvrhi::ResourceStates::CopyDest;
+    vertexPoolDesc.keepInitialState = true;
+    PYXIS_TRY(EnsureGeometryPoolCapacity(device, commandList, vertexPoolBuffer,
+                                         vertexPoolUsedBytes,
+                                         vertexPoolUsedBytes + newVertexBytes,
+                                         vertexPoolDesc, "vertexPool"));
+
+    // Index pool — R32 indices; ALSO the gMeshIndices structured view (binding 26,
+    // structStride = 4), which deletes the old flat duplicate buffer + its upload
+    // path. The geometry desc carries the index format at BLAS build, so the
+    // buffer's own `format` stays UNKNOWN (structured-view rule).
+    nvrhi::BufferDesc indexPoolDesc;
+    indexPoolDesc.debugName = "GpuScene.indexPool";
+    indexPoolDesc.isIndexBuffer = true;
+    indexPoolDesc.isAccelStructBuildInput = true;
+    indexPoolDesc.structStride = sizeof(std::uint32_t);
+    indexPoolDesc.canHaveRawViews = false;
+    indexPoolDesc.canHaveTypedViews = false;
+    indexPoolDesc.format = nvrhi::Format::UNKNOWN;
+    indexPoolDesc.initialState = nvrhi::ResourceStates::ShaderResource;
+    indexPoolDesc.keepInitialState = true;
+    PYXIS_TRY(EnsureGeometryPoolCapacity(
+        device, commandList, indexPoolBuffer,
+        indexPoolUsedElements * sizeof(std::uint32_t),
+        (indexPoolUsedElements + newIndexElements) * sizeof(std::uint32_t),
+        indexPoolDesc, "indexPool"));
+
+    // Append pass — ascending slot order (deterministic; matches the old per-mesh
+    // upload order, so a bulk load's pool bytes equal the old buffers concatenated).
+    for (uint32_t slot = 1; slot < meshSlots.SlotCount(); ++slot)
+    {
+      if (!meshSlots.IsLive(slot) || !meshSlots.EntityAtSlot(slot).has<scene::DirtyTopology>())
+        continue;
+      MeshResource& entry = meshResources[slot];
+      const std::size_t vertexBytes = entry.positions.size() * sizeof(hlslpp::float3);
+      const std::size_t indexBytes  = entry.indices.size() * sizeof(std::uint32_t);
+      entry.vertexPoolByteOffset = vertexPoolUsedBytes;
+      entry.indexPoolElemOffset  = static_cast<std::uint32_t>(indexPoolUsedElements);
+      commandList->writeBuffer(vertexPoolBuffer.Get(), entry.positions.data(), vertexBytes,
+                               entry.vertexPoolByteOffset);
+      commandList->writeBuffer(indexPoolBuffer.Get(), entry.indices.data(), indexBytes,
+                               indexPoolUsedElements * sizeof(std::uint32_t));
+      vertexPoolUsedBytes += vertexBytes;
+      indexPoolUsedElements += entry.indices.size();
+      entry.residentInPool = true;
+    }
+  }
+
+  // The packed MeshInfoGpu table reads the pool offsets assigned above, so it is
+  // uploaded via a direct call here rather than its own system — the dependency
+  // must not rest on intra-phase registration order (mirrors review fix #6).
+  PYXIS_TRY(UploadMeshInfo(commandList));
   return {};
 }
 
@@ -1064,24 +1128,32 @@ Expected<void> GpuScene::Impl::BuildPendingBlas(nvrhi::ICommandList* commandList
     if (!meshSlots.IsLive(slot) || !meshEntity.has<scene::DirtyTopology>())
       continue;
     MeshResource& entry = meshResources[slot];
-    if (!entry.vertexBuffer || !entry.indexBuffer)
+    if (!vertexPoolBuffer || !indexPoolBuffer || !entry.residentInPool)
     {
       return std::unexpected{
           PYXIS_ERROR(ErrorKind::InvalidState,
-                      "CommitResources: BLAS build for '%s' missing vertex/index buffers",
+                      "CommitResources: BLAS build for '%s' missing pooled vertex/index data",
                       entry.debugName.c_str())};
     }
 
     const uint32_t triangleCount = entry.indexCount / 3u;
 
+    // §14.5 pooled pages — the build inputs are (pool buffer + byte offset). The
+    // pool handles are captured HERE, at build-record time, after every grow this
+    // commit already ran in UploadPendingMeshes (PhaseExtractMeshes precedes
+    // PhaseBuildBlas), so a mid-commit 2× growth can't dangle a build input. The
+    // input bytes are identical to the old per-mesh buffers → identical BLAS.
     nvrhi::rt::GeometryTriangles triangles;
-    triangles.setVertexBuffer(entry.vertexBuffer.Get())
+    triangles.setVertexBuffer(vertexPoolBuffer.Get())
         .setVertexFormat(nvrhi::Format::RGB32_FLOAT)
         .setVertexCount(entry.vertexCount)
         .setVertexStride(sizeof(hlslpp::float3))
-        .setIndexBuffer(entry.indexBuffer.Get())
+        .setVertexOffset(entry.vertexPoolByteOffset)
+        .setIndexBuffer(indexPoolBuffer.Get())
         .setIndexFormat(nvrhi::Format::R32_UINT)
-        .setIndexCount(entry.indexCount);
+        .setIndexCount(entry.indexCount)
+        .setIndexOffset(static_cast<uint64_t>(entry.indexPoolElemOffset)
+                        * sizeof(std::uint32_t));
 
     // M9: drop the Opaque flag globally so the anyhit shader fires
     // on every hit. Anyhit reads the bound material and calls
@@ -1130,8 +1202,15 @@ Expected<void> GpuScene::Impl::RebuildTlasIfDirty(nvrhi::ICommandList* commandLi
   // RFC 0009 follow-up — the TLAS is dirty when any instance carries DirtyTransform
   // (transform edit) or DirtyVisibility (Append/SetVisibility/Destroy-via-sentinel,
   // i.e. structural). Sys_ClearDirty clears both at commit end.
+  //
+  // P2 packing — this function also owns the instanceInfoBuffer upload (see
+  // UploadInstanceInfoIfNeeded at the bottom): the instance walk below writes the
+  // mirror's transform rows with EXACTLY the floats the nvrhi instance descs get,
+  // and the upload must run after that. When the TLAS isn't dirty the upload still
+  // services a pending slot-half repack (UpdateInstanceMaterial — which must NOT
+  // force a TLAS rebuild, see Internal.h's instanceMaterialNeedsUpload note).
   if (dirtyTransformQuery.count() == 0 && dirtyVisibilityQuery.count() == 0)
-    return {};
+    return UploadInstanceInfoIfNeeded(commandList);
 
   // RFC 0009 / §16 — refit when only instance transforms changed (no structural
   // DirtyVisibility this commit) AND the live TLAS supports update. Otherwise a full
@@ -1195,6 +1274,19 @@ Expected<void> GpuScene::Impl::RebuildTlasIfDirty(nvrhi::ICommandList* commandLi
     float worldRowMajor[16];
     hlslpp::store(worldRowMajor, inst.worldFromLocal);
     std::memcpy(&desc.transform, worldRowMajor, sizeof(nvrhi::rt::AffineTransform));
+    // P2 packing — mirror the SAME 12 floats into the packed instance record's
+    // objectToWorld rows (the 12-float float3x4 ctor is exact bit-copies via
+    // set_ps, so the mirror bytes equal the nvrhi desc transform bytes). The
+    // mirror was sized by PackInstanceInfo earlier this commit (AppendInstance
+    // always sets instanceMaterialNeedsUpload, and PhaseUploadMaterials precedes
+    // PhaseRebuildTlas); the bounds guard covers the empty-mirror degenerate case
+    // only. Populated for the P4 split — no shader reads the transform yet
+    // (closesthit keeps ObjectToWorld3x4()).
+    if (slot < instanceInfo.size())
+      instanceInfo[slot].objectToWorld = hlslpp::float3x4(
+          worldRowMajor[0], worldRowMajor[1], worldRowMajor[2],  worldRowMajor[3],
+          worldRowMajor[4], worldRowMajor[5], worldRowMajor[6],  worldRowMajor[7],
+          worldRowMajor[8], worldRowMajor[9], worldRowMajor[10], worldRowMajor[11]);
     desc.instanceMask = 0xFF;
     // Plan §15 — instanceCustomIndex carries the INSTANCE slot
     // (24-bit cap matches §19.7's HANDLE_SLOT_BITS). The
@@ -1248,64 +1340,70 @@ Expected<void> GpuScene::Impl::RebuildTlasIfDirty(nvrhi::ICommandList* commandLi
   tlasBuiltInstanceCount = static_cast<uint32_t>(instanceDescs.size());
   // DirtyTransform/DirtyVisibility are cleared by Sys_ClearDirty at commit end; a
   // transform-only edit next commit (DirtyTransform, no DirtyVisibility) then refits.
+
+  // P2 packing — the TLAS was rebuilt or refit this commit, so the mirror's
+  // transform rows just changed: force the packed-buffer upload (trigger (b);
+  // trigger (a) is a pending slot-half repack via instanceInfoNeedsUpload).
+  instanceInfoNeedsUpload = true;
+  return UploadInstanceInfoIfNeeded(commandList);
+}
+
+Expected<void> GpuScene::Impl::UploadInstanceInfoIfNeeded(nvrhi::ICommandList* commandList)
+{
+  // P2 packing — flush the CPU InstanceInfoGpu mirror to the GPU. Runs at the tail
+  // of RebuildTlasIfDirty (whether or not the TLAS was touched) so the upload always
+  // sees this commit's transform rows; gated on instanceInfoNeedsUpload, which is
+  // set by (a) PackInstanceInfo (slot halves repacked) or (b) a TLAS rebuild/refit.
+  if (!instanceInfoNeedsUpload || instanceInfo.empty())
+    return {};
+  const std::size_t infoBytes =
+      instanceInfo.size() * sizeof(shaderinterop::InstanceInfoGpu);
+  PYXIS_TRY(EnsureStructuredBuffer(device, instanceInfoBuffer, infoBytes,
+                                   sizeof(shaderinterop::InstanceInfoGpu),
+                                   "GpuScene.instanceInfoBuffer",
+                                   "instanceInfoBuffer"));
+  commandList->writeBuffer(instanceInfoBuffer.Get(), instanceInfo.data(), infoBytes);
+  instanceInfoNeedsUpload = false;
   return {};
 }
 
-Expected<void> GpuScene::Impl::UploadInstanceSideTables(nvrhi::ICommandList* commandList)
+Expected<void> GpuScene::Impl::PackInstanceInfo(nvrhi::ICommandList* /*commandList*/)
 {
-  // Plan §15 / M6 P0 — upload the instance→material side-table.
-  // Indexed by instance slot (so dead/sparse slots are present but
-  // unread; they're never visited because the TLAS only contains
-  // live instances). Each entry holds the material slot bound to
-  // that instance; slot 0 always maps to material slot 0 (the
-  // GpuScene sentinel grey material). Re-uploaded whenever the
-  // dedicated dirty flag fires — independent of TLAS rebuild so
-  // UpdateInstanceMaterial doesn't pointlessly rebuild the TLAS.
+  // Plan §15 / M6 P0 / P2 packing — fill the materialSlot/meshSlot halves of the
+  // packed per-instance mirror (one InstanceInfoGpu record replaces the old parallel
+  // instance→material + instance→mesh uint tables; identical values, same walk).
+  // Indexed by instance slot (dead/sparse slots are present but unread; they're
+  // never visited because the TLAS only contains live instances). Slot 0 always
+  // maps to material slot 0 (the GpuScene sentinel grey material). Repacked
+  // whenever the dedicated dirty flag fires — independent of TLAS rebuild so
+  // UpdateInstanceMaterial doesn't pointlessly rebuild the TLAS. The instance↔mesh
+  // half piggy-backs on the same flag because instance↔mesh changes only happen
+  // when the TLAS shape changes anyway. The GPU upload happens at the end of
+  // RebuildTlasIfDirty, after the transform rows are current.
   if (!instanceMaterialNeedsUpload || instanceSlots.SlotCount() <= 1u)
     return {};
 
   const std::size_t instanceTableEntries = instanceSlots.SlotCount();
-  std::vector<std::uint32_t> instanceMaterialTable(instanceTableEntries, 0u);
-  for (std::size_t entrySlot = 1; entrySlot < instanceTableEntries; ++entrySlot)
+  // Grow keeps prior elements (their transform rows persist across a material-only
+  // repack); fresh elements value-init to zero until the TLAS walk fills them.
+  instanceInfo.resize(instanceTableEntries);
+  for (std::size_t entrySlot = 0; entrySlot < instanceTableEntries; ++entrySlot)
   {
-    if (!instanceSlots.IsLive(static_cast<uint32_t>(entrySlot)))
+    shaderinterop::InstanceInfoGpu& info = instanceInfo[entrySlot];
+    info.materialSlot = 0u;
+    info.meshSlot = 0u;
+    info._pad0 = 0u;
+    info._pad1 = 0u;
+    if (entrySlot == 0 || !instanceSlots.IsLive(static_cast<uint32_t>(entrySlot)))
       continue;
     const InstanceResource& inst = instanceResources[entrySlot];
     const auto materialValue = static_cast<std::uint32_t>(inst.material);
-    instanceMaterialTable[entrySlot] =
-        (materialValue == 0) ? 0u : HandleSlot(materialValue);
-  }
-  const std::size_t instanceTableBytes =
-      instanceMaterialTable.size() * sizeof(std::uint32_t);
-  PYXIS_TRY(EnsureStructuredBuffer(device, instanceMaterialBuffer, instanceTableBytes,
-                                   sizeof(std::uint32_t),
-                                   "GpuScene.instanceMaterialBuffer",
-                                   "instanceMaterialBuffer"));
-  commandList->writeBuffer(instanceMaterialBuffer.Get(),
-                           instanceMaterialTable.data(), instanceTableBytes);
-
-  // M7 NdotL — instance→mesh side-table. Same shape + lifecycle
-  // as instanceMaterialBuffer; piggy-backs on the same dirty flag
-  // because instance ↔ mesh changes only happen when the TLAS
-  // shape changes (AppendInstance / DestroyInstance / visibility
-  // flip — UpdateInstanceMaterial doesn't touch instance.mesh).
-  std::vector<std::uint32_t> instanceMeshTable(instanceTableEntries, 0u);
-  for (std::size_t entrySlot = 1; entrySlot < instanceTableEntries; ++entrySlot)
-  {
-    if (!instanceSlots.IsLive(static_cast<uint32_t>(entrySlot)))
-      continue;
-    const InstanceResource& inst = instanceResources[entrySlot];
+    info.materialSlot = (materialValue == 0) ? 0u : HandleSlot(materialValue);
     const auto meshValue = static_cast<std::uint32_t>(inst.mesh);
-    instanceMeshTable[entrySlot] =
-        (meshValue == 0) ? 0u : HandleSlot(meshValue);
+    info.meshSlot = (meshValue == 0) ? 0u : HandleSlot(meshValue);
   }
-  PYXIS_TRY(EnsureStructuredBuffer(device, instanceMeshBuffer, instanceTableBytes,
-                                   sizeof(std::uint32_t),
-                                   "GpuScene.instanceMeshBuffer",
-                                   "instanceMeshBuffer"));
-  commandList->writeBuffer(instanceMeshBuffer.Get(),
-                           instanceMeshTable.data(), instanceTableBytes);
 
+  instanceInfoNeedsUpload = true;
   instanceMaterialNeedsUpload = false;
   return {};
 }
@@ -1327,21 +1425,19 @@ uint32_t GpuScene::Impl::LowestDirtyMeshSlot() const noexcept
 Expected<void> GpuScene::Impl::UploadMeshFaceNormals(nvrhi::ICommandList* commandList)
 {
   // Concatenates every live mesh's per-triangle face normals into one
-  // flat float4 buffer + a per-mesh-slot start-offset table. The
-  // closesthit's NdotL Lambert pass reads:
-  //   offset = gMeshFaceOffsets[meshSlot]
-  //   nLocal = gMeshFaceNormals[offset + PrimitiveIndex()].xyz
-  // The +1 in the offsets sizing reserves slot 0 (the §19.7
-  // sentinel mesh handle) so the closesthit's "no mesh assigned"
-  // path resolves to offset 0 with a black/zero normal entry.
+  // flat float4 buffer. The closesthit's NdotL Lambert pass reads:
+  //   nLocal = gMeshFaceNormals[gMeshInfo[meshSlot].faceOffset
+  //                            + PrimitiveIndex()].xyz
+  // (P2 packing: the per-slot start offsets live in the MeshInfoGpu
+  // table — see UploadMeshInfo — which reserves slot 0, the §19.7
+  // sentinel mesh handle, at offset 0.)
   if (commitLowestDirtyMeshSlot >= meshSlots.SlotCount())
-    return {};  // no DirtyTopology mesh this commit (the tag gates all 5 side tables).
+    return {};  // no DirtyTopology mesh this commit (the tag gates every side table).
 
   PYXIS_TRY(gpuscene_detail::UploadMeshSideTable<hlslpp::float4>(
       device, commandList, meshSlots, commitLowestDirtyMeshSlot, meshFaceNormalsPackedSlots,
-      meshFaceNormalsBuffer, meshFaceOffsetsBuffer, hlslpp::float4{0.0f, 0.0f, 0.0f, 0.0f},
+      meshFaceNormalsBuffer, hlslpp::float4{0.0f, 0.0f, 0.0f, 0.0f},
       "GpuScene.meshFaceNormalsBuffer", "meshFaceNormalsBuffer",
-      "GpuScene.meshFaceOffsetsBuffer", "meshFaceOffsetsBuffer",
       [this](uint32_t slot) -> uint32_t {
         return static_cast<uint32_t>(meshResources[slot].faceNormals.size());
       },
@@ -1354,10 +1450,9 @@ Expected<void> GpuScene::Impl::UploadMeshFaceNormals(nvrhi::ICommandList* comman
 
 // ---- M8a UV pipeline -------------------------------------------------
 // Concatenates every live mesh's per-vertex UVs into one flat float2
-// buffer + a per-mesh-slot start-offset table. Closesthit reads:
-//   uvOffset = gMeshUvOffsets[meshSlot]
-//   uv0/1/2  = gMeshUvs[uvOffset + vertexIndex]
-// Vertex indices come from gMeshIndices (uploaded by the next phase).
+// buffer. Closesthit reads:
+//   uv0/1/2 = gMeshUvs[gMeshInfo[meshSlot].uvOffset + vertexIndex]
+// Vertex indices come from the §14.5 index pool (gMeshIndices).
 //
 // Meshes that authored no `primvars:st` (cube fixtures, tagged-empty
 // authoring) contribute zero UVs — their offset stays the same as
@@ -1375,7 +1470,7 @@ Expected<void> GpuScene::Impl::UploadMeshUvs(nvrhi::ICommandList* commandList)
   // a 16-byte stride — the shader then reads every other element as the
   // padding (0,0), scrambling ALL mesh UVs (manifested as diagonal /
   // degenerate texturing on st-mapped surfaces, e.g. wood grain). The
-  // float4 mesh buffers (normals/tangents/face-normals) are unaffected
+  // float4 mesh buffers (face normals / vertex attribs) are unaffected
   // because hlslpp::float4 is exactly 16 bytes. The per-mesh pack/pad
   // step lives in MeshUvPack.h so MeshUvPackV2 can pin the stride
   // contract directly. Every mesh contributes EXACTLY vertexCount UV
@@ -1384,9 +1479,8 @@ Expected<void> GpuScene::Impl::UploadMeshUvs(nvrhi::ICommandList* commandList)
   using gpuscene_detail::PackedUv;
   PYXIS_TRY(gpuscene_detail::UploadMeshSideTable<PackedUv>(
       device, commandList, meshSlots, commitLowestDirtyMeshSlot, meshUvsPackedSlots,
-      meshUvsBuffer, meshUvOffsetsBuffer, PackedUv{0.0f, 0.0f},
+      meshUvsBuffer, PackedUv{0.0f, 0.0f},
       "GpuScene.meshUvsBuffer", "meshUvsBuffer",
-      "GpuScene.meshUvOffsetsBuffer", "meshUvOffsetsBuffer",
       [this](uint32_t slot) -> uint32_t {
         const MeshResource& mesh = meshResources[slot];
         return std::max(static_cast<uint32_t>(mesh.uv0.size()), mesh.vertexCount);
@@ -1399,103 +1493,106 @@ Expected<void> GpuScene::Impl::UploadMeshUvs(nvrhi::ICommandList* commandList)
   return {};
 }
 
-// Concatenates every live mesh's triangle indices into one flat uint
-// buffer + per-mesh-slot start-offset table. The same data lives in
-// the per-mesh BLAS index buffer, but those are bound for AS-build
-// (not as structured buffers for shader read). The duplication cost
-// is one uint per triangle (~12 MB at World Lobby scale, acceptable).
+// P2 packing — interleaved per-vertex shading attributes:
+// attrib[i] = {normal[i], tangent[i]} (VertexAttribGpu, 32 B). One
+// upload replaces the old UploadMeshVertexNormals + UploadMeshTangents
+// pair; both source streams pad independently to EXACTLY vertexCount
+// entries per mesh exactly as before, so the zero-magnitude "not
+// authored" sentinels stay independently detectable (a mesh can author
+// normals but no tangents, or vice versa). That shared countOf ==
+// vertexCount is also what made the old vertex-normal and tangent
+// offset tables equal by construction — now a single vertexAttribOffset
+// in MeshInfoGpu (with _r0 reserved if they ever needed to diverge).
 //
-// Closesthit reads three indices per hit:
-//   ofs = gMeshIndexOffsets[meshSlot]
-//   v0/1/2 = gMeshIndices[ofs + PrimitiveIndex()*3 + 0/1/2]
-Expected<void> GpuScene::Impl::UploadMeshIndices(nvrhi::ICommandList* commandList)
+// Closesthit reads (per indexed vertex v_i):
+//   a    = gMeshVertexAttribs[gMeshInfo[meshSlot].vertexAttribOffset + v_i]
+//   nv_i = a.normal.xyz — zero ⇒ fall back to face normal
+//   tv_i = a.tangent    — zero xyz ⇒ skip TBN; .w = handedness
+Expected<void> GpuScene::Impl::UploadMeshVertexAttribs(nvrhi::ICommandList* commandList)
 {
   if (commitLowestDirtyMeshSlot >= meshSlots.SlotCount())
     return {};  // no DirtyTopology mesh this commit.
 
-  PYXIS_TRY(gpuscene_detail::UploadMeshSideTable<std::uint32_t>(
-      device, commandList, meshSlots, commitLowestDirtyMeshSlot, meshIndicesPackedSlots,
-      meshIndicesBuffer, meshIndexOffsetsBuffer, 0u,
-      "GpuScene.meshIndicesBuffer", "meshIndicesBuffer",
-      "GpuScene.meshIndexOffsetsBuffer", "meshIndexOffsetsBuffer",
-      [this](uint32_t slot) -> uint32_t {
-        return static_cast<uint32_t>(meshResources[slot].indices.size());
-      },
-      [this](uint32_t slot, std::vector<std::uint32_t>& out) {
-        const MeshResource& mesh = meshResources[slot];
-        out.insert(out.end(), mesh.indices.begin(), mesh.indices.end());
-      }));
-  return {};
-}
-
-// M9 smooth shading: per-vertex normals concatenated into one flat
-// float4 buffer + per-mesh-slot start-offset table. Mirror of the
-// per-triangle face-normal upload above but per-VERTEX so the
-// closesthit can barycentric-interpolate three vertex normals at
-// each hit.
-//
-// Like the UV path, every mesh contributes EXACTLY vertexCount
-// entries — short / empty `mesh.normals` arrays pad with (0,0,0,0).
-// Closesthit detects the zero-magnitude case and falls back to the
-// face-normal path so meshes that authored no normals still render.
-Expected<void> GpuScene::Impl::UploadMeshVertexNormals(nvrhi::ICommandList* commandList)
-{
-  if (commitLowestDirtyMeshSlot >= meshSlots.SlotCount())
-    return {};  // no DirtyTopology mesh this commit.
-
-  // Every mesh contributes EXACTLY vertexCount entries: min(normals,vc) copied,
-  // the rest padded with zero (closesthit detects the zero magnitude and falls
-  // back to the M7 face-normal path). countOf must mirror that = vertexCount.
-  PYXIS_TRY(gpuscene_detail::UploadMeshSideTable<hlslpp::float4>(
-      device, commandList, meshSlots, commitLowestDirtyMeshSlot, meshVertexNormalsPackedSlots,
-      meshVertexNormalsBuffer, meshVertexNormalOffsetsBuffer,
-      hlslpp::float4{0.0f, 0.0f, 0.0f, 0.0f},
-      "GpuScene.meshVertexNormalsBuffer", "meshVertexNormalsBuffer",
-      "GpuScene.meshVertexNormalOffsetsBuffer", "meshVertexNormalOffsetsBuffer",
+  using shaderinterop::VertexAttribGpu;
+  PYXIS_TRY(gpuscene_detail::UploadMeshSideTable<VertexAttribGpu>(
+      device, commandList, meshSlots, commitLowestDirtyMeshSlot, meshVertexAttribsPackedSlots,
+      meshVertexAttribsBuffer, VertexAttribGpu{},
+      "GpuScene.meshVertexAttribsBuffer", "meshVertexAttribsBuffer",
       [this](uint32_t slot) -> uint32_t { return meshResources[slot].vertexCount; },
-      [this](uint32_t slot, std::vector<hlslpp::float4>& out) {
+      [this](uint32_t slot, std::vector<VertexAttribGpu>& out) {
         const MeshResource& mesh = meshResources[slot];
-        const std::size_t copyCount =
+        const std::size_t normalCount =
             std::min<std::size_t>(mesh.normals.size(), mesh.vertexCount);
-        for (std::size_t i = 0; i < copyCount; ++i)
-          out.emplace_back(mesh.normals[i].x, mesh.normals[i].y, mesh.normals[i].z, 0.0f);
-        if (copyCount < mesh.vertexCount)
-          out.insert(out.end(), mesh.vertexCount - copyCount,
-                     hlslpp::float4{0.0f, 0.0f, 0.0f, 0.0f});
+        const std::size_t tangentCount =
+            std::min<std::size_t>(mesh.tangents.size(), mesh.vertexCount);
+        for (std::size_t i = 0; i < mesh.vertexCount; ++i)
+        {
+          VertexAttribGpu attrib{};  // hlslpp float4s zero-construct = both sentinels.
+          if (i < normalCount)
+            attrib.normal = hlslpp::float4(mesh.normals[i].x, mesh.normals[i].y,
+                                           mesh.normals[i].z, 0.0f);
+          if (i < tangentCount)
+            attrib.tangent = mesh.tangents[i];
+          out.push_back(attrib);
+        }
       }));
   return {};
 }
 
-// M9 normal mapping: per-vertex tangents (from MikkTSpace) packed
-// into a flat float4 buffer + per-mesh start-offset table. xyz is
-// the unit tangent; w is the bitangent sign (+/- 1) used by the
-// closesthit's `bitangent = sign × cross(N, T)` construction. Same
-// shape + padding policy as the vertex-normal upload above —
-// meshes that didn't generate tangents (no UVs / no normals) pad
-// with zeros, and the closesthit's normal-mapping branch detects
-// the zero-magnitude case and skips its TBN construction.
-Expected<void> GpuScene::Impl::UploadMeshTangents(nvrhi::ICommandList* commandList)
+// P2 packing — one MeshInfoGpu per mesh slot replaces the five parallel
+// per-mesh uint offset tables (face / UV / index / vertex-normal /
+// tangent). EVERY running sum is computed in this ONE walk, in the same
+// ascending-live-slot order the five separate walks used, so each
+// offset value is identical to what the old tables held. The table is
+// always fully rewritten (the offset tables always were — any dirty
+// mesh shifts every later offset), so merging them is layout-neutral.
+//
+// indexOffset is the exception: it is the mesh's element offset into
+// the §14.5 index POOL (assigned in UploadPendingMeshes, which calls
+// this function directly), not a running sum — the pool never re-packs,
+// so the offset is stable for the mesh's lifetime and the shader
+// fetches identical index VALUES through it. Dead/sentinel slots keep
+// zero-init indexOffset/vertexCount; they're never visited because the
+// TLAS only references live meshes.
+Expected<void> GpuScene::Impl::UploadMeshInfo(nvrhi::ICommandList* commandList)
 {
   if (commitLowestDirtyMeshSlot >= meshSlots.SlotCount())
-    return {};  // no DirtyTopology mesh this commit.
+    return {};  // no DirtyTopology mesh this commit (same gate as the element tables).
 
-  // Same vertexCount-per-mesh padding policy as the vertex-normal upload.
-  PYXIS_TRY(gpuscene_detail::UploadMeshSideTable<hlslpp::float4>(
-      device, commandList, meshSlots, commitLowestDirtyMeshSlot, meshTangentsPackedSlots,
-      meshTangentsBuffer, meshTangentOffsetsBuffer, hlslpp::float4{0.0f, 0.0f, 0.0f, 0.0f},
-      "GpuScene.meshTangentsBuffer", "meshTangentsBuffer",
-      "GpuScene.meshTangentOffsetsBuffer", "meshTangentOffsetsBuffer",
-      [this](uint32_t slot) -> uint32_t { return meshResources[slot].vertexCount; },
-      [this](uint32_t slot, std::vector<hlslpp::float4>& out) {
-        const MeshResource& mesh = meshResources[slot];
-        const std::size_t copyCount =
-            std::min<std::size_t>(mesh.tangents.size(), mesh.vertexCount);
-        for (std::size_t i = 0; i < copyCount; ++i)
-          out.push_back(mesh.tangents[i]);
-        if (copyCount < mesh.vertexCount)
-          out.insert(out.end(), mesh.vertexCount - copyCount,
-                     hlslpp::float4{0.0f, 0.0f, 0.0f, 0.0f});
-      }));
+  const uint32_t slotCount = meshSlots.SlotCount();
+  std::vector<shaderinterop::MeshInfoGpu> infos(slotCount);  // value-init = all zero.
+  uint32_t faceRunning   = 0;
+  uint32_t uvRunning     = 0;
+  uint32_t attribRunning = 0;
+  for (uint32_t slot = 0; slot < slotCount; ++slot)
+  {
+    shaderinterop::MeshInfoGpu& info = infos[slot];
+    // Slot 0 (the §19.7 sentinel) and dead slots contribute 0 elements, so their
+    // offsets equal the next live slot's start — exactly as the old tables packed.
+    info.faceOffset         = faceRunning;
+    info.uvOffset           = uvRunning;
+    info.vertexAttribOffset = attribRunning;
+    if (!meshSlots.IsLive(slot))
+      continue;
+    const MeshResource& mesh = meshResources[slot];
+    info.indexOffset = mesh.indexPoolElemOffset;
+    info.vertexCount = mesh.vertexCount;
+    faceRunning += static_cast<uint32_t>(mesh.faceNormals.size());
+    uvRunning += std::max(static_cast<uint32_t>(mesh.uv0.size()), mesh.vertexCount);
+    attribRunning += mesh.vertexCount;
+  }
+
+  const std::size_t infoBytes = infos.size() * sizeof(shaderinterop::MeshInfoGpu);
+  // Geometric growth mirrors the old offset tables' amortised-append behaviour
+  // (EnsureStructuredBuffer early-outs when the current capacity already fits).
+  std::size_t allocBytes = infoBytes;
+  if (meshInfoBuffer && meshInfoBuffer->getDesc().byteSize < infoBytes)
+    allocBytes = std::max(infoBytes,
+                          static_cast<std::size_t>(meshInfoBuffer->getDesc().byteSize) * 2u);
+  PYXIS_TRY(EnsureStructuredBuffer(device, meshInfoBuffer, allocBytes,
+                                   sizeof(shaderinterop::MeshInfoGpu),
+                                   "GpuScene.meshInfoBuffer", "meshInfoBuffer"));
+  commandList->writeBuffer(meshInfoBuffer.Get(), infos.data(), infoBytes);
   return {};
 }
 

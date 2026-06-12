@@ -19,7 +19,9 @@
 #include "ShaderInterop.slang"
 
 [[vk::binding(3, 0)]] StructuredBuffer<OpenPBRMaterialGPU> gMaterials;
-[[vk::binding(4, 0)]] StructuredBuffer<uint>               gInstanceMaterial;
+// P2 packing — the packed per-instance record (materialSlot half) replaces the
+// old gInstanceMaterial uint table at the same binding.
+[[vk::binding(4, 0)]] StructuredBuffer<InstanceInfoGpu>    gInstanceInfo;
 
 // Slang emits the SPIR-V `OpEntryPoint` name as `"main"` regardless
 // of the source-side function name; the C++ side passes `"main"` to
@@ -27,7 +29,7 @@
 [shader("anyhit")]
 void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attribs) {
     const uint instanceId = InstanceID();
-    const uint materialId = gInstanceMaterial[instanceId];
+    const uint materialId = gInstanceInfo[instanceId].materialSlot;
     const OpenPBRMaterialGPU mat = gMaterials[materialId];
 
     // V2.B follow-up — only IgnoreHit for true alpha cutout

@@ -1,15 +1,21 @@
 // Pyxis renderer — incremental mesh side-table upload byte-identity test (RFC 0009).
 //
-// The per-mesh side-table buffers (face normals / UVs / indices / vertex normals /
-// tangents, each a concatenation + per-slot offset table) are uploaded by an
-// incremental fast path: when the only dirty meshes are NEW tail slots and the
-// buffers still have capacity, UploadMeshSideTable writes ONLY the new tail region
-// instead of re-packing every mesh (the audit's quadratic-load fix). The golden
-// suite only ever does a SINGLE bulk commit, so it exercises the full-rebuild path
-// but never the tail-append path. This test pins the load-bearing invariant the
-// optimization rests on: a scene built across MANY commits (mesh-add-then-commit,
-// repeatedly — driving the append + geometric-grow branches) produces byte-identical
-// side-table buffers to the same scene built in one bulk commit.
+// The per-mesh side-table buffers (face normals / UVs / interleaved vertex
+// attribs — each a concatenation whose per-slot offsets live in the packed
+// MeshInfoGpu table — plus the §14.5 index pool) are uploaded by an incremental
+// fast path: when the only dirty meshes are NEW tail slots and the buffers still
+// have capacity, UploadMeshSideTable writes ONLY the new tail region instead of
+// re-packing every mesh (the audit's quadratic-load fix), and the geometry pools
+// append-only by construction. The golden suite only ever does a SINGLE bulk
+// commit, so it exercises the full-rebuild path but never the tail-append path.
+// This test pins the load-bearing invariant the optimization rests on: a scene
+// built across MANY commits (mesh-add-then-commit, repeatedly — driving the
+// append + geometric-grow branches) produces byte-identical buffers to the same
+// scene built in one bulk commit.
+//
+// P2 packing: the buffers are reached through the renderer-internal
+// SceneResources accessor (RFC 0003) — the public Get* getters are gone. The
+// unit-test harness is the documented §35 exception allowed into Private/.
 //
 // Needs a real (RT-capable) Vulkan device because the upload happens inside
 // CommitResources; skips on CPU-only CI.
@@ -23,6 +29,8 @@
 #include <Pyxis/Renderer/Descs/MeshDesc.h>
 #include <Pyxis/Renderer/GpuScene.h>
 #include <Pyxis/Renderer/Profiler.h>
+
+#include "Scene/SceneResources.h"  // Private — see the §35 exception note above.
 
 #include <nvrhi/nvrhi.h>
 
@@ -175,26 +183,27 @@ TEST(GpuSceneIncrementalUpload, IncrementalCommitsMatchBulkCommitByteForByte) {
     ASSERT_TRUE(Commit(device, incrementalScene));
   }
 
-  // Every per-mesh side-table buffer + its offset table must be byte-identical.
-  ExpectBufferPrefixEqual(device, "MeshFaceNormals", bulkScene.GetMeshFaceNormalsBuffer(),
-                          incrementalScene.GetMeshFaceNormalsBuffer());
-  ExpectBufferPrefixEqual(device, "MeshFaceOffsets", bulkScene.GetMeshFaceOffsetsBuffer(),
-                          incrementalScene.GetMeshFaceOffsetsBuffer());
-  ExpectBufferPrefixEqual(device, "MeshUvs", bulkScene.GetMeshUvsBuffer(),
-                          incrementalScene.GetMeshUvsBuffer());
-  ExpectBufferPrefixEqual(device, "MeshUvOffsets", bulkScene.GetMeshUvOffsetsBuffer(),
-                          incrementalScene.GetMeshUvOffsetsBuffer());
-  ExpectBufferPrefixEqual(device, "MeshIndices", bulkScene.GetMeshIndicesBuffer(),
-                          incrementalScene.GetMeshIndicesBuffer());
-  ExpectBufferPrefixEqual(device, "MeshIndexOffsets", bulkScene.GetMeshIndexOffsetsBuffer(),
-                          incrementalScene.GetMeshIndexOffsetsBuffer());
-  ExpectBufferPrefixEqual(device, "MeshVertexNormals", bulkScene.GetMeshVertexNormalsBuffer(),
-                          incrementalScene.GetMeshVertexNormalsBuffer());
-  ExpectBufferPrefixEqual(device, "MeshVertexNormalOffsets",
-                          bulkScene.GetMeshVertexNormalOffsetsBuffer(),
-                          incrementalScene.GetMeshVertexNormalOffsetsBuffer());
-  ExpectBufferPrefixEqual(device, "MeshTangents", bulkScene.GetMeshTangentsBuffer(),
-                          incrementalScene.GetMeshTangentsBuffer());
-  ExpectBufferPrefixEqual(device, "MeshTangentOffsets", bulkScene.GetMeshTangentOffsetsBuffer(),
-                          incrementalScene.GetMeshTangentOffsetsBuffer());
+  // Every packed/concatenated mesh buffer must be byte-identical. The bulk scene's
+  // single commit sizes each buffer exactly (and the §14.5 pools allocate exact-fit
+  // on first use thanks to UploadPendingMeshes' per-commit pre-pass), so the bulk
+  // byteSize is precisely the valid range; the incremental buffers may be larger
+  // (geometric growth) and only the prefix is compared.
+  const SceneResources bulkRes        = detail::SceneResourcesAccess::Get(bulkScene);
+  const SceneResources incrementalRes = detail::SceneResourcesAccess::Get(incrementalScene);
+  ExpectBufferPrefixEqual(device, "MeshFaceNormals", bulkRes.meshFaceNormalsBuffer,
+                          incrementalRes.meshFaceNormalsBuffer);
+  ExpectBufferPrefixEqual(device, "MeshUvs", bulkRes.meshUvsBuffer,
+                          incrementalRes.meshUvsBuffer);
+  // §14.5 index pool (gMeshIndices view) — append-only, so bulk vs incremental
+  // prefixes match by construction.
+  ExpectBufferPrefixEqual(device, "MeshIndices(pool)", bulkRes.meshIndicesBuffer,
+                          incrementalRes.meshIndicesBuffer);
+  // P2 interleaved per-vertex normal+tangent stream.
+  ExpectBufferPrefixEqual(device, "MeshVertexAttribs", bulkRes.meshVertexAttribsBuffer,
+                          incrementalRes.meshVertexAttribsBuffer);
+  // P2 packed MeshInfoGpu table — carries EVERY per-slot offset (face / UV /
+  // vertex-attrib running sums + index-pool offsets) + vertexCount, replacing the
+  // five old offset-table comparisons.
+  ExpectBufferPrefixEqual(device, "MeshInfo", bulkRes.meshInfoBuffer,
+                          incrementalRes.meshInfoBuffer);
 }

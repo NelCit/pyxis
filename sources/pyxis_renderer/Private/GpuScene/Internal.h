@@ -87,8 +87,14 @@ struct GpuScene::Impl
     std::vector<hlslpp::float2>  uv0;
     std::string                  debugName;
 
-    nvrhi::BufferHandle          vertexBuffer;
-    nvrhi::BufferHandle          indexBuffer;
+    // §14.5 pooled geometry pages (P2 packing) — the mesh no longer owns per-mesh
+    // vertex/index buffers; it records its ranges in the two scene-wide pools
+    // (vertexPoolBuffer / indexPoolBuffer below). BLAS builds take buffer+offset.
+    // `residentInPool` flips true once UploadPendingMeshes appended the data;
+    // DestroyMesh leaks the ranges until Clear() releases the pools wholesale.
+    std::uint64_t                vertexPoolByteOffset = 0;
+    std::uint32_t                indexPoolElemOffset  = 0;
+    bool                         residentInPool       = false;
     std::uint32_t                vertexCount = 0;
     std::uint32_t                indexCount  = 0;
     nvrhi::rt::AccelStructHandle blas;
@@ -208,7 +214,7 @@ struct GpuScene::Impl
   Expected<void>                    commitError{};
   bool                              commitPipelineRegistered = false;
   // Review fix #3 — lowest DirtyTopology mesh slot, computed ONCE per commit so the
-  // five mesh side-table uploaders don't each rescan the whole mesh table.
+  // mesh side-table uploaders don't each rescan the whole mesh table.
   uint32_t                          commitLowestDirtyMeshSlot = 0;
   // P2 — materials (GpuMaterialComponent). GpuSlotMap keeps slot == GPU buffer index
   // (gpuscene_detail encoding) so the packed material buffer + instance side-table
@@ -228,6 +234,11 @@ struct GpuScene::Impl
   // side table (not GpuTextureComponent) so a cache hit bumps it with a plain write
   // instead of a get<>()+set<>() round-trip that also re-persisted a fragile view.
   std::vector<std::uint64_t>        textureLastAccessTick;
+  // RFC 0003 — slot-indexed ITexture* scratch behind SceneResources::bindlessTextures.
+  // Refreshed by SceneResourcesAccess::Get each call (nullptr for sentinel / dead /
+  // not-yet-decoded slots — the old GetBindlessTextureAt semantics); reuses capacity,
+  // so steady-state frames are allocation-free.
+  std::vector<nvrhi::ITexture*>     bindlessTextureScratch;
   // P4 — meshes (GpuMeshComponent). meshResources is the slot-indexed heavy CPU/GPU
   // data; meshSlots owns slot/generation/liveness; DirtyTopology marks (re)upload+BLAS.
   GpuSlotMap                        meshSlots{sceneWorld};
@@ -283,18 +294,26 @@ struct GpuScene::Impl
   //   indexed by material slot. Re-uploaded on every commit if any
   //   material has needsGpuUpload — small enough (M5 stub: <1 MiB)
   //   that we don't bother with partial updates.
-  // - instanceMaterialBuffer (M6): structured buffer of uint, indexed
-  //   by instance slot, value = material slot. The closesthit reads
-  //   `materials[instanceMaterial[InstanceID()]]` — one indirection
-  //   so the TLAS instanceCustomIndex can carry the INSTANCE slot
-  //   (per plan §15) instead of the material slot (M5 expedience).
-  //   Freeing instanceCustomIndex unblocks the M6 instanceId AOV +
-  //   future picking (§19.4).
+  // - instanceInfoBuffer (M6 / P2 packing): structured buffer of
+  //   InstanceInfoGpu indexed by instance slot — one packed record
+  //   replaces the old parallel instance→material + instance→mesh
+  //   uint tables. Row 3 carries the material slot (the closesthit
+  //   reads `materials[gInstanceInfo[InstanceID()].materialSlot]` —
+  //   the §15 indirection that frees instanceCustomIndex for the
+  //   INSTANCE slot) + the M7-NdotL mesh slot; rows 0-2 carry the
+  //   instance object→world 3×4 (populated for the P4 split; no
+  //   shader reads them yet). `instanceInfo` is the CPU mirror,
+  //   sized to instanceSlots.SlotCount(): PackInstanceInfo fills the
+  //   slot halves (gated on instanceMaterialNeedsUpload), the TLAS
+  //   instance walk fills the transforms, and the buffer re-uploads
+  //   at the end of RebuildTlasIfDirty when EITHER fired.
   // - bindlessSampler: a single shared linear-clamp sampler. Per-
   //   role samplers (sRGB filtering, anisotropic for tangent maps,
   //   etc.) are an M9 polish item.
   nvrhi::BufferHandle  materialGpuBuffer;  // re-packed when any DirtyMaterial tag is present.
-  nvrhi::BufferHandle  instanceMaterialBuffer;
+  nvrhi::BufferHandle  instanceInfoBuffer;
+  std::vector<shaderinterop::InstanceInfoGpu> instanceInfo;  // CPU mirror, slot-indexed.
+  bool                 instanceInfoNeedsUpload = false;  // set by PackInstanceInfo.
   nvrhi::SamplerHandle bindlessSampler;
   // M9-fidelity per-role samplers. `bindlessSampler` (above) is
   // Wrap-Wrap-Wrap for tiling material textures; `domeSampler` is
@@ -313,64 +332,60 @@ struct GpuScene::Impl
   nvrhi::BufferHandle  lightsGpuBuffer;
 
   // M7 NdotL: per-mesh face normals concatenated into one flat
-  // buffer + per-mesh-slot starting offsets. Closesthit reads:
-  //   nLocal = gMeshFaceNormals[gMeshFaceOffsets[meshSlot]
+  // buffer. Closesthit reads:
+  //   nLocal = gMeshFaceNormals[gMeshInfo[meshSlot].faceOffset
   //                            + PrimitiveIndex()].xyz
   // Then transforms via Vulkan's `ObjectToWorld3x4()` to get
   // world-space N for the Lambert pass. Uploaded alongside BLAS
   // builds (computed in CreateMesh; flushed at CommitResources when a
-  // DirtyTopology mesh exists — LowestDirtyMeshSlot gates all 5 side tables).
-  // Plus gInstanceMeshBuffer: per-instance mesh slot, indexed by
-  // instance slot — the closesthit needs to know which mesh's
-  // face-normal range to look in.
+  // DirtyTopology mesh exists — LowestDirtyMeshSlot gates every side table).
   nvrhi::BufferHandle  meshFaceNormalsBuffer;
-  nvrhi::BufferHandle  meshFaceOffsetsBuffer;
   // RFC 0009 follow-up — # mesh slots already concatenated into the buffer above.
   // A new upload appends only slots >= this (the tail fast path) when no lower slot
   // changed; see UploadMeshSideTable. One tracker per concatenated buffer (they share
   // a lifecycle but each owns its packed extent, so there is no cross-buffer hazard).
   uint32_t             meshFaceNormalsPackedSlots = 0;
-  nvrhi::BufferHandle  instanceMeshBuffer;
 
-  // M8a UV pipeline: per-mesh UVs + per-triangle indices concatenated
-  // into flat structured buffers + per-mesh-slot start-offset tables.
-  // Closesthit reads:
-  //   indexOffset = gMeshIndexOffsets[meshSlot]
-  //   uvOffset    = gMeshUvOffsets[meshSlot]
-  //   v0,v1,v2    = gMeshIndices[indexOffset + PrimitiveIndex()*3 + {0,1,2}]
-  //   uv0,uv1,uv2 = gMeshUvs[uvOffset + v_i]
+  // M8a UV pipeline: per-mesh UVs concatenated into one flat
+  // structured buffer. Closesthit reads (offsets from gMeshInfo):
+  //   v0,v1,v2    = gMeshIndices[mi.indexOffset + PrimitiveIndex()*3 + {0,1,2}]
+  //   uv0,uv1,uv2 = gMeshUvs[mi.uvOffset + v_i]
   //   uv          = barycentric_interp(uv0, uv1, uv2, attribs.bary)
   // Then samples bindless gBindlessTextures[mat.baseColorTex] at uv.
-  // Sized + uploaded by UploadMeshUvs / UploadMeshIndices in
-  // Commit.cpp; gated by DirtyTopology like meshFaceNormals.
+  // Sized + uploaded by UploadMeshUvs in Commit.cpp; gated by
+  // DirtyTopology like meshFaceNormals. (gMeshIndices is the §14.5
+  // index pool below — the old flat duplicate is gone.)
   nvrhi::BufferHandle  meshUvsBuffer;
-  nvrhi::BufferHandle  meshUvOffsetsBuffer;
-  nvrhi::BufferHandle  meshIndicesBuffer;
-  nvrhi::BufferHandle  meshIndexOffsetsBuffer;
-  uint32_t             meshUvsPackedSlots     = 0;  // see meshFaceNormalsPackedSlots.
-  uint32_t             meshIndicesPackedSlots = 0;
+  uint32_t             meshUvsPackedSlots = 0;  // see meshFaceNormalsPackedSlots.
 
-  // M9 smooth shading: per-vertex normals concatenated into one flat
-  // float4 buffer + per-mesh-slot start offsets. Mirror of the
-  // per-triangle face-normal buffer above but per-VERTEX so the
-  // closesthit can barycentric-interpolate three vertex normals at
-  // each hit. Stored as float4 for std430 alignment + a future
-  // tangent.w sign-bit slot. Empty for meshes with no authored
-  // normals — closesthit detects a near-zero magnitude and falls
-  // back to the M7 face-normal path.
-  nvrhi::BufferHandle  meshVertexNormalsBuffer;
-  nvrhi::BufferHandle  meshVertexNormalOffsetsBuffer;
-  uint32_t             meshVertexNormalsPackedSlots = 0;  // see meshFaceNormalsPackedSlots.
+  // P2 packing — interleaved per-vertex shading attributes
+  // (VertexAttribGpu = {normal, tangent}); merges the old parallel
+  // per-vertex normal + tangent float4 streams. Exactly vertexCount
+  // entries per mesh; zero-magnitude xyz stays the independent
+  // "not authored" sentinel per field (a mesh can have normals but
+  // no tangents). Closesthit reads
+  //   gMeshVertexAttribs[gMeshInfo[meshSlot].vertexAttribOffset + v_i].
+  nvrhi::BufferHandle  meshVertexAttribsBuffer;
+  uint32_t             meshVertexAttribsPackedSlots = 0;  // see meshFaceNormalsPackedSlots.
 
-  // M9 normal mapping: per-vertex tangents from MikkTSpace. float4
-  // stride — xyz is the unit tangent, w is the bitangent sign
-  // (+/- 1) for the closesthit's `bitangent = sign × cross(N, T)`
-  // construction. Empty when the mesh has no UVs or normals (those
-  // are MikkTSpace prereqs); closesthit's normal-mapping branch then
-  // falls back to using the vertex-interpolated normal without TBN.
-  nvrhi::BufferHandle  meshTangentsBuffer;
-  nvrhi::BufferHandle  meshTangentOffsetsBuffer;
-  uint32_t             meshTangentsPackedSlots = 0;  // see meshFaceNormalsPackedSlots.
+  // P2 packing — one MeshInfoGpu per mesh slot (binding 6) replaces the
+  // five parallel per-mesh uint offset tables. Fully rewritten whenever
+  // a DirtyTopology mesh exists (offset tables always were); built by
+  // UploadMeshInfo in ONE walk computing every running sum.
+  nvrhi::BufferHandle  meshInfoBuffer;
+
+  // §14.5 pooled geometry pages (P2 packing) — two grow-only pools
+  // replace the per-mesh vertex/index buffers (2N buffers → 2). BLAS
+  // builds reference buffer+offset; growth (2×, copy live range, swap
+  // handle) happens in UploadPendingMeshes, strictly before
+  // BuildPendingBlas records builds against the pool. The index pool
+  // doubles as the gMeshIndices structured view (binding 26), deleting
+  // the old flat duplicate + its upload path. DestroyMesh leaks its
+  // ranges until Clear() releases the pools wholesale.
+  nvrhi::BufferHandle  vertexPoolBuffer;
+  nvrhi::BufferHandle  indexPoolBuffer;
+  std::uint64_t        vertexPoolUsedBytes    = 0;
+  std::uint64_t        indexPoolUsedElements  = 0;
 
   // Magenta 4x4 fallback texture — slot 0 in the bindless table is
   // permanently the "missing texture" colour so any material whose
@@ -400,9 +415,9 @@ struct GpuScene::Impl
   // mesh's BLAS, which does NOT tag DirtyVisibility) must full-rebuild, not refit.
   uint32_t                     tlasBuiltInstanceCount = 0;
   // Review fix #2 — cached single-dome env-map texture, refreshed once per commit
-  // (RefreshDomeEnvMapCache). GetDomeEnvMapTexture is read every frame by the
-  // PathTracePass binding path; recomputing there allocated + sorted the live-light
-  // set per frame.
+  // (RefreshDomeEnvMapCache). SceneResources::domeEnvMapTexture is read every frame
+  // by the PathTracePass binding path; recomputing there allocated + sorted the
+  // live-light set per frame.
   nvrhi::ITexture*             domeEnvMapTexture = nullptr;
 
   // M6 audit closeout: the instance→material/mesh side-table buffer (binding 4) has
@@ -579,12 +594,25 @@ struct GpuScene::Impl
   [[nodiscard]] Expected<void> UploadLightBuffer(nvrhi::ICommandList* commandList);
   [[nodiscard]] Expected<void> BuildPendingBlas(nvrhi::ICommandList* commandList);
   [[nodiscard]] Expected<void> RebuildTlasIfDirty(nvrhi::ICommandList* commandList);
-  [[nodiscard]] Expected<void> UploadInstanceSideTables(nvrhi::ICommandList* commandList);
+  // P2 packing — fills the materialSlot/meshSlot halves of the instanceInfo mirror
+  // (replaces the old UploadInstanceSideTables; same walk, same dirty flag). The GPU
+  // upload happens at the end of RebuildTlasIfDirty once the transform rows are
+  // current.
+  [[nodiscard]] Expected<void> PackInstanceInfo(nvrhi::ICommandList* commandList);
+  // P2 packing — flushes the instanceInfo mirror to the GPU when either trigger
+  // fired (slot-half repack OR TLAS rebuild/refit). Called from RebuildTlasIfDirty's
+  // tail only (the transform rows must be current).
+  [[nodiscard]] Expected<void> UploadInstanceInfoIfNeeded(nvrhi::ICommandList* commandList);
   [[nodiscard]] Expected<void> UploadMeshFaceNormals(nvrhi::ICommandList* commandList);
   [[nodiscard]] Expected<void> UploadMeshUvs(nvrhi::ICommandList* commandList);
-  [[nodiscard]] Expected<void> UploadMeshIndices(nvrhi::ICommandList* commandList);
-  [[nodiscard]] Expected<void> UploadMeshVertexNormals(nvrhi::ICommandList* commandList);
-  [[nodiscard]] Expected<void> UploadMeshTangents(nvrhi::ICommandList* commandList);
+  // P2 packing — interleaved per-vertex normal+tangent stream (replaces the old
+  // UploadMeshVertexNormals + UploadMeshTangents pair).
+  [[nodiscard]] Expected<void> UploadMeshVertexAttribs(nvrhi::ICommandList* commandList);
+  // P2 packing — the packed MeshInfoGpu table (replaces the five offset tables).
+  // Called from the tail of UploadPendingMeshes (NOT a separate system) because it
+  // reads the index-pool offsets assigned there — a direct call keeps the dependency
+  // off intra-phase system registration order (mirrors review fix #6).
+  [[nodiscard]] Expected<void> UploadMeshInfo(nvrhi::ICommandList* commandList);
   [[nodiscard]] Expected<void> UploadPendingVolumes(nvrhi::ICommandList* commandList);
 
   // RFC 0009 follow-up — PhaseClearDirty system: removes the transient Dirty<T> tags
@@ -602,7 +630,7 @@ struct GpuScene::Impl
 
   // Review fix #2 — recompute the cached single-dome env-map texture (the first live
   // Dome light with a resolved env-map, slot order). Called once at the end of each
-  // CommitResources; GetDomeEnvMapTexture() then returns the cached pointer.
+  // CommitResources; SceneResources then carries the cached pointer.
   void RefreshDomeEnvMapCache() noexcept;
 };
 

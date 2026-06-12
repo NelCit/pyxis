@@ -20,6 +20,8 @@
 
 #include "GpuScene/Internal.h"
 
+#include "Scene/SceneResources.h"  // RFC 0003 — the renderer-internal resource view.
+
 #if defined(PYXIS_DEBUG_TOOLS) && defined(FLECS_REST)
 #include <flecs/addons/rest.h>  // Flecs Explorer (Debug-tools only); ticked by progress().
 #endif
@@ -245,10 +247,6 @@ Expected<void> GpuScene::CommitResources(nvrhi::ICommandList* commandList)
   return _impl->CommitResources(commandList);
 }
 
-nvrhi::rt::IAccelStruct* GpuScene::GetTlas() const noexcept {
-  return _impl->tlas.Get();
-}
-
 const CameraDesc& GpuScene::GetCamera() const noexcept {
   return _impl->cameraDesc;
 }
@@ -257,95 +255,46 @@ bool GpuScene::HasCamera() const noexcept {
   return _impl->hasCamera;
 }
 
-nvrhi::IBuffer* GpuScene::GetMaterialBuffer() const noexcept {
-  return _impl->materialGpuBuffer.Get();
-}
+// ---- SceneResources view (RFC 0003) -----------------------------------------
+// The renderer-internal replacement for the removed public Get* NVRHI getters.
+// PathTracePass (and the §35 unit-test harness) call this each use; every
+// pointer is borrowed from Impl with the same lifetimes the getters had.
+SceneResources detail::SceneResourcesAccess::Get(GpuScene& scene) noexcept {
+  GpuScene::Impl& impl = *scene._impl;
 
-nvrhi::IBuffer* GpuScene::GetInstanceMaterialBuffer() const noexcept {
-  return _impl->instanceMaterialBuffer.Get();
-}
+  // Refresh the slot-indexed ITexture* scratch behind `bindlessTextures`.
+  // bindlessSlot == texture slot (RFC 0009 P3); nullptr for the sentinel slot 0
+  // and dead / not-yet-decoded slots — identical to the old GetBindlessTextureAt.
+  // `assign` reuses capacity, so steady-state frames are allocation-free.
+  const uint32_t textureSlotCount = impl.textureSlots.SlotCount();
+  impl.bindlessTextureScratch.assign(textureSlotCount, nullptr);
+  impl.textureSlots.ForEachLiveSlot([&impl](uint32_t slot, flecs::entity) {
+    if (slot < impl.textureResources.size())
+      impl.bindlessTextureScratch[slot] = impl.textureResources[slot].Get();
+  });
 
-nvrhi::IBuffer* GpuScene::GetLightBuffer() const noexcept {
-  return _impl->lightsGpuBuffer.Get();
-}
-
-nvrhi::ITexture* GpuScene::GetDomeEnvMapTexture() const noexcept {
-  // The single-dome env-map texture (the first live Dome with a resolved env-map, slot
-  // order — the convention every production renderer follows; multiple domes is post-v1,
-  // §43). Review fix #2 — the selection is computed once per commit in
-  // RefreshDomeEnvMapCache and cached here; this accessor is on the per-frame
-  // PathTracePass binding path, so it must not allocate/sort. nullptr when no dome with
-  // an env-map exists → PathTracePass binds a 1×1 black fallback.
-  return _impl->domeEnvMapTexture;
-}
-
-nvrhi::ISampler* GpuScene::GetBindlessSampler() const noexcept {
-  return _impl->bindlessSampler.Get();
-}
-
-nvrhi::ISampler* GpuScene::GetDomeSampler() const noexcept {
-  return _impl->domeSampler.Get();
-}
-
-nvrhi::IBuffer* GpuScene::GetInstanceMeshBuffer() const noexcept {
-  return _impl->instanceMeshBuffer.Get();
-}
-
-nvrhi::IBuffer* GpuScene::GetMeshFaceNormalsBuffer() const noexcept {
-  return _impl->meshFaceNormalsBuffer.Get();
-}
-
-nvrhi::IBuffer* GpuScene::GetMeshFaceOffsetsBuffer() const noexcept {
-  return _impl->meshFaceOffsetsBuffer.Get();
-}
-
-nvrhi::IBuffer* GpuScene::GetMeshUvsBuffer() const noexcept {
-  return _impl->meshUvsBuffer.Get();
-}
-
-nvrhi::IBuffer* GpuScene::GetMeshUvOffsetsBuffer() const noexcept {
-  return _impl->meshUvOffsetsBuffer.Get();
-}
-
-nvrhi::IBuffer* GpuScene::GetMeshIndicesBuffer() const noexcept {
-  return _impl->meshIndicesBuffer.Get();
-}
-
-nvrhi::IBuffer* GpuScene::GetMeshIndexOffsetsBuffer() const noexcept {
-  return _impl->meshIndexOffsetsBuffer.Get();
-}
-
-nvrhi::IBuffer* GpuScene::GetMeshVertexNormalsBuffer() const noexcept {
-  return _impl->meshVertexNormalsBuffer.Get();
-}
-
-nvrhi::IBuffer* GpuScene::GetMeshVertexNormalOffsetsBuffer() const noexcept {
-  return _impl->meshVertexNormalOffsetsBuffer.Get();
-}
-
-nvrhi::IBuffer* GpuScene::GetMeshTangentsBuffer() const noexcept {
-  return _impl->meshTangentsBuffer.Get();
-}
-
-nvrhi::IBuffer* GpuScene::GetMeshTangentOffsetsBuffer() const noexcept {
-  return _impl->meshTangentOffsetsBuffer.Get();
-}
-
-nvrhi::ITexture* GpuScene::GetMissingTexture() const noexcept {
-  return _impl->missingTexture.Get();
-}
-
-uint32_t GpuScene::GetBindlessTextureCount() const noexcept {
-  // RFC 0009 P3 — slot count (== old textures.size()); the bindless table is sized to
-  // this so slot == bindless index stays stable.
-  return _impl->textureSlots.SlotCount();
-}
-
-nvrhi::ITexture* GpuScene::GetBindlessTextureAt(uint32_t bindlessSlot) const noexcept {
-  // bindlessSlot == texture slot for M5. The GPU resource lives in the side table.
-  if (!_impl->textureSlots.IsLive(bindlessSlot) || bindlessSlot >= _impl->textureResources.size())
-    return nullptr;
-  return _impl->textureResources[bindlessSlot].Get();
+  SceneResources view;
+  view.tlas                    = impl.tlas.Get();
+  view.materialBuffer          = impl.materialGpuBuffer.Get();
+  view.instanceInfoBuffer      = impl.instanceInfoBuffer.Get();
+  view.lightBuffer             = impl.lightsGpuBuffer.Get();
+  view.meshInfoBuffer          = impl.meshInfoBuffer.Get();
+  view.meshFaceNormalsBuffer   = impl.meshFaceNormalsBuffer.Get();
+  view.meshUvsBuffer           = impl.meshUvsBuffer.Get();
+  view.meshIndicesBuffer       = impl.indexPoolBuffer.Get();  // §14.5 pool's SRV view.
+  view.meshVertexAttribsBuffer = impl.meshVertexAttribsBuffer.Get();
+  // The single-dome env-map texture (the first live Dome with a resolved env-map,
+  // slot order — the production-renderer convention; multi-dome is post-v1 §43).
+  // Review fix #2 — computed once per commit in RefreshDomeEnvMapCache and cached;
+  // this accessor sits on the per-frame binding path, so it must not allocate/sort.
+  // nullptr when no dome exists → PathTracePass binds its 1×1 fallback.
+  view.domeEnvMapTexture       = impl.domeEnvMapTexture;
+  view.bindlessSampler         = impl.bindlessSampler.Get();
+  view.domeSampler             = impl.domeSampler.Get();
+  view.missingTexture          = impl.missingTexture.Get();
+  view.bindlessTextureCount    = textureSlotCount;
+  view.bindlessTextures        = impl.bindlessTextureScratch.data();
+  return view;
 }
 
 // ---- Editor introspection (M7 follow-up) -----------------------------------
@@ -463,10 +412,15 @@ FrameStats GpuScene::LastFrameStats() const {
       const uint64_t triangleCount = entry.indexCount / 3u;
       blasBytesEstimate += triangleCount * BLAS_BYTES_PER_TRIANGLE_ESTIMATE;
     }
-    if (entry.vertexBuffer)
-      vertexBytes += entry.vertexBuffer->getDesc().byteSize;
-    if (entry.indexBuffer)
-      indexBytes += entry.indexBuffer->getDesc().byteSize;
+    // §14.5 pooled pages — per-mesh geometry bytes from the logical pool ranges
+    // (identical numbers to the old per-mesh buffer byteSize sums: vertexCount ×
+    // 16 B + indexCount × 4 B). Destroyed meshes' leaked pool ranges are NOT
+    // counted, matching the old released-buffer semantics.
+    if (entry.residentInPool)
+    {
+      vertexBytes += static_cast<uint64_t>(entry.vertexCount) * sizeof(hlslpp::float3);
+      indexBytes += static_cast<uint64_t>(entry.indexCount) * sizeof(uint32_t);
+    }
   });
   // RFC 0009 P5 — instances are Flecs entities; the slot map tracks live count O(1).
   const uint64_t liveInstanceCount = _impl->instanceSlots.LiveCount();

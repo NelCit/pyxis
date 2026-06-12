@@ -56,15 +56,17 @@
 namespace nvrhi {
 class IDevice;
 class ICommandList;
-class IBuffer;
 class ITexture;
-class ISampler;
-namespace rt {
-class IAccelStruct;
-}  // namespace rt
 }  // namespace nvrhi
 
 namespace pyxis {
+
+// RFC 0003 — renderer-internal accessor (Private/Scene/SceneResources.h)
+// friended below so render passes + the §35 unit-test harness can reach the
+// scene's raw NVRHI resources without any public getter surface.
+namespace detail {
+struct SceneResourcesAccess;
+}  // namespace detail
 
 class PYXIS_RENDERER_API GpuScene final {
 public:
@@ -209,139 +211,13 @@ public:
   [[nodiscard]] MaterialHandle LookupInstanceMaterialBySlot(uint32_t instanceSlot) const noexcept;
 
   // ---- Render-side accessors -----------------------------------------
-  // Borrowed pointer / ref valid for the lifetime of the scene (the
-  // TLAS is alive after the first CommitResources that observed at
-  // least one instance; nullptr before that). These exist so
-  // render-side code inside pyxis_renderer (PathTracePass, future
-  // pyxis_hydra) can bind the scene's TLAS + camera into their
-  // descriptor sets without GpuScene having to know which passes
-  // exist.
-  //
-  // `nvrhi::rt::IAccelStruct` is forward-declared at the top of this
-  // header, so callers that only need to round-trip the pointer
-  // (binding it into another desc) don't need <nvrhi/nvrhi.h>.
-  // Callers that need to read its members include the full NVRHI
-  // header from their .cpp.
-  [[nodiscard]] nvrhi::rt::IAccelStruct* GetTlas() const noexcept;
+  // RFC 0003 — the raw-NVRHI-resource getters (TLAS, packed scene
+  // buffers, samplers, bindless table) moved to the renderer-internal
+  // `SceneResources` view (Private/Scene/SceneResources.h), reached via
+  // the friended `detail::SceneResourcesAccess` hook below. Only
+  // non-NVRHI introspection remains public.
   [[nodiscard]] const CameraDesc&        GetCamera() const noexcept;
   [[nodiscard]] bool                     HasCamera() const noexcept;
-
-  // M5/M6: structured buffer of OpenPBRMaterialGPU entries the
-  // closesthit reads via the instance→material indirection (see
-  // `GetInstanceMaterialBuffer` below). Allocated lazily on the
-  // first CommitResources that observed at least one
-  // AcquireMaterial — nullptr before that. The §11 packed layout
-  // is documented in resources/shaders/ShaderInterop.slang's
-  // `OpenPBRMaterialGPU` struct.
-  [[nodiscard]] nvrhi::IBuffer*          GetMaterialBuffer() const noexcept;
-
-  // M6 (plan §15): structured buffer of `uint` indexed by instance
-  // slot. Each entry holds the material slot bound to that instance,
-  // so the closesthit reads `materials[instanceMaterial[InstanceID()]]`.
-  // The indirection is what frees the TLAS instanceCustomIndex to
-  // carry the INSTANCE slot (per §15) — required for the M6
-  // instanceId AOV + future picking. Allocated alongside the TLAS
-  // on the first CommitResources that built one; nullptr before that.
-  [[nodiscard]] nvrhi::IBuffer*          GetInstanceMaterialBuffer() const noexcept;
-
-  // M7: structured buffer of `LightGpu` entries (resources/shaders/
-  // ShaderInterop.slang) packed from the LightDesc copies of every
-  // LIVE LightHandle. Sized to the live-light count (sparse / dead
-  // slots are omitted, NOT included as holes — the closesthit
-  // iterates the buffer's full length). Allocated lazily on the
-  // first CommitResources that observed at least one AddLight;
-  // nullptr before that — PathTracePass binds a 1-element zero
-  // sentinel fallback in that case so the closesthit never reads
-  // an unbound buffer.
-  [[nodiscard]] nvrhi::IBuffer*          GetLightBuffer() const noexcept;
-
-  // M7 NdotL: per-instance mesh slot side-table (parallel to the
-  // §15 instance→material side-table). Indexed by instance slot,
-  // value = mesh slot. The closesthit needs this to know which
-  // mesh's face-normal range to look up for the Lambert pass.
-  [[nodiscard]] nvrhi::IBuffer*          GetInstanceMeshBuffer() const noexcept;
-
-  // M7 NdotL: flat float4 buffer of object-space face normals,
-  // every live mesh's normals concatenated. Closesthit reads:
-  //   nLocal = gMeshFaceNormals[gMeshFaceOffsets[meshSlot]
-  //                            + PrimitiveIndex()].xyz
-  [[nodiscard]] nvrhi::IBuffer*          GetMeshFaceNormalsBuffer() const noexcept;
-
-  // M7 NdotL: per-mesh-slot start offsets into GetMeshFaceNormalsBuffer.
-  // Sized to the mesh table length so the closesthit's lookup is
-  // bounds-safe by construction.
-  [[nodiscard]] nvrhi::IBuffer*          GetMeshFaceOffsetsBuffer() const noexcept;
-
-  // M8a UV pipeline: per-mesh UVs concatenated into one flat
-  // float2 buffer + per-mesh-slot start offsets. Closesthit reads:
-  //   uv0..2 = gMeshUvs[gMeshUvOffsets[meshSlot] + vertexIdx]
-  // Vertex indices come from the per-mesh index buffer below.
-  [[nodiscard]] nvrhi::IBuffer*          GetMeshUvsBuffer() const noexcept;
-  [[nodiscard]] nvrhi::IBuffer*          GetMeshUvOffsetsBuffer() const noexcept;
-
-  // M8a UV pipeline: per-mesh triangle indices concatenated into one
-  // flat uint buffer + per-mesh-slot start offsets. Closesthit reads:
-  //   v_i = gMeshIndices[gMeshIndexOffsets[meshSlot] + PrimitiveIndex()*3 + i]
-  // Same data as the per-mesh BLAS index buffer; duplicated here
-  // because BLAS index buffers are bound for AS-build, not as
-  // structured buffers for shader read. Acceptable given the tiny
-  // overhead (one uint per mesh triangle, ~1-3 MB at World Lobby scale).
-  [[nodiscard]] nvrhi::IBuffer*          GetMeshIndicesBuffer() const noexcept;
-  [[nodiscard]] nvrhi::IBuffer*          GetMeshIndexOffsetsBuffer() const noexcept;
-
-  // M9 smooth shading: per-vertex normals concatenated into one flat
-  // float4 buffer + per-mesh-slot start offsets. Closesthit reads:
-  //   nv0..2 = gMeshVertexNormals[gMeshVertexNormalOffsets[meshSlot] + v_i]
-  //   nLocal = barycentric_interp(nv0, nv1, nv2, attribs.bary)
-  // and falls back to the per-triangle face normal when |nLocal|≈0
-  // (mesh authored no normals). Float4 stride for std430 alignment +
-  // a future tangent.w sign-bit slot.
-  [[nodiscard]] nvrhi::IBuffer*          GetMeshVertexNormalsBuffer() const noexcept;
-  [[nodiscard]] nvrhi::IBuffer*          GetMeshVertexNormalOffsetsBuffer() const noexcept;
-
-  // M9 normal mapping: per-vertex tangents from MikkTSpace. float4
-  // stride — xyz is the unit tangent, w is the bitangent sign for
-  // the closesthit's `bitangent = sign × cross(N, T)` build. Empty
-  // for meshes without UVs or normals (MikkTSpace prereqs); the
-  // closesthit's normal-mapping branch then skips the TBN sample.
-  [[nodiscard]] nvrhi::IBuffer*          GetMeshTangentsBuffer() const noexcept;
-  [[nodiscard]] nvrhi::IBuffer*          GetMeshTangentOffsetsBuffer() const noexcept;
-
-  // M7-IBL: env-map texture of the FIRST live UsdLuxDomeLight, or
-  // nullptr if no dome with a resolved envMap exists. Miss shader
-  // samples this at the ray direction's lat-long uv to draw the
-  // actual HDRI background. Multi-dome scenes pick the first one
-  // (production-renderer convention; multi-dome is post-v1 §43).
-  [[nodiscard]] nvrhi::ITexture*         GetDomeEnvMapTexture() const noexcept;
-
-  // M5/M7: shared linear sampler for material bindless textures
-  // (baseColor / normal / metallic / roughness / emission). Wrap-
-  // Wrap-Wrap addressing covers the tiling architectural materials
-  // common in v1; per-role anisotropic samplers are M11+ polish.
-  [[nodiscard]] nvrhi::ISampler*         GetBindlessSampler() const noexcept;
-
-  // M9-fidelity: dedicated sampler for the HDRI dome lat-long
-  // mapping. Wrap-U / Clamp-V — the V-axis clamp prevents the
-  // elevation seam at the poles from mirroring +Y onto -Y, an
-  // artefact visible at glancing-angle hits with the original
-  // shared bindlessSampler.
-  [[nodiscard]] nvrhi::ISampler*         GetDomeSampler() const noexcept;
-
-  // M8a bindless textures: 4×4 magenta fallback bound at bindless
-  // slot 0 so any material whose resolved texture failed to decode
-  // (or whose desc never authored one) renders visibly-broken. Lives
-  // for the scene's lifetime once the first CommitResources runs;
-  // nullptr before that.
-  [[nodiscard]] nvrhi::ITexture*         GetMissingTexture() const noexcept;
-
-  // M8a bindless textures: walk the texture table for PathTracePass's
-  // descriptor-array binding. `Count` is the SLOT-SPACE size (sparse;
-  // includes dead / un-uploaded slots). `At(slot)` returns the
-  // ITexture* for that bindless slot, or nullptr for sentinel /
-  // dead / not-yet-decoded entries — caller binds the missingTexture
-  // (slot 0 fallback) for each null.
-  [[nodiscard]] uint32_t                 GetBindlessTextureCount() const noexcept;
-  [[nodiscard]] nvrhi::ITexture*         GetBindlessTextureAt(uint32_t bindlessSlot) const noexcept;
 
   // V2.A.5 — render-side accessor for the per-volume Texture3D. Sparse
   // (includes dead slots). The volume-integrator follow-up will walk
@@ -357,6 +233,12 @@ private:
   // STL-container-free. §18.9 ABI rule.
   struct Impl;
   std::unique_ptr<Impl> _impl;
+
+  // RFC 0003 — the ONLY hook through the PIMPL: the renderer-internal
+  // SceneResources accessor (Private/Scene/SceneResources.h) builds the
+  // render passes' borrowed-resource view from Impl. No other
+  // public-surface addition.
+  friend struct detail::SceneResourcesAccess;
 };
 
 }  // namespace pyxis
