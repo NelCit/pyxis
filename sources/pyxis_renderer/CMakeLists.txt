@@ -104,6 +104,8 @@ target_sources(pyxis_renderer PRIVATE
 
     Private/Passes/PathTracePass.h
     Private/Passes/PathTracePass.cpp
+    Private/Passes/TonemapPass.h
+    Private/Passes/TonemapPass.cpp
     Private/Passes/SsaaResolvePass.h
     Private/Passes/SsaaResolvePass.cpp
     Private/Passes/BlitToSrgbPass.h
@@ -255,12 +257,17 @@ pyxis_generate_version_source(pyxis_renderer)
 # compiled by Slang at build time (plan §10 / §23). The .spv lands in
 # <bin>/Resources/shaders/ and is loaded by PathTracePass at startup.
 include(Slang)
+# Every shader that #includes the shared interop header lists it under
+# INCLUDES so an interop edit recompiles the dependents (Slang.cmake
+# appends INCLUDES to the custom command's DEPENDS — P2 finding).
+set(PYXIS_SHADER_INTEROP ${CMAKE_SOURCE_DIR}/resources/shaders/ShaderInterop.slang)
 pyxis_compile_slang_shader(
     TARGET      pyxis_renderer
     SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/raygen.slang
     ENTRY_POINT main
     STAGE       raygen
     OUTPUT      raygen.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP}
 )
 pyxis_compile_slang_shader(
     TARGET      pyxis_renderer
@@ -268,6 +275,7 @@ pyxis_compile_slang_shader(
     ENTRY_POINT main
     STAGE       miss
     OUTPUT      miss.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP}
 )
 pyxis_compile_slang_shader(
     TARGET      pyxis_renderer
@@ -275,6 +283,7 @@ pyxis_compile_slang_shader(
     ENTRY_POINT main
     STAGE       closesthit
     OUTPUT      closesthit.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP}
 )
 pyxis_compile_slang_shader(
     TARGET      pyxis_renderer
@@ -282,6 +291,7 @@ pyxis_compile_slang_shader(
     ENTRY_POINT main
     STAGE       anyhit
     OUTPUT      anyhit.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP}
 )
 # M9-fidelity shadow rays — second miss shader stitched into the
 # shader binding table at miss-index 1. Closesthit traces a shadow
@@ -294,19 +304,35 @@ pyxis_compile_slang_shader(
     ENTRY_POINT main
     STAGE       miss
     OUTPUT      shadow_miss.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP}
+)
+# Display transform (compute) — P3 pass split. The 11-way debug-view
+# branch (exposure + Narkowicz ACES on COLOR) extracted from raygen;
+# reads the fp32 linearColor scratch + the raw AOVs, writes the BGRA8
+# display target. Runs every frame, before the SSAA resolve.
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/tonemap.slang
+    ENTRY_POINT main
+    STAGE       compute
+    OUTPUT      tonemap.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP}
 )
 # Viewer SSAA box-downsample resolve (compute). Reads the super-res
 # color AOV, writes the backbuffer-resolution resolve. Used by
-# ViewerMode when SSAA > 1 (ImGui toggle / factor).
+# ViewerMode when SSAA > 1 (ImGui toggle / factor). Renamed from
+# ssaa_downsample at P3 (shader files are named after their pass).
 pyxis_compile_slang_shader(
     TARGET      pyxis_renderer
-    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/ssaa_downsample.slang
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/ssaa_resolve.slang
     ENTRY_POINT main
     STAGE       compute
-    OUTPUT      ssaa_downsample.spv
+    OUTPUT      ssaa_resolve.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP}
 )
 # Viewer present blit (compute): linear -> sRGB OETF into the present target.
 # Split out of SsaaResolvePass so each pass has one job; runs every viewer frame.
+# (Declares its cbuffer locally — no ShaderInterop include.)
 pyxis_compile_slang_shader(
     TARGET      pyxis_renderer
     SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/blit_to_srgb.slang

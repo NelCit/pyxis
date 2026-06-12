@@ -35,6 +35,18 @@ struct PassContext {
   // at factor 1 (BlitToSrgbPass then reads targets->color directly). Keeps the
   // SSAA(downsample) + Blit(sRGB) split entirely Private/ -- no §18 surface change.
   nvrhi::ITexture* colorLinearResolved = nullptr;
+  // Renderer-internal scratch (NOT a public RenderTargets field): the full-
+  // render-resolution fp32 LINEAR radiance (RGBA32F, isUAV + isShaderResource)
+  // PathTracePass writes (binding 2, gLinearColor) and TonemapPass reads to
+  // produce the BGRA8 display output in targets->color (P3 pass split). fp32 so
+  // the display transform sees bit-identical values to the in-kernel
+  // payload.color the old inline raygen branch consumed. PathTracePass owns the
+  // texture (EnsureLinearColor, sized off targets->color, recreated on size
+  // change only — never inside a pass Execute); PyxisRenderer::RenderFrame sets
+  // this each frame. Null when targets->color is unbound — PathTracePass and
+  // TonemapPass then no-op, preserving the old "no display target, no trace"
+  // behaviour.
+  nvrhi::ITexture* linearColor = nullptr;
   uint64_t frameIndex = 0;
   // Default 0 to flush out anyone who forgot to wire it through —
   // PyxisRenderer::RenderFrame always sets the real value. A pass

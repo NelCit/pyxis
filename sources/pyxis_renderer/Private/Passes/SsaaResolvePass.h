@@ -17,7 +17,7 @@
 // BlitToSrgbPass reads `color` directly). Owns its own compute shader + pipeline +
 // binding layout, mirroring PathTracePass's self-contained construction.
 //
-// Bindings (matched to ssaa_downsample.slang):
+// Bindings (matched to ssaa_resolve.slang, renamed from ssaa_downsample at P3):
 //   space=0, t0 : Texture2D<float4>   source super-res LINEAR color
 //   space=0, u1 : RWTexture2D<float4> destination base-res LINEAR color
 //   space=0, b2 : ConstantBuffer<SsaaDownsampleUniforms>

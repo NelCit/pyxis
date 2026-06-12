@@ -5,11 +5,11 @@
 // box-averages each factor x factor block down to one output texel.
 //
 // Single responsibility: DOWNSAMPLE ONLY, staying in LINEAR throughout. The source
-// color AOV is the ACES-tonemapped color in LINEAR display space (raygen writes
-// acesFilmic() with NO OETF -- verified by readback: range [0,1], not raw HDR), and
-// averaging in linear is the correct way to downsample (the sRGB curve is convex;
-// a naive average of encoded values biases dark). The sRGB DISPLAY encode is a
-// separate pass (BlitToSrgbPass / blit_to_srgb.slang) -- this pass is misnamed-free
+// color AOV is the ACES-tonemapped color in LINEAR display space (TonemapPass
+// writes acesFilmic() with NO OETF -- verified by readback: range [0,1], not raw
+// HDR), and averaging in linear is the correct way to downsample (the sRGB curve
+// is convex; a naive average of encoded values biases dark). The sRGB DISPLAY
+// encode is a separate pass (BlitToSrgbPass / blit_to_srgb.slang) -- this pass is
 // box-downsample, nothing else. Output is base-res LINEAR.
 //
 // Deterministic by construction: fixed box kernel, no jitter, no accumulation.

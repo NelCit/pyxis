@@ -181,10 +181,29 @@ struct SsaaDownsampleUniforms {
     uint _ssaaPad0;
 };
 
+// Tonemap compute-pass uniforms (P3 pass split — the display transform
+// extracted from raygen's inline branch). exposure mirrors
+// CameraUniforms.exposure (photographic stops, applied as 2^exposure
+// before the ACES tonemap); debugViewMode / worldPosPeriod mirror the
+// FrameUiUniforms fields the raygen display branch used to read.
+// 32 bytes (two cbuffer rows).
+struct TonemapUniforms {
+    // Row 0 — display transform inputs.
+    float exposure;        // photographic stops; gain = 2^exposure
+    uint  debugViewMode;   // DEBUG_VIEW_COLOR / NORMAL / DEPTH / ...
+    float worldPosPeriod;  // WorldPos sin-encode period (scene units)
+    uint  destWidth;       // output (display target) dimensions in texels
+    // Row 1 — dims tail + reserved pads.
+    uint  destHeight;
+    uint  _pad0;
+    uint  _pad1;
+    uint  _pad2;
+};
+
 // Debug-view selector mirrored on both sides. The combo in ImGuiHost's
-// Editor panel writes one of these into camera.debugViewMode; raygen
-// branches on it to compute the BGRA8 display output (gOutput) from
-// the raw per-AOV textures.
+// Editor panel writes one of these into camera.debugViewMode; the
+// TonemapPass branches on it to compute the BGRA8 display output
+// (gOutput) from the fp32 linear radiance + the raw per-AOV textures.
 static const uint DEBUG_VIEW_COLOR        = 0;   // post-tonemap radiance
 static const uint DEBUG_VIEW_NORMAL       = 1;   // world normal as (n*0.5+0.5)
 static const uint DEBUG_VIEW_DEPTH        = 2;   // 1/depth grayscale
@@ -542,6 +561,11 @@ static const uint BINDLESS_TEXTURES_CAP = 4096u;
                   "display selector + per-AOV knobs).");
     static_assert(sizeof(FrameUiUniforms) % 16 == 0,
                   "FrameUiUniforms must be 16-byte aligned (cbuffer std140 rule).");
+    static_assert(sizeof(TonemapUniforms) == 32,
+                  "TonemapUniforms must be 32 bytes (2 cbuffer rows: exposure / "
+                  "debug-view selector / WorldPos period / dest dims + pads).");
+    static_assert(sizeof(TonemapUniforms) % 16 == 0,
+                  "TonemapUniforms must be 16-byte aligned (cbuffer std140 rule).");
     static_assert(sizeof(PickResult) == 112,
                   "PickResult must be 112 bytes (7 rows of 16) — original 5 rows + "
                   "Tier 1 Hydra Neye/elementId on row 5, Peye/alpha on row 6. "

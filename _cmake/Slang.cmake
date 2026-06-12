@@ -7,7 +7,14 @@
 #       ENTRY_POINT    <name>           # e.g. main / vertexMain
 #       STAGE          <vertex|fragment|compute|raygen|closesthit|miss|anyhit>
 #       OUTPUT         <path under <bin>/Resources/shaders/...>
+#       [INCLUDES      <.slang files the SOURCE #includes>]
 #   )
+#
+# INCLUDES lists the shared .slang modules the SOURCE #includes
+# (ShaderInterop.slang today; camera_ray/shading later). They are appended
+# to the custom command's DEPENDS so editing a shared header recompiles
+# every dependent shader — without it, an interop edit left stale .spv on
+# disk until the including .slang itself was touched (P2 finding).
 #
 # Each call adds a custom command that runs slangc with the §23 invocation
 # flags and adds the output .spv to TARGET's source list so ninja tracks
@@ -27,7 +34,7 @@ include_guard(GLOBAL)
 function(pyxis_compile_slang_shader)
     set(options "")
     set(oneValueArgs TARGET SOURCE ENTRY_POINT STAGE OUTPUT)
-    set(multiValueArgs DEFINES)
+    set(multiValueArgs DEFINES INCLUDES)
     cmake_parse_arguments(SHADER "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
 
     if(NOT SHADER_TARGET)
@@ -101,7 +108,7 @@ function(pyxis_compile_slang_shader)
                 -O$<IF:$<CONFIG:Debug>,0,3>
                 $<$<CONFIG:Debug>:-g>
                 -o "${_out}"
-        DEPENDS "${_src}"
+        DEPENDS "${_src}" ${SHADER_INCLUDES}
         COMMENT "Compiling Slang shader ${SHADER_SOURCE} (${SHADER_STAGE}/${SHADER_ENTRY_POINT})"
         VERBATIM
         COMMAND_EXPAND_LISTS

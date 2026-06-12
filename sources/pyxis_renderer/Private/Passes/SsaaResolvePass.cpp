@@ -21,7 +21,7 @@ namespace pyxis {
 SsaaResolvePass::SsaaResolvePass(nvrhi::IDevice* device) : _device(device) {
   auto& log = Logging::Get();
   const AssetLocator locator;
-  const auto spvPath = locator.LocateResource("shaders/ssaa_downsample.spv");
+  const auto spvPath = locator.LocateResource("shaders/ssaa_resolve.spv");
 
   _shader = LoadSpirvShader(_device, spvPath.View(), nvrhi::ShaderType::Compute, "main",
                             "SsaaResolvePass");

@@ -8,6 +8,7 @@
 #include "Passes/BlitToSrgbPass.h"
 #include "Passes/PathTracePass.h"
 #include "Passes/SsaaResolvePass.h"
+#include "Passes/TonemapPass.h"
 #include "RenderGraph/IRenderPass.h"
 #include "RenderGraph/PassContext.h"
 #include "RenderGraph/RenderGraph.h"
@@ -33,6 +34,12 @@ PyxisRenderer::PyxisRenderer(nvrhi::IDevice* device, GpuScene& scene, Profiler& 
   auto pathTrace = std::make_unique<PathTracePass>(device, scene);
   _pathTracePass = pathTrace.get();
   _graph->AddPass(std::move(pathTrace));
+  // Tonemap runs next (P3 pass split): the display transform (exposure 2^stops +
+  // Narkowicz ACES on COLOR, the 10 debug-view encodes) extracted from raygen's
+  // inline branch. Reads the fp32 linearColor scratch PathTracePass writes
+  // (threaded via PassContext::linearColor) + the raw AOVs; writes the BGRA8
+  // display target (targets.color). No-ops when either texture is unbound.
+  _graph->AddPass(std::make_unique<TonemapPass>(device, scene));
   // SSAA resolve runs next: it box-downsamples the super-res LINEAR color AOV into
   // a base-res LINEAR intermediate (it owns the texture; RenderFrame threads it via
   // PassContext::colorLinearResolved). No-ops at ssaaFactor < 2.
@@ -44,8 +51,9 @@ PyxisRenderer::PyxisRenderer(nvrhi::IDevice* device, GpuScene& scene, Profiler& 
   // directly. No-ops when colorResolved is unbound (Kit never binds it; only the
   // standalone viewer does). Split from SsaaResolvePass so each pass has one job.
   _graph->AddPass(std::make_unique<BlitToSrgbPass>(device));
-  Logging::Get().Info(
-      log::RENDER, "PyxisRenderer: initialised (PathTrace + SsaaResolve + BlitToSrgb registered)");
+  Logging::Get().Info(log::RENDER,
+                      "PyxisRenderer: initialised (PathTrace + Tonemap + SsaaResolve + "
+                      "BlitToSrgb registered)");
 }
 
 // Out-of-line dtor lives here so unique_ptr<RenderGraph>'s deleter sees
@@ -70,6 +78,19 @@ void PyxisRenderer::RenderFrame(nvrhi::ICommandList* commandList, const RenderSe
   // readback asserts == 1 since the mapBuffer-without-fence path
   // would race past that.
   context.framesInFlight = _framesInFlight;
+  // P3 pass split — the full-render-res fp32 LINEAR radiance scratch the raygen
+  // writes (binding 2) and TonemapPass reads. PathTracePass owns the texture
+  // (EnsureLinearColor — created here on the CPU path before the graph runs,
+  // NEVER inside a pass Execute; recreated on size change only). Sized off the
+  // display target so the ray-dispatch extents are byte-identical to when the
+  // raygen wrote targets.color directly. Stays null when no display target is
+  // bound — PathTrace + Tonemap then no-op (nothing to display into), matching
+  // the old targets.color early-out.
+  if (_pathTracePass != nullptr && targets.color != nullptr) {
+    const nvrhi::TextureDesc& colorDesc = targets.color->getDesc();
+    context.linearColor = static_cast<PathTracePass*>(_pathTracePass)
+                              ->EnsureLinearColor(colorDesc.width, colorDesc.height);
+  }
   // At SSAA factor > 1, give SsaaResolvePass its base-res LINEAR downsample target
   // (it owns the texture) and thread it to BlitToSrgbPass via the context. At
   // factor 1 it stays null and BlitToSrgbPass reads `color` directly.

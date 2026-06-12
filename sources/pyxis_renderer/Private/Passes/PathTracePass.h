@@ -12,7 +12,8 @@
 // Bindings (matched to raygen.slang):
 //   space=0, b0  : CameraUniforms cbuffer  (uploaded per-frame from GpuScene::GetCamera)
 //   space=0, t0  : RaytracingAccelerationStructure (TLAS, SceneResources::tlas)
-//   space=0, u0  : RWTexture2D<float4>     (output colour AOV)
+//   space=0, u0  : RWTexture2D<float4>     (fp32 linear radiance — PassContext::
+//                  linearColor; the display transform moved to TonemapPass at P3)
 
 #pragma once
 
@@ -58,16 +59,30 @@ class PathTracePass final : public IRenderPass {
   // forwards this to the public LastPickResult() entry.
   [[nodiscard]] PickResult GetLastPickResult() const noexcept { return _lastPickResult; }
 
+  // P3 pass split — the full-render-resolution fp32 LINEAR radiance scratch
+  // the raygen writes at binding 2 (gLinearColor) and TonemapPass reads.
+  // Owned here (the pass has the device + is the writer, mirroring
+  // SsaaResolvePass::EnsureLinearOutput); allocated/cached at `width` x
+  // `height` (the display target's dims so the ray-dispatch extents are
+  // unchanged), recreated on a size change only — NEVER inside Execute.
+  // RGBA32F: the display transform must see bit-identical values to the
+  // in-kernel payload.color the old inline branch consumed (RGBA16F would
+  // quantize). PyxisRenderer calls this each RenderFrame and threads the
+  // result through PassContext::linearColor.
+  [[nodiscard]] nvrhi::ITexture* EnsureLinearColor(uint32_t width, uint32_t height);
+
  private:
-  // Build the binding set for the supplied targets + scene-resource view
-  // (RFC 0003 — the per-Execute SceneResources snapshot replaces the old
-  // public GpuScene getters). Cached per `nvrhi::ITexture*` identity (the
-  // BGRA8 output) so we don't churn descriptor sets on every frame; a
-  // swapchain rebuild invalidates pointers and the cache is bounded so
-  // stale entries get evicted. Takes the full RenderTargets so the M7 raw
-  // AOV outputs + pick buffer get bound alongside the scene-side buffers.
+  // Build the binding set for the supplied linear-radiance output + targets +
+  // scene-resource view (RFC 0003 — the per-Execute SceneResources snapshot
+  // replaces the old public GpuScene getters). Cached per `nvrhi::ITexture*`
+  // identity (the RGBA32F linearColor output at binding 2) so we don't churn
+  // descriptor sets on every frame; a resize invalidates pointers and the
+  // cache is bounded so stale entries get evicted. Takes the full
+  // RenderTargets so the M7 raw AOV outputs + pick buffer get bound alongside
+  // the scene-side buffers.
   [[nodiscard]] nvrhi::BindingSetHandle GetOrCreateBindingSet(
-      struct RenderTargets const& targets, const SceneResources& res);
+      nvrhi::ITexture* linearColor, struct RenderTargets const& targets,
+      const SceneResources& res);
 
   nvrhi::IDevice* _device = nullptr;
   GpuScene* _scene = nullptr;
@@ -134,6 +149,11 @@ class PathTracePass final : public IRenderPass {
   // miss shader's "use authored color" branch fires unchanged.
   nvrhi::TextureHandle _fallbackDomeTexture;
   nvrhi::SamplerHandle _fallbackDomeSampler;
+
+  // P3 — cached fp32 linear-radiance output (see EnsureLinearColor).
+  nvrhi::TextureHandle _linearColor;
+  uint32_t _linearColorW = 0;
+  uint32_t _linearColorH = 0;
 
   // Output binding-set cache, keyed on the output texture pointer.
   // Bounded — a swapchain rebuild churns through up to ~3 swapchain

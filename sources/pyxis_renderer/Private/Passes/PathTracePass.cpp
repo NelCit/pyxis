@@ -112,7 +112,7 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
   layoutDesc.bindings = {
       nvrhi::BindingLayoutItem::ConstantBuffer(0),           // binding 0 CameraUniforms
       nvrhi::BindingLayoutItem::RayTracingAccelStruct(1),    // binding 1 TLAS
-      nvrhi::BindingLayoutItem::Texture_UAV(2),              // binding 2 output (BGRA8 display)
+      nvrhi::BindingLayoutItem::Texture_UAV(2),              // binding 2 linear radiance (RGBA32F, P3)
       nvrhi::BindingLayoutItem::StructuredBuffer_SRV(3),     // binding 3 materials (M5)
       nvrhi::BindingLayoutItem::StructuredBuffer_SRV(4),     // binding 4 instance info (P2: InstanceInfoGpu)
       nvrhi::BindingLayoutItem::StructuredBuffer_SRV(5),     // binding 5 lights (M7)
@@ -401,6 +401,30 @@ PathTracePass::PathTracePass(nvrhi::IDevice* device, GpuScene& scene)
 
 PathTracePass::~PathTracePass() = default;
 
+nvrhi::ITexture* PathTracePass::EnsureLinearColor(uint32_t width, uint32_t height) {
+  if (width == 0u || height == 0u)
+    return nullptr;
+  if (_linearColor && _linearColorW == width && _linearColorH == height)
+    return _linearColor;
+  nvrhi::TextureDesc desc;
+  desc.width = width;
+  desc.height = height;
+  // RGBA32F — full fp32 so the TonemapPass display transform reads the exact
+  // bits the old inline raygen branch consumed (RGBA16F would quantize the
+  // display path; the colorHdr AOV stays the quantized inspector copy).
+  desc.format = nvrhi::Format::RGBA32_FLOAT;
+  desc.dimension = nvrhi::TextureDimension::Texture2D;
+  desc.isUAV = true;            // raygen writes gLinearColor (binding 2).
+  desc.isShaderResource = true; // sampled by TonemapPass.
+  desc.debugName = "PathTrace.linearColor";
+  desc.initialState = nvrhi::ResourceStates::UnorderedAccess;
+  desc.keepInitialState = true;
+  _linearColor = _device->createTexture(desc);
+  _linearColorW = width;
+  _linearColorH = height;
+  return _linearColor;
+}
+
 bool PathTracePass::ReloadShaders() noexcept {
   // Editor-driven reload (M7 follow-up). Re-translates Slang -> SPIR-V
   // is NOT done here — the Slang compiler isn't linked into the
@@ -493,9 +517,13 @@ bool PathTracePass::ReloadShaders() noexcept {
   return true;
 }
 
-nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(RenderTargets const& targets,
+nvrhi::BindingSetHandle PathTracePass::GetOrCreateBindingSet(nvrhi::ITexture* linearColor,
+                                                             RenderTargets const& targets,
                                                              const SceneResources& res) {
-  nvrhi::ITexture* output = targets.color;
+  // P3 pass split — binding 2 is the fp32 linear-radiance scratch (the BGRA8
+  // display target moved to TonemapPass's layout). It doubles as the cache
+  // key, exactly as targets.color did before the split.
+  nvrhi::ITexture* output = linearColor;
   // Capture every borrowed-pointer that participates in a binding into
   // one snapshot, then compare against last frame's. A mismatch on
   // ANY field invalidates the cached binding sets — covers the
@@ -730,7 +758,12 @@ void PathTracePass::Execute(nvrhi::ICommandList* commandList, const PassContext&
     return;
   if (commandList == nullptr || context.targets == nullptr)
     return;
-  nvrhi::ITexture* const output = context.targets->color;
+  // P3 pass split — the raygen writes fp32 linear radiance (binding 2,
+  // gLinearColor); the BGRA8 display target is TonemapPass's output now.
+  // PyxisRenderer threads the scratch through the context (null when no
+  // display target is bound — same "nothing to render into" early-out the
+  // old targets->color check provided).
+  nvrhi::ITexture* const output = context.linearColor;
   if (output == nullptr)
     return;
 
@@ -963,14 +996,14 @@ void PathTracePass::Execute(nvrhi::ICommandList* commandList, const PassContext&
   }
 
   // ---- Bind + dispatch ----------------------------------------------
-  const nvrhi::BindingSetHandle bindingSet = GetOrCreateBindingSet(*context.targets, res);
+  const nvrhi::BindingSetHandle bindingSet =
+      GetOrCreateBindingSet(output, *context.targets, res);
   if (!bindingSet)
     return;
 
-  // Output image must be in UnorderedAccess so the shader can write
-  // it. The caller (or RenderGraph) is responsible for transitioning
-  // it to a presentable / copy-source state afterward; that happens
-  // in the viewer / headless paths.
+  // Output image (the fp32 linearColor scratch) must be in UnorderedAccess
+  // so the raygen can write it. TonemapPass transitions it to ShaderResource
+  // when it reads it back for the display transform.
   commandList->setTextureState(output, nvrhi::AllSubresources,
                                nvrhi::ResourceStates::UnorderedAccess);
   // Same transition for the M7 raw AOV outputs the raygen writes.
