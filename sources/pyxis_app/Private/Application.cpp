@@ -80,6 +80,46 @@ void EnsureUsdPluginPath() noexcept {
   Logging::Get().Info(log::APP, "PXR_PLUGINPATH_NAME = " + pathString);
 }
 
+// Point usdMtlx at <exe-dir>/libraries/ so `.mtlx`-referenced materials
+// resolve. The OpenPBR Shader Playground (and most production MaterialX
+// assets) author materials as `references = @foo.mtlx@</MaterialX/...>`;
+// usdMtlx composes those by loading the MaterialX standard library to look
+// up node definitions (ND_open_pbr_surface_surfaceshader, etc.). That library
+// is NOT auto-discovered from the staged MaterialX*.dll — without a search
+// path, every .mtlx material composes empty and the StageWalker reports
+// `[mtlx:no-output]` + falls back to grey. The pyxis_app CMake POST_BUILD
+// stages nv-usd's libraries/ next to the exe; we point
+// PXR_MTLX_STDLIB_SEARCH_PATHS there. Verified: with this set,
+// UsdShadeMaterial::ComputeSurfaceSource("mtlx") resolves the playground's
+// open_pbr_surface networks, which the §11 MaterialX→OpenPBR translator then
+// consumes. (Under Kit the host sets its own MaterialX search path.)
+void EnsureMaterialXSearchPath() noexcept {
+  const AssetLocator locator;
+  const Path& exeDir = locator.ExecutableDirectory();
+  if (exeDir.View().empty())
+    return;
+  const std::filesystem::path mtlxLibs =
+      std::filesystem::path(std::string{exeDir.View()}) / "libraries";
+  std::error_code errorCode;
+  if (!std::filesystem::exists(mtlxLibs, errorCode))
+  {
+    Logging::Get().Warn(log::APP,
+                        "MaterialX stdlib not found at " + mtlxLibs.string()
+                            + "; .mtlx materials will fall back to grey. Confirm "
+                              "the pyxis_app CMake POST_BUILD copy ran.");
+    return;
+  }
+  const std::string pathString = mtlxLibs.string();
+  // Only set it if the operator (or Kit) hasn't already provided one, so we
+  // never clobber a host-configured search path.
+  if (const char* existing = std::getenv("PXR_MTLX_STDLIB_SEARCH_PATHS");
+      existing == nullptr || existing[0] == '\0')
+  {
+    _putenv_s("PXR_MTLX_STDLIB_SEARCH_PATHS", pathString.c_str());
+    Logging::Get().Info(log::APP, "PXR_MTLX_STDLIB_SEARCH_PATHS = " + pathString);
+  }
+}
+
 }  // namespace
 
 int Run(int argc, char** argv) noexcept {
@@ -126,6 +166,7 @@ int Run(int argc, char** argv) noexcept {
 
   EmitVersionBanner();
   EnsureUsdPluginPath();
+  EnsureMaterialXSearchPath();
 
   // §29.1 overlay: defaults -> exe-dir -> %LOCALAPPDATA% -> --config,
   // then ApplyCliOverrides. ResolveConfiguration handles the chain;

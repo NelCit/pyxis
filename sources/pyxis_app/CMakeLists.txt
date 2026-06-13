@@ -137,6 +137,26 @@ add_custom_command(TARGET pyxis POST_BUILD
         "${_pyxis_usd_plugin_dst}"
     COMMENT "Copying nv-usd plugin tree (lib/usd/, incl. aggregator plugInfo.json) to <bin>/usd/")
 
+# MaterialX standard-library staging. usdMtlx resolves `.mtlx`-referenced
+# materials (the OpenPBR Shader Playground authors all 55 of its materials this
+# way — references = @foo.mtlx@</...>) by loading the MaterialX standard library
+# to look up node definitions like ND_open_pbr_surface_surfaceshader. nv-usd
+# ships that library at PXR_USD_ROOT/libraries/. It is NOT auto-discovered from
+# the staged DLLs, so without it every .mtlx material composes empty and falls
+# back to grey. Stage it next to pyxis.exe and Application::EnsureMaterialXSearchPath
+# points PXR_MTLX_STDLIB_SEARCH_PATHS at <bin>/libraries. (Under Kit the host
+# provides its own MaterialX search path; this is the standalone path.)
+if(EXISTS "${PXR_USD_ROOT}/libraries")
+    add_custom_command(TARGET pyxis POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different
+            "${PXR_USD_ROOT}/libraries"
+            "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/$<CONFIG>/libraries"
+        COMMENT "Copying nv-usd MaterialX standard library (libraries/) to <bin>/libraries/")
+else()
+    message(WARNING "pyxis_app: MaterialX stdlib not found at ${PXR_USD_ROOT}/libraries — "
+                    ".mtlx materials (e.g. the OpenPBR Playground) will fall back to grey.")
+endif()
+
 # Stage the nv-usd + python runtime DLLs next to pyxis.exe. Globbed at configure
 # time (CONFIGURE_DEPENDS re-globs on rebuild if the set changes); each file is a
 # copy_if_different so incremental builds skip unchanged DLLs.

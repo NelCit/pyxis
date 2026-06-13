@@ -1416,14 +1416,28 @@ void EmitPointInstancer(const pxr::UsdPrim& instancerPrim,
 // `indices.size() * elementSize` BEFORE validating a single index
 // (pxr/usd/usdGeom/primvar.h, _ComputeFlattenedHelper). Production
 // scenes ship malformed primvars — the OpenPBR Shader Playground
-// authors `primvars:normals` with elementSize == values.size() on 48
-// meshes — turning that resize into a multi-hundred-GB VtArray
+// authors `primvars:normals` on ~187 meshes with elementSize ==
+// values.size() — turning that resize into a multi-hundred-GB VtArray
 // allocation. The resulting std::bad_alloc escapes PrepareMesh's
-// noexcept and fail-fasts the process (0xc0000409). Validate
-// elementSize + every index BEFORE expanding; on any violation return
-// false with a reason so the caller warns and treats the channel as
-// unauthored (normals → computed face normals, st → no UVs,
-// displayColor → no fallback colour).
+// noexcept and fail-fasts the process (0xc0000409). So we NEVER route the
+// indexed path through ComputeFlattened: we read the values + indices and
+// flatten manually, bounds-checking every index first.
+//
+// On elementSize: it is the number of array elements per *logical* primvar
+// value. The vector channels Pyxis consumes (normals, st, displayColor,
+// tangents) are one vec per logical value, so elementSize is semantically
+// always 1. The malformed exporters above mis-author it as values.size(),
+// but the values + indices are a perfectly well-formed standard indexed
+// primvar (each index in [0, values.size()), one index per face-vertex /
+// point). We therefore IGNORE the authored elementSize and flatten as
+// elementSize 1 — `flattened[i] = values[indices[i]]` — which recovers the
+// authored (smooth) normals rather than discarding them and falling back
+// to faceted computed face normals (the earlier over-strict behaviour:
+// elementSize != 1 was rejected outright). Pyxis never consumes a genuine
+// array-of-struct (elementSize > 1) primvar on these channels, so there is
+// no correct-block case to lose; a truly malformed primvar (out-of-range
+// indices) is still caught by the per-index bounds check and the caller's
+// downstream count check, and falls back as before.
 template <typename ScalarType>
 [[nodiscard]] bool ComputeFlattenedChecked(const pxr::UsdGeomPrimvar& primvar,
                                            pxr::VtArray<ScalarType>* flattened,
@@ -1431,26 +1445,14 @@ template <typename ScalarType>
 {
   if (!primvar.IsIndexed())
   {
-    // Non-indexed path is a plain typed Get() — no index expansion.
+    // Non-indexed path is a plain typed Get() — no index expansion, so the
+    // elementSize*size pre-resize can't fire here.
     if (!primvar.ComputeFlattened(flattened))
     {
       *whyInvalid = "value read failed (type mismatch or no value)";
       return false;
     }
     return true;
-  }
-
-  // elementSize > 1 means each index addresses a *block* of N values
-  // (array-of-struct primvars). No Pyxis channel consumes blocked
-  // primvars — downstream length checks expect one value per face-
-  // vertex / point — and the malformed assets above live here, so
-  // reject outright instead of expanding.
-  const int elementSize = primvar.GetElementSize();
-  if (elementSize != 1)
-  {
-    *whyInvalid = "indexed with elementSize " + std::to_string(elementSize)
-                  + " (only 1 supported)";
-    return false;
   }
 
   pxr::VtArray<ScalarType> authored;
