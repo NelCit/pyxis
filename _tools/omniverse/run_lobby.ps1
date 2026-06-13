@@ -36,7 +36,13 @@ if ($Scene -ne "") { $usd = $Scene } else {
 }
 
 $env:PATH = "$PXR_USD_ROOT\lib;$PXR_USD_ROOT\bin;$PYTHON_ROOT;$releaseBin;" + $env:PATH
-$env:PXR_PLUGINPATH_NAME = "$PXR_USD_ROOT\lib\usd;$PXR_USD_ROOT\plugin\usd"
+# No "$PXR_USD_ROOT\lib\usd" here: the exe loads the usd_*.dll copies staged next to
+# it (app dir beats PATH) and USD auto-discovers their <exe-dir>\usd core plugin
+# tree. Registering usd-deps\lib\usd too makes Plug's dedup point core plugins at the
+# OTHER tree, so a lazy PlugPlugin::Load pulls a second copy of an already-loaded
+# usd DLL and busy-spins in its static initializers (see run_smoke.ps1 for the full
+# autopsy). Only the second-tier plugin\usd tree (unique DLLs) may be listed.
+$env:PXR_PLUGINPATH_NAME = "$PXR_USD_ROOT\plugin\usd"
 
 & $lobby $usd $Camera $Width $Height $Frames
 $rc = $LASTEXITCODE
