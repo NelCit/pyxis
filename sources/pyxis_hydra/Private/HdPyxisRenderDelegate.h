@@ -120,6 +120,15 @@ class HdPyxisRenderDelegate final : public HdRenderDelegate {
   // flattened material network (UsdPreviewSurface only — loses MDL diffuse tints).
   void SetStage(const UsdStageRefPtr& stage) noexcept;
 
+  // Q3 OpenPBR-complete — compose RenderSettings::openPbrFeatureMask from the
+  // six pyxis:openpbr* BOOL render settings (Kit Render Settings panel rows;
+  // carb-bridged like pyxis:persistEngine). Absent / unknown-typed settings
+  // default to ON, so a bare usdview run (no carb) gets the all-on reference
+  // look (0x3F) and §25.O.3 parity holds. Called per-frame by the render pass
+  // (NOT once at Init — carb propagation timing makes Init-time reads stale)
+  // and pushed into the engine via PyxisEngine::SetOpenPbrFeatureMask.
+  [[nodiscard]] uint32_t ReadOpenPbrFeatureMask() const;
+
  private:
   void Init();
   // Resolve pyxis:persistEngine (render setting, default true) with the

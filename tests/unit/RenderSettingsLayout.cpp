@@ -84,3 +84,26 @@ TEST(RenderSettingsLayout, WorldPosPeriodDefaultsToTenMeters) {
   const RenderSettings settings;
   EXPECT_FLOAT_EQ(settings.worldPosPeriod, 10.0f);
 }
+
+TEST(RenderSettingsLayout, SsaaFactorDefaultsToOff) {
+  const RenderSettings settings;
+  EXPECT_EQ(settings.ssaaFactor, 1u);
+}
+
+// Q3 OpenPBR-complete — the feature mask MUST default to all six bits
+// on (0x3F). Anything else changes headless byte-equal output (§33.7)
+// and breaks §25.O.3 adapter parity. The literal-vs-interop-constant
+// drift guard lives in PyxisRenderer.cpp (the public header cannot
+// include ShaderInterop.slang); this test pins the public default.
+TEST(RenderSettingsLayout, OpenPbrFeatureMaskDefaultsToAllOn) {
+  const RenderSettings settings;
+  EXPECT_EQ(settings.openPbrFeatureMask, 0x3Fu);
+}
+
+// §22.3 reserved tail — must stay zeroed until a future MINOR turns a
+// slot into a typed member.
+TEST(RenderSettingsLayout, ReservedTailIsZeroed) {
+  const RenderSettings settings;
+  for (const uint32_t slot : settings._reserved)
+    EXPECT_EQ(slot, 0u);
+}

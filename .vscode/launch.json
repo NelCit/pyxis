@@ -63,6 +63,39 @@
     },
 
     {
+      "//": "Release viewer on the OpenPBR Shader Playground (ASWF DPEL) — the",
+      "//pb2": "OpenPBR look-dev asset. Fetch once via `pwsh _tools/init.ps1 -Stage scenes`.",
+      "//pb3": "Release build so the full closure stack runs at interactive rates.",
+      "name": "pyxis (Release) — OpenPBR Playground",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/dev/bin/Release/pyxis.exe",
+      "args": [
+        "--scene",
+        "${workspaceFolder}/resources/scenes/openpbr_playground/ShdrPlygrnd/ShdrPlygrnd_OpenPBR.usda"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "preLaunchTask": "build:dev-release"
+    },
+    {
+      "//": "Release viewer on the NVIDIA Residential/World Lobby USD scene — the",
+      "//wl2": "M8a hero stress scene. Not vendored (multi-GB, license-gated): drop",
+      "//wl3": "Collected_World_Lobby.zip into resources/scenes/world_lobby/ (or pass",
+      "//wl4": "-WorldLobbyUrl to _tools/init.ps1 -Stage scenes). Release for perf.",
+      "name": "pyxis (Release) — NVIDIA World Lobby",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/dev/bin/Release/pyxis.exe",
+      "args": [
+        "--scene",
+        "${workspaceFolder}/resources/scenes/world_lobby/World_Lobby.usd"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "preLaunchTask": "build:dev-release"
+    },
+    {
       "//": "RFC 0007 — launch Omniverse Kit (pyxis.editor) with the Pyxis Hydra",
       "//2": "delegate. Prebuilds the delegate (pyxis_hydra.dll, build/dev) and stages",
       "//3": "the Python omni.hydra.pyxis extension. cppvsdbg lets you set breakpoints",

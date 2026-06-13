@@ -10,6 +10,15 @@
       "problemMatcher": ["$gcc"]
     },
     {
+      "label": "build:dev-release",
+      "detail": "Full Release build (all targets) — the prelaunch for the scene-viewer launch configs.",
+      "type": "shell",
+      "command": "cmake",
+      "args": ["--build", "--preset", "dev-release"],
+      "group": "build",
+      "problemMatcher": ["$gcc"]
+    },
+    {
       "label": "configure:dev",
       "type": "shell",
       "command": "cmake",

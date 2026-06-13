@@ -48,6 +48,7 @@ target_sources(pyxis_unit_tests PRIVATE
     PurposeFilterSpecParsing.cpp
     PrescanRenderSettingsV2A27.cpp
     MaterialCoverageFields.cpp
+    MaterialDescHash.cpp
     MdlTranslation.cpp
     UdimMultiTile.cpp
     MaterialXTranslation.cpp
@@ -67,6 +68,10 @@ target_sources(pyxis_unit_tests PRIVATE
     ColorEncodingFixture.cpp
     AovColorEncodeFixture.cpp
     TextureReadbackFixture.cpp
+    # Q3 review — OpenPBR-complete defensive bound + packing/parse pins.
+    PackMaterialGpuRows.cpp
+    OpenPbrMaskParsing.cpp
+    VariantKeyClamp.cpp
 
     # V2.A.14 — BCn encoder helper. Recompiled here so the test exe
     # exercises the real helper directly instead of going through the
@@ -141,6 +146,10 @@ target_include_directories(pyxis_unit_tests PRIVATE
     # (Private/AovColorEncode.h) — the single source of truth for the
     # Omniverse⇄engine color-parity contract.
     ${CMAKE_SOURCE_DIR}/sources/pyxis_hydra/Private
+    # Q1 — MaterialDescHash pins the §11 dedup hash
+    # (Private/GpuScene/Detail.h), which includes the dual-language
+    # ShaderInterop.slang the same way the renderer target does.
+    ${CMAKE_SOURCE_DIR}/resources/shaders
 )
 
 # pyxis_unit_tests is the one place we *do* allow exceptions — gtest

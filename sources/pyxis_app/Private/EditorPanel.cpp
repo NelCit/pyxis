@@ -432,6 +432,28 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
                           _editorSsaaEnabled ? static_cast<uint32_t>(_editorSsaaFactor) : 1u);
     }
 
+    // ---- OpenPBR Features ---------------------------------------------
+    // Q3 (openpbr-complete-design.md "Control surface"): per-lobe gates
+    // on the OpenPBR closure stack. Each checkbox flips one
+    // OPENPBR_FEATURE_* bit; ViewerMode reads GetOpenPbrFeatureMask()
+    // each frame and the renderer swaps to the matching
+    // specialization-constant pipeline variant same-frame (built
+    // lazily on first use, cached after). A gate that is OFF shades
+    // exactly as if that feature's weight were 0 on every material.
+    if (ImGui::CollapsingHeader("OpenPBR Features"))
+    {
+      ImGui::Checkbox("Coat", &_editorOpenPbrCoat);
+      ImGui::Checkbox("Fuzz (sheen)", &_editorOpenPbrFuzz);
+      ImGui::Checkbox("Transmission", &_editorOpenPbrTransmission);
+      ImGui::Checkbox("Subsurface", &_editorOpenPbrSubsurface);
+      ImGui::Checkbox("Anisotropy", &_editorOpenPbrAnisotropy);
+      ImGui::Checkbox("Energy-preserving diffuse (EON)", &_editorOpenPbrEonDiffuse);
+      const uint32_t mask = GetOpenPbrFeatureMask();
+      ImGui::TextDisabled("mask 0x%02X%s", mask,
+                          mask == OPENPBR_FEATURES_ALL ? "  (all on — reference look)"
+                                                       : "  (reduced model)");
+    }
+
     // ---- Camera section ----------------------------------------------
     // FOV (vertical, degrees) and Focal length (mm) are linked via a
     // 24mm full-frame sensor height. Any projection-affecting slider

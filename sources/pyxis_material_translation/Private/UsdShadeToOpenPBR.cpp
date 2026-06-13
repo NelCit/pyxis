@@ -18,6 +18,7 @@
 #include <pxr/base/tf/token.h>
 #include <pxr/base/vt/value.h>
 
+#include <array>
 #include <cctype>
 #include <filesystem>
 #include <string>
@@ -116,10 +117,12 @@ struct SurfaceMatch {
   if (!attr.Get(&value) || !value.IsHolding<pxr::SdfAssetPath>())
     return false;
 
-  // Probe for any OmniPBR-style input that TranslateMdl actually reads.
-  // If none are authored on the prim, the .mdl module owns the values
-  // and we can't translate — defer to the next render context.
-  static const std::array<pxr::TfToken, 8> MDL_INPUT_PROBE{{
+  // Probe for any OmniPBR / OmniGlass-style input that TranslateMdl
+  // actually reads. If none are authored on the prim, the .mdl module
+  // owns the values and we can't translate — defer to the next render
+  // context. (Q1 added the OmniGlass entries alongside the glass →
+  // transmission wiring.)
+  static const std::array<pxr::TfToken, 12> MDL_INPUT_PROBE{{
       pxr::TfToken{"inputs:diffuse_color_constant"},
       pxr::TfToken{"inputs:metallic_constant"},
       pxr::TfToken{"inputs:reflection_roughness_constant"},
@@ -128,6 +131,10 @@ struct SurfaceMatch {
       pxr::TfToken{"inputs:emissive_intensity"},
       pxr::TfToken{"inputs:opacity_constant"},
       pxr::TfToken{"inputs:ior_constant"},
+      pxr::TfToken{"inputs:glass_color"},          // Q1 — OmniGlass
+      pxr::TfToken{"inputs:glass_ior"},            // Q1 — OmniGlass
+      pxr::TfToken{"inputs:frosting_roughness"},   // Q1 — OmniGlass
+      pxr::TfToken{"inputs:thin_walled"},          // Q1 — OmniGlass
   }};
   for (const pxr::TfToken& inputName : MDL_INPUT_PROBE)
   {
@@ -240,6 +247,44 @@ hlslpp::float3 ReadColor(const pxr::UsdShadeShader& shader, const pxr::TfToken& 
     return fallback;
   const pxr::GfVec3f rgb = value.UncheckedGet<pxr::GfVec3f>();
   return hlslpp::float3{rgb[0], rgb[1], rgb[2]};
+}
+
+// V2.A.23 — read an authored bool/int/float input on the shader
+// prim. Returns the typed value, or `fallback` when the input is
+// missing OR holds a different scalar type. USD authoring exporters
+// vary: Omniverse Composer writes `enable_emission` as a bool, some
+// pipelines write it as int, and an MDL author might write it as
+// float. Handle all three. (Moved above the MaterialX translators at
+// Q1 — `geometry_thin_walled` / `thin_walled` are boolean inputs.)
+[[nodiscard]] bool ReadBoolish(const pxr::UsdShadeShader& shader,
+                                const pxr::TfToken&        name,
+                                bool                       fallback,
+                                pxr::UsdTimeCode           timeCode) noexcept
+{
+  const pxr::UsdShadeInput input = shader.GetInput(name);
+  if (!input)
+    return fallback;
+  pxr::VtValue value;
+  if (!input.Get(&value, timeCode))
+    return fallback;
+  if (value.IsHolding<bool>())
+    return value.UncheckedGet<bool>();
+  if (value.IsHolding<int>())
+    return value.UncheckedGet<int>() != 0;
+  if (value.IsHolding<float>())
+    return value.UncheckedGet<float>() > 0.0f;
+  return fallback;
+}
+
+// Q1 OpenPBR-complete — stamp an hlslpp color into the desc's scalar
+// R/G/B triple (the Q1 desc extension stores colors as plain floats
+// to avoid SIMD padding holes in the public POD).
+inline void StoreRgb(const hlslpp::float3& color, float& outR, float& outG,
+                     float& outB) noexcept
+{
+  outR = static_cast<float>(color.x);
+  outG = static_cast<float>(color.y);
+  outB = static_cast<float>(color.z);
 }
 
 // V2.A.18 — UsdTransform2d UV transform captured from the
@@ -598,6 +643,41 @@ void TranslateMaterialXOpenPBR(const pxr::UsdShadeShader& shader,
   desc.emissionColor  = ReadColor(shader, pxr::TfToken("emission_color"),
                                    hlslpp::float3{0.0f, 0.0f, 0.0f}, timeCode);
   desc.emissionLuminance = ReadFloat(shader, pxr::TfToken("emission_luminance"), 0.0f, timeCode);
+  // Q1 OpenPBR-complete — the remaining open_pbr_surface inputs map
+  // field-for-field onto the Q1 desc extension. Fallbacks are the
+  // OpenPBR spec defaults (= the desc defaults).
+  StoreRgb(ReadColor(shader, pxr::TfToken("specular_color"),
+                     hlslpp::float3{1.0f, 1.0f, 1.0f}, timeCode),
+           desc.specularColorR, desc.specularColorG, desc.specularColorB);
+  desc.baseDiffuseRoughness =
+      ReadFloat(shader, pxr::TfToken("base_diffuse_roughness"), 0.0f, timeCode);
+  desc.specularRoughnessAnisotropy =
+      ReadFloat(shader, pxr::TfToken("specular_roughness_anisotropy"), 0.0f, timeCode);
+  StoreRgb(ReadColor(shader, pxr::TfToken("coat_color"),
+                     hlslpp::float3{1.0f, 1.0f, 1.0f}, timeCode),
+           desc.coatColorR, desc.coatColorG, desc.coatColorB);
+  desc.coatIor       = ReadFloat(shader, pxr::TfToken("coat_ior"), 1.6f, timeCode);
+  desc.coatDarkening = ReadFloat(shader, pxr::TfToken("coat_darkening"), 1.0f, timeCode);
+  desc.fuzzWeight    = ReadFloat(shader, pxr::TfToken("fuzz_weight"), 0.0f, timeCode);
+  StoreRgb(ReadColor(shader, pxr::TfToken("fuzz_color"),
+                     hlslpp::float3{1.0f, 1.0f, 1.0f}, timeCode),
+           desc.fuzzColorR, desc.fuzzColorG, desc.fuzzColorB);
+  desc.fuzzRoughness = ReadFloat(shader, pxr::TfToken("fuzz_roughness"), 0.5f, timeCode);
+  StoreRgb(ReadColor(shader, pxr::TfToken("transmission_color"),
+                     hlslpp::float3{1.0f, 1.0f, 1.0f}, timeCode),
+           desc.transmissionColorR, desc.transmissionColorG, desc.transmissionColorB);
+  desc.subsurfaceWeight =
+      ReadFloat(shader, pxr::TfToken("subsurface_weight"), 0.0f, timeCode);
+  StoreRgb(ReadColor(shader, pxr::TfToken("subsurface_color"),
+                     hlslpp::float3{0.8f, 0.8f, 0.8f}, timeCode),
+           desc.subsurfaceColorR, desc.subsurfaceColorG, desc.subsurfaceColorB);
+  desc.thinWalled =
+      ReadBoolish(shader, pxr::TfToken("geometry_thin_walled"), false, timeCode) ? 1u : 0u;
+  // Dropped open_pbr_surface inputs with no Q1 desc slot (warn-skip;
+  // logging lands caller-side — this static lib has no spdlog):
+  // coat_roughness_anisotropy, coat_rotation, specular_rotation,
+  // transmission_depth/scatter/dispersion_*, subsurface_radius(_scale)/
+  // scatter_anisotropy, thin_film_*, geometry_coat_normal/tangent.
   desc.source = OpenPBRMaterialDesc::Source::MaterialX;
 }
 
@@ -622,33 +702,55 @@ void TranslateMaterialXStandardSurface(const pxr::UsdShadeShader& shader,
   desc.emissionColor  = ReadColor(shader, pxr::TfToken("emission_color"),
                                    hlslpp::float3{0.0f, 0.0f, 0.0f}, timeCode);
   desc.emissionLuminance = ReadFloat(shader, pxr::TfToken("emission"), 0.0f, timeCode);
+  // Q1 OpenPBR-complete — Standard Surface → OpenPBR mapping for the
+  // Q1 desc extension. Fallbacks are the desc (OpenPBR spec) defaults,
+  // matching this translator's existing convention.
+  StoreRgb(ReadColor(shader, pxr::TfToken("specular_color"),
+                     hlslpp::float3{1.0f, 1.0f, 1.0f}, timeCode),
+           desc.specularColorR, desc.specularColorG, desc.specularColorB);
+  desc.specularRoughnessAnisotropy =
+      ReadFloat(shader, pxr::TfToken("specular_anisotropy"), 0.0f, timeCode);
+  // Standard Surface sheen_* → OpenPBR fuzz_* (same lobe family; the
+  // Zeltner LTC fuzz consumes these at Q2).
+  desc.fuzzWeight = ReadFloat(shader, pxr::TfToken("sheen"), 0.0f, timeCode);
+  StoreRgb(ReadColor(shader, pxr::TfToken("sheen_color"),
+                     hlslpp::float3{1.0f, 1.0f, 1.0f}, timeCode),
+           desc.fuzzColorR, desc.fuzzColorG, desc.fuzzColorB);
+  desc.fuzzRoughness = ReadFloat(shader, pxr::TfToken("sheen_roughness"), 0.5f, timeCode);
+  StoreRgb(ReadColor(shader, pxr::TfToken("coat_color"),
+                     hlslpp::float3{1.0f, 1.0f, 1.0f}, timeCode),
+           desc.coatColorR, desc.coatColorG, desc.coatColorB);
+  desc.coatIor = ReadFloat(shader, pxr::TfToken("coat_IOR"), 1.6f, timeCode);
+  // Standard Surface's coat_affect_color / coat_affect_roughness have
+  // NO OpenPBR equivalent — OpenPBR replaces them with coat_darkening
+  // (default 1) and an always-on parameter-free roughening formula.
+  // coat_affect_color > 0 maps onto coat_darkening = 1 (the default
+  // anyway); any other authored value is warn-skipped, as is
+  // coat_affect_roughness (logging lands caller-side — this static
+  // lib has no spdlog).
+  {
+    float coatAffectColor = 0.0f;
+    if (ReadShaderInputFloat(shader, pxr::TfToken("coat_affect_color"), coatAffectColor)
+        && coatAffectColor > 0.0f)
+    {
+      desc.coatDarkening = 1.0f;
+    }
+  }
+  desc.subsurfaceWeight = ReadFloat(shader, pxr::TfToken("subsurface"), 0.0f, timeCode);
+  StoreRgb(ReadColor(shader, pxr::TfToken("subsurface_color"),
+                     hlslpp::float3{0.8f, 0.8f, 0.8f}, timeCode),
+           desc.subsurfaceColorR, desc.subsurfaceColorG, desc.subsurfaceColorB);
+  StoreRgb(ReadColor(shader, pxr::TfToken("transmission_color"),
+                     hlslpp::float3{1.0f, 1.0f, 1.0f}, timeCode),
+           desc.transmissionColorR, desc.transmissionColorG, desc.transmissionColorB);
+  desc.thinWalled =
+      ReadBoolish(shader, pxr::TfToken("thin_walled"), false, timeCode) ? 1u : 0u;
+  // Dropped standard_surface inputs not in the Q1 mapping set
+  // (warn-skip): diffuse_roughness, specular_rotation,
+  // coat_anisotropy/rotation/normal, transmission_depth/scatter/
+  // extra_roughness/dispersion, subsurface_radius/scale/anisotropy,
+  // thin_film_*, tangent.
   desc.source = OpenPBRMaterialDesc::Source::MaterialX;
-}
-
-// V2.A.23 — read an authored bool/int/float input on the MDL shader
-// prim. Returns the typed value, or `fallback` when the input is
-// missing OR holds a different scalar type. USD authoring exporters
-// vary: Omniverse Composer writes `enable_emission` as a bool, some
-// pipelines write it as int, and an MDL author might write it as
-// float. Handle all three.
-[[nodiscard]] bool ReadBoolish(const pxr::UsdShadeShader& shader,
-                                const pxr::TfToken&        name,
-                                bool                       fallback,
-                                pxr::UsdTimeCode           timeCode) noexcept
-{
-  const pxr::UsdShadeInput input = shader.GetInput(name);
-  if (!input)
-    return fallback;
-  pxr::VtValue value;
-  if (!input.Get(&value, timeCode))
-    return fallback;
-  if (value.IsHolding<bool>())
-    return value.UncheckedGet<bool>();
-  if (value.IsHolding<int>())
-    return value.UncheckedGet<int>() != 0;
-  if (value.IsHolding<float>())
-    return value.UncheckedGet<float>() > 0.0f;
-  return fallback;
 }
 
 // V2.A.23 follow-up — MDL OmniPBR exposes textures via direct
@@ -683,6 +785,41 @@ void TranslateMaterialXStandardSurface(const pxr::UsdShadeShader& shader,
     return TextureHandle::Invalid;
   return acquire(resolved, role, userData);
   (void)colorspace;  // role-derived sRGB/Linear is the renderer's call
+}
+
+// Q1 OpenPBR-complete — OmniGlass detection. Three signals, any of
+// which marks the prim as glass: the universal `info:id` (e.g.
+// "mdl::OmniGlass"), the Omniverse sourceAsset subIdentifier, or an
+// authored glass-only input (covers re-exports that strip both ids).
+[[nodiscard]] bool IsOmniGlass(const pxr::UsdShadeShader& shader) noexcept
+{
+  pxr::TfToken shaderId;
+  if (shader.GetShaderId(&shaderId)
+      && shaderId.GetString().find("OmniGlass") != std::string::npos)
+    return true;
+  static const pxr::TfToken subIdentifierAttr("info:mdl:sourceAsset:subIdentifier");  // NOLINT
+  if (const pxr::UsdAttribute attr = shader.GetPrim().GetAttribute(subIdentifierAttr); attr)
+  {
+    pxr::VtValue value;
+    if (attr.Get(&value) && value.IsHolding<pxr::TfToken>()
+        && value.UncheckedGet<pxr::TfToken>().GetString().find("OmniGlass")
+               != std::string::npos)
+      return true;
+  }
+  // Glass-only inputs (deliberately excludes `thin_walled`, which is
+  // not unique to OmniGlass).
+  static const std::array<pxr::TfToken, 3> GLASS_INPUT_PROBE{{
+      pxr::TfToken{"glass_color"},
+      pxr::TfToken{"glass_ior"},
+      pxr::TfToken{"frosting_roughness"},
+  }};
+  for (const pxr::TfToken& inputName : GLASS_INPUT_PROBE)
+  {
+    const pxr::UsdShadeInput input = shader.GetInput(inputName);
+    if (input && input.GetAttr().HasAuthoredValue())
+      return true;
+  }
+  return false;
 }
 
 // V2.A.23 — MDL OmniPBR / OmniGlass translator. Inputs match
@@ -872,6 +1009,46 @@ void TranslateMdl(const pxr::UsdShadeShader& shader,
     const bool objectSpace =
         ReadBoolish(shader, pxr::TfToken("world_or_object"), false, timeCode);
     desc.projectionMode = projectUvw ? (objectSpace ? 2u : 1u) : 0u;
+  }
+  // Q1 OpenPBR-complete — OmniPBR clearcoat → OpenPBR coat. Gated on
+  // `enable_clearcoat` (MDL function default FALSE; a missing input
+  // means "use the MDL default" = disabled — same convention as
+  // enable_emission above), so disabled-clearcoat materials keep the
+  // desc coat fields at their defaults and dedup cleanly.
+  if (ReadBoolish(shader, pxr::TfToken("enable_clearcoat"), /*fallback=*/false, timeCode))
+  {
+    desc.coatWeight = ReadFloat(shader, pxr::TfToken("clearcoat_weight"), 1.0f, timeCode);
+    StoreRgb(ReadColor(shader, pxr::TfToken("clearcoat_tint"),
+                       hlslpp::float3{1.0f, 1.0f, 1.0f}, timeCode),
+             desc.coatColorR, desc.coatColorG, desc.coatColorB);
+    desc.coatIor = ReadFloat(shader, pxr::TfToken("clearcoat_ior"), 1.6f, timeCode);
+    desc.coatRoughness =
+        ReadFloat(shader, pxr::TfToken("clearcoat_reflection_roughness"), 0.0f, timeCode);
+    // Dropped OmniPBR clearcoat inputs with no OpenPBR equivalent
+    // (warn-skip; logging lands caller-side — no spdlog here):
+    // clearcoat_transparency, clearcoat_bump_factor, clearcoat_flatten,
+    // clearcoat_normalmap_texture.
+  }
+  // Q1 OpenPBR-complete — OmniGlass → OpenPBR transmission. OmniGlass
+  // is a dielectric transmitter: transmission is unconditionally on,
+  // glass_color is the depth-0 constant transmission tint, glass_ior
+  // drives the dielectric Fresnel, frosting_roughness replaces the
+  // OmniPBR roughness chain (OmniGlass authors no
+  // reflection_roughness_constant — smooth glass default 0).
+  if (IsOmniGlass(shader))
+  {
+    desc.transmissionWeight = 1.0f;
+    StoreRgb(ReadColor(shader, pxr::TfToken("glass_color"),
+                       hlslpp::float3{1.0f, 1.0f, 1.0f}, timeCode),
+             desc.transmissionColorR, desc.transmissionColorG, desc.transmissionColorB);
+    desc.specularIor = ReadFloat(shader, pxr::TfToken("glass_ior"), desc.specularIor,
+                                 timeCode);
+    desc.roughness = ReadFloat(shader, pxr::TfToken("frosting_roughness"), 0.0f, timeCode);
+    desc.thinWalled =
+        ReadBoolish(shader, pxr::TfToken("thin_walled"), false, timeCode) ? 1u : 0u;
+    // Dropped OmniGlass inputs not in the Q1 mapping set (warn-skip):
+    // depth, glass_color_texture, reflection_color_texture,
+    // roughness_texture_influence.
   }
   desc.source = OpenPBRMaterialDesc::Source::Mdl;
 }

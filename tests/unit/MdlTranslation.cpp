@@ -111,3 +111,96 @@ TEST(MdlTranslation, EnableEmissionOffSuppressesLuminance)
   EXPECT_FLOAT_EQ(desc.emissionColor.y, 0.0f);
   EXPECT_FLOAT_EQ(desc.emissionColor.z, 0.0f);
 }
+
+// Q1 OpenPBR-complete — OmniPBR clearcoat → OpenPBR coat. Gated on
+// enable_clearcoat (MDL function default false), mirroring the
+// enable_emission convention.
+TEST(MdlTranslation, OmniPBRClearcoatMapsToCoatFields)
+{
+  const pxr::UsdStageRefPtr stage = pxr::UsdStage::CreateInMemory("mdl_coat.usda");
+  const pxr::UsdShadeMaterial material = BuildMdlMaterial(stage);
+  // NOLINTNEXTLINE(misc-const-correctness) — CreateInput mutates.
+  pxr::UsdShadeShader shader{stage->GetPrimAtPath(pxr::SdfPath("/Mat/MdlSurface"))};
+  ASSERT_TRUE(shader);
+  shader.CreateInput(pxr::TfToken("enable_clearcoat"), pxr::SdfValueTypeNames->Bool)
+      .Set(true);
+  shader.CreateInput(pxr::TfToken("clearcoat_weight"), pxr::SdfValueTypeNames->Float)
+      .Set(0.8f);
+  shader.CreateInput(pxr::TfToken("clearcoat_tint"), pxr::SdfValueTypeNames->Color3f)
+      .Set(pxr::GfVec3f(1.0f, 0.9f, 0.8f));
+  shader.CreateInput(pxr::TfToken("clearcoat_ior"), pxr::SdfValueTypeNames->Float)
+      .Set(1.45f);
+  shader.CreateInput(pxr::TfToken("clearcoat_reflection_roughness"),
+                     pxr::SdfValueTypeNames->Float)
+      .Set(0.12f);
+
+  const pyxis::OpenPBRMaterialDesc desc =
+      pyxis::material_translation::FromUsdShade(material);
+
+  EXPECT_NEAR(desc.coatWeight, 0.8f, 1e-6f);
+  EXPECT_NEAR(desc.coatColorR, 1.0f, 1e-6f);
+  EXPECT_NEAR(desc.coatColorG, 0.9f, 1e-6f);
+  EXPECT_NEAR(desc.coatColorB, 0.8f, 1e-6f);
+  EXPECT_NEAR(desc.coatIor, 1.45f, 1e-6f);
+  EXPECT_NEAR(desc.coatRoughness, 0.12f, 1e-6f);
+}
+
+// Q1 OpenPBR-complete — clearcoat inputs WITHOUT enable_clearcoat
+// stay inert (MDL function default false; missing input = MDL default).
+TEST(MdlTranslation, OmniPBRClearcoatDisabledKeepsCoatDefaults)
+{
+  const pxr::UsdStageRefPtr stage = pxr::UsdStage::CreateInMemory("mdl_nocoat.usda");
+  const pxr::UsdShadeMaterial material = BuildMdlMaterial(stage);
+  // NOLINTNEXTLINE(misc-const-correctness) — CreateInput mutates.
+  pxr::UsdShadeShader shader{stage->GetPrimAtPath(pxr::SdfPath("/Mat/MdlSurface"))};
+  ASSERT_TRUE(shader);
+  shader.CreateInput(pxr::TfToken("clearcoat_weight"), pxr::SdfValueTypeNames->Float)
+      .Set(0.8f);
+  shader.CreateInput(pxr::TfToken("clearcoat_tint"), pxr::SdfValueTypeNames->Color3f)
+      .Set(pxr::GfVec3f(0.2f, 0.3f, 0.4f));
+
+  const pyxis::OpenPBRMaterialDesc desc =
+      pyxis::material_translation::FromUsdShade(material);
+
+  EXPECT_FLOAT_EQ(desc.coatWeight, 0.0f);
+  EXPECT_FLOAT_EQ(desc.coatColorR, 1.0f);
+  EXPECT_FLOAT_EQ(desc.coatIor, 1.6f);
+}
+
+// Q1 OpenPBR-complete — OmniGlass → OpenPBR transmission. glass_color
+// becomes the constant transmission tint, transmission is
+// unconditionally on, glass_ior drives the dielectric Fresnel,
+// frosting_roughness replaces the OmniPBR roughness chain, and
+// thin_walled maps onto the flag field.
+TEST(MdlTranslation, OmniGlassMapsToTransmissionFields)
+{
+  const pxr::UsdStageRefPtr stage = pxr::UsdStage::CreateInMemory("mdl_glass.usda");
+  const pxr::UsdShadeMaterial material =
+      pxr::UsdShadeMaterial::Define(stage, pxr::SdfPath("/Mat"));
+  pxr::UsdShadeShader shader =
+      pxr::UsdShadeShader::Define(stage, pxr::SdfPath("/Mat/MdlSurface"));
+  shader.CreateIdAttr(pxr::VtValue(pxr::TfToken("mdl::OmniGlass")));
+  shader.CreateInput(pxr::TfToken("glass_color"), pxr::SdfValueTypeNames->Color3f)
+      .Set(pxr::GfVec3f(0.6f, 0.8f, 0.9f));
+  shader.CreateInput(pxr::TfToken("glass_ior"), pxr::SdfValueTypeNames->Float)
+      .Set(1.33f);
+  shader.CreateInput(pxr::TfToken("frosting_roughness"), pxr::SdfValueTypeNames->Float)
+      .Set(0.25f);
+  shader.CreateInput(pxr::TfToken("thin_walled"), pxr::SdfValueTypeNames->Bool)
+      .Set(true);
+  const pxr::UsdShadeOutput shaderOut =
+      shader.CreateOutput(pxr::TfToken("surface"), pxr::SdfValueTypeNames->Token);
+  material.CreateSurfaceOutput().ConnectToSource(shaderOut);
+
+  const pyxis::OpenPBRMaterialDesc desc =
+      pyxis::material_translation::FromUsdShade(material);
+
+  EXPECT_FLOAT_EQ(desc.transmissionWeight, 1.0f);
+  EXPECT_NEAR(desc.transmissionColorR, 0.6f, 1e-6f);
+  EXPECT_NEAR(desc.transmissionColorG, 0.8f, 1e-6f);
+  EXPECT_NEAR(desc.transmissionColorB, 0.9f, 1e-6f);
+  EXPECT_NEAR(desc.specularIor, 1.33f, 1e-6f);
+  EXPECT_NEAR(desc.roughness, 0.25f, 1e-6f);
+  EXPECT_EQ(desc.thinWalled, 1u);
+  EXPECT_EQ(desc.source, pyxis::OpenPBRMaterialDesc::Source::Mdl);
+}

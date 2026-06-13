@@ -19,7 +19,25 @@
 #include <Pyxis/Renderer/Profiler.h>
 #include <Pyxis/Renderer/PyxisRenderer.h>
 
+// Dual-language interop header (renderer-private include path) — Q2
+// pulls the OPENPBR_FEATURE_* bits for the lighting pass's
+// feature-mask variant selection below.
+#include "ShaderInterop.slang"
+
 #include <nvrhi/nvrhi.h>
+
+// Q3 (openpbr-complete-design.md "Control surface") — drift guard.
+// RenderSettings::openPbrFeatureMask defaults to the literal 0x3F
+// because the public header cannot include ShaderInterop.slang; this
+// TU sees both headers, so pin the literal to the interop constant
+// (and the POD's default to it) so neither can drift silently.
+static_assert(pyxis::shaderinterop::OPENPBR_FEATURES_ALL == 0x3Fu,
+              "OPENPBR_FEATURES_ALL changed — update the RenderSettings::openPbrFeatureMask "
+              "default literal (Public/Pyxis/Renderer/Descs/RenderSettings.h) in lockstep.");
+static_assert(pyxis::RenderSettings{}.openPbrFeatureMask
+                  == pyxis::shaderinterop::OPENPBR_FEATURES_ALL,
+              "RenderSettings::openPbrFeatureMask must default to OPENPBR_FEATURES_ALL — "
+              "headless goldens and §25.O.3 adapter parity depend on all-features-on.");
 
 namespace pyxis {
 
@@ -112,36 +130,42 @@ void PyxisRenderer::RenderFrame(nvrhi::ICommandList* commandList, const RenderSe
                                 ->EnsureLinearColor(colorDesc.width, colorDesc.height);
     }
   }
-  // P5 (design D2) — spec-constant pipeline variants: make sure the
-  // ACTIVE camera projection mode's RT pipelines exist before the graph
-  // walks. The perspective variant is built in each pass's ctor; the
-  // orthographic one materializes here the first frame the camera
-  // reports it. Creation happens on this CPU frame path only — never
-  // inside a pass Execute (§30.10); both hooks no-op once built.
+  // P5 (design D2) / Q2 — spec-constant pipeline variants: make sure
+  // the ACTIVE camera projection mode's RT pipelines exist before the
+  // graph walks. The GBuffer pass stays projection-only (its pipeline
+  // is feature-mask-independent — visibility + alpha-test only); the
+  // lighting pass is keyed on (projectionMode, OpenPBR feature mask)
+  // since Q2 — ALL until Q3 threads RenderSettings. The
+  // perspective(+ALL) variants are built in each pass's ctor; other
+  // keys materialize here the first frame they're requested. Creation
+  // happens on this CPU frame path only — never inside a pass Execute
+  // (§30.10); both hooks no-op once built.
+  const uint32_t projectionMode = _scene != nullptr && _scene->HasCamera()
+                                      ? _scene->GetCamera().projectionMode
+                                      : 0u;
   if (_gbufferPass != nullptr) {
     static_cast<RaytracedGBufferPass*>(_gbufferPass)->EnsureProjectionPipeline();
   }
   if (_lightingPass != nullptr) {
-    static_cast<RaytracedLightingPass*>(_lightingPass)->EnsureProjectionPipeline();
+    static_cast<RaytracedLightingPass*>(_lightingPass)
+        ->EnsureFeaturePipeline(projectionMode, settings.openPbrFeatureMask);
   }
   // P6 review — pass-health degradation. The per-pass gates (_shadersOk,
   // latched variant-build failures) are pass-LOCAL and can fail
-  // asymmetrically (one pipeline's .spv missing/corrupt, one lazy ortho
-  // build failing): without this, the lighting pass would shade from a
-  // visibility buffer the GBuffer pass never wrote, and Tonemap would
-  // display a linearColor the lighting pass never wrote. Nulling the
-  // scratch pointers here makes every downstream consumer take its
+  // asymmetrically (one pipeline's .spv missing/corrupt, one lazy
+  // variant build failing): without this, the lighting pass would shade
+  // from a visibility buffer the GBuffer pass never wrote, and Tonemap
+  // would display a linearColor the lighting pass never wrote. Nulling
+  // the scratch pointers here makes every downstream consumer take its
   // existing null early-out, degrading to the pre-split behavior of an
   // untouched display output instead of garbage frames.
-  const uint32_t projectionMode = _scene != nullptr && _scene->HasCamera()
-                                      ? _scene->GetCamera().projectionMode
-                                      : 0u;
   const bool gbufferOk = _gbufferPass != nullptr
                          && static_cast<RaytracedGBufferPass*>(_gbufferPass)
                                 ->IsOperational(projectionMode);
-  const bool lightingOk = _lightingPass != nullptr
-                          && static_cast<RaytracedLightingPass*>(_lightingPass)
-                                 ->IsOperational(projectionMode);
+  const bool lightingOk =
+      _lightingPass != nullptr
+      && static_cast<RaytracedLightingPass*>(_lightingPass)
+             ->IsOperational(projectionMode, settings.openPbrFeatureMask);
   if (!gbufferOk)
     context.visibility = nullptr;
   if (!gbufferOk || !lightingOk)

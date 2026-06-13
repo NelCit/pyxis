@@ -51,6 +51,12 @@ struct ResolvedScene;
 // `variantSelections` (V2.A.2): comma-separated
 // `<primPath>:<setName>=<value>` triples applied to the session layer
 // post stage open, overriding authored variantSelection.
+//
+// `openPbrFeatureMask` (Q3 OpenPBR-complete): per-lobe feature gates
+// pushed into RenderSettings::openPbrFeatureMask every frame. Default
+// 0x3F = all on — MUST stay the default or headless byte-equal output
+// (§33.7) changes. CLI `--openpbr-mask` overrides for debugging /
+// toggle-regression proofs.
 int RunHeadless(const Configuration& config, const ResolvedScene& scene,
                 std::string_view saveAovList = {},
                 uint32_t benchFrames = 0,
@@ -64,7 +70,8 @@ int RunHeadless(const Configuration& config, const ResolvedScene& scene,
                 std::string_view variantSelections = {},
                 std::string_view renderPurpose = {},
                 bool compressTextures = true,
-                uint32_t ssaa = 1) noexcept;
+                uint32_t ssaa = 1,
+                uint32_t openPbrFeatureMask = 0x3Fu) noexcept;
 
 // Viewer mode. screenshotPath is the M1 --screenshot debug capture
 // (non-empty -> render a few warmup frames, write a PNG, exit 0).
@@ -81,6 +88,7 @@ int RunViewer(const Configuration& config, const ResolvedScene& scene,
               std::string_view variantSelections = {},
               std::string_view renderPurpose = {},
               bool compressTextures = false,
-              uint32_t ssaa = 1) noexcept;
+              uint32_t ssaa = 1,
+              uint32_t openPbrFeatureMask = 0x3Fu) noexcept;
 
 }  // namespace pyxis::app

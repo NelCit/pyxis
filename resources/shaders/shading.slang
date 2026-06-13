@@ -36,6 +36,7 @@
 #include "ShaderInterop.slang"
 #include "camera_ray.slang"   // gCamera (binding 0) — pixelSpreadRadians for ray-cone LOD
 #include "dome_sample.slang"  // gLights (5) + gDomeEnvMap (9) + gDomeSampler (33) + PYXIS_PI/TWO_PI
+#include "openpbr_material.slang"  // Q2 — the complete OpenPBR closure (pure math, spec-constant gated)
 
 // Shadow / AO / reflection rays trace against the same TLAS the
 // primary rays traversed. Same binding-set entry as the pre-split
@@ -93,9 +94,9 @@ float4 SampleByGradRGBA(uint texIdx, float2 uv, float2 ddxUv, float2 ddyUv) {
 }
 
 // PYXIS_PI / PYXIS_TWO_PI come from dome_sample.slang (identical
-// literals to the pre-split closesthit's own copies).
-static const float PYXIS_PI_SAFE = 3.14159265358979323846;
-static const float PYXIS_INV_PI   = 0.31830988618379067154;
+// literals to the pre-split closesthit's own copies). The PI/INV_PI
+// constants the BSDF used to keep here moved with the BSDF into
+// openpbr_material.slang (OPENPBR_PI / OPENPBR_INV_PI).
 
 // V2.B — ray recursion budget. Every secondary TraceRay (reflection,
 // AO, shadow) is gated on `recursionDepth + 1u < MAX_RAY_RECURSION`,
@@ -127,62 +128,14 @@ static const float PYXIS_INV_PI   = 0.31830988618379067154;
 // (RaytracedLightingPass::REFL_MAX_SEGMENTS).
 [[vk::constant_id(SPEC_ID_REFL_MAX_SEGMENTS)]] const uint REFL_MAX_SEGMENTS = 16u;
 
-// M9-fidelity Schlick Fresnel. F0 derives per-material:
-//   dielectrics: F0 = ((ior - 1) / (ior + 1))² — typically ~0.04
-//                 for plastics / glass at ior ≈ 1.5
-//   metals:      F0 = baseColor (each channel acts as the per-
-//                 wavelength reflectance at normal incidence)
-// metalness blends linearly between the two.
-float3 SchlickF0(float3 baseColor, float metalness, float ior) {
-    const float dielectricBase = (ior - 1.0) / (ior + 1.0);
-    const float dielectricF0   = dielectricBase * dielectricBase;
-    return lerp(float3(dielectricF0, dielectricF0, dielectricF0),
-                baseColor, metalness);
-}
-
-float3 SchlickFresnel(float3 f0, float cosTheta) {
-    const float oneMinus = 1.0 - max(0.0, cosTheta);
-    const float oneMinus5 = oneMinus * oneMinus * oneMinus * oneMinus * oneMinus;
-    return f0 + (float3(1.0, 1.0, 1.0) - f0) * oneMinus5;
-}
-
-// Simplified GGX specular evaluation for direct lighting. Trowbridge-
-// Reitz NDF + Smith correlated G — full microfacet eval but no
-// importance sampling (we evaluate per-light contribution at the
-// half-vector, not sample a bounce direction). Roughness is
-// remapped via α = roughness² (the Disney convention) so the input
-// roughness is perceptually linear.
-//
-// Returns: per-channel specular contribution. Multiply by light
-// radiance, NdotL, falloff, and cone attenuation at the call site.
-float3 GgxSpecular(float3 N, float3 V, float3 L, float3 baseColor,
-                   float metalness, float roughness, float ior) {
-    const float3 H = normalize(V + L);
-    const float NdotL = max(1e-4, dot(N, L));
-    const float NdotV = max(1e-4, dot(N, V));
-    const float NdotH = max(1e-4, dot(N, H));
-    const float VdotH = max(1e-4, dot(V, H));
-
-    // Roughness² remap (Disney). α=0 is mirror; α=1 is diffuse-like.
-    const float alpha  = max(0.001, roughness * roughness);
-    const float alpha2 = alpha * alpha;
-
-    // GGX / Trowbridge-Reitz NDF.
-    const float denomD = NdotH * NdotH * (alpha2 - 1.0) + 1.0;
-    const float D      = alpha2 / (PYXIS_PI_SAFE * denomD * denomD);
-
-    // Smith-correlated G (Heitz 2014 — single divide for both
-    // shadowing+masking).
-    const float lambdaV = NdotL * sqrt(NdotV * NdotV * (1.0 - alpha2) + alpha2);
-    const float lambdaL = NdotV * sqrt(NdotL * NdotL * (1.0 - alpha2) + alpha2);
-    const float G2      = 0.5 / (lambdaV + lambdaL);
-
-    // Schlick Fresnel at the half-vector.
-    const float3 F0 = SchlickF0(baseColor, metalness, ior);
-    const float3 F  = SchlickFresnel(F0, VdotH);
-
-    return D * G2 * F;  // (NdotL × NdotV) factor cancels with G2's denominator
-}
+// Q2 (openpbr-complete-design.md): the Schlick/GGX subset that lived
+// here (SchlickF0 / SchlickFresnel / GgxSpecular) is RETIRED — every
+// lobe evaluation now goes through the complete OpenPBR closure in
+// openpbr_material.slang (EvaluateOpenPBRDirect / EvaluateOpenPBRAmbient
+// / OpenPBRReflectionWeight / OpenPBRTransmittance / OpenPBREmission).
+// This kernel keeps ONLY orchestration: hit reconstruction, the
+// UV/LOD/texture/normal pipeline, the light loop, AO/shadow/reflection
+// rays and the front-to-back composite contract with the raygen.
 
 // Affine inverse of a row-major 3×4 object→world transform (upper 3×3
 // linear part; translation in the last column — column-vector
@@ -659,6 +612,72 @@ SurfaceShadeResult ShadeSurfaceHit(uint instanceId, uint primitiveIndex, float2 
         }
     }
 
+    // ---- Q2 OpenPBR-complete: gather the material parameter set ONCE,
+    // post-texturing (rows 0-14 of OpenPBRMaterialGPU; see the row map
+    // in ShaderInterop.slang). ALL BSDF math lives in
+    // openpbr_material.slang — this kernel only orchestrates.
+    //
+    // Anisotropy tangent frame (gate ANISOTROPY): the MikkTSpace
+    // per-vertex tangent, orthonormalized against the FINAL shading
+    // normal (post normal-map) so the stretched NDF stays in the
+    // shading tangent plane. Zero when the mesh authored no tangents —
+    // the closure then takes the spec-endorsed isotropic α = r² path.
+    float3 anisoTangentW   = float3(0.0, 0.0, 0.0);
+    float3 anisoBitangentW = float3(0.0, 0.0, 0.0);
+    {
+        const uint   atBase = mi.vertexAttribOffset;
+        const float4 atv0 = gMeshVertexAttribs[atBase + v0].tangent;
+        const float3 atLocal = atv0.xyz * w0
+                             + gMeshVertexAttribs[atBase + v1].tangent.xyz * bary.x
+                             + gMeshVertexAttribs[atBase + v2].tangent.xyz * bary.y;
+        const float atLenSq = dot(atLocal, atLocal);
+        if (atLenSq > 1e-6) {
+            const float3 atWorldRaw =
+                normalize(mul(worldFromObject3x3, atLocal * rsqrt(atLenSq)));
+            const float3 atOrtho = atWorldRaw - dot(atWorldRaw, nWorld) * nWorld;
+            const float atOrthoLenSq = dot(atOrtho, atOrtho);
+            if (atOrthoLenSq > 1e-8) {
+                anisoTangentW   = atOrtho * rsqrt(atOrthoLenSq);
+                // First-vertex handedness — same lossy-but-consistent
+                // collapse the normal-map TBN uses (MikkTSpace doc:
+                // never interpolate the sign).
+                anisoBitangentW = cross(nWorld, anisoTangentW) * atv0.w;
+            }
+        }
+    }
+
+    OpenPBRSurfaceParams pbr;
+    pbr.baseColor = baseColor;
+    pbr.baseWeight = saturate(mat.baseWeight);
+    pbr.baseMetalness = metalness;
+    pbr.baseDiffuseRoughness = saturate(mat.baseDiffuseRoughness);
+    pbr.specularWeight = max(0.0, mat.specularWeight);   // spec range [0, ∞)
+    pbr.specularColor = saturate(float3(mat.specularColorR, mat.specularColorG,
+                                        mat.specularColorB));
+    pbr.specularRoughness = roughness;                   // post-texture, [0.04, 1]
+    pbr.specularRoughnessAnisotropy = saturate(mat.specularRoughnessAnisotropy);
+    pbr.specularIor = max(1e-2, mat.specularIor);
+    pbr.transmissionWeight = saturate(mat.transmissionWeight);
+    pbr.transmissionColor = saturate(float3(mat.transmissionColorR,
+                                            mat.transmissionColorG,
+                                            mat.transmissionColorB));
+    pbr.subsurfaceWeight = saturate(mat.subsurfaceWeight);
+    pbr.subsurfaceColor = saturate(float3(mat.subsurfaceColorR, mat.subsurfaceColorG,
+                                          mat.subsurfaceColorB));
+    pbr.coatWeight = saturate(mat.coatWeight);
+    pbr.coatColor = saturate(float3(mat.coatColorR, mat.coatColorG, mat.coatColorB));
+    pbr.coatRoughness = saturate(mat.coatRoughness);
+    pbr.coatIor = max(1e-2, mat.coatIor);
+    pbr.coatDarkening = saturate(mat.coatDarkening);
+    pbr.fuzzWeight = saturate(mat.fuzzWeight);
+    pbr.fuzzColor = saturate(float3(mat.fuzzColorR, mat.fuzzColorG, mat.fuzzColorB));
+    pbr.fuzzRoughness = saturate(mat.fuzzRoughness);
+    pbr.emission = float3(0.0, 0.0, 0.0);  // filled after the emission-map sample below
+    pbr.geometryOpacity = saturate(mat.opacity);
+    pbr.thinWalled = (mat.flags & MATERIAL_FLAG_THIN_WALLED) != 0u;
+    pbr.tangentWorld = anisoTangentW;
+    pbr.bitangentWorld = anisoBitangentW;
+
     // M7-simple lighting + NdotL Lambert for direct lights. Loop
     // over every authored light, accumulate the per-light Lambert
     // contribution. The no-lights case (RaytracedLightingPass binds a
@@ -695,9 +714,12 @@ SurfaceShadeResult ShadeSurfaceHit(uint instanceId, uint primitiveIndex, float2 
     uint lightCount;
     uint _stride;
     gLights.GetDimensions(lightCount, _stride);
-    float3 directDiffuse  = float3(0.0, 0.0, 0.0);
-    float3 directSpecular = float3(0.0, 0.0, 0.0);
-    float3 ambientSum     = float3(0.0, 0.0, 0.0);
+    // Q2: one accumulator per transport path — the per-light closure
+    // (EvaluateOpenPBRDirect folds diffuse + specular) and the dome
+    // ambient (EvaluateOpenPBRAmbient folds the energy chain that used
+    // to live in the final composite: baseColor × (1 − metalness)).
+    float3 directLight = float3(0.0, 0.0, 0.0);
+    float3 ambientSum  = float3(0.0, 0.0, 0.0);
     float  totalContribution = 0.0;
     const float3 hitWorld = worldHit;
     // M9-fidelity: view direction (FROM surface TO eye) for the GGX
@@ -807,7 +829,13 @@ SurfaceShadeResult ShadeSurfaceHit(uint instanceId, uint primitiveIndex, float2 
                 aoVisibility = aoPayload.color.x;
             }
 
-            ambientSum += Lcol * domeRadiance * PYXIS_INV_PI * aoVisibility;
+            // Q2: the dome-diffuse response (Lambert 1/π, the
+            // (1 − metalness) gate, EON ambient albedo, dielectric
+            // albedo-scaling, coat absorption/darkening, fuzz layer)
+            // lives in the closure module now. AO stays a multiplier
+            // computed here (TraceRay belongs to this kernel).
+            ambientSum += EvaluateOpenPBRAmbient(pbr, nWorld, viewDir,
+                                                 Lcol * domeRadiance, aoVisibility);
             totalContribution += L.intensity;
             continue;
         }
@@ -940,22 +968,15 @@ SurfaceShadeResult ShadeSurfaceHit(uint instanceId, uint primitiveIndex, float2 
             visibility = shadowPayload.color.x;
         }
 
-        // M9-fidelity diffuse + specular split. Diffuse: Lambert
-        // (baseColor × NdotL). Specular: GGX microfacet at the
-        // half-vector. Schlick Fresnel handles the dielectric vs
-        // metal F0 split inside GgxSpecular. Energy conservation
-        // (1 - F) on diffuse for dielectrics + (0) for metals
-        // (which absorb diffuse light) is approximated via
-        // (1 - metalness) — proper energy-conservation requires
-        // computing F at the view angle and weighting diffuse by
-        // (1 - F)·(1 - metalness), which is M11+ polish.
-        const float3 diffuseTerm =
-            baseColor * (1.0 - metalness) * NdotL * falloff * coneAttenuation * visibility;
-        const float3 specularTerm =
-            GgxSpecular(nWorld, viewDir, lightDir, baseColor, metalness, roughness, mat.specularIor)
-            * NdotL * falloff * coneAttenuation * visibility;
-        directDiffuse  += Lcol * diffuseTerm;
-        directSpecular += Lcol * specularTerm;
+        // Q2 — the complete OpenPBR closure per light (EON diffuse +
+        // exact-Fresnel dielectric / F82 metal GGX + coat + fuzz +
+        // subsurface/transmission energy accounting), evaluated in
+        // openpbr_material.slang. Returns BSDF × NdotL × lightColor;
+        // the scalar attenuation chain (1/r² falloff, shaping cone,
+        // shadow visibility) stays here, exactly as the pre-Q2 split.
+        const float3 lightContribution =
+            EvaluateOpenPBRDirect(pbr, nWorld, viewDir, lightDir, Lcol);
+        directLight += lightContribution * (falloff * coneAttenuation * visibility);
         // pre-NdotL, pre-falloff totalContribution drives only the
         // "any-lights / fall through to emissive baseColor" sentinel
         // below. Adding the raw intensity (rather than the attenuated
@@ -972,31 +993,31 @@ SurfaceShadeResult ShadeSurfaceHit(uint instanceId, uint primitiveIndex, float2 
     // incoming light. Per-material emissionTex (when authored)
     // multiplies the constant emissionColor pointwise; no UV-set
     // indirection beyond what the baseColor sample already did.
-    float3 emission = float3(0.0, 0.0, 0.0);
+    float3 emissionRaw = float3(0.0, 0.0, 0.0);
     if ((mat.flags & MATERIAL_FLAG_EMISSIVE) != 0u) {
-        emission = float3(mat.emissionR, mat.emissionG, mat.emissionB)
-                   * mat.emissionLuminance;
+        emissionRaw = float3(mat.emissionR, mat.emissionG, mat.emissionB)
+                      * mat.emissionLuminance;
         if ((mat.flags & MATERIAL_FLAG_HAS_EMISSION_MAP) != 0u
             && mat.emissionTex < BINDLESS_TEXTURES_CAP) {
             const float3 sampledEmission =
                 SampleByGrad(mat.emissionTex, uv, ddxUv, ddyUv);
-            emission *= sampledEmission;
+            emissionRaw *= sampledEmission;
         }
     }
+    // Q2 — the boxed closure's EDF row: emission sits BELOW the coat,
+    // so the coat absorbs it (L_e = lerp(1, T_coat, C)·E). The closure
+    // module applies that tint; with no coat this is `emissionRaw`
+    // unchanged.
+    pbr.emission = emissionRaw;
+    const float3 emission = OpenPBREmission(pbr);
 
-    // M9-fidelity composite: diffuse already has baseColor + (1-metalness)
-    // baked in by the per-light loop. Ambient (dome) still uses the
-    // M7-simple Lambertian-against-up approximation modulated by
-    // baseColor. Specular is energy-conserving via the per-light F0
-    // / metalness split inside GgxSpecular.
-    // Ambient (dome) is a LAMBERTIAN diffuse term, so it must be gated
-    // by (1 - metalness): metals have no diffuse lobe. Without this a
-    // metal (mirror, gold, steel) gets a grey Lambertian ambient wash
-    // layered over its reflection — the "washed-out mirror" symptom
-    // (the mirror is metal=1 yet read half-grey). Now metals rely on the
-    // specular reflection (handled in the layered composite below).
+    // Q2 composite: EvaluateOpenPBRDirect folds diffuse + specular per
+    // light (with the spec's energy accounting), EvaluateOpenPBRAmbient
+    // folds the dome chain (incl. the historical baseColor ×
+    // (1 − metalness) gate). The no-lights case falls through to raw
+    // baseColor — preserves the M5/M6 byte-equal unlit fixtures.
     float3 lit = (totalContribution > 0.0)
-        ? (directDiffuse + directSpecular + baseColor * ambientSum * (1.0 - metalness))
+        ? (directLight + ambientSum)
         : baseColor;
 
     // V2.B.1 — inline RT specular reflection. **Deterministic mirror
@@ -1106,28 +1127,20 @@ SurfaceShadeResult ShadeSurfaceHit(uint instanceId, uint primitiveIndex, float2 
             reflRay.TMin   = 1e-3;
         }
 
-        // Schlick-Fresnel weight at the mirror direction. F0 derives
-        // per-material (metals = baseColor, dielectrics = ((ior-1)/
-        // (ior+1))²). With mirror sampling we evaluate Fresnel at the
-        // surface normal (H = N → HdotV = NdotV), which is exact for
-        // smooth surfaces and a deterministic approximation for rough
-        // ones until the envmap blur lands.
-        const float3 F0 = SchlickF0(baseColor, metalness, mat.specularIor);
-        const float NdotV = max(0.0, dot(nWorld, viewDir));
-        // V2.B follow-up — roughness-aware glossy attenuation. The
-        // bounce ray is a single sharp mirror sample (no stochastic
-        // cone, per the no-noise doctrine); a rough surface should
-        // reflect a dimmer + softer image than a polished one. We
-        // can't blur the reflected geometry deterministically, so we
-        // fade the reflection's contribution as roughness climbs:
-        // (1 - roughness)² gives a perceptually-reasonable falloff
-        // (polished floor at roughness 0.12 keeps ~77% of the mirror;
-        // a half-rough surface keeps ~25%; matte surfaces approach 0).
-        // This both softens the hard `roughness < 0.5` gate edge and
-        // stops rough surfaces from showing a crisp — and physically
-        // wrong — mirror image.
-        const float glossy = (1.0 - roughness) * (1.0 - roughness);
-        reflWeightOut = SchlickFresnel(F0, NdotV) * glossy;
+        // Q2 — the deterministic mirror WEIGHT comes from the closure
+        // module: dielectric exact-Fresnel (modulated-IOR η′ chain,
+        // specular_color top-side tint) blended with the metal F82 by
+        // metalness, × the (1 − r′)² glossy fade now evaluated at the
+        // COAT-ROUGHENED r′, with the coat's own mirror lobe layered on
+        // top and the fuzz throughput over everything. Fresnel is
+        // evaluated at the surface normal (H = N → HdotV = NdotV) —
+        // exact for smooth surfaces, the same deterministic
+        // approximation as before for rough ones until the envmap blur
+        // lands. The glossy fade keeps its pre-Q2 rationale: the bounce
+        // ray is a single sharp mirror sample (no stochastic cone, per
+        // the no-noise doctrine), so rough surfaces fade the mirror
+        // instead of showing a crisp — and physically wrong — image.
+        reflWeightOut = OpenPBRReflectionWeight(pbr, nWorld, viewDir);
         reflColorOut  = reflRadiance;
     }
 
@@ -1143,29 +1156,32 @@ SurfaceShadeResult ShadeSurfaceHit(uint instanceId, uint primitiveIndex, float2 
     //     transparent layers free of recursion cost and reproduces the
     //     old result exactly.
     //
-    // The previous single-surface composite was
-    //   out = reflWeight·refl + (1-reflWeight)·(lit·opacity + behind·(1-opacity)) + emission
-    // Split into a surface-emitted term (independent of `behind`) and a
-    // transmittance the raygen loop multiplies into `behind`:
+    // The pre-Q2 single-surface composite was
     //   emitted       = reflWeight·refl + (1-reflWeight)·lit·opacity + emission
-    //   transmittance = (1-reflWeight)·(1-opacity)
-    //   - Glass (opacity 0): emitted ≈ reflWeight·refl (+emission),
-    //     transmittance ≈ (1-reflWeight) → grazing reflects, head-on sees
-    //     through. Falls back to reflection (not black) past the loop cap.
-    //   - Mirror / metal: reflWeight ≈ baseColor → emitted ≈ reflection,
-    //     transmittance ≈ 0.
-    //   - Opaque diffuse: opacity 1 → transmittance 0, emitted ≈ lit.
-    // 0.999 matches the anyhit translucency gate.
+    //   transmittance = (1-reflWeight)·(1-opacity)        [opacity-only]
+    // Q2 keeps the emitted shape (reflection layered on top,
+    // independent of opacity, so glass keeps its reflection) but the
+    // surface transmittance reported to the raygen is now the spec's
+    // own straight-through formula (§"Opacity / Transparency"):
+    //   T_pbr = 1 − α(1 − (1 − M)·T_dielectric)
+    // with transmission_color × transmission_weight × (1 − reflWeight)
+    // folded into T_dielectric (see OpenPBRTransmittance). Notes:
+    //   - Opaque (α = 1, transmission_weight = 0) → T_pbr = 0 EXACTLY,
+    //     so the raygen / reflection segment loops break after their
+    //     first iteration exactly as before (1e-3 thresholds intact).
+    //   - geometry_opacity composes per the spec's f_PBR presence mix:
+    //     the (1 − α) pass-through leg takes NO Fresnel; emission and
+    //     the lit surface scale by α (emission previously didn't —
+    //     spec-correct now, and unobservable for α = 1 materials).
+    //   - Metal gates transmission via (1 − M) (metal slab is opaque).
     const float3 oneMinusRefl = float3(1.0, 1.0, 1.0) - reflWeightOut;
     const float3 emitted = reflWeightOut * reflColorOut
                          + oneMinusRefl * lit * mat.opacity
-                         + emission;
+                         + emission * mat.opacity;
 
     SurfaceShadeResult result;
     result.emitted = emitted;
-    result.transmittance = (mat.opacity < 0.999)
-                              ? oneMinusRefl * (1.0 - mat.opacity)
-                              : float3(0.0, 0.0, 0.0);
+    result.transmittance = OpenPBRTransmittance(pbr, reflWeightOut);
     result.normalWorld = nWorld;
     result.baseColor   = baseColor;
     result.materialId  = materialId;

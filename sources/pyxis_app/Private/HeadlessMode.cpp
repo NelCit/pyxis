@@ -144,7 +144,8 @@ void LogDeterminismPin(const Configuration& config, uint32_t framesInFlight) noe
                                                GpuScene& gpuScene,
                                                PyxisRenderer& renderer,
                                                const AovTextures& aovs,
-                                               nvrhi::ITexture* renderTarget) noexcept
+                                               nvrhi::ITexture* renderTarget,
+                                               uint32_t openPbrFeatureMask) noexcept
 {
   commandList->open();
 
@@ -182,6 +183,10 @@ void LogDeterminismPin(const Configuration& config, uint32_t framesInFlight) noe
   RenderSettings settings{};
   settings.width = renderTarget->getDesc().width;
   settings.height = renderTarget->getDesc().height;
+  // Q3 OpenPBR feature gates. The default (0x3F, all on) reproduces
+  // the reference look byte-for-byte; --openpbr-mask narrows it for
+  // debugging / toggle-regression proofs.
+  settings.openPbrFeatureMask = openPbrFeatureMask;
   renderer.RenderFrame(commandList, settings, targets);
   // Force the offscreen RT into CopySource before we close the
   // command list. Without this we relied on NVRHI's auto-barrier
@@ -451,7 +456,8 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
                 std::string_view variantSelections,
                 std::string_view renderPurpose,
                 bool compressTextures,
-                uint32_t ssaa) noexcept {
+                uint32_t ssaa,
+                uint32_t openPbrFeatureMask) noexcept {
   // V2.A.4 — the multi-frame loop lives in Application::Run (it
   // overrides config.output.image per frame and re-enters here). The
   // frameRangeBegin/End/Step params are accepted on the signature so
@@ -592,7 +598,8 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
 
   {
     const Profiler::CpuScope frameScope(profiler, "headless.frame");
-    if (!RecordAndExecuteRenderFrame(device, commandList, gpuScene, renderer, aovs, renderTarget))
+    if (!RecordAndExecuteRenderFrame(device, commandList, gpuScene, renderer, aovs, renderTarget,
+                                     openPbrFeatureMask))
     {
       return EXIT_RUNTIME_FAIL;
     }
@@ -763,7 +770,7 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
       {
         const Profiler::CpuScope frameScope(profiler, "headless.frame");
         frameOk = RecordAndExecuteRenderFrame(device, commandList, gpuScene, renderer,
-                                              aovs, renderTarget);
+                                              aovs, renderTarget, openPbrFeatureMask);
       }
       deviceManager->EndFrame();
       profiler.EndFrame();
@@ -1007,7 +1014,8 @@ int RunViewer(const Configuration& config, const ResolvedScene& resolvedScene,
               std::string_view variantSelections,
               std::string_view renderPurpose,
               bool compressTextures,
-              uint32_t ssaa) noexcept {
+              uint32_t ssaa,
+              uint32_t openPbrFeatureMask) noexcept {
   // Viewer keeps the M1 entrypoint shape; M4 P5d/P5e wires
   // resolvedScene through to the engine dispatch inside
   // RunViewerLoop. shaderRebuildDir overrides the cwd walk-up
@@ -1015,7 +1023,7 @@ int RunViewer(const Configuration& config, const ResolvedScene& resolvedScene,
   // ViewerMode.cpp's FindCMakeBuildDir).
   return RunViewerLoop(config, resolvedScene, screenshotPath, shaderRebuildDir,
                        loadMode, variantSelections, renderPurpose,
-                       compressTextures, ssaa);
+                       compressTextures, ssaa, openPbrFeatureMask);
 }
 
 }  // namespace pyxis::app

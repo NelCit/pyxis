@@ -77,6 +77,18 @@ _DELEGATE_SETTINGS_ROOTS = (
 )
 _PERSIST_ENGINE_TOKEN = "pyxis:persistEngine"
 _STAGE_TOKEN = "pyxis:stageToken"
+# Q3 OpenPBR feature gates (openpbr-complete-design.md "Control surface") —
+# one BOOL render-setting per OPENPBR_FEATURE_* bit. The delegate re-reads
+# these per frame (HdPyxisRenderDelegate::ReadOpenPbrFeatureMask) and
+# composes RenderSettings::openPbrFeatureMask. All default ON.
+_OPENPBR_FEATURE_TOKENS = (
+    "pyxis:openpbrCoat",
+    "pyxis:openpbrFuzz",
+    "pyxis:openpbrTransmission",
+    "pyxis:openpbrSubsurface",
+    "pyxis:openpbrAnisotropy",
+    "pyxis:openpbrEonDiffuse",
+)
 
 
 def _delegate_setting_keys(token: str):
@@ -305,13 +317,21 @@ class _PyxisViewportExt(omni.ext.IExt):
         """Stamp pyxis:persistEngine = true at startup if no value exists yet.
         Keys are the AVxcelerate form:
         /persistent/app/hydra/delegates/HdPyxisRendererPlugin/settings/pyxis/persistEngine/value
-        (+ the /pxr/... fallback)."""
-        for key in _delegate_setting_keys(_PERSIST_ENGINE_TOKEN):
-            try:
-                if self._settings.get(key) is None:
-                    self._settings.set(key, True)
-            except Exception as exc:  # noqa: BLE001
-                carb.log_warn(f"[omni.hydra.pyxis] persist-default set failed ({key}): {exc}")
+        (+ the /pxr/... fallback).
+
+        Q3: also stamp the six OpenPBR feature gates = true (all bits on —
+        the reference look the delegate falls back to when a key is absent).
+        Stamping makes the toggles inspectable + persistable in carb even
+        before the Render Settings panel first writes them."""
+        for token in (_PERSIST_ENGINE_TOKEN,) + _OPENPBR_FEATURE_TOKENS:
+            for key in _delegate_setting_keys(token):
+                try:
+                    if self._settings.get(key) is None:
+                        self._settings.set(key, True)
+                except Exception as exc:  # noqa: BLE001
+                    carb.log_warn(
+                        f"[omni.hydra.pyxis] setting-default stamp failed ({key}): {exc}"
+                    )
 
     def _stamp_stage_token(self) -> None:
         """Stamp the current stage identity so the delegate can detect a stage

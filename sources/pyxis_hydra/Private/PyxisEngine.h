@@ -53,6 +53,15 @@ class PyxisEngine {
   // contract. No-op if !IsValid().
   void WaitIdle() noexcept;
 
+  // Q3 OpenPBR-complete (openpbr-complete-design.md "Control surface") — the
+  // per-lobe OpenPBR feature gates, applied to the RenderSettings RenderFrame
+  // builds. Bits mirror shaderinterop::OPENPBR_FEATURE_* (0x01 coat, 0x02 fuzz,
+  // 0x04 transmission, 0x08 subsurface, 0x10 anisotropy, 0x20 EON diffuse).
+  // Default 0x3F = all on (the parity-stable reference look). The delegate's
+  // render pass pushes the value read from the pyxis:openpbr* render settings
+  // every frame; a change takes effect same-frame.
+  void SetOpenPbrFeatureMask(uint32_t mask) noexcept;
+
   [[nodiscard]] uint32_t Width() const noexcept;
   [[nodiscard]] uint32_t Height() const noexcept;
 

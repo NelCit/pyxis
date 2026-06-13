@@ -20,6 +20,7 @@
 #include <Pyxis/Platform/Color/ColorEncoding.h>  // shared half/sRGB conversions
 #include <Pyxis/Renderer/Descs/CameraDesc.h>
 #include <Pyxis/Renderer/Descs/LightDesc.h>  // LightDesc::Kind — Sprim registration
+#include <Pyxis/Renderer/Descs/RenderSettings.h>  // Q3 — openPbrFeatureMask drift pin
 #include <Pyxis/Renderer/GpuScene.h>
 
 // §25.O.3 — the SHARED stage ingest: the render pass populates the GpuScene by
@@ -102,6 +103,26 @@ PersistentPyxisState& PersistentState() {
   static PersistentPyxisState state;
   return state;
 }
+
+// ---- Q3 OpenPBR feature gates (openpbr-complete-design.md "Control surface") --
+// File-local mirror of the shaderinterop::OPENPBR_FEATURE_* bits. pyxis_hydra
+// does not include ShaderInterop.slang (renderer-private interop file), so the
+// six bits are restated here and pinned: the static_assert ties the composed
+// ALL to RenderSettings::openPbrFeatureMask's default, and PyxisRenderer.cpp
+// ties THAT default to the interop constant — a drift anywhere fails to compile.
+constexpr uint32_t OPENPBR_FEATURE_COAT         = 1u << 0;
+constexpr uint32_t OPENPBR_FEATURE_FUZZ         = 1u << 1;
+constexpr uint32_t OPENPBR_FEATURE_TRANSMISSION = 1u << 2;
+constexpr uint32_t OPENPBR_FEATURE_SUBSURFACE   = 1u << 3;
+constexpr uint32_t OPENPBR_FEATURE_ANISOTROPY   = 1u << 4;
+constexpr uint32_t OPENPBR_FEATURE_EON_DIFFUSE  = 1u << 5;
+constexpr uint32_t OPENPBR_FEATURES_ALL =
+    OPENPBR_FEATURE_COAT | OPENPBR_FEATURE_FUZZ | OPENPBR_FEATURE_TRANSMISSION
+    | OPENPBR_FEATURE_SUBSURFACE | OPENPBR_FEATURE_ANISOTROPY | OPENPBR_FEATURE_EON_DIFFUSE;
+static_assert(OPENPBR_FEATURES_ALL == pyxis::RenderSettings{}.openPbrFeatureMask,
+              "Delegate-side OPENPBR_FEATURE_* bits drifted from "
+              "RenderSettings::openPbrFeatureMask's default — keep this mirror in lockstep "
+              "with ShaderInterop.slang.");
 
 // USD row-major double matrix -> Pyxis column-vector row-major float4x4 (§10).
 // Same transposition both Pyxis adapters use (§25.O.3 byte-equal invariant).
@@ -624,6 +645,18 @@ class HdPyxisRenderPass final : public HdRenderPass {
       _engine->Scene()->SetCamera(cam);
     }
 
+    // Q3 OpenPBR feature gates — re-read the six pyxis:openpbr* render
+    // settings EVERY frame (an Init-time read would miss later carb ->
+    // SetRenderSetting updates from the Render Settings panel) and push the
+    // composed mask into the engine; it lands in the RenderSettings the next
+    // RenderFrame builds, so a panel toggle takes effect same-frame. All-on
+    // (0x3F) when the settings are absent — usdview / parity stays reference.
+    if (const HdRenderIndex* renderIndex = GetRenderIndex()) {
+      if (const auto* pyxisDelegate =
+              dynamic_cast<const HdPyxisRenderDelegate*>(renderIndex->GetRenderDelegate()))
+        _engine->SetOpenPbrFeatureMask(pyxisDelegate->ReadOpenPbrFeatureMask());
+    }
+
     _engine->RenderFrame();
 
     // Present: composite Pyxis's color into the host's bound color render buffer
@@ -766,6 +799,40 @@ bool HdPyxisRenderDelegate::ReadPersistEngineSetting() const {
   return persist;
 }
 
+uint32_t HdPyxisRenderDelegate::ReadOpenPbrFeatureMask() const {
+  // Per-token rows; tokens match render_settings.py's carb paths via the
+  // established <root>/<token-colon-as-slash>/value convention. Type-coerce
+  // like ReadPersistEngineSetting — carb may deliver bool / int / string.
+  struct FeatureRow {
+    TfToken token;
+    uint32_t bit;
+  };
+  static const FeatureRow ROWS[] = {
+      {TfToken("pyxis:openpbrCoat"), OPENPBR_FEATURE_COAT},
+      {TfToken("pyxis:openpbrFuzz"), OPENPBR_FEATURE_FUZZ},
+      {TfToken("pyxis:openpbrTransmission"), OPENPBR_FEATURE_TRANSMISSION},
+      {TfToken("pyxis:openpbrSubsurface"), OPENPBR_FEATURE_SUBSURFACE},
+      {TfToken("pyxis:openpbrAnisotropy"), OPENPBR_FEATURE_ANISOTROPY},
+      {TfToken("pyxis:openpbrEonDiffuse"), OPENPBR_FEATURE_EON_DIFFUSE},
+  };
+  uint32_t mask = 0u;
+  for (const FeatureRow& row : ROWS) {
+    const VtValue value = GetRenderSetting(row.token);
+    bool enabled = true;  // default ON (setting absent / unknown type)
+    if (value.IsHolding<bool>())
+      enabled = value.UncheckedGet<bool>();
+    else if (value.IsHolding<int>())
+      enabled = value.UncheckedGet<int>() != 0;
+    else if (value.IsHolding<std::string>()) {
+      const std::string& str = value.UncheckedGet<std::string>();
+      enabled = !(str == "0" || str == "false" || str == "False");
+    }
+    if (enabled)
+      mask |= row.bit;
+  }
+  return mask;
+}
+
 void HdPyxisRenderDelegate::Init() {
   _resourceRegistry = std::make_shared<HdResourceRegistry>();
   _supportedRprimTypes = {HdPrimTypeTokens->mesh};
@@ -791,6 +858,23 @@ void HdPyxisRenderDelegate::Init() {
       {"Persist engine across renderer switches", TfToken("pyxis:persistEngine"), VtValue(true)});
   _settingDescriptors.push_back(
       {"Stage token (internal)", TfToken("pyxis:stageToken"), VtValue(std::string())});
+  // Q3 OpenPBR feature gates — one BOOL per OPENPBR_FEATURE_* bit, all default
+  // ON (the parity-stable reference look). The Render Settings panel rows
+  // (render_settings.py) bind carb paths to these tokens; the render pass
+  // re-composes the mask per-frame via ReadOpenPbrFeatureMask.
+  _settingDescriptors.push_back(
+      {"OpenPBR: coat layer", TfToken("pyxis:openpbrCoat"), VtValue(true)});
+  _settingDescriptors.push_back(
+      {"OpenPBR: fuzz (sheen)", TfToken("pyxis:openpbrFuzz"), VtValue(true)});
+  _settingDescriptors.push_back(
+      {"OpenPBR: transmission", TfToken("pyxis:openpbrTransmission"), VtValue(true)});
+  _settingDescriptors.push_back(
+      {"OpenPBR: subsurface", TfToken("pyxis:openpbrSubsurface"), VtValue(true)});
+  _settingDescriptors.push_back(
+      {"OpenPBR: anisotropy", TfToken("pyxis:openpbrAnisotropy"), VtValue(true)});
+  _settingDescriptors.push_back(
+      {"OpenPBR: energy-preserving diffuse (EON)", TfToken("pyxis:openpbrEonDiffuse"),
+       VtValue(true)});
 
   // Resolve the persist toggle: pyxis:persistEngine render setting (default
   // true), overridden OFF by PYXIS_OMNI_NO_PERSIST (for VRAM-constrained / large

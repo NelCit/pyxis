@@ -69,19 +69,21 @@ struct PipelineVariant {
 // Vulkan backend hardcodes 4-byte map entries):
 //   * raygen — its module includes camera_ray.slang (id 0
 //     PROJECTION_MODE) + shading.slang (id 1 MAX_RAY_RECURSION, id 3
-//     REFL_MAX_SEGMENTS) and declares id 2 MAX_TRANSPARENT_SEGMENTS
-//     itself → all four constants.
-//   * closesthit — includes shading.slang → ids 1 + 3. (Its module
+//     REFL_MAX_SEGMENTS; its openpbr_material.slang include declares
+//     id 4 OPENPBR_FEATURE_MASK) and declares id 2
+//     MAX_TRANSPARENT_SEGMENTS itself → all five constants.
+//   * closesthit — includes shading.slang → ids 1 + 3 + 4. (Its module
 //     also inherits camera_ray.slang's id 0 via shading.slang, but
 //     BuildCameraRay is never called from a hit shader, so the unset
 //     default 0 is unreachable dead code.)
 //   * miss / shadow-miss / anyhit — declare no spec constants; passed
 //     through unspecialized.
-// projectionMode is the only value that differs between variants, so
-// the specialized closesthit is value-identical across them. Returns a
-// default (null) PipelineVariant on any failure, after logging with
-// the caller-supplied context prefix; the caller keeps its previous
-// state (old-on-failure semantics).
+// projectionMode + featureMask are the values that differ between
+// variants (Q2: the OpenPBR feature bitmask folds closure blocks in /
+// out at pipeline-creation time). Returns a default (null)
+// PipelineVariant on any failure, after logging with the
+// caller-supplied context prefix; the caller keeps its previous state
+// (old-on-failure semantics).
 // §30.5 — more than five inputs, so they ride in a Desc struct (the
 // nvrhi::*Desc idiom this function itself uses internally).
 struct PipelineVariantDesc {
@@ -93,6 +95,10 @@ struct PipelineVariantDesc {
   nvrhi::IShader* closestHit = nullptr;
   nvrhi::IShader* anyHit = nullptr;
   uint32_t projectionMode = 0;
+  // Q2 — OPENPBR_FEATURE_MASK spec-constant value (SPEC_ID = 4) fed to
+  // BOTH the raygen and the closesthit (both include the closure module
+  // via shading.slang).
+  uint32_t openPbrFeatureMask = shaderinterop::OPENPBR_FEATURES_ALL;
   const char* logContext = "";
 };
 
@@ -116,12 +122,16 @@ PipelineVariant BuildPipelineVariant(const PipelineVariantDesc& desc) noexcept {
                                           RaytracedLightingPass::MAX_TRANSPARENT_SEGMENTS),
       nvrhi::ShaderSpecialization::UInt32(shaderinterop::SPEC_ID_REFL_MAX_SEGMENTS,
                                           RaytracedLightingPass::REFL_MAX_SEGMENTS),
+      nvrhi::ShaderSpecialization::UInt32(shaderinterop::SPEC_ID_OPENPBR_FEATURES,
+                                          desc.openPbrFeatureMask),
   };
   const nvrhi::ShaderSpecialization closestHitConstants[] = {
       nvrhi::ShaderSpecialization::UInt32(shaderinterop::SPEC_ID_MAX_RAY_RECURSION,
                                           RaytracedLightingPass::MAX_RAY_RECURSION),
       nvrhi::ShaderSpecialization::UInt32(shaderinterop::SPEC_ID_REFL_MAX_SEGMENTS,
                                           RaytracedLightingPass::REFL_MAX_SEGMENTS),
+      nvrhi::ShaderSpecialization::UInt32(shaderinterop::SPEC_ID_OPENPBR_FEATURES,
+                                          desc.openPbrFeatureMask),
   };
   const nvrhi::ShaderHandle specRaygen = device->createShaderSpecialization(
       raygen, raygenConstants, static_cast<uint32_t>(std::size(raygenConstants)));
@@ -300,12 +310,14 @@ RaytracedLightingPass::RaytracedLightingPass(nvrhi::IDevice* device, GpuScene& s
     return;
   }
 
-  // P5 (design D2) — the PERSPECTIVE pipeline variant (projectionMode
-  // 0, the v1 default) is built eagerly here; the ORTHOGRAPHIC variant
-  // is built lazily by EnsureProjectionPipeline the first time the
-  // camera reports it (PyxisRenderer's CPU frame path — never inside
-  // Execute). BuildPipelineVariant wraps the base shaders with the
-  // spec-constant values and creates pipeline + SBT together.
+  // P5 (design D2) / Q2 — the PERSPECTIVE + OPENPBR_FEATURES_ALL
+  // variant (the v1 default: projectionMode 0, full closure stack) is
+  // built eagerly here; every other (projectionMode, featureMask) key
+  // is built lazily by EnsureFeaturePipeline the first frame it is
+  // requested (PyxisRenderer's CPU frame path — never inside Execute).
+  // BuildPipelineVariant wraps the base shaders with the spec-constant
+  // values and creates pipeline + SBT together.
+  _activeVariantKey = VariantKey(0u, shaderinterop::OPENPBR_FEATURES_ALL);
   PipelineVariant perspective = BuildPipelineVariant({.device = _device,
                                                       .bindingLayout = _bindingLayout,
                                                       .raygen = _raygenShader,
@@ -314,11 +326,13 @@ RaytracedLightingPass::RaytracedLightingPass(nvrhi::IDevice* device, GpuScene& s
                                                       .closestHit = _closestHitShader,
                                                       .anyHit = _anyHitShader,
                                                       .projectionMode = 0u,
+                                                      .openPbrFeatureMask =
+                                                          shaderinterop::OPENPBR_FEATURES_ALL,
                                                       .logContext = "RaytracedLightingPass"});
   if (!perspective.pipeline || !perspective.shaderTable)
     return;  // BuildPipelineVariant already logged the failing step.
-  _pipelines[0]    = std::move(perspective.pipeline);
-  _shaderTables[0] = std::move(perspective.shaderTable);
+  _variants[_activeVariantKey] =
+      VariantEntry{std::move(perspective.pipeline), std::move(perspective.shaderTable)};
 
   // Camera uniforms constant buffer — sized for one CameraUniforms
   // struct; rewritten every frame from GpuScene's CameraDesc via
@@ -594,13 +608,18 @@ bool RaytracedLightingPass::ReloadShaders() noexcept {
     return false;
   }
 
-  // P5 — rebuild base + specialized handles + pipelines + SBTs
+  // P5 / Q2 — rebuild base + specialized handles + pipelines + SBTs
   // TOGETHER (a spec-value or .spv change invalidates all of them as a
-  // unit). Variant 0 (perspective) always exists; variant 1
-  // (orthographic) is rebuilt only if it had been materialized —
-  // otherwise EnsureProjectionPipeline lazily rebuilds it from the NEW
-  // base shaders on demand.
-  PipelineVariant newPerspective =
+  // unit). The variant CACHE is dropped wholesale: every materialized
+  // (projectionMode, featureMask) pipeline wraps the old base shaders.
+  // Only the LAST-ACTIVE key is rebuilt eagerly (it is what the next
+  // Execute selects); any other key the frame path requests later
+  // re-materializes lazily in EnsureFeaturePipeline from the new base
+  // shaders.
+  const uint32_t activeProjection = static_cast<uint32_t>(_activeVariantKey >> 32);
+  const uint32_t activeMask =
+      static_cast<uint32_t>(_activeVariantKey & 0xFFFFFFFFull);
+  PipelineVariant newActive =
       BuildPipelineVariant({.device = _device,
                             .bindingLayout = _bindingLayout,
                             .raygen = newRaygen,
@@ -608,35 +627,15 @@ bool RaytracedLightingPass::ReloadShaders() noexcept {
                             .shadowMiss = newShadowMiss,
                             .closestHit = newClosestHit,
                             .anyHit = newAnyHit,
-                            .projectionMode = 0u,
+                            .projectionMode = activeProjection,
+                            .openPbrFeatureMask = activeMask,
                             .logContext = "RaytracedLightingPass::ReloadShaders"});
-  if (!newPerspective.pipeline || !newPerspective.shaderTable)
+  if (!newActive.pipeline || !newActive.shaderTable)
   {
     log.Error(log::RENDER,
-              "RaytracedLightingPass::ReloadShaders: perspective variant rebuild failed; "
+              "RaytracedLightingPass::ReloadShaders: active variant rebuild failed; "
               "keeping old pipeline");
     return false;
-  }
-  PipelineVariant newOrthographic;
-  if (_pipelines[1])
-  {
-    newOrthographic =
-        BuildPipelineVariant({.device = _device,
-                              .bindingLayout = _bindingLayout,
-                              .raygen = newRaygen,
-                              .miss = newMiss,
-                              .shadowMiss = newShadowMiss,
-                              .closestHit = newClosestHit,
-                              .anyHit = newAnyHit,
-                              .projectionMode = 1u,
-                              .logContext = "RaytracedLightingPass::ReloadShaders"});
-    if (!newOrthographic.pipeline || !newOrthographic.shaderTable)
-    {
-      log.Error(log::RENDER,
-                "RaytracedLightingPass::ReloadShaders: orthographic variant rebuild failed; "
-                "keeping old pipeline");
-      return false;
-    }
   }
 
   // Atomic-ish swap: every reference taken in Execute reads from the
@@ -648,26 +647,32 @@ bool RaytracedLightingPass::ReloadShaders() noexcept {
   _shadowMissShader = std::move(newShadowMiss);
   _closestHitShader = std::move(newClosestHit);
   _anyHitShader     = std::move(newAnyHit);
-  _pipelines[0]     = std::move(newPerspective.pipeline);
-  _shaderTables[0]  = std::move(newPerspective.shaderTable);
-  // Null when the orthographic variant wasn't materialized pre-reload —
-  // the lazy path then rebuilds it from the new shaders if needed.
-  _pipelines[1]     = std::move(newOrthographic.pipeline);
-  _shaderTables[1]  = std::move(newOrthographic.shaderTable);
-  _variantBuildFailed = {};
+  _variants.clear();
+  _variantBuildFailed.clear();
+  _variants[_activeVariantKey] =
+      VariantEntry{std::move(newActive.pipeline), std::move(newActive.shaderTable)};
   _shadersOk = true;
   log.Info(log::RENDER, "RaytracedLightingPass::ReloadShaders: reload OK");
   return true;
 }
 
-void RaytracedLightingPass::EnsureProjectionPipeline() {
-  if (!_shadersOk || _scene == nullptr || !_scene->HasCamera())
+void RaytracedLightingPass::EnsureFeaturePipeline(uint32_t projectionMode,
+                                                  uint32_t featureMask) {
+  if (!_shadersOk)
     return;
-  // Same selection Execute uses: anything but 1 (including out-of-range
-  // garbage) falls to perspective — matching the shader branch's
-  // `PROJECTION_MODE == 1u` shape exactly.
-  const std::size_t variant = (_scene->GetCamera().projectionMode == 1u) ? 1u : 0u;
-  if (_pipelines[variant] || _variantBuildFailed[variant])
+  // Same normalization Execute's key uses: anything but 1 (including
+  // out-of-range garbage) falls to perspective — matching the shader
+  // branch's `PROJECTION_MODE == 1u` shape exactly. Q3 review — the
+  // feature mask is clamped to OPENPBR_FEATURES_ALL via the SAME
+  // NormalizeFeatureMask VariantKey uses, so the spec constant baked
+  // into the pipeline below matches the key it is stored under (and
+  // arbitrary high bits can't materialize unbounded variants — see the
+  // VariantKey comment). The key is also latched as THE variant Execute
+  // selects this frame (pure lookup there), so a Q3 runtime mask flip
+  // takes effect the same frame its pipeline materializes.
+  const std::uint64_t key = VariantKey(projectionMode, featureMask);
+  _activeVariantKey = key;
+  if (_variants.contains(key) || _variantBuildFailed.contains(key))
     return;
   // CPU-frame-path creation (PyxisRenderer calls this before the graph
   // walks) — pipeline variants are NEVER created inside Execute
@@ -680,17 +685,17 @@ void RaytracedLightingPass::EnsureProjectionPipeline() {
        .shadowMiss = _shadowMissShader,
        .closestHit = _closestHitShader,
        .anyHit = _anyHitShader,
-       .projectionMode = static_cast<uint32_t>(variant),
-       .logContext = "RaytracedLightingPass::EnsureProjectionPipeline"});
+       .projectionMode = (projectionMode == 1u) ? 1u : 0u,
+       .openPbrFeatureMask = NormalizeFeatureMask(featureMask),
+       .logContext = "RaytracedLightingPass::EnsureFeaturePipeline"});
   if (!built.pipeline || !built.shaderTable)
   {
     // Latched so the per-frame hook doesn't retry (and re-log) forever;
     // ReloadShaders resets the latch.
-    _variantBuildFailed[variant] = true;
+    _variantBuildFailed.insert(key);
     return;
   }
-  _pipelines[variant]    = std::move(built.pipeline);
-  _shaderTables[variant] = std::move(built.shaderTable);
+  _variants[key] = VariantEntry{std::move(built.pipeline), std::move(built.shaderTable)};
 }
 
 nvrhi::BindingSetHandle RaytracedLightingPass::GetOrCreateBindingSet(
@@ -973,17 +978,19 @@ void RaytracedLightingPass::Execute(nvrhi::ICommandList* commandList, const Pass
   if (res.tlas == nullptr || !_scene->HasCamera())
     return;
 
-  // P5 — select the projection-mode pipeline variant. Pure array
-  // lookup (§30.10 — no creation here): EnsureProjectionPipeline ran
-  // on PyxisRenderer's CPU frame path BEFORE the graph walked, so the
-  // active mode's variant exists unless its build failed — then the
-  // slot is null and we skip, exactly like the _shadersOk gate.
-  // CameraDesc::projectionMode is the same source the CameraUniforms
-  // upload below reads, so the spec-constant branch and the cbuffer
-  // field can never disagree within a frame.
+  // P5 / Q2 — select the active (projectionMode, featureMask) pipeline
+  // variant. Pure map lookup (§30.10 — no creation here):
+  // EnsureFeaturePipeline ran on PyxisRenderer's CPU frame path BEFORE
+  // the graph walked, latched _activeVariantKey from the SAME
+  // CameraDesc::projectionMode the CameraUniforms upload below reads
+  // (so the spec-constant branch and the cbuffer field can never
+  // disagree within a frame), and materialized the variant unless its
+  // build failed — then the key is absent and we skip, exactly like
+  // the _shadersOk gate.
   const CameraDesc& camera = _scene->GetCamera();
-  const std::size_t projectionVariant = (camera.projectionMode == 1u) ? 1u : 0u;
-  if (!_pipelines[projectionVariant] || !_shaderTables[projectionVariant])
+  const auto variantIt = _variants.find(_activeVariantKey);
+  if (variantIt == _variants.end() || !variantIt->second.pipeline
+      || !variantIt->second.shaderTable)
     return;
 
   const Profiler::GpuScope gpuScope(*context.profiler, commandList, "pass.RaytracedLighting");
@@ -1134,6 +1141,37 @@ void RaytracedLightingPass::Execute(nvrhi::ICommandList* commandList, const Pass
     material.opacityTex = shaderinterop::INVALID_BINDLESS_TEXTURE;
     material.transmissionTex = shaderinterop::INVALID_BINDLESS_TEXTURE;
     material.coatRoughnessTex = shaderinterop::INVALID_BINDLESS_TEXTURE;
+    // Q2 — rows 8-14 are READ by the OpenPBR closure now; they must
+    // carry the same OpenPBR spec defaults Commit.cpp's
+    // PackMaterialGpu(OpenPBRMaterialDesc{}) packs for the sentinel
+    // slot, or no-material scenes shade black (baseWeight 0 zeroes the
+    // diffuse ρ — caught by the Q2 golden drift run on the
+    // PointInstancer fixtures, which bind this fallback buffer).
+    material.specularColorR = 1.0f;
+    material.specularColorG = 1.0f;
+    material.specularColorB = 1.0f;
+    material.specularWeight = 1.0f;
+    material.coatColorR = 1.0f;
+    material.coatColorG = 1.0f;
+    material.coatColorB = 1.0f;
+    material.coatIor = 1.6f;
+    material.coatDarkening = 1.0f;
+    material.fuzzWeight = 0.0f;
+    material.fuzzRoughness = 0.5f;
+    material.baseDiffuseRoughness = 0.0f;
+    material.fuzzColorR = 1.0f;
+    material.fuzzColorG = 1.0f;
+    material.fuzzColorB = 1.0f;
+    material.specularRoughnessAnisotropy = 0.0f;
+    material.transmissionColorR = 1.0f;
+    material.transmissionColorG = 1.0f;
+    material.transmissionColorB = 1.0f;
+    material.subsurfaceWeight = 0.0f;
+    material.subsurfaceColorR = 0.8f;
+    material.subsurfaceColorG = 0.8f;
+    material.subsurfaceColorB = 0.8f;
+    material.baseWeight = 1.0f;
+    material.transmissionWeight = 0.0f;
     return material;
   }();
   static const shaderinterop::LightGpu        FALLBACK_LIGHT_DISABLED{};
@@ -1262,7 +1300,7 @@ void RaytracedLightingPass::Execute(nvrhi::ICommandList* commandList, const Pass
   commandList->commitBarriers();
 
   nvrhi::rt::State state;
-  state.shaderTable = _shaderTables[projectionVariant];
+  state.shaderTable = variantIt->second.shaderTable;
   state.bindings = {bindingSet};
   commandList->setRayTracingState(state);
 

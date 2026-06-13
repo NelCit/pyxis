@@ -96,6 +96,10 @@ struct PyxisEngine::Impl {
   uint32_t width = 0;
   uint32_t height = 0;
   uint64_t frameValue = 0;
+  // Q3 OpenPBR feature gates (SetOpenPbrFeatureMask). 0x3F = all on — the
+  // default MUST stay all-on so the Kit/usdview output matches the standalone
+  // adapters byte-for-byte (§25.O.3 parity).
+  uint32_t openPbrFeatureMask = 0x3Fu;
   bool valid = false;
 };
 
@@ -128,6 +132,11 @@ void PyxisEngine::WaitIdle() noexcept {
       device->runGarbageCollection();
     }
   }
+}
+
+void PyxisEngine::SetOpenPbrFeatureMask(uint32_t mask) noexcept {
+  if (_impl)
+    _impl->openPbrFeatureMask = mask;
 }
 
 bool PyxisEngine::Initialize(uint32_t width, uint32_t height) noexcept {
@@ -251,6 +260,10 @@ void PyxisEngine::RenderFrame() noexcept {
   pyxis::RenderSettings settings{};
   settings.width = impl.width;
   settings.height = impl.height;
+  // Q3 OpenPBR feature gates — pushed per-frame by the delegate's render pass
+  // from the pyxis:openpbr* render settings (Kit Render Settings panel). The
+  // default (0x3F, all on) reproduces the reference look byte-for-byte.
+  settings.openPbrFeatureMask = impl.openPbrFeatureMask;
   impl.renderer->RenderFrame(impl.commandList, settings, targets);
   // Leave the shared image in a layout the Kit side can sample after import.
   impl.commandList->setTextureState(impl.exportedColor.texture, nvrhi::AllSubresources,
