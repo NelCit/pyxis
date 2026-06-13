@@ -204,3 +204,48 @@ TEST(MdlTranslation, OmniGlassMapsToTransmissionFields)
   EXPECT_EQ(desc.thinWalled, 1u);
   EXPECT_EQ(desc.source, pyxis::OpenPBRMaterialDesc::Source::Mdl);
 }
+
+// World Lobby parity — a custom MDL glass that is NOT OmniGlass (the lobby's
+// "Tinted_Glass": no glass_* inputs, signalled by an authored transmission_color
+// and using the short `ior` / `roughness` input names). FromUsdShade must treat
+// it as transmissive (else the tinted windows render opaque grey).
+TEST(MdlTranslation, GenericMdlGlassTransmissionColorMapsToTransmission)
+{
+  const pxr::UsdStageRefPtr stage = pxr::UsdStage::CreateInMemory("tinted_glass.usda");
+  const pxr::UsdShadeMaterial material =
+      pxr::UsdShadeMaterial::Define(stage, pxr::SdfPath("/Mat"));
+  pxr::UsdShadeShader shader =
+      pxr::UsdShadeShader::Define(stage, pxr::SdfPath("/Mat/MdlSurface"));
+  shader.CreateIdAttr(pxr::VtValue(pxr::TfToken("mdl::Tinted_Glass")));
+  shader.CreateInput(pxr::TfToken("transmission_color"), pxr::SdfValueTypeNames->Color3f)
+      .Set(pxr::GfVec3f(0.35f, 0.35f, 0.35f));
+  shader.CreateInput(pxr::TfToken("ior"), pxr::SdfValueTypeNames->Float).Set(1.52f);
+  shader.CreateInput(pxr::TfToken("roughness"), pxr::SdfValueTypeNames->Float).Set(0.0f);
+  shader.CreateInput(pxr::TfToken("reflection_color"), pxr::SdfValueTypeNames->Color3f)
+      .Set(pxr::GfVec3f(1.0f, 1.0f, 1.0f));
+  const pxr::UsdShadeOutput shaderOut =
+      shader.CreateOutput(pxr::TfToken("surface"), pxr::SdfValueTypeNames->Token);
+  material.CreateSurfaceOutput().ConnectToSource(shaderOut);
+
+  const pyxis::OpenPBRMaterialDesc desc =
+      pyxis::material_translation::FromUsdShade(material);
+
+  EXPECT_FLOAT_EQ(desc.transmissionWeight, 1.0f);
+  EXPECT_NEAR(desc.transmissionColorR, 0.35f, 1e-6f);
+  EXPECT_NEAR(desc.transmissionColorG, 0.35f, 1e-6f);
+  EXPECT_NEAR(desc.transmissionColorB, 0.35f, 1e-6f);
+  EXPECT_NEAR(desc.specularIor, 1.52f, 1e-6f);
+  EXPECT_NEAR(desc.roughness, 0.0f, 1e-6f);
+  EXPECT_EQ(desc.source, pyxis::OpenPBRMaterialDesc::Source::Mdl);
+}
+
+// The generic-glass path must NOT fire for an ordinary opaque OmniPBR material
+// (no transmission_color authored) — it stays opaque.
+TEST(MdlTranslation, OpaqueOmniPbrWithoutTransmissionColorStaysOpaque)
+{
+  const pxr::UsdStageRefPtr stage = pxr::UsdStage::CreateInMemory("opaque.usda");
+  const pxr::UsdShadeMaterial material = BuildMdlMaterial(stage);  // OmniPBR, no transmission
+  const pyxis::OpenPBRMaterialDesc desc =
+      pyxis::material_translation::FromUsdShade(material);
+  EXPECT_FLOAT_EQ(desc.transmissionWeight, 0.0f);
+}
