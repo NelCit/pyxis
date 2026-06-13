@@ -111,9 +111,12 @@ struct RenderSettings {
   // Omniverse Render Settings `pyxis:autoExposure` toggle. uint32 (not bool)
   // keeps the frozen-tail layout POD-clean.
   uint32_t autoExposure = 0u;
-  // Target middle-grey the auto exposure maps the average luminance to
-  // (0.18 = the photographic 18% grey card). Ignored when autoExposure is 0.
-  float autoExposureKey = 0.18f;
+  // Auto-exposure target: the linear level the BRIGHTEST pixel maps to before
+  // ACES (auto-exposure exposes for the highlights — autoEV = log2(target) −
+  // maxLog2Lum — so nothing clips). 1.0 (max → white, ACES rolls the top off)
+  // is a safe default; lower darkens, higher brightens. Ignored when
+  // autoExposure is 0.
+  float autoExposureKey = 1.0f;
 
   // §22.3 reserved tail — future RenderSettings additions consume
   // these slots (becoming typed members at MINOR) instead of growing

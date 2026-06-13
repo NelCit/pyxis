@@ -96,27 +96,38 @@ void main(uint3 tid : SV_DispatchThreadID) {
         // calibrate light intensities for a strongly-negative camera
         // exposure (~-10 stops); without this scale the dome blows out.
         //
-        // Auto-exposure: when enabled, derive the exposure from the scene's
-        // geometric-mean luminance (AutoExposurePass accumulated
-        // sum(log2(lum)) + count over lit pixels). autoEV maps that average to
-        // the target middle-grey `key`; the manual `exposure` then rides on top
-        // as an artist bias. This is what lets a scene with hot UsdLux lights
-        // and no authored camera exposure (the OpenPBR Playground) display
-        // without clipping to white.
+        // Auto-exposure: when enabled, expose for the HIGHLIGHTS — drive the
+        // exposure from the scene's bright end (AutoExposurePass tracked the max
+        // AND the geometric-mean log2(lum) over lit pixels) so the brightest
+        // content lands on the target and nothing clips to white:
+        //   brightLog2 = min(maxLog2Lum, avgLog2Lum + MAX_HEADROOM)
+        //   autoEV     = log2(target) − brightLog2
+        // The MAX is clamped to a few stops above the average so a single
+        // firefly / a sliver of a visible light can't crush the image to black
+        // (pure-max fragility); when the scene has no such outlier the true max
+        // drives the exposure. `target` is the linear level the bright end maps
+        // to before ACES (default 1.0; ACES rolls the very top off). Auto FULLY
+        // REPLACES the manual exposure — mutually exclusive (the editor disables
+        // the manual slider when auto is on), so a scene with hot UsdLux lights
+        // and no authored camera exposure (the OpenPBR Playground) displays
+        // correctly with zero manual tuning.
         float effectiveExposure = gParams.exposure;
         if (gParams.autoExposureEnabled != 0u)
         {
-            const uint sum   = gAutoExposureStats.Load(0u);
             const uint count = gAutoExposureStats.Load(4u);
             if (count > 0u)
             {
-                const float avgLog2Lum =
-                    (float(sum) / AUTO_EXPOSURE_LOG_SCALE) / float(count)
-                    - AUTO_EXPOSURE_LOG_OFFSET;
-                const float key = (gParams.autoExposureKey > 0.0)
-                                    ? gParams.autoExposureKey : 0.18;
-                const float autoEv = clamp(log2(key) - avgLog2Lum, -24.0, 8.0);
-                effectiveExposure = autoEv + gParams.exposure;
+                const uint  sum        = gAutoExposureStats.Load(0u);
+                const uint  maxFixed   = gAutoExposureStats.Load(8u);
+                const float avgLog2Lum = (float(sum) / AUTO_EXPOSURE_LOG_SCALE) / float(count)
+                                       - AUTO_EXPOSURE_LOG_OFFSET;
+                const float maxLog2Lum = (float(maxFixed) / AUTO_EXPOSURE_LOG_SCALE)
+                                       - AUTO_EXPOSURE_LOG_OFFSET;
+                const float brightLog2 = min(maxLog2Lum,
+                                             avgLog2Lum + AUTO_EXPOSURE_MAX_HEADROOM);
+                const float target = (gParams.autoExposureKey > 0.0)
+                                       ? gParams.autoExposureKey : 1.0;
+                effectiveExposure = clamp(log2(target) - brightLog2, -24.0, 8.0);
             }
         }
         const float exposureGain = exp2(effectiveExposure);

@@ -860,7 +860,7 @@ float HdPyxisRenderDelegate::ReadAutoExposureKey() const {
     return static_cast<float>(value.UncheckedGet<double>());
   if (value.IsHolding<int>())
     return static_cast<float>(value.UncheckedGet<int>());
-  return 0.18f;  // photographic 18% grey
+  return 1.0f;  // brightest pixel → white (ACES rolls the top off)
 }
 
 void HdPyxisRenderDelegate::Init() {
@@ -912,7 +912,7 @@ void HdPyxisRenderDelegate::Init() {
   _settingDescriptors.push_back(
       {"Auto exposure", TfToken("pyxis:autoExposure"), VtValue(false)});
   _settingDescriptors.push_back(
-      {"Auto-exposure target grey", TfToken("pyxis:autoExposureKey"), VtValue(0.18f)});
+      {"Auto-exposure target (max→)", TfToken("pyxis:autoExposureKey"), VtValue(1.0f)});
 
   // Resolve the persist toggle: pyxis:persistEngine render setting (default
   // true), overridden OFF by PYXIS_OMNI_NO_PERSIST (for VRAM-constrained / large

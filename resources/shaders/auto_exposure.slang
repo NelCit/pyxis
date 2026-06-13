@@ -20,11 +20,12 @@
 #include "ShaderInterop.slang"
 
 [[vk::binding(0, 0)]] Texture2D<float4>   gLinearColor;  // fp32 LINEAR radiance (RGBA32F)
-[[vk::binding(1, 0)]] RWByteAddressBuffer  gStats;        // [0]=fixed-point sum, [4]=lit count
+[[vk::binding(1, 0)]] RWByteAddressBuffer  gStats;        // [0]=fixed sum [4]=count [8]=fixed max
 [[vk::binding(2, 0)]] ConstantBuffer<AutoExposureUniforms> gParams;
 
 groupshared uint gGroupSum;    // fixed-point log-lum sum for this group
 groupshared uint gGroupCount;  // lit-pixel count for this group
+groupshared uint gGroupMax;    // fixed-point MAX log-lum for this group
 
 [shader("compute")]
 [numthreads(8, 8, 1)]
@@ -32,6 +33,7 @@ void main(uint3 tid : SV_DispatchThreadID, uint groupIndex : SV_GroupIndex) {
     if (groupIndex == 0u) {
         gGroupSum = 0u;
         gGroupCount = 0u;
+        gGroupMax = 0u;
     }
     GroupMemoryBarrierWithGroupSync();
 
@@ -44,14 +46,17 @@ void main(uint3 tid : SV_DispatchThreadID, uint groupIndex : SV_GroupIndex) {
             uint prev;
             InterlockedAdd(gGroupSum, fixedPt, prev);
             InterlockedAdd(gGroupCount, 1u, prev);
+            InterlockedMax(gGroupMax, fixedPt, prev);
         }
     }
     GroupMemoryBarrierWithGroupSync();
 
-    // One global atomic per group.
+    // One global atomic per group. Integer add/max are order-independent →
+    // the whole reduction stays deterministic (byte-equal even with AE on).
     if (groupIndex == 0u) {
         uint prev;
         gStats.InterlockedAdd(0u, gGroupSum, prev);
         gStats.InterlockedAdd(4u, gGroupCount, prev);
+        gStats.InterlockedMax(8u, gGroupMax, prev);
     }
 }

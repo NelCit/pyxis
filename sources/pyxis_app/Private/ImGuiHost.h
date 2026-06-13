@@ -201,7 +201,7 @@ class ImGuiHost {
   // the renderer derives the exposure from the frame's average luminance and
   // the manual slider rides on top as a bias.
   bool                                  _editorAutoExposure    = false;
-  float                                 _editorAutoExposureKey = 0.18f;
+  float                                 _editorAutoExposureKey = 1.0f;  // max→target
   // Q3 OpenPBR feature gates — the editor's "OpenPBR Features"
   // section. One checkbox per OPENPBR_FEATURE_* bit; ViewerMode reads
   // GetOpenPbrFeatureMask() each frame and pushes the composed mask

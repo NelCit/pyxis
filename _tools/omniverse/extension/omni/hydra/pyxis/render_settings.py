@@ -98,14 +98,16 @@ _OPENPBR_ROWS = (
 _AUTO_EXPOSURE_PATH = f"{_OPENPBR_ROOT}/autoExposure/value"
 _AUTO_EXPOSURE_KEY_PATH = f"{_OPENPBR_ROOT}/autoExposureKey/value"
 _AUTO_EXPOSURE_TOOLTIP = (
-    "Derive the exposure automatically from the frame's average (geometric-mean) "
-    "luminance, so a scene with hot lights and no authored camera exposure "
-    "displays without clipping to white. The camera's manual exposure then acts "
-    "as a bias on top. OFF by default (the manual exposure is authoritative)."
+    "Expose for the highlights automatically: the renderer derives the exposure "
+    "from the frame's MAXIMUM luminance so the brightest pixel lands on the "
+    "target and nothing clips to white — useful for a scene with hot lights and "
+    "no authored camera exposure. Replaces the camera's manual exposure when on. "
+    "OFF by default."
 )
 _AUTO_EXPOSURE_KEY_TOOLTIP = (
-    "Target middle-grey the auto exposure maps the average luminance to "
-    "(0.18 = the photographic 18% grey card). Lower = darker, higher = brighter."
+    "The linear level the brightest pixel maps to before the ACES tonemap "
+    "(1.0 = max→white; ACES then rolls the very top off). Lower = darker, "
+    "higher = brighter."
 )
 
 
@@ -139,9 +141,9 @@ class PyxisSettingsFrame(SettingsCollectionFrame):
         self._add_setting(
             setting_type=SettingType.FLOAT,
             path=_AUTO_EXPOSURE_KEY_PATH,
-            name="Auto-exposure target grey",
+            name="Auto-exposure target (max→)",
             tooltip=_AUTO_EXPOSURE_KEY_TOOLTIP,
-            cleartext_path="Auto-exposure target grey",
+            cleartext_path="Auto-exposure target (max→)",
             has_reset=True,
         )
 

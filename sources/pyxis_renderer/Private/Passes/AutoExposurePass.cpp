@@ -66,10 +66,11 @@ AutoExposurePass::AutoExposurePass(nvrhi::IDevice* device) : _device(device) {
     return;
   }
 
-  // The reduction accumulator: uint2 (sum, count). Raw views for the
-  // ByteAddressBuffer UAV (this pass) + SRV (TonemapPass). 8 bytes, never resized.
+  // The reduction accumulator: uint3 (log-lum sum, lit count, log-lum MAX). Raw
+  // views for the ByteAddressBuffer UAV (this pass) + SRV (TonemapPass). 12
+  // bytes, never resized.
   nvrhi::BufferDesc statsDesc;
-  statsDesc.byteSize = 8u;
+  statsDesc.byteSize = 12u;
   statsDesc.canHaveUAVs = true;
   statsDesc.canHaveRawViews = true;
   statsDesc.debugName = "AutoExposure.Stats";
