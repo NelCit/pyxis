@@ -7,7 +7,10 @@
 #include "Pyxis/MaterialTranslation/UsdShadeToOpenPBR.h"
 
 #include <pxr/usd/usd/prim.h>
+#include <pxr/usd/usd/stage.h>
 #include <pxr/usd/sdf/assetPath.h>
+#include <pxr/usd/sdf/layer.h>
+#include <pxr/usd/sdf/propertySpec.h>
 #include <pxr/usd/usdShade/connectableAPI.h>
 #include <pxr/usd/usdShade/input.h>
 #include <pxr/usd/usdShade/material.h>
@@ -23,6 +26,7 @@
 #include <filesystem>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace pyxis::material_translation {
 
@@ -667,14 +671,55 @@ bool ResolveUVTextureBinding(const pxr::UsdShadeShader& shader,
   return primary;
 }
 
-// Read an `ND_image*` node's `inputs:file` asset path (UDIM-aware). Mirrors the
-// UsdUVTexture file handling in ResolveUVTextureBinding: resolve via ArResolver,
-// fall back to the unresolved string, and substitute 1001 for `<UDIM>`.
+// Directories to anchor a relative MaterialX texture path against, in priority
+// order. USD's pre-computed resolved path anchors a `file` asset to the layer
+// it was AUTHORED in — but MaterialX documents reference textures relative to
+// the SCENE ROOT via a search path, not the .mtlx's own directory (the OpenPBR
+// Playground authors `file = textures/foo.<UDIM>.png` in materials/<mat>.mtlx
+// while the textures live in the sibling ShdrPlygrnd/textures/). So USD resolves
+// those to empty and the relative path would leak to the loader. We try both
+// the authoring-layer dir (textures co-located with the material doc) and the
+// root-layer dir (the scene .usda) and let the caller pick whichever makes the
+// file exist on disk.
+void CollectMtlxAnchorDirs(const pxr::UsdShadeInput&  fileInput,
+                           const pxr::UsdShadeShader& imageNode,
+                           std::vector<std::string>&  outDirs) noexcept
+{
+  namespace fs = std::filesystem;
+  for (const pxr::SdfPropertySpecHandle& spec :
+       fileInput.GetAttr().GetPropertyStack(pxr::UsdTimeCode::Default()))
+  {
+    if (spec && spec->GetLayer())
+    {
+      const std::string real = spec->GetLayer()->GetRealPath();
+      if (!real.empty())
+        outDirs.push_back(fs::path(real).parent_path().string());
+    }
+  }
+  if (const pxr::UsdStageWeakPtr stage = imageNode.GetPrim().GetStage())
+  {
+    if (const pxr::SdfLayerHandle root = stage->GetRootLayer())
+    {
+      const std::string real = root->GetRealPath();
+      if (!real.empty())
+        outDirs.push_back(fs::path(real).parent_path().string());
+    }
+  }
+}
+
+// Read an `ND_image*` node's `inputs:file` asset path (UDIM-aware) and resolve
+// it to an absolute on-disk path. Prefers USD's pre-resolved path (correct for
+// existing non-UDIM files); for UDIM paths — where USD resolves the literal
+// `<UDIM>` to empty — and for any path USD couldn't resolve, it anchors the
+// 1001-tile path against CollectMtlxAnchorDirs and picks the first that exists.
+// `outUdimPattern` is the matching ABSOLUTE `<UDIM>` pattern so the caller's
+// tile enumeration (AcquireTextureMaybeUdim) finds 1002..1099 on disk.
 [[nodiscard]] bool ReadMtlxImageFile(const pxr::UsdShadeShader& imageNode,
                                      std::string& outFile,
                                      std::string& outUdimPattern,
                                      bool&        outHasUdim) noexcept
 {
+  namespace fs = std::filesystem;
   static const pxr::TfToken fileToken("file");  // NOLINT(readability-identifier-naming)
   outFile.clear();
   outUdimPattern.clear();
@@ -686,18 +731,66 @@ bool ResolveUVTextureBinding(const pxr::UsdShadeShader& shader,
   if (!fileInput.Get(&value) || !value.IsHolding<pxr::SdfAssetPath>())
     return false;
   const pxr::SdfAssetPath asset = value.UncheckedGet<pxr::SdfAssetPath>();
-  outFile = asset.GetResolvedPath();
-  if (outFile.empty())
-    outFile = asset.GetAssetPath();
-  if (outFile.empty())
+  const std::string rawPath = asset.GetAssetPath();
+  if (rawPath.empty())
     return false;
-  if (const auto udimPos = outFile.find("<UDIM>"); udimPos != std::string::npos)
+
+  constexpr std::size_t UDIM_TOKEN_LEN = 6u;  // length of literal "<UDIM>"
+  const auto udimPos = rawPath.find("<UDIM>");
+  outHasUdim = (udimPos != std::string::npos);
+  std::string primaryRel = rawPath;  // the 1001 tile (or the whole path if no UDIM).
+  if (outHasUdim)
+    primaryRel.replace(udimPos, UDIM_TOKEN_LEN, "1001");
+
+  // 1) USD's pre-resolved path — authoritative for an existing non-UDIM file.
+  if (!outHasUdim)
   {
-    outUdimPattern = outFile;
-    outHasUdim = true;
-    constexpr std::size_t UDIM_TOKEN_LEN = 6u;
-    outFile.replace(udimPos, UDIM_TOKEN_LEN, "1001");
+    const std::string resolved = asset.GetResolvedPath();
+    if (!resolved.empty())
+    {
+      std::error_code existsErr;
+      if (fs::exists(resolved, existsErr) && !existsErr)
+      {
+        outFile = resolved;
+        return true;
+      }
+    }
   }
+
+  // 2) An already-absolute relative spec that exists as-authored.
+  {
+    std::error_code existsErr;
+    if (fs::path(primaryRel).is_absolute() && fs::exists(primaryRel, existsErr)
+        && !existsErr)
+    {
+      outFile = primaryRel;
+      if (outHasUdim)
+        outUdimPattern = rawPath;
+      return true;
+    }
+  }
+
+  // 3) Anchor against the candidate layer dirs; pick the first that exists.
+  std::vector<std::string> anchorDirs;
+  CollectMtlxAnchorDirs(fileInput, imageNode, anchorDirs);
+  for (const std::string& dir : anchorDirs)
+  {
+    const fs::path candidate = fs::path(dir) / primaryRel;
+    std::error_code existsErr;
+    if (fs::exists(candidate, existsErr) && !existsErr)
+    {
+      outFile = candidate.string();
+      if (outHasUdim)
+        outUdimPattern = (fs::path(dir) / rawPath).string();
+      return true;
+    }
+  }
+
+  // 4) Last resort: hand back the (relative) primary so the loader surfaces the
+  // miss loudly rather than silently dropping the texture.
+  outFile = primaryRel;
+  if (outHasUdim)
+    outUdimPattern = rawPath;
   return true;
 }
 

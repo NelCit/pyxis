@@ -22,12 +22,15 @@
 #include "Materials/MaterialFlag.h"
 
 #include <stb_image.h>
+#include <tiffio.h>
 #include <tinyexr.h>
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -723,6 +726,22 @@ Expected<void> GpuScene::Impl::UploadPendingTextures(nvrhi::ICommandList* comman
     const bool isDds = path.size() >= 4
         && (path.compare(path.size() - 4, 4, ".dds") == 0
             || path.compare(path.size() - 4, 4, ".DDS") == 0);
+    // libtiff handles `.tif` / `.tiff` (stb_image can't). Lower-case the
+    // tail for the compare so `.TIF` / `.TIFF` / `.Tiff` all match.
+    const auto endsWithCi = [&path](std::string_view suffix) {
+      if (path.size() < suffix.size())
+        return false;
+      const std::size_t off = path.size() - suffix.size();
+      for (std::size_t i = 0; i < suffix.size(); ++i)
+      {
+        const char c = static_cast<char>(
+            std::tolower(static_cast<unsigned char>(path[off + i])));
+        if (c != suffix[i])
+          return false;
+      }
+      return true;
+    };
+    const bool isTiff = endsWithCi(".tif") || endsWithCi(".tiff");
 
     int width = 0;
     int height = 0;
@@ -794,6 +813,80 @@ Expected<void> GpuScene::Impl::UploadPendingTextures(nvrhi::ICommandList* comman
       std::free(exrPixels);
       pixelFormat = nvrhi::Format::RGBA32_FLOAT;
       rowPitchBytes = static_cast<std::size_t>(width) * 4u * sizeof(float);
+    }
+    else if (isTiff)
+    {
+      // libtiff decode → top-left-origin RGBA8. TIFFReadRGBAImage handles
+      // the parts stb_image can't: LZW/PackBits/Deflate codecs, horizontal
+      // differencing predictors, strip AND tile layouts, planar config, and
+      // photometric conversion (RGB / min-is-black / palette) — all of which
+      // the OpenPBR Playground's 8-bit LZW maps use. Feeds the same RGBA8
+      // mip + BCn path below as the stb_image branch.
+      //
+      // Silence libtiff's stderr warning handler once (thread-safe static
+      // init): production TIFFs trip benign "unknown field" / predictor
+      // warnings we don't want in the render log. Decode failures are still
+      // surfaced via the return-value check + our own Warn below.
+      static const bool tiffWarningsSilenced = [] {
+        TIFFSetWarningHandler(nullptr);
+        return true;
+      }();
+      (void)tiffWarningsSilenced;
+
+      TIFF* tif = TIFFOpen(path.c_str(), "r");
+      if (tif == nullptr)
+      {
+        Logging::Get().Warn(log::RENDER,
+                            std::string{"TextureCache: TIFFOpen failed for "} + path
+                                + " — falling back to missing-texture (slot 0).");
+        return;
+      }
+      std::uint32_t tiffWidth = 0;
+      std::uint32_t tiffHeight = 0;
+      TIFFGetField(tif, TIFFTAG_IMAGEWIDTH, &tiffWidth);
+      TIFFGetField(tif, TIFFTAG_IMAGELENGTH, &tiffHeight);
+      if (tiffWidth == 0 || tiffHeight == 0)
+      {
+        Logging::Get().Warn(log::RENDER,
+                            std::string{"TextureCache: TIFF has zero dimensions for "}
+                                + path + " — falling back to missing-texture (slot 0).");
+        TIFFClose(tif);
+        return;
+      }
+      const std::size_t texelCount =
+          static_cast<std::size_t>(tiffWidth) * static_cast<std::size_t>(tiffHeight);
+      // TIFFReadRGBAImageOriented packs one machine-order RGBA word per texel
+      // (extract with the TIFFGet{R,G,B,A} macros). ORIENTATION_TOPLEFT puts
+      // row 0 at the top, matching stb_image + our V-down sampling.
+      std::vector<std::uint32_t> raster(texelCount);
+      if (TIFFReadRGBAImageOriented(tif, tiffWidth, tiffHeight, raster.data(),
+                                    ORIENTATION_TOPLEFT, /*stopOnError=*/0)
+          == 0)
+      {
+        Logging::Get().Warn(log::RENDER,
+                            std::string{"TextureCache: TIFFReadRGBAImage failed for "}
+                                + path + " — falling back to missing-texture (slot 0).");
+        TIFFClose(tif);
+        return;
+      }
+      TIFFClose(tif);
+      width  = static_cast<int>(tiffWidth);
+      height = static_cast<int>(tiffHeight);
+      decodedPixels.resize(texelCount * 4u);
+      for (std::size_t i = 0; i < texelCount; ++i)
+      {
+        const std::uint32_t px = raster[i];
+        decodedPixels[i * 4u + 0u] = static_cast<std::uint8_t>(TIFFGetR(px));
+        decodedPixels[i * 4u + 1u] = static_cast<std::uint8_t>(TIFFGetG(px));
+        decodedPixels[i * 4u + 2u] = static_cast<std::uint8_t>(TIFFGetB(px));
+        decodedPixels[i * 4u + 3u] = static_cast<std::uint8_t>(TIFFGetA(px));
+      }
+      // Same role-driven EOTF choice as the stb_image branch below.
+      pixelFormat = (dirtyTex.role == TextureKey::Role::BaseColor
+                     || dirtyTex.role == TextureKey::Role::Emission)
+                        ? nvrhi::Format::SRGBA8_UNORM
+                        : nvrhi::Format::RGBA8_UNORM;
+      rowPitchBytes = static_cast<std::size_t>(width) * 4u;
     }
     else
     {
