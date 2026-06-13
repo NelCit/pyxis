@@ -1044,7 +1044,18 @@ Expected<void> GpuScene::Impl::UploadMaterialBuffer(nvrhi::ICommandList* command
     // bindless lookup so a missing texture renders the scalar
     // fallback rather than the magenta missingTexture.
     std::uint32_t flags = 0;
-    if (descCopy.opacity < 1.0f) flags |= MaterialFlag::AlphaTested;
+    // AlphaTested is the anyhit's "IgnoreHit -> invisible" cutout flag
+    // (raytraced_anyhit.slang). It must NOT be set from smooth scalar opacity:
+    // a translucent/glass material (0 < opacity < 1) is composited by the
+    // front-to-back transmittance loop (transmittance = 1 - opacity, tinted via
+    // OpenPBRTransmittance when transmissionWeight > 0), so the surface stays
+    // VISIBLE and tints whatever is behind it. Flagging it AlphaTested instead
+    // made the anyhit skip the hit -> glass rendered fully invisible (you saw
+    // the surface behind, with no tint) — the long-standing M7/M9 "invisibility-
+    // as-translucency" stub that the V2.B transmittance compositing superseded.
+    // True binary alpha cutout (foliage) belongs to a per-texel opacity-map +
+    // threshold path that sets this flag; that is not plumbed yet (M11), so
+    // nothing sets AlphaTested today and the anyhit accepts every hit.
     if (descCopy.coatWeight > 0.0f) flags |= MaterialFlag::CoatEnabled;
     if (descCopy.transmissionWeight > 0.0f)
       flags |= MaterialFlag::TransmissionEnabled;
