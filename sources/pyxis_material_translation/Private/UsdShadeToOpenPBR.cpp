@@ -709,11 +709,19 @@ void CollectMtlxAnchorDirs(const pxr::UsdShadeInput&  fileInput,
 
 // Read an `ND_image*` node's `inputs:file` asset path (UDIM-aware) and resolve
 // it to an absolute on-disk path. Prefers USD's pre-resolved path (correct for
-// existing non-UDIM files); for UDIM paths — where USD resolves the literal
-// `<UDIM>` to empty — and for any path USD couldn't resolve, it anchors the
-// 1001-tile path against CollectMtlxAnchorDirs and picks the first that exists.
+// existing non-UDIM files); otherwise anchors against CollectMtlxAnchorDirs.
+//
+// UDIM: the primary tile is NOT always 1001. A model's UV shells can live
+// entirely in a non-1001 tile (the playground's lampShade/toolsMetal/toolsPlastic
+// ship only `.1002`/`.1003`), so a hard `<UDIM>`→1001 substitution misses them.
+// We scan 1001..1100 and bind the FIRST tile that exists as the primary handle.
+// The closesthit samples one handle with the global repeat sampler, so a
+// single-tile object whose u lands in [N, N+1) fracs back into [0, 1) and reads
+// the bound tile correctly regardless of which tile number it is. (True
+// multi-tile UDIM — one object spanning several tiles — still needs per-tile
+// shader selection; not plumbed. The playground objects are single-tile.)
 // `outUdimPattern` is the matching ABSOLUTE `<UDIM>` pattern so the caller's
-// tile enumeration (AcquireTextureMaybeUdim) finds 1002..1099 on disk.
+// tile enumeration (AcquireTextureMaybeUdim) can load the neighbours.
 [[nodiscard]] bool ReadMtlxImageFile(const pxr::UsdShadeShader& imageNode,
                                      std::string& outFile,
                                      std::string& outUdimPattern,
@@ -738,59 +746,68 @@ void CollectMtlxAnchorDirs(const pxr::UsdShadeInput&  fileInput,
   constexpr std::size_t UDIM_TOKEN_LEN = 6u;  // length of literal "<UDIM>"
   const auto udimPos = rawPath.find("<UDIM>");
   outHasUdim = (udimPos != std::string::npos);
-  std::string primaryRel = rawPath;  // the 1001 tile (or the whole path if no UDIM).
-  if (outHasUdim)
-    primaryRel.replace(udimPos, UDIM_TOKEN_LEN, "1001");
 
-  // 1) USD's pre-resolved path — authoritative for an existing non-UDIM file.
+  std::vector<std::string> anchorDirs;
+  CollectMtlxAnchorDirs(fileInput, imageNode, anchorDirs);
+  const auto existsAt = [](const std::string& path) noexcept {
+    std::error_code existsErr;
+    return !path.empty() && fs::exists(path, existsErr) && !existsErr;
+  };
+
   if (!outHasUdim)
   {
-    const std::string resolved = asset.GetResolvedPath();
-    if (!resolved.empty())
+    // Non-UDIM: USD's resolved path → absolute spec → anchored dirs.
+    if (const std::string resolved = asset.GetResolvedPath(); existsAt(resolved))
     {
-      std::error_code existsErr;
-      if (fs::exists(resolved, existsErr) && !existsErr)
+      outFile = resolved;
+      return true;
+    }
+    if (fs::path(rawPath).is_absolute() && existsAt(rawPath))
+    {
+      outFile = rawPath;
+      return true;
+    }
+    for (const std::string& dir : anchorDirs)
+    {
+      const std::string candidate = (fs::path(dir) / rawPath).string();
+      if (existsAt(candidate))
       {
-        outFile = resolved;
+        outFile = candidate;
+        return true;
+      }
+    }
+    outFile = rawPath;  // last resort — loader surfaces the miss loudly.
+    return true;
+  }
+
+  // UDIM: bind the first tile that exists (1001..1100), not a hardcoded 1001.
+  for (int tile = 1001; tile <= 1100; ++tile)
+  {
+    std::string tileRel = rawPath;
+    tileRel.replace(udimPos, UDIM_TOKEN_LEN, std::to_string(tile));
+    if (fs::path(tileRel).is_absolute() && existsAt(tileRel))
+    {
+      outFile = tileRel;
+      outUdimPattern = rawPath;
+      return true;
+    }
+    for (const std::string& dir : anchorDirs)
+    {
+      const std::string candidate = (fs::path(dir) / tileRel).string();
+      if (existsAt(candidate))
+      {
+        outFile = candidate;
+        outUdimPattern = (fs::path(dir) / rawPath).string();
         return true;
       }
     }
   }
 
-  // 2) An already-absolute relative spec that exists as-authored.
-  {
-    std::error_code existsErr;
-    if (fs::path(primaryRel).is_absolute() && fs::exists(primaryRel, existsErr)
-        && !existsErr)
-    {
-      outFile = primaryRel;
-      if (outHasUdim)
-        outUdimPattern = rawPath;
-      return true;
-    }
-  }
-
-  // 3) Anchor against the candidate layer dirs; pick the first that exists.
-  std::vector<std::string> anchorDirs;
-  CollectMtlxAnchorDirs(fileInput, imageNode, anchorDirs);
-  for (const std::string& dir : anchorDirs)
-  {
-    const fs::path candidate = fs::path(dir) / primaryRel;
-    std::error_code existsErr;
-    if (fs::exists(candidate, existsErr) && !existsErr)
-    {
-      outFile = candidate.string();
-      if (outHasUdim)
-        outUdimPattern = (fs::path(dir) / rawPath).string();
-      return true;
-    }
-  }
-
-  // 4) Last resort: hand back the (relative) primary so the loader surfaces the
-  // miss loudly rather than silently dropping the texture.
-  outFile = primaryRel;
-  if (outHasUdim)
-    outUdimPattern = rawPath;
+  // No tile found anywhere — last resort (1001, relative) so the loader warns.
+  std::string tile1001 = rawPath;
+  tile1001.replace(udimPos, UDIM_TOKEN_LEN, "1001");
+  outFile = tile1001;
+  outUdimPattern = rawPath;
   return true;
 }
 
