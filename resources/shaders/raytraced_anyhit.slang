@@ -48,16 +48,26 @@
 // ray would skip them and shade whatever opaque surface was
 // behind, indistinguishable from a hole in the model.
 //
-// Side-effect: shadow rays now block on translucent geometry
-// too. Physically light should pass through glass; we accept
-// that minor wrong-ness here to keep the anyhit independent of
-// ray context. The §V2.B refraction follow-up's separate ray
-// path through glass will compensate visually.
 bool AnyHitIsAlphaTested() {
     const uint instanceId = InstanceID();
     const uint materialId = gInstanceInfo[instanceId].materialSlot;
     const OpenPBRMaterialGPU mat = gMaterials[materialId];
     return (mat.flags & MATERIAL_FLAG_ALPHA_TESTED) != 0u;
+}
+
+// True iff the hit material is transmissive (glass-like). The lighting anyhit
+// uses this — gated on RayFlags() SKIP_CLOSEST_HIT_SHADER, i.e. ONLY for
+// shadow / AO rays — to let light pass THROUGH transmissive surfaces instead of
+// casting an opaque shadow (physically, light goes through glass). Composite /
+// reflection rays (closesthit runs) still hit transmissive surfaces so the
+// front-to-back transparency loop can shade them. This is a binary
+// approximation (transmissive ⇒ no shadow); colored/attenuated transparent
+// shadows are a follow-up.
+bool AnyHitIsTransmissive() {
+    const uint instanceId = InstanceID();
+    const uint materialId = gInstanceInfo[instanceId].materialSlot;
+    const OpenPBRMaterialGPU mat = gMaterials[materialId];
+    return (mat.flags & MATERIAL_FLAG_TRANSMISSION_ENABLED) != 0u;
 }
 
 #endif  // PYXIS_RAYTRACED_ANYHIT_SLANG

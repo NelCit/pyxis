@@ -24,7 +24,22 @@
 void main(inout HitInfo payload, in BuiltInTriangleIntersectionAttributes attribs) {
     if (AnyHitIsAlphaTested()) {
         IgnoreHit();
+        return;
     }
-    // All other hits — including opacity < 1 and transmission — are
-    // accepted; the closesthit decides how to shade them.
+    // Transparent shadows / AO: shadow + AO rays carry
+    // RAY_FLAG_SKIP_CLOSEST_HIT_SHADER (shading.slang's shadow/AO TraceRay). On
+    // those rays, let TRANSMISSIVE (glass-like) surfaces pass instead of
+    // occluding — physically light goes through glass, so a transmissive
+    // surface should not cast an opaque black shadow (the documented wrong-ness
+    // this replaces). Composite / reflection rays (closesthit runs, no SKIP
+    // flag) still hit transmissive surfaces so the front-to-back transparency
+    // loop shades them. Binary approximation — clear glass casts no shadow;
+    // colored/attenuated transparent shadows are a follow-up.
+    if ((RayFlags() & RAY_FLAG_SKIP_CLOSEST_HIT_SHADER) != 0u
+        && AnyHitIsTransmissive()) {
+        IgnoreHit();
+        return;
+    }
+    // All other hits — including opacity < 1 on composite rays — are accepted;
+    // the closesthit decides how to shade them.
 }
