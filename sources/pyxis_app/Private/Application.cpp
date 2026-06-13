@@ -30,6 +30,7 @@ namespace {
 
 constexpr int EXIT_OK = 0;
 constexpr int EXIT_CONFIG_FAIL = 3;
+constexpr int EXIT_SCENE_NOT_FOUND = 4;
 
 void ConfigureLogging() noexcept {
   LogConfig cfg{};
@@ -147,6 +148,28 @@ int Run(int argc, char** argv) noexcept {
       log::APP, std::string{"scene.resolved.source = "}
                     + std::string{SceneSourceLabel(scene.source)} + "  path = " + scene.path);
   Logging::Get().Info(log::APP, "app.ingest = " + config.app.ingest);
+
+  // An explicit `--scene <path>` that did not resolve is a HARD error.
+  // §29.4.a's typo-robustness — fall through to the bundled default so the
+  // app always shows something — is intended only for the IMPLICIT sources
+  // (config `paths.scene`, the recent list, the no-arguments first-run case),
+  // which is what SceneResolver's unit tests pin. When the operator names a
+  // scene explicitly on the command line, silently rendering the default cube
+  // instead is misleading: e.g. the "pyxis (Release) — NVIDIA World Lobby"
+  // launch config would render default.usd because the (multi-GB, unvendored)
+  // World Lobby asset isn't fetched. Fail loudly with the fetch hint rather
+  // than masquerade. `scene.source != Cli` means the explicit --scene lost to
+  // a later chain step (or to the bundled fallback) because the file is absent.
+  if (!cli.scenePath.empty() && scene.source != SceneSource::Cli)
+  {
+    std::fprintf(stderr,
+        "pyxis: --scene '%s' not found. Provide a valid .usd/.usda path, or omit "
+        "--scene to use the bundled default scene. Large external scenes (the "
+        "OpenPBR Playground and the NVIDIA World Lobby) are fetched via "
+        "`pwsh _tools/init.ps1 -Stage scenes`.\n",
+        std::string{cli.scenePath}.c_str());
+    return EXIT_SCENE_NOT_FOUND;
+  }
 
   // V2.A.27 — UsdRenderSettings pre-scan. Production scenes
   // (Omniverse, Maya-USD, Houdini-USD) increasingly author the
