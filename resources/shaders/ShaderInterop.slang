@@ -396,6 +396,73 @@ struct OpenPBRMaterialGPU {
     float _reserved2;
     float _reserved3;
     float _reserved4;
+
+    // ------------------------------------------------------------------
+    // Rows 8-14 — OpenPBR-complete parameter block (Q1,
+    // openpbr-complete-design.md). Grows the struct 128 B -> 240 B
+    // (15 rows of 16 — the tightest multiple-of-16 that fits the full
+    // v1.1.1 parameter set; rows 0-7 above are byte-identical to the
+    // 128-B layout so the Q1 packing change is image-safe). Packed by
+    // PackMaterialGpu (Private/GpuScene/Detail.h); consumed by the Q2
+    // openpbr_material.slang closure stack — NO shader reads rows 8-14
+    // in Q1. Row map:
+    //   Row  8 — specularColor RGB + specularWeight
+    //   Row  9 — coatColor RGB + coatIor
+    //   Row 10 — coatDarkening + fuzzWeight + fuzzRoughness
+    //            + baseDiffuseRoughness
+    //   Row 11 — fuzzColor RGB + specularRoughnessAnisotropy
+    //   Row 12 — transmissionColor RGB + subsurfaceWeight
+    //   Row 13 — subsurfaceColor RGB + baseWeight
+    //   Row 14 — transmissionWeight + 3 reserved slots
+    // (geometry_thin_walled travels as MATERIAL_FLAG_THIN_WALLED, not
+    // as a struct field. _reserved1-4 on rows 5/7 above stay zero.)
+    // ------------------------------------------------------------------
+
+    // Row 8 — specular tint (OpenPBR `specular_color`) + weight.
+    float specularColorR;
+    float specularColorG;
+    float specularColorB;
+    float specularWeight;
+
+    // Row 9 — coat tint (OpenPBR `coat_color` = squared normal-
+    // incidence transmittance) + coat IOR (default 1.6).
+    float coatColorR;
+    float coatColorG;
+    float coatColorB;
+    float coatIor;
+
+    // Row 10 — coat darkening (default 1 = physical darkening ON),
+    // fuzz scalars, EON diffuse roughness.
+    float coatDarkening;
+    float fuzzWeight;
+    float fuzzRoughness;
+    float baseDiffuseRoughness;
+
+    // Row 11 — fuzz tint + GGX anisotropy
+    // (OpenPBR `specular_roughness_anisotropy`).
+    float fuzzColorR;
+    float fuzzColorG;
+    float fuzzColorB;
+    float specularRoughnessAnisotropy;
+
+    // Row 12 — transmission tint (depth-0 constant-tint semantics)
+    // + subsurface selector weight.
+    float transmissionColorR;
+    float transmissionColorG;
+    float transmissionColorB;
+    float subsurfaceWeight;
+
+    // Row 13 — subsurface albedo (diffuse-fallback rho) + base weight.
+    float subsurfaceColorR;
+    float subsurfaceColorG;
+    float subsurfaceColorB;
+    float baseWeight;
+
+    // Row 14 — translucent-base selector weight + reserved tail.
+    float transmissionWeight;
+    float _reserved5;
+    float _reserved6;
+    float _reserved7;
 };
 
 // LightGpu — packed light entry the closesthit reads via the
@@ -499,6 +566,10 @@ static const uint MATERIAL_FLAG_FLIP_TANGENT_V          = 1u << 14;
 static const uint MATERIAL_FLAG_HAS_UV_TRANSFORM        = 1u << 15;
 static const uint MATERIAL_FLAG_WORLD_PROJECTION        = 1u << 16;
 static const uint MATERIAL_FLAG_OBJECT_PROJECTION       = 1u << 17;
+// Q1 OpenPBR-complete — OpenPBR `geometry_thin_walled`. The Q2
+// transmission path treats the surface as a thin sheet (ignore the
+// underside; transmission_color = through-sheet transmittance).
+static const uint MATERIAL_FLAG_THIN_WALLED             = 1u << 18;
 
 // InstanceInfoGpu — packed per-instance record at binding 4 (P2 buffer
 // packing; replaces the two parallel per-instance uint side-tables
@@ -629,10 +700,12 @@ static const uint BINDLESS_TEXTURES_CAP = 4096u;
                   "See resources/shaders/ShaderInterop.slang.");
     static_assert(sizeof(PickResult) % 16 == 0,
                   "PickResult must be 16-byte aligned (structured-buffer rule).");
-    static_assert(sizeof(OpenPBRMaterialGPU) == 128,
-                  "OpenPBRMaterialGPU must be 128 bytes (8 rows of 16) — M9 added "
-                  "emissionR/G/B on row 5; V2.A.24 added the UV transform "
-                  "(scale/rotate/translate) on rows 6-7.");
+    static_assert(sizeof(OpenPBRMaterialGPU) == 240,
+                  "OpenPBRMaterialGPU must be 240 bytes (15 rows of 16) — rows 0-7 "
+                  "are the frozen 128-B M9/V2.A.24 layout (base + textures + UV "
+                  "transform); rows 8-14 carry the Q1 OpenPBR-complete parameter "
+                  "block (specular/coat/fuzz/transmission/subsurface tints + "
+                  "weights). See the row map on the struct.");
     static_assert(sizeof(OpenPBRMaterialGPU) % 16 == 0,
                   "OpenPBRMaterialGPU must be 16-byte aligned (§23 cbuffer / "
                   "structured-buffer alignment rule).");

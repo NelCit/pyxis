@@ -1049,6 +1049,9 @@ Expected<void> GpuScene::Impl::UploadMaterialBuffer(nvrhi::ICommandList* command
     if (descCopy.transmissionWeight > 0.0f)
       flags |= MaterialFlag::TransmissionEnabled;
     if (descCopy.emissionLuminance > 0.0f) flags |= MaterialFlag::Emissive;
+    // Q1 OpenPBR-complete — geometry_thin_walled travels as a flag bit
+    // (boolean; no GPU-struct field). No shader reads it until Q2.
+    if (descCopy.thinWalled != 0u) flags |= MaterialFlag::ThinWalled;
     // V2.A.24 — normal-map tangent flips + non-identity UV transform.
     if (descCopy.flipTangentU != 0u) flags |= MaterialFlag::FlipTangentU;
     if (descCopy.flipTangentV != 0u) flags |= MaterialFlag::FlipTangentV;

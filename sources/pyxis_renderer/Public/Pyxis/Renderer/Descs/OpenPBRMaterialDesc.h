@@ -148,16 +148,53 @@ struct OpenPBRMaterialDesc {
   // slot/offset as the former `worldProjection` (not an ABI add).
   uint32_t projectionMode        = 0;  // RFC 0005 (was worldProjection / _reserved[13])
 
-  // §22.3 reserved padding: M5+ adds OpenPBR fields (sheen, coat
-  // colour, displacement, transmission depth, etc.) by consuming
-  // these slots one at a time, keeping the layout byte-stable
-  // across MINOR bumps. Once exhausted, further fields require a
-  // major version (§22 + RFC §44.1). The `_reserved` underscore
-  // prefix is the §22.3 / §43 plan convention — overrides §30.2's
-  // public-POD camelCase rule for this slot purpose only.
-  // 14 slots consumed above; 2 remain.
+  // ------------------------------------------------------------------
+  // OpenPBR-complete extension (Q1, openpbr-complete-design.md) — a
+  // DELIBERATE MAJOR layout extension (§22 / RFC §44.1): the original
+  // `_reserved[16]` budget was down to 2 slots, which cannot hold the
+  // remaining OpenPBR v1.1.1 parameter set, so the fields below start
+  // where the old `_reserved[2]` sat and grow the struct. Every offset
+  // BEFORE this block is unchanged (pinned in
+  // tests/unit/PublicDescLayout.cpp). Field defaults are the OpenPBR
+  // spec defaults (spec parameter-reference v1.1.1); spec input names
+  // in the trailing comments. Scalar R/G/B floats (not hlslpp::float3)
+  // keep 4-byte packing — no SIMD padding holes.
+  // ------------------------------------------------------------------
+  float specularColorR = 1.0f;  // OpenPBR `specular_color` (default 1,1,1)
+  float specularColorG = 1.0f;
+  float specularColorB = 1.0f;
+  float baseDiffuseRoughness = 0.0f;        // OpenPBR `base_diffuse_roughness`
+  float specularRoughnessAnisotropy = 0.0f; // OpenPBR `specular_roughness_anisotropy`
+  float coatColorR = 1.0f;  // OpenPBR `coat_color` (default 1,1,1)
+  float coatColorG = 1.0f;
+  float coatColorB = 1.0f;
+  float coatIor = 1.6f;        // OpenPBR `coat_ior` (default 1.6 — NOT specular_ior's 1.5)
+  float coatDarkening = 1.0f;  // OpenPBR `coat_darkening` (default 1 = physical darkening ON)
+  float fuzzWeight = 0.0f;     // OpenPBR `fuzz_weight`
+  float fuzzColorR = 1.0f;     // OpenPBR `fuzz_color` (default 1,1,1)
+  float fuzzColorG = 1.0f;
+  float fuzzColorB = 1.0f;
+  float fuzzRoughness = 0.5f;  // OpenPBR `fuzz_roughness` (default 0.5)
+  float transmissionColorR = 1.0f;  // OpenPBR `transmission_color` (default 1,1,1)
+  float transmissionColorG = 1.0f;
+  float transmissionColorB = 1.0f;
+  float subsurfaceWeight = 0.0f;     // OpenPBR `subsurface_weight`
+  float subsurfaceColorR = 0.8f;     // OpenPBR `subsurface_color` (default 0.8,0.8,0.8)
+  float subsurfaceColorG = 0.8f;
+  float subsurfaceColorB = 0.8f;
+  uint32_t thinWalled = 0;  // OpenPBR `geometry_thin_walled` (boolean; 0 = false)
+
+  // §22.3 reserved padding — FRESH budget after the Q1 extension
+  // above. Post-Q1 fields consume these slots one at a time, keeping
+  // the layout byte-stable across MINOR bumps. Once exhausted,
+  // further fields require a major version (§22 + RFC §44.1). The
+  // `_reserved` underscore prefix is the §22.3 / §43 plan convention —
+  // overrides §30.2's public-POD camelCase rule for this slot purpose
+  // only. NOTE for future consumers: when a slot becomes a named
+  // field, add it to HashMaterialDesc (Private/GpuScene/Detail.h) —
+  // the dedup hash is an explicit field list, not a byte sweep.
   // NOLINTNEXTLINE(readability-identifier-naming)
-  uint32_t _reserved[2] = {};
+  uint32_t _reserved[16] = {};
 };
 
 }  // namespace pyxis

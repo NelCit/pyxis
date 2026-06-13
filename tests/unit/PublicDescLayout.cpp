@@ -118,6 +118,100 @@ TEST(PublicDescLayout, OpenPBRDefaultsMatchSpec) {
   EXPECT_FLOAT_EQ(desc.opacity, 1.0f);
 }
 
+// -----------------------------------------------------------------------------
+// OpenPBRMaterialDesc — byte-frozen layout tripwire (Q1,
+// openpbr-complete-design.md). §18.4 / §22.3: sizeof / alignof /
+// member offsets are part of the public contract. No static_asserts
+// existed before the Q1 MAJOR extension; these pin BOTH the
+// pre-extension prefix (whose offsets must never move again) and the
+// Q1 extension block. Any reorder / type change / insertion fails the
+// build here instead of silently shipping an ABI break.
+// -----------------------------------------------------------------------------
+static_assert(sizeof(OpenPBRMaterialDesc) == 352,
+              "OpenPBRMaterialDesc must be 352 bytes — the frozen 184-byte "
+              "pre-Q1 prefix + the 92-byte Q1 OpenPBR-complete extension + "
+              "uint32_t _reserved[16] + tail padding to the hlslpp 16-byte "
+              "alignment. Growing it again is a MAJOR version event.");
+static_assert(alignof(OpenPBRMaterialDesc) == 16,
+              "OpenPBRMaterialDesc alignment is set by the embedded "
+              "hlslpp::float3 (16-byte SIMD).");
+// Pre-Q1 prefix — representative fields. These offsets are the frozen
+// v1 contract; the Q1 extension appended AFTER projectionMode and must
+// never have moved any of them.
+static_assert(offsetof(OpenPBRMaterialDesc, baseColor)          ==   0);
+static_assert(offsetof(OpenPBRMaterialDesc, baseWeight)         ==  16);
+static_assert(offsetof(OpenPBRMaterialDesc, specularWeight)     ==  28);
+static_assert(offsetof(OpenPBRMaterialDesc, transmissionWeight) ==  36);
+static_assert(offsetof(OpenPBRMaterialDesc, emissionColor)      ==  48);
+static_assert(offsetof(OpenPBRMaterialDesc, opacity)            ==  68);
+static_assert(offsetof(OpenPBRMaterialDesc, baseColorMap)       ==  72);
+static_assert(offsetof(OpenPBRMaterialDesc, coatRoughnessMap)   == 100);
+static_assert(offsetof(OpenPBRMaterialDesc, source)             == 104);
+static_assert(offsetof(OpenPBRMaterialDesc, sourcePrim)         == 112);
+static_assert(offsetof(OpenPBRMaterialDesc, hasDisplacementOutput) == 128);
+static_assert(offsetof(OpenPBRMaterialDesc, baseColorUvTranslationX) == 148);
+static_assert(offsetof(OpenPBRMaterialDesc, normalStrength)     == 168);
+static_assert(offsetof(OpenPBRMaterialDesc, projectionMode)     == 180);
+// Q1 extension block — every new field.
+static_assert(offsetof(OpenPBRMaterialDesc, specularColorR)     == 184);
+static_assert(offsetof(OpenPBRMaterialDesc, specularColorG)     == 188);
+static_assert(offsetof(OpenPBRMaterialDesc, specularColorB)     == 192);
+static_assert(offsetof(OpenPBRMaterialDesc, baseDiffuseRoughness) == 196);
+static_assert(offsetof(OpenPBRMaterialDesc, specularRoughnessAnisotropy) == 200);
+static_assert(offsetof(OpenPBRMaterialDesc, coatColorR)         == 204);
+static_assert(offsetof(OpenPBRMaterialDesc, coatColorG)         == 208);
+static_assert(offsetof(OpenPBRMaterialDesc, coatColorB)         == 212);
+static_assert(offsetof(OpenPBRMaterialDesc, coatIor)            == 216);
+static_assert(offsetof(OpenPBRMaterialDesc, coatDarkening)      == 220);
+static_assert(offsetof(OpenPBRMaterialDesc, fuzzWeight)         == 224);
+static_assert(offsetof(OpenPBRMaterialDesc, fuzzColorR)         == 228);
+static_assert(offsetof(OpenPBRMaterialDesc, fuzzColorG)         == 232);
+static_assert(offsetof(OpenPBRMaterialDesc, fuzzColorB)         == 236);
+static_assert(offsetof(OpenPBRMaterialDesc, fuzzRoughness)      == 240);
+static_assert(offsetof(OpenPBRMaterialDesc, transmissionColorR) == 244);
+static_assert(offsetof(OpenPBRMaterialDesc, transmissionColorG) == 248);
+static_assert(offsetof(OpenPBRMaterialDesc, transmissionColorB) == 252);
+static_assert(offsetof(OpenPBRMaterialDesc, subsurfaceWeight)   == 256);
+static_assert(offsetof(OpenPBRMaterialDesc, subsurfaceColorR)   == 260);
+static_assert(offsetof(OpenPBRMaterialDesc, subsurfaceColorG)   == 264);
+static_assert(offsetof(OpenPBRMaterialDesc, subsurfaceColorB)   == 268);
+static_assert(offsetof(OpenPBRMaterialDesc, thinWalled)         == 272);
+// Fresh reserved tail (last member).
+static_assert(offsetof(OpenPBRMaterialDesc, _reserved)          == 276);
+static_assert(sizeof(OpenPBRMaterialDesc::_reserved) == 16 * sizeof(uint32_t));
+
+// Q1 extension — default values are the OpenPBR v1.1.1 spec defaults
+// (load-bearing: the byte-frozen POD ships them; translators rely on
+// "unauthored input == desc default" for dedup-clean fallbacks).
+TEST(PublicDescLayout, OpenPBRCompleteExtensionDefaultsMatchSpec) {
+  const OpenPBRMaterialDesc desc;
+  EXPECT_FLOAT_EQ(desc.specularColorR, 1.0f);  // specular_color (1,1,1)
+  EXPECT_FLOAT_EQ(desc.specularColorG, 1.0f);
+  EXPECT_FLOAT_EQ(desc.specularColorB, 1.0f);
+  EXPECT_FLOAT_EQ(desc.baseDiffuseRoughness, 0.0f);         // base_diffuse_roughness
+  EXPECT_FLOAT_EQ(desc.specularRoughnessAnisotropy, 0.0f);  // specular_roughness_anisotropy
+  EXPECT_FLOAT_EQ(desc.coatColorR, 1.0f);  // coat_color (1,1,1)
+  EXPECT_FLOAT_EQ(desc.coatColorG, 1.0f);
+  EXPECT_FLOAT_EQ(desc.coatColorB, 1.0f);
+  EXPECT_FLOAT_EQ(desc.coatIor, 1.6f);        // coat_ior — NOT specular_ior's 1.5
+  EXPECT_FLOAT_EQ(desc.coatDarkening, 1.0f);  // coat_darkening — darkening ON by default
+  EXPECT_FLOAT_EQ(desc.fuzzWeight, 0.0f);     // fuzz_weight
+  EXPECT_FLOAT_EQ(desc.fuzzColorR, 1.0f);     // fuzz_color (1,1,1)
+  EXPECT_FLOAT_EQ(desc.fuzzColorG, 1.0f);
+  EXPECT_FLOAT_EQ(desc.fuzzColorB, 1.0f);
+  EXPECT_FLOAT_EQ(desc.fuzzRoughness, 0.5f);  // fuzz_roughness
+  EXPECT_FLOAT_EQ(desc.transmissionColorR, 1.0f);  // transmission_color (1,1,1)
+  EXPECT_FLOAT_EQ(desc.transmissionColorG, 1.0f);
+  EXPECT_FLOAT_EQ(desc.transmissionColorB, 1.0f);
+  EXPECT_FLOAT_EQ(desc.subsurfaceWeight, 0.0f);  // subsurface_weight
+  EXPECT_FLOAT_EQ(desc.subsurfaceColorR, 0.8f);  // subsurface_color (0.8,0.8,0.8)
+  EXPECT_FLOAT_EQ(desc.subsurfaceColorG, 0.8f);
+  EXPECT_FLOAT_EQ(desc.subsurfaceColorB, 0.8f);
+  EXPECT_EQ(desc.thinWalled, 0u);  // geometry_thin_walled (false)
+  for (const uint32_t slot : desc._reserved)
+    EXPECT_EQ(slot, 0u);  // §22.3 — reserved slots ship zeroed.
+}
+
 TEST(PublicDescLayout, CameraDescDefaultsAreSensible) {
   const CameraDesc desc;
   EXPECT_FLOAT_EQ(desc.focalLengthMm, 35.0f);

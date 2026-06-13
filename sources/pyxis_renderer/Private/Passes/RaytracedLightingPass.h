@@ -185,7 +185,7 @@ class RaytracedLightingPass final : public IRenderPass {
   // matches the shader's declared element type even when GpuScene hasn't
   // allocated the real buffer yet (empty scenes / first frames). Contents
   // are (re)written every Execute while the matching scene buffer is null:
-  //   * _fallbackMaterialBuffer  (128 B OpenPBRMaterialGPU) — binding 3,
+  //   * _fallbackMaterialBuffer  (240 B OpenPBRMaterialGPU) — binding 3,
   //     default grey so `material = Invalid` renders the same recognisable
   //     grey as GpuScene's sentinel slot 0.
   //   * _fallbackLightBuffer     (96 B LightGpu) — binding 5, one disabled

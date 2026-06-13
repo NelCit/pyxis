@@ -77,32 +77,124 @@ inline std::uint64_t HashBytes(const void* data, std::size_t size) noexcept
   return hash;
 }
 
-// Hash an OpenPBRMaterialDesc for dedup. We exclude the
-// `sourcePrim` view (diagnostics-only, not part of the material
-// identity per §18.5) so two materials authored from different USD
-// prims with identical fields collapse to the same handle. The
-// `_reserved[16]` trailing slot is included since two
-// minor-version-different layouts MUST hash differently — once the
-// reserved slots get populated by §22.3 future fields, the hash
-// reflects that automatically.
+// Hash an OpenPBRMaterialDesc for §11 dedup — an EXPLICIT
+// field-by-field hash over every semantic field, in declaration
+// order.
+//
+// Excluded (diagnostics-only, not material identity per §18.5):
+//   * `sourcePrim` — pointer + length into caller-owned storage,
+//     unstable across calls and never semantic.
+//   * `source` — provenance tag. Two materials with identical
+//     semantic fields authored from different dialects (e.g. an
+//     MDL and a UsdPreviewSurface that translate to the same
+//     values) now collapse to one handle. This is a deliberate Q1
+//     dedup-behaviour change (the old hash mixed the enum in via
+//     its byte sweep).
+//   * `_reserved` — required to be all-zero by the §22.3 contract;
+//     when a slot becomes a named field it MUST be appended to the
+//     list below (see the note in OpenPBRMaterialDesc.h).
+//
+// History (Q1 rewrite, openpbr-complete-design.md): the previous
+// implementation hashed two byte ranges — [0, offsetof(sourcePrim))
+// and [offsetof(_reserved), +8) — which silently EXCLUDED every
+// field between `sourcePrim` and `_reserved` (UV transform,
+// normalStrength, flipTangent*, projectionMode, wrap/colorspace
+// tokens, displacement/volume flags) from dedup identity: materials
+// differing only in those fields collapsed to one handle and
+// rendered with the first one's values. The explicit list below
+// fixes that (a dedup-behaviour change), removes the
+// offsetof(_reserved) landmine (consuming the final reserved slot
+// no longer breaks compilation here), and also avoids hashing
+// hlslpp::float3's undefined 4th SIMD lane by mixing x/y/z
+// explicitly.
 inline std::uint64_t HashMaterialDesc(const OpenPBRMaterialDesc& desc) noexcept
 {
-  // Hash the bytes of the struct *excluding* the sourcePrim view
-  // (which is a pointer + length pair into caller-owned storage,
-  // unstable across calls). We hash the prefix up to sourcePrim
-  // and the suffix after it, which on the M5 layout are the body
-  // and the _reserved[16] tail respectively.
-  const auto* base = reinterpret_cast<const std::uint8_t*>(&desc);
-  const std::size_t prefixSize = offsetof(OpenPBRMaterialDesc, sourcePrim);
-  const std::size_t reservedOff = offsetof(OpenPBRMaterialDesc, _reserved);
-  const std::size_t reservedSize = sizeof(desc._reserved);
+  std::uint64_t hash = FNV1A_64_OFFSET;
+  const auto mixBytes = [&hash](const void* data, std::size_t size) noexcept {
+    const auto* bytes = static_cast<const std::uint8_t*>(data);
+    for (std::size_t i = 0; i < size; ++i)
+    {
+      hash ^= bytes[i];
+      hash *= FNV1A_64_PRIME;
+    }
+  };
+  const auto mixF = [&mixBytes](float value) noexcept {
+    mixBytes(&value, sizeof(value));
+  };
+  const auto mixU = [&mixBytes](std::uint32_t value) noexcept {
+    mixBytes(&value, sizeof(value));
+  };
+  const auto mixF3 = [&mixF](const hlslpp::float3& value) noexcept {
+    mixF(static_cast<float>(value.x));
+    mixF(static_cast<float>(value.y));
+    mixF(static_cast<float>(value.z));
+  };
+  const auto mixTex = [&mixU](TextureHandle handle) noexcept {
+    mixU(static_cast<std::uint32_t>(handle));
+  };
 
-  std::uint64_t hash = HashBytes(base, prefixSize);
-  // Mix in source enum (1 byte at the same offset prefixSize would
-  // already be covered if it preceded sourcePrim; in the current
-  // layout `Source source` sits BEFORE sourcePrim so prefixSize
-  // already covers it — see OpenPBRMaterialDesc.h).
-  hash = (hash ^ HashBytes(base + reservedOff, reservedSize)) * FNV1A_64_PRIME;
+  // Base + dielectric + coat + emission scalars (declaration order).
+  mixF3(desc.baseColor);
+  mixF(desc.baseWeight);
+  mixF(desc.metalness);
+  mixF(desc.roughness);
+  mixF(desc.specularWeight);
+  mixF(desc.specularIor);
+  mixF(desc.transmissionWeight);
+  mixF(desc.coatWeight);
+  mixF(desc.coatRoughness);
+  mixF3(desc.emissionColor);
+  mixF(desc.emissionLuminance);
+  mixF(desc.opacity);
+  // Texture bindings.
+  mixTex(desc.baseColorMap);
+  mixTex(desc.metallicMap);
+  mixTex(desc.roughnessMap);
+  mixTex(desc.normalMap);
+  mixTex(desc.emissionMap);
+  mixTex(desc.opacityMap);
+  mixTex(desc.transmissionMap);
+  mixTex(desc.coatRoughnessMap);
+  // (source / sourcePrim deliberately skipped — see above.)
+  // Coverage + sampler metadata (the previously-unhashed gap).
+  mixU(desc.hasDisplacementOutput);
+  mixU(desc.hasVolumeOutput);
+  mixU(desc.baseColorWrapS);
+  mixU(desc.baseColorWrapT);
+  mixU(desc.baseColorSourceCS);
+  mixF(desc.baseColorUvTranslationX);
+  mixF(desc.baseColorUvTranslationY);
+  mixF(desc.baseColorUvRotationDeg);
+  mixF(desc.baseColorUvScaleX);
+  mixF(desc.baseColorUvScaleY);
+  mixF(desc.normalStrength);
+  mixU(desc.flipTangentU);
+  mixU(desc.flipTangentV);
+  mixU(desc.projectionMode);
+  // Q1 OpenPBR-complete extension fields.
+  mixF(desc.specularColorR);
+  mixF(desc.specularColorG);
+  mixF(desc.specularColorB);
+  mixF(desc.baseDiffuseRoughness);
+  mixF(desc.specularRoughnessAnisotropy);
+  mixF(desc.coatColorR);
+  mixF(desc.coatColorG);
+  mixF(desc.coatColorB);
+  mixF(desc.coatIor);
+  mixF(desc.coatDarkening);
+  mixF(desc.fuzzWeight);
+  mixF(desc.fuzzColorR);
+  mixF(desc.fuzzColorG);
+  mixF(desc.fuzzColorB);
+  mixF(desc.fuzzRoughness);
+  mixF(desc.transmissionColorR);
+  mixF(desc.transmissionColorG);
+  mixF(desc.transmissionColorB);
+  mixF(desc.subsurfaceWeight);
+  mixF(desc.subsurfaceColorR);
+  mixF(desc.subsurfaceColorG);
+  mixF(desc.subsurfaceColorB);
+  mixU(desc.thinWalled);
   return hash;
 }
 
@@ -156,7 +248,8 @@ inline std::uint64_t HashTextureKey(const TextureKey& key) noexcept
 }
 
 // Pack an OpenPBRMaterialDesc + computed flag bits into the §11
-// 80-byte GPU layout the closesthit reads. `baseColorTex` etc. are
+// 240-byte OpenPBRMaterialGPU layout (15 rows of 16; row map on the
+// struct in ShaderInterop.slang). `baseColorTex` etc. are
 // the BINDLESS slot indices the caller resolved (or
 // INVALID_BINDLESS_TEXTURE for "no texture for this lobe").
 inline shaderinterop::OpenPBRMaterialGPU PackMaterialGpu(
@@ -207,6 +300,38 @@ inline shaderinterop::OpenPBRMaterialGPU PackMaterialGpu(
   gpu._reserved2 = 0.0f;
   gpu._reserved3 = 0.0f;
   gpu._reserved4 = 0.0f;
+  // Q1 OpenPBR-complete — rows 8-14 (see the row map on the struct in
+  // ShaderInterop.slang). Packed straight from the desc; NO shader
+  // reads these rows until the Q2 openpbr_material.slang closure
+  // lands, so this packing is image-safe by construction.
+  gpu.specularColorR = desc.specularColorR;             // row 8
+  gpu.specularColorG = desc.specularColorG;
+  gpu.specularColorB = desc.specularColorB;
+  gpu.specularWeight = desc.specularWeight;
+  gpu.coatColorR = desc.coatColorR;                     // row 9
+  gpu.coatColorG = desc.coatColorG;
+  gpu.coatColorB = desc.coatColorB;
+  gpu.coatIor = desc.coatIor;
+  gpu.coatDarkening = desc.coatDarkening;               // row 10
+  gpu.fuzzWeight = desc.fuzzWeight;
+  gpu.fuzzRoughness = desc.fuzzRoughness;
+  gpu.baseDiffuseRoughness = desc.baseDiffuseRoughness;
+  gpu.fuzzColorR = desc.fuzzColorR;                     // row 11
+  gpu.fuzzColorG = desc.fuzzColorG;
+  gpu.fuzzColorB = desc.fuzzColorB;
+  gpu.specularRoughnessAnisotropy = desc.specularRoughnessAnisotropy;
+  gpu.transmissionColorR = desc.transmissionColorR;     // row 12
+  gpu.transmissionColorG = desc.transmissionColorG;
+  gpu.transmissionColorB = desc.transmissionColorB;
+  gpu.subsurfaceWeight = desc.subsurfaceWeight;
+  gpu.subsurfaceColorR = desc.subsurfaceColorR;         // row 13
+  gpu.subsurfaceColorG = desc.subsurfaceColorG;
+  gpu.subsurfaceColorB = desc.subsurfaceColorB;
+  gpu.baseWeight = desc.baseWeight;
+  gpu.transmissionWeight = desc.transmissionWeight;     // row 14
+  gpu._reserved5 = 0.0f;
+  gpu._reserved6 = 0.0f;
+  gpu._reserved7 = 0.0f;
   return gpu;
 }
 

@@ -23,10 +23,15 @@ enum class MaterialFlag : uint32_t {
   HasOpacityMap       = 1u << 6,
   HasTransmissionMap  = 1u << 7,
   HasCoatRoughnessMap = 1u << 8,
-  AlphaTested         = 1u << 9,   // opacityThreshold > 0
+  AlphaTested         = 1u << 9,   // opacity < 1 (set by UploadMaterialBuffer;
+                                   // UsdPreviewSurface `opacityThreshold` is NOT
+                                   // translated — the anyhit IgnoreHit gate keys
+                                   // off partial scalar opacity)
   CoatEnabled         = 1u << 10,  // coatWeight > 0
   TransmissionEnabled = 1u << 11,  // transmissionWeight > 0
-  Emissive            = 1u << 12,  // emissionLuminance > 0 OR emissionMap valid
+  Emissive            = 1u << 12,  // emissionLuminance > 0 (luminance-only; a
+                                   // valid emissionMap with zero luminance does
+                                   // NOT set this bit)
   // V2.A.24 — normal-map tangent-handedness flips (OmniPBR
   // `flip_tangent_u` / `flip_tangent_v`). The DirectX-vs-OpenGL normal
   // convention: Omniverse content commonly authors flip_tangent_v=1
@@ -48,6 +53,10 @@ enum class MaterialFlag : uint32_t {
   // C++ flag-packing site sets exactly one from `projectionMode`.
   WorldProjection     = 1u << 16,
   ObjectProjection    = 1u << 17,
+  // Q1 OpenPBR-complete — OpenPBR `geometry_thin_walled` (desc.thinWalled).
+  // The Q2 transmission path treats the surface as a thin sheet (ignore
+  // the underside; transmission_color = through-sheet transmittance).
+  ThinWalled          = 1u << 18,
 };
 
 constexpr uint32_t operator|(MaterialFlag lhs, MaterialFlag rhs) noexcept {
