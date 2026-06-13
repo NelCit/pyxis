@@ -1437,6 +1437,30 @@ void TranslateMdl(const pxr::UsdShadeShader& shader,
     // depth, glass_color_texture, reflection_color_texture,
     // roughness_texture_influence.
   }
+  // Generic MDL glass — a custom dielectric-transmitter MDL that is NOT
+  // OmniGlass (the World Lobby's "Tinted_Glass" MDL: subIdentifier "Tinted_Glass",
+  // no glass_* inputs). Signalled by an authored `transmission_color`. This MDL
+  // names its inputs `ior` / `roughness` (NOT the OmniPBR `ior_constant` /
+  // `reflection_roughness_constant` the scalar reads above used), so re-read
+  // those and turn transmission on with transmission_color as the depth-0 tint.
+  // Without this the tinted-glass windows render OPAQUE grey instead of the dark
+  // see-through tint RTX shows.
+  else if (const pxr::UsdShadeInput transmissionColorInput =
+               shader.GetInput(pxr::TfToken("transmission_color"));
+           transmissionColorInput && transmissionColorInput.GetAttr().HasAuthoredValue())
+  {
+    desc.transmissionWeight = 1.0f;
+    StoreRgb(ReadColor(shader, pxr::TfToken("transmission_color"),
+                       hlslpp::float3{1.0f, 1.0f, 1.0f}, timeCode),
+             desc.transmissionColorR, desc.transmissionColorG, desc.transmissionColorB);
+    desc.specularIor = ReadFloat(shader, pxr::TfToken("ior"), desc.specularIor, timeCode);
+    desc.roughness   = ReadFloat(shader, pxr::TfToken("roughness"), desc.roughness, timeCode);
+    StoreRgb(ReadColor(shader, pxr::TfToken("reflection_color"),
+                       hlslpp::float3{1.0f, 1.0f, 1.0f}, timeCode),
+             desc.specularColorR, desc.specularColorG, desc.specularColorB);
+    desc.thinWalled =
+        ReadBoolish(shader, pxr::TfToken("thin_walled"), false, timeCode) ? 1u : 0u;
+  }
   desc.source = OpenPBRMaterialDesc::Source::Mdl;
 }
 
