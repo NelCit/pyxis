@@ -199,6 +199,36 @@ struct SsaaDownsampleUniforms {
     uint _ssaaPad0;
 };
 
+// Auto-exposure (AutoExposurePass) — fixed-point log-luminance reduction.
+// The reduction accumulates sum(log2(luminance)) over LIT pixels as a
+// DETERMINISTIC integer (so the parallel InterlockedAdd is order-independent
+// → byte-equal even with auto-exposure on). Per pixel we store
+// (log2(lum) + OFFSET) * SCALE as a uint; OFFSET shifts the [-30,30] log range
+// to non-negative, SCALE gives fractional bits. The tonemap recovers
+// avgLog2Lum = (sum / SCALE) / count − OFFSET.
+// OFFSET shifts log2(lum) non-negative; LIT pixels have lum > MIN_LUM so
+// log2 >= -13.29, hence offset 14. The encoded per-pixel value is clamped to
+// [LOG_MIN, LOG_MAX] before scaling so a firefly can't overflow the uint32
+// global sum: max encoded ≈ (14+20)*16 = 544/pixel keeps sum < 2^32 for any
+// resolution up to ~7.9M texels (4K + 2x SSAA), Pyxis's ceiling.
+#define AUTO_EXPOSURE_LOG_OFFSET 14.0
+#define AUTO_EXPOSURE_LOG_SCALE  16.0
+#define AUTO_EXPOSURE_LOG_MIN    (-14.0)
+#define AUTO_EXPOSURE_LOG_MAX    20.0
+// Below this luminance a pixel is treated as background/unlit and excluded from
+// the average (keeps the dark background from dragging the key down).
+#define AUTO_EXPOSURE_MIN_LUM    1e-4
+
+// AutoExposurePass compute uniforms — source (HDR radiance) dimensions. The
+// stats buffer (uint2: [0]=fixed-point log-lum sum, [1]=lit-pixel count) is a
+// separate UAV the pass clears + accumulates and the tonemap reads.
+struct AutoExposureUniforms {
+    uint srcWidth;
+    uint srcHeight;
+    uint _aePad0;
+    uint _aePad1;
+};
+
 // Tonemap compute-pass uniforms (P3 pass split — the display transform
 // extracted from raygen's inline branch). exposure mirrors
 // CameraUniforms.exposure (photographic stops, applied as 2^exposure
@@ -211,10 +241,11 @@ struct TonemapUniforms {
     uint  debugViewMode;   // DEBUG_VIEW_COLOR / NORMAL / DEPTH / ...
     float worldPosPeriod;  // WorldPos sin-encode period (scene units)
     uint  destWidth;       // output (display target) dimensions in texels
-    // Row 1 — dims tail + reserved pads.
+    // Row 1 — dims tail + auto-exposure (reuses the former reserved pads, so
+    // the 32-byte layout is unchanged).
     uint  destHeight;
-    uint  _pad0;
-    uint  _pad1;
+    uint  autoExposureEnabled;  // 0 = use `exposure` as-is; 1 = add the auto EV
+    float autoExposureKey;      // target middle-grey (0.18 default)
     uint  _pad2;
 };
 

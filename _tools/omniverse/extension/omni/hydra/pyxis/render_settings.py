@@ -93,6 +93,21 @@ _OPENPBR_ROWS = (
     ),
 )
 
+# Auto-exposure (AutoExposurePass). The delegate re-reads these every frame
+# (ReadAutoExposure / ReadAutoExposureKey) and pushes them into the engine.
+_AUTO_EXPOSURE_PATH = f"{_OPENPBR_ROOT}/autoExposure/value"
+_AUTO_EXPOSURE_KEY_PATH = f"{_OPENPBR_ROOT}/autoExposureKey/value"
+_AUTO_EXPOSURE_TOOLTIP = (
+    "Derive the exposure automatically from the frame's average (geometric-mean) "
+    "luminance, so a scene with hot lights and no authored camera exposure "
+    "displays without clipping to white. The camera's manual exposure then acts "
+    "as a bias on top. OFF by default (the manual exposure is authoritative)."
+)
+_AUTO_EXPOSURE_KEY_TOOLTIP = (
+    "Target middle-grey the auto exposure maps the average luminance to "
+    "(0.18 = the photographic 18% grey card). Lower = darker, higher = brighter."
+)
+
 
 class PyxisSettingsFrame(SettingsCollectionFrame):
     def _build_ui(self):
@@ -113,6 +128,22 @@ class PyxisSettingsFrame(SettingsCollectionFrame):
                 cleartext_path=f"OpenPBR: {name}",
                 has_reset=True,
             )
+        self._add_setting(
+            setting_type=SettingType.BOOL,
+            path=_AUTO_EXPOSURE_PATH,
+            name="Auto exposure",
+            tooltip=_AUTO_EXPOSURE_TOOLTIP,
+            cleartext_path="Auto exposure",
+            has_reset=True,
+        )
+        self._add_setting(
+            setting_type=SettingType.FLOAT,
+            path=_AUTO_EXPOSURE_KEY_PATH,
+            name="Auto-exposure target grey",
+            tooltip=_AUTO_EXPOSURE_KEY_TOOLTIP,
+            cleartext_path="Auto-exposure target grey",
+            has_reset=True,
+        )
 
 
 class PyxisSettingsStack(RTXSettingsStack):

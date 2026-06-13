@@ -58,6 +58,7 @@ TonemapPass::TonemapPass(nvrhi::IDevice* device, GpuScene& scene)
       nvrhi::BindingLayoutItem::Texture_SRV(10),             // worldPosEye AOV
       nvrhi::BindingLayoutItem::VolatileConstantBuffer(11),  // TonemapUniforms
       nvrhi::BindingLayoutItem::Texture_UAV(12),             // BGRA8 display output
+      nvrhi::BindingLayoutItem::RawBuffer_SRV(13),           // auto-exposure stats (uint2)
   };
   _bindingLayout = _device->createBindingLayout(layoutDesc);
   if (!_bindingLayout) {
@@ -130,12 +131,29 @@ TonemapPass::TonemapPass(nvrhi::IDevice* device, GpuScene& scene)
     }
   }
 
+  // 8-byte zero-filled raw buffer used for binding 13 when the caller doesn't
+  // wire PassContext::autoExposureStats. count == 0 → shader uses manual exposure.
+  {
+    nvrhi::BufferDesc fbBufDesc;
+    fbBufDesc.byteSize = 8u;  // uint2: sum, count.
+    fbBufDesc.canHaveRawViews = true;
+    fbBufDesc.debugName = "Tonemap.FbAutoExposureStats";
+    fbBufDesc.initialState = nvrhi::ResourceStates::ShaderResource;
+    fbBufDesc.keepInitialState = true;
+    _fallbackAutoExposureStats = _device->createBuffer(fbBufDesc);
+    if (!_fallbackAutoExposureStats) {
+      log.Error(log::RENDER, "TonemapPass: auto-exposure stats fallback create failed");
+      return;
+    }
+  }
+
   _ready = true;
   log.Info(log::RENDER, "TonemapPass: initialised (display transform extracted from raygen)");
 }
 
 nvrhi::BindingSetHandle TonemapPass::GetOrCreateBindingSet(
-    nvrhi::ITexture* source, nvrhi::ITexture* dest, nvrhi::ITexture* const (&aovs)[10]) {
+    nvrhi::ITexture* source, nvrhi::ITexture* dest, nvrhi::ITexture* const (&aovs)[10],
+    nvrhi::IBuffer* autoExposureStats) {
   // FNV1a-64 over every borrowed pointer the set references — same identity
   // scheme as SsaaResolvePass / BlitToSrgbPass, with the 10 resolved AOV
   // pointers folded in so a caller-side AOV swap invalidates by key change.
@@ -152,6 +170,7 @@ nvrhi::BindingSetHandle TonemapPass::GetOrCreateBindingSet(
   mix(dest);
   for (nvrhi::ITexture* const aov : aovs)
     mix(aov);
+  mix(autoExposureStats);
 
   if (auto cached = _bindingSetCache.find(key); cached != _bindingSetCache.end())
     return cached->second;
@@ -171,6 +190,7 @@ nvrhi::BindingSetHandle TonemapPass::GetOrCreateBindingSet(
       nvrhi::BindingSetItem::Texture_SRV(10, aovs[9]),  // worldPosEye
       nvrhi::BindingSetItem::ConstantBuffer(11, _paramsBuffer),
       nvrhi::BindingSetItem::Texture_UAV(12, dest),
+      nvrhi::BindingSetItem::RawBuffer_SRV(13, autoExposureStats),
   };
   nvrhi::BindingSetHandle set = _device->createBindingSet(setDesc, _bindingLayout);
   // P6 review — a key miss means at least one bound pointer changed, i.e.
@@ -232,8 +252,13 @@ void TonemapPass::Execute(nvrhi::ICommandList* commandList, const PassContext& c
                               : 10.0f;
   params.destWidth = destWidth;
   params.destHeight = destHeight;
-  params._pad0 = 0u;
-  params._pad1 = 0u;
+  // Auto-exposure (AutoExposurePass populated context.autoExposureStats this
+  // frame when enabled); the shader's COLOR path reads the stats only when
+  // autoExposureEnabled != 0, otherwise it uses the manual `exposure`.
+  params.autoExposureEnabled = context.settings->autoExposure;
+  params.autoExposureKey = (context.settings->autoExposureKey > 0.0f)
+                               ? context.settings->autoExposureKey
+                               : 0.18f;
   params._pad2 = 0u;
   commandList->writeBuffer(_paramsBuffer, &params, sizeof(params));
 
@@ -252,7 +277,15 @@ void TonemapPass::Execute(nvrhi::ICommandList* commandList, const PassContext& c
       context.targets->worldPosEyeAov ? context.targets->worldPosEyeAov : _fallbackWorldPosEyeAov.Get(),
   };
 
-  const nvrhi::BindingSetHandle bindingSet = GetOrCreateBindingSet(source, dest, aovs);
+  // Auto-exposure stats: the renderer-owned buffer AutoExposurePass wrote this
+  // frame, or the zero-filled fallback (count 0 → manual exposure) for callers
+  // that don't wire it.
+  nvrhi::IBuffer* const autoExposureStats = context.autoExposureStats != nullptr
+                                                ? context.autoExposureStats
+                                                : _fallbackAutoExposureStats.Get();
+
+  const nvrhi::BindingSetHandle bindingSet =
+      GetOrCreateBindingSet(source, dest, aovs, autoExposureStats);
   if (!bindingSet)
     return;
 
@@ -268,6 +301,10 @@ void TonemapPass::Execute(nvrhi::ICommandList* commandList, const PassContext& c
                                  nvrhi::ResourceStates::ShaderResource);
   commandList->setTextureState(dest, nvrhi::AllSubresources,
                                nvrhi::ResourceStates::UnorderedAccess);
+  // The stats buffer was UAV-written by AutoExposurePass (when enabled); read it
+  // as a shader resource here. No-op when auto-exposure is off (fallback stays
+  // ShaderResource via keepInitialState).
+  commandList->setBufferState(autoExposureStats, nvrhi::ResourceStates::ShaderResource);
   commandList->commitBarriers();
 
   nvrhi::ComputeState state;

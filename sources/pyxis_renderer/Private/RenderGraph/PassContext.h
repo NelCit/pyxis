@@ -56,6 +56,12 @@ struct PassContext {
   // PyxisRenderer::RenderFrame sets this each frame. Null when targets->color
   // is unbound — both RT passes then no-op.
   nvrhi::IBuffer* visibility = nullptr;
+  // Renderer-internal scratch: an 8-byte uint2 buffer (sum of fixed-point
+  // log2-luminance, lit-pixel count) AutoExposurePass clears + accumulates from
+  // `linearColor` and TonemapPass reads to derive the auto exposure. PyxisRenderer
+  // owns it (created once — 8 bytes, never resized) and sets it each frame.
+  // Null / untouched when auto-exposure is disabled (TonemapPass ignores it).
+  nvrhi::IBuffer* autoExposureStats = nullptr;
   uint64_t frameIndex = 0;
   // Default 0 to flush out anyone who forgot to wire it through —
   // PyxisRenderer::RenderFrame always sets the real value. A pass

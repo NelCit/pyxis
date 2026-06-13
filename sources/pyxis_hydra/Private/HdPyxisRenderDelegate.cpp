@@ -653,8 +653,14 @@ class HdPyxisRenderPass final : public HdRenderPass {
     // (0x3F) when the settings are absent — usdview / parity stays reference.
     if (const HdRenderIndex* renderIndex = GetRenderIndex()) {
       if (const auto* pyxisDelegate =
-              dynamic_cast<const HdPyxisRenderDelegate*>(renderIndex->GetRenderDelegate()))
+              dynamic_cast<const HdPyxisRenderDelegate*>(renderIndex->GetRenderDelegate())) {
         _engine->SetOpenPbrFeatureMask(pyxisDelegate->ReadOpenPbrFeatureMask());
+        // Auto-exposure (pyxis:autoExposure / pyxis:autoExposureKey) — same
+        // per-frame re-read so a Render Settings panel toggle takes effect
+        // same-frame.
+        _engine->SetAutoExposure(pyxisDelegate->ReadAutoExposure(),
+                                 pyxisDelegate->ReadAutoExposureKey());
+      }
     }
 
     _engine->RenderFrame();
@@ -833,6 +839,30 @@ uint32_t HdPyxisRenderDelegate::ReadOpenPbrFeatureMask() const {
   return mask;
 }
 
+bool HdPyxisRenderDelegate::ReadAutoExposure() const {
+  const VtValue value = GetRenderSetting(TfToken("pyxis:autoExposure"));
+  if (value.IsHolding<bool>())
+    return value.UncheckedGet<bool>();
+  if (value.IsHolding<int>())
+    return value.UncheckedGet<int>() != 0;
+  if (value.IsHolding<std::string>()) {
+    const std::string& str = value.UncheckedGet<std::string>();
+    return (str == "1" || str == "true" || str == "True");
+  }
+  return false;  // default OFF (parity-stable reference)
+}
+
+float HdPyxisRenderDelegate::ReadAutoExposureKey() const {
+  const VtValue value = GetRenderSetting(TfToken("pyxis:autoExposureKey"));
+  if (value.IsHolding<float>())
+    return value.UncheckedGet<float>();
+  if (value.IsHolding<double>())
+    return static_cast<float>(value.UncheckedGet<double>());
+  if (value.IsHolding<int>())
+    return static_cast<float>(value.UncheckedGet<int>());
+  return 0.18f;  // photographic 18% grey
+}
+
 void HdPyxisRenderDelegate::Init() {
   _resourceRegistry = std::make_shared<HdResourceRegistry>();
   _supportedRprimTypes = {HdPrimTypeTokens->mesh};
@@ -875,6 +905,14 @@ void HdPyxisRenderDelegate::Init() {
   _settingDescriptors.push_back(
       {"OpenPBR: energy-preserving diffuse (EON)", TfToken("pyxis:openpbrEonDiffuse"),
        VtValue(true)});
+  // Auto-exposure — derive the exposure from the frame's average luminance so a
+  // scene with hot lights + no authored camera exposure displays without
+  // clipping to white. Default OFF (parity-stable); the render pass re-reads it
+  // per-frame via ReadAutoExposure and pushes it into the engine.
+  _settingDescriptors.push_back(
+      {"Auto exposure", TfToken("pyxis:autoExposure"), VtValue(false)});
+  _settingDescriptors.push_back(
+      {"Auto-exposure target grey", TfToken("pyxis:autoExposureKey"), VtValue(0.18f)});
 
   // Resolve the persist toggle: pyxis:persistEngine render setting (default
   // true), overridden OFF by PYXIS_OMNI_NO_PERSIST (for VRAM-constrained / large

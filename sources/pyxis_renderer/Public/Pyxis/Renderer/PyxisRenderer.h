@@ -106,6 +106,10 @@ class PYXIS_RENDERER_API PyxisRenderer final {
   // thread it into PassContext::colorLinearResolved for BlitToSrgbPass. Same
   // forward-declared-IRenderPass* + impl-side cast pattern as _lightingPass.
   class IRenderPass* _ssaaPass = nullptr;
+  // Borrowed pointer to the AutoExposurePass the graph owns — kept so RenderFrame
+  // can thread its stats buffer into PassContext::autoExposureStats for
+  // TonemapPass. Same forward-declared-IRenderPass* + impl-side cast pattern.
+  class IRenderPass* _autoExposurePass = nullptr;
   uint64_t _frameIndex = 0;
   // Active frames-in-flight count from RendererCreateDesc. Threaded
   // into every PassContext so passes can size per-FIF rings.

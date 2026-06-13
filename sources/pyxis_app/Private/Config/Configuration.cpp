@@ -119,6 +119,10 @@ std::expected<void, std::string> OverlayConfiguration(Configuration& target,
       failure = ReadField(*render, "seed", target.render.seed);
     if (failure.empty())
       failure = ReadField(*render, "exposure", target.render.exposure);
+    if (failure.empty())
+      failure = ReadField(*render, "autoExposure", target.render.autoExposure);
+    if (failure.empty())
+      failure = ReadField(*render, "autoExposureKey", target.render.autoExposureKey);
   }
   if (auto output = document.find("output"); output != document.end() && output->is_object())
   {

@@ -4,6 +4,7 @@
 // (design D1): the graph runs RaytracedGBuffer → RaytracedLighting →
 // Tonemap → SsaaResolve → BlitToSrgb, all linear (§9).
 
+#include "Passes/AutoExposurePass.h"
 #include "Passes/BlitToSrgbPass.h"
 #include "Passes/RaytracedGBufferPass.h"
 #include "Passes/RaytracedLightingPass.h"
@@ -63,6 +64,14 @@ PyxisRenderer::PyxisRenderer(nvrhi::IDevice* device, GpuScene& scene, Profiler& 
   auto lighting = std::make_unique<RaytracedLightingPass>(device, scene);
   _lightingPass = lighting.get();
   _graph->AddPass(std::move(lighting));
+  // AutoExposurePass (optional) runs between lighting and tonemap: when
+  // RenderSettings::autoExposure is set it reduces the fp32 linearColor to a
+  // geometric-mean luminance (into the 8-byte stats buffer it owns, threaded to
+  // TonemapPass via PassContext::autoExposureStats). No-op + zero overhead when
+  // disabled (the default), so the byte-equal contract is untouched.
+  auto autoExposure = std::make_unique<AutoExposurePass>(device);
+  _autoExposurePass = autoExposure.get();
+  _graph->AddPass(std::move(autoExposure));
   // Tonemap runs next (P3 pass split): the display transform (exposure 2^stops +
   // Narkowicz ACES on COLOR, the 10 debug-view encodes) extracted from raygen's
   // inline branch. Reads the fp32 linearColor scratch RaytracedLightingPass
@@ -129,6 +138,13 @@ void PyxisRenderer::RenderFrame(nvrhi::ICommandList* commandList, const RenderSe
       context.linearColor = static_cast<RaytracedLightingPass*>(_lightingPass)
                                 ->EnsureLinearColor(colorDesc.width, colorDesc.height);
     }
+  }
+  // Thread the AutoExposurePass's stats buffer to TonemapPass (AutoExposurePass
+  // accumulates into it when enabled; TonemapPass reads it). Always available
+  // (created once in the pass ctor); both passes no-op when auto-exposure is off.
+  if (_autoExposurePass != nullptr) {
+    context.autoExposureStats =
+        static_cast<AutoExposurePass*>(_autoExposurePass)->StatsBuffer();
   }
   // P5 (design D2) / Q2 — spec-constant pipeline variants: make sure
   // the ACTIVE camera projection mode's RT pipelines exist before the
