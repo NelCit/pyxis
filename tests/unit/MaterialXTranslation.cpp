@@ -4,10 +4,13 @@
 
 #include <Pyxis/MaterialTranslation/UsdShadeToOpenPBR.h>
 #include <Pyxis/Renderer/Descs/OpenPBRMaterialDesc.h>
+#include <Pyxis/Renderer/Descs/TextureKey.h>
+#include <Pyxis/Renderer/Forward.h>
 
 #include <pxr/base/gf/vec3f.h>
 #include <pxr/base/tf/token.h>
 #include <pxr/base/vt/value.h>
+#include <pxr/usd/sdf/assetPath.h>
 #include <pxr/usd/sdf/path.h>
 #include <pxr/usd/usd/stage.h>
 #include <pxr/usd/usdShade/connectableAPI.h>
@@ -15,6 +18,11 @@
 #include <pxr/usd/usdShade/shader.h>
 
 #include <gtest/gtest.h>
+
+#include <cstdint>
+#include <string>
+#include <string_view>
+#include <vector>
 
 namespace {
 
@@ -30,6 +38,25 @@ pxr::UsdShadeMaterial BuildSurface(const pxr::UsdStageRefPtr& stage,
       shader.CreateOutput(pxr::TfToken("surface"), pxr::SdfValueTypeNames->Token);
   material.CreateSurfaceOutput().ConnectToSource(shaderOut);
   return material;
+}
+
+// Records the AcquireTexture calls the translator makes (Q3 — MaterialX texture
+// connections). Returns a distinct non-Invalid handle per call so the desc map
+// slots can be asserted as "bound".
+struct AcquireRecord {
+  std::vector<std::string>             paths;
+  std::vector<pyxis::TextureKey::Role> roles;
+};
+
+pyxis::TextureHandle RecordingAcquire(std::string_view path,
+                                      pyxis::TextureKey::Role role,
+                                      void* userData)
+{
+  auto* rec = static_cast<AcquireRecord*>(userData);
+  rec->paths.emplace_back(path);
+  rec->roles.push_back(role);
+  return static_cast<pyxis::TextureHandle>(
+      1000u + static_cast<std::uint32_t>(rec->paths.size()));
 }
 
 }  // namespace
@@ -250,4 +277,114 @@ TEST(MaterialXTranslation, StandardSurfaceSheenAndCoatMapToQ1Fields)
   EXPECT_NEAR(desc.transmissionColorB, 0.95f, 1e-6f);
   EXPECT_EQ(desc.thinWalled, 1u);
   EXPECT_EQ(desc.source, pyxis::OpenPBRMaterialDesc::Source::MaterialX);
+}
+
+// Q3 — the dominant real-world authoring shape: surface inputs are NOT direct
+// values but connections to PROMOTED INTERFACE INPUTS on the material/nodegraph
+// (the OpenPBR Playground authors all 55 materials this way). Pre-Q3 the
+// translator read only `.Get()` on the surface shader, saw "no value authored"
+// for every connected input, and fell back to OpenPBR defaults — so glass
+// (transmission_weight as an interface input) rendered opaque. The resolver
+// must follow the connection to the authored constant.
+TEST(MaterialXTranslation, ConnectedInterfaceInputResolvesToConstant)
+{
+  const pxr::UsdStageRefPtr stage = pxr::UsdStage::CreateInMemory("iface.usda");
+  const pxr::UsdShadeMaterial material =
+      BuildSurface(stage, pxr::TfToken("ND_open_pbr_surface_surfaceshader"));
+  // NOLINTNEXTLINE(misc-const-correctness) — CreateInput mutates.
+  pxr::UsdShadeShader shader{stage->GetPrimAtPath(pxr::SdfPath("/Mat/Surface"))};
+
+  // Promote transmission_weight to a material interface input holding 0.9 and
+  // connect the surface shader's input to it (the glass authoring shape).
+  pxr::UsdShadeInput ifaceTransmission =
+      material.CreateInput(pxr::TfToken("transmission_weight"),
+                           pxr::SdfValueTypeNames->Float);
+  ifaceTransmission.Set(0.9f);
+  shader.CreateInput(pxr::TfToken("transmission_weight"), pxr::SdfValueTypeNames->Float)
+      .ConnectToSource(ifaceTransmission);
+  // Colors resolve through interface inputs too.
+  pxr::UsdShadeInput ifaceColor =
+      material.CreateInput(pxr::TfToken("base_color"), pxr::SdfValueTypeNames->Color3f);
+  ifaceColor.Set(pxr::GfVec3f(0.2f, 0.7f, 0.3f));
+  shader.CreateInput(pxr::TfToken("base_color"), pxr::SdfValueTypeNames->Color3f)
+      .ConnectToSource(ifaceColor);
+
+  const pyxis::OpenPBRMaterialDesc desc =
+      pyxis::material_translation::FromUsdShade(material);
+
+  EXPECT_NEAR(desc.transmissionWeight, 0.9f, 1e-6f);
+  EXPECT_NEAR(desc.baseColor.x, 0.2f, 1e-6f);
+  EXPECT_NEAR(desc.baseColor.y, 0.7f, 1e-6f);
+  EXPECT_NEAR(desc.baseColor.z, 0.3f, 1e-6f);
+  EXPECT_EQ(desc.source, pyxis::OpenPBRMaterialDesc::Source::MaterialX);
+}
+
+// Q3 — base_color connected to an `ND_image_color3` node resolves to a texture:
+// the acquire callback fires with the file path + BaseColor role, the map slot
+// is bound, and the scalar baseColor becomes white (texture × 1).
+TEST(MaterialXTranslation, ConnectedImageNodeResolvesToTexture)
+{
+  const pxr::UsdStageRefPtr stage = pxr::UsdStage::CreateInMemory("img.usda");
+  const pxr::UsdShadeMaterial material =
+      BuildSurface(stage, pxr::TfToken("ND_open_pbr_surface_surfaceshader"));
+  // NOLINTNEXTLINE(misc-const-correctness) — CreateInput mutates.
+  pxr::UsdShadeShader shader{stage->GetPrimAtPath(pxr::SdfPath("/Mat/Surface"))};
+
+  pxr::UsdShadeShader image =
+      pxr::UsdShadeShader::Define(stage, pxr::SdfPath("/Mat/BaseTex"));
+  image.CreateIdAttr(pxr::VtValue(pxr::TfToken("ND_image_color3")));
+  image.CreateInput(pxr::TfToken("file"), pxr::SdfValueTypeNames->Asset)
+      .Set(pxr::SdfAssetPath("textures/base_color.png"));
+  const pxr::UsdShadeOutput imageOut =
+      image.CreateOutput(pxr::TfToken("out"), pxr::SdfValueTypeNames->Color3f);
+  shader.CreateInput(pxr::TfToken("base_color"), pxr::SdfValueTypeNames->Color3f)
+      .ConnectToSource(imageOut);
+
+  AcquireRecord rec;
+  const pyxis::OpenPBRMaterialDesc desc =
+      pyxis::material_translation::FromUsdShade(material, &RecordingAcquire, &rec);
+
+  ASSERT_EQ(rec.paths.size(), 1u);
+  EXPECT_EQ(rec.roles.front(), pyxis::TextureKey::Role::BaseColor);
+  EXPECT_NE(desc.baseColorMap, pyxis::TextureHandle::Invalid);
+  EXPECT_NEAR(desc.baseColor.x, 1.0f, 1e-6f);
+  EXPECT_NEAR(desc.baseColor.y, 1.0f, 1e-6f);
+  EXPECT_NEAR(desc.baseColor.z, 1.0f, 1e-6f);
+}
+
+// Q3 — geometry_normal connected through an `ND_normalmap` wrapping an
+// `ND_image_vector3` resolves to the normal-map texture (one unwrap hop).
+TEST(MaterialXTranslation, ConnectedNormalmapResolvesToNormalTexture)
+{
+  const pxr::UsdStageRefPtr stage = pxr::UsdStage::CreateInMemory("nrm.usda");
+  const pxr::UsdShadeMaterial material =
+      BuildSurface(stage, pxr::TfToken("ND_open_pbr_surface_surfaceshader"));
+  // NOLINTNEXTLINE(misc-const-correctness) — CreateInput mutates.
+  pxr::UsdShadeShader shader{stage->GetPrimAtPath(pxr::SdfPath("/Mat/Surface"))};
+
+  pxr::UsdShadeShader image =
+      pxr::UsdShadeShader::Define(stage, pxr::SdfPath("/Mat/NrmTex"));
+  image.CreateIdAttr(pxr::VtValue(pxr::TfToken("ND_image_vector3")));
+  image.CreateInput(pxr::TfToken("file"), pxr::SdfValueTypeNames->Asset)
+      .Set(pxr::SdfAssetPath("textures/normal.png"));
+  const pxr::UsdShadeOutput imageOut =
+      image.CreateOutput(pxr::TfToken("out"), pxr::SdfValueTypeNames->Float3);
+
+  pxr::UsdShadeShader normalmap =
+      pxr::UsdShadeShader::Define(stage, pxr::SdfPath("/Mat/Nmap"));
+  normalmap.CreateIdAttr(pxr::VtValue(pxr::TfToken("ND_normalmap_vector2")));
+  normalmap.CreateInput(pxr::TfToken("in"), pxr::SdfValueTypeNames->Float3)
+      .ConnectToSource(imageOut);
+  const pxr::UsdShadeOutput normalmapOut =
+      normalmap.CreateOutput(pxr::TfToken("out"), pxr::SdfValueTypeNames->Float3);
+  shader.CreateInput(pxr::TfToken("geometry_normal"), pxr::SdfValueTypeNames->Float3)
+      .ConnectToSource(normalmapOut);
+
+  AcquireRecord rec;
+  const pyxis::OpenPBRMaterialDesc desc =
+      pyxis::material_translation::FromUsdShade(material, &RecordingAcquire, &rec);
+
+  ASSERT_EQ(rec.paths.size(), 1u);
+  EXPECT_EQ(rec.roles.front(), pyxis::TextureKey::Role::NormalMap);
+  EXPECT_NE(desc.normalMap, pyxis::TextureHandle::Invalid);
 }

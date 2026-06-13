@@ -621,58 +621,276 @@ bool ResolveUVTextureBinding(const pxr::UsdShadeShader& shader,
   return true;
 }
 
-// V2.A.18 — MaterialX OpenPBR (`open_pbr_surface`) translator. Pyxis's
+// === MaterialX node-graph resolution (Q3 follow-up) ==========================
+//
+// Playground + production MaterialX materials author EVERY surface input
+// through the node graph, never as direct values: `base_color` connects to an
+// `ND_image_color3` (a texture), `transmission_weight` connects to a promoted
+// nodegraph/material *interface input* (where the real constant lives),
+// `geometry_normal` connects to `ND_normalmap` wrapping an `ND_image_vector3`.
+// The pre-Q3 translators only read `.Get()` direct values, so they saw nothing
+// and every MaterialX material fell back to OpenPBR defaults (grey, opaque —
+// which is why playground glass rendered opaque: its transmission_weight is a
+// connected interface input we never read). These helpers walk the graph the
+// way the UsdPreviewSurface path walks UsdUVTexture chains: follow interface-
+// input connections to the authored constant, and a direct `ND_image*`
+// (optionally through one `ND_normalmap`) to the texture asset.
+
+// Acquire a (possibly UDIM) texture. `file` is the 1001-substituted primary
+// path; when `hasUdim`, the 1002..1099 tiles present on disk are acquired too
+// (the closesthit samples only 1001 today, matching the UsdPreviewSurface
+// path). Returns the primary handle.
+[[nodiscard]] TextureHandle AcquireTextureMaybeUdim(
+    AcquireTextureFn acquire, void* userData, const std::string& file,
+    const std::string& udimPattern, bool hasUdim, TextureKey::Role role) noexcept
+{
+  if (acquire == nullptr || file.empty())
+    return TextureHandle::Invalid;
+  const TextureHandle primary = acquire(file, role, userData);
+  if (hasUdim)
+  {
+    if (const std::size_t udimPos = udimPattern.find("<UDIM>");
+        udimPos != std::string::npos)
+    {
+      constexpr std::size_t UDIM_TOKEN_LEN = 6u;  // length of literal "<UDIM>"
+      for (int tile = 1002; tile <= 1099; ++tile)
+      {
+        std::string tilePath = udimPattern;
+        tilePath.replace(udimPos, UDIM_TOKEN_LEN, std::to_string(tile));
+        std::error_code existsErr;
+        if (!std::filesystem::exists(tilePath, existsErr) || existsErr)
+          continue;
+        (void)acquire(tilePath, role, userData);
+      }
+    }
+  }
+  return primary;
+}
+
+// Read an `ND_image*` node's `inputs:file` asset path (UDIM-aware). Mirrors the
+// UsdUVTexture file handling in ResolveUVTextureBinding: resolve via ArResolver,
+// fall back to the unresolved string, and substitute 1001 for `<UDIM>`.
+[[nodiscard]] bool ReadMtlxImageFile(const pxr::UsdShadeShader& imageNode,
+                                     std::string& outFile,
+                                     std::string& outUdimPattern,
+                                     bool&        outHasUdim) noexcept
+{
+  static const pxr::TfToken fileToken("file");  // NOLINT(readability-identifier-naming)
+  outFile.clear();
+  outUdimPattern.clear();
+  outHasUdim = false;
+  const pxr::UsdShadeInput fileInput = imageNode.GetInput(fileToken);
+  if (!fileInput)
+    return false;
+  pxr::VtValue value;
+  if (!fileInput.Get(&value) || !value.IsHolding<pxr::SdfAssetPath>())
+    return false;
+  const pxr::SdfAssetPath asset = value.UncheckedGet<pxr::SdfAssetPath>();
+  outFile = asset.GetResolvedPath();
+  if (outFile.empty())
+    outFile = asset.GetAssetPath();
+  if (outFile.empty())
+    return false;
+  if (const auto udimPos = outFile.find("<UDIM>"); udimPos != std::string::npos)
+  {
+    outUdimPattern = outFile;
+    outHasUdim = true;
+    constexpr std::size_t UDIM_TOKEN_LEN = 6u;
+    outFile.replace(udimPos, UDIM_TOKEN_LEN, "1001");
+  }
+  return true;
+}
+
+// The outcome of resolving a MaterialX surface input through the graph.
+struct MtlxResolved {
+  enum class Kind : uint8_t { None, Constant, Texture };
+  Kind         kind = Kind::None;
+  pxr::VtValue value;             // Kind::Constant — the authored value.
+  std::string  file;              // Kind::Texture — 1001-substituted path.
+  std::string  udimPattern;
+  bool         hasUdim = false;
+};
+
+// Walk a MaterialX surface-shader input to the value that ultimately drives it.
+// Follows promoted interface-input connections (`.connect` targeting another
+// Input) up to the authored constant; a direct `ND_image*` output yields its
+// texture asset; one `ND_normalmap` hop unwraps to its tangent-space image.
+// Utility nodes we don't evaluate (invert / colorcorrect / combine / extract /
+// …) yield Kind::None so the caller keeps its scalar default. The bounded hop
+// budget guards against an authoring cycle.
+[[nodiscard]] MtlxResolved ResolveMtlxInput(pxr::UsdShadeInput input,
+                                            pxr::UsdTimeCode   timeCode) noexcept
+{
+  static const pxr::TfToken inToken("in");  // NOLINT(readability-identifier-naming)
+  MtlxResolved out;
+  for (int hop = 0; hop < 16; ++hop)
+  {
+    if (!input)
+      return out;
+    if (!input.HasConnectedSource())
+    {
+      // Leaf: read the authored constant (if any).
+      pxr::VtValue value;
+      if (input.GetAttr().HasAuthoredValue() && input.Get(&value, timeCode))
+      {
+        out.kind  = MtlxResolved::Kind::Constant;
+        out.value = value;
+      }
+      return out;
+    }
+    pxr::UsdShadeConnectableAPI source;
+    pxr::TfToken                sourceName;
+    pxr::UsdShadeAttributeType  sourceType;
+    if (!input.GetConnectedSource(&source, &sourceName, &sourceType))
+      return out;
+    if (sourceType == pxr::UsdShadeAttributeType::Input)
+    {
+      // Promoted interface input — hop upstream toward the authored value.
+      input = source.GetInput(sourceName);
+      continue;
+    }
+    // An output: a node produces this value.
+    const pxr::UsdShadeShader node{source.GetPrim()};
+    pxr::TfToken              nodeId;
+    if (!node.GetShaderId(&nodeId))
+      return out;
+    const std::string& idStr = nodeId.GetString();
+    if (idStr.starts_with("ND_image"))
+    {
+      if (ReadMtlxImageFile(node, out.file, out.udimPattern, out.hasUdim))
+        out.kind = MtlxResolved::Kind::Texture;
+      return out;
+    }
+    if (idStr.starts_with("ND_normalmap"))
+    {
+      input = node.GetInput(inToken);  // unwrap to the tangent-space image
+      continue;
+    }
+    return out;  // unevaluated utility node → caller keeps its default
+  }
+  return out;
+}
+
+// V2.A.18 / Q3 — MaterialX OpenPBR (`open_pbr_surface`) translator. Pyxis's
 // canonical target; the OpenPBRMaterialDesc IS the MTLX OpenPBR model
-// post-translation, so field-for-field mapping. V2.A.13 — every
-// scalar / color input sampled at `timeCode`.
+// post-translation, so field-for-field mapping. Every input is resolved
+// through the node graph (ResolveMtlxInput): a promoted interface input yields
+// its authored constant, a direct `ND_image*` connection yields a texture into
+// the matching map slot (the six the closesthit samples: baseColor / metallic /
+// roughness / normal / emission / opacity). V2.A.13 — constants sampled at
+// `timeCode`.
 void TranslateMaterialXOpenPBR(const pxr::UsdShadeShader& shader,
                                 OpenPBRMaterialDesc&       desc,
+                                AcquireTextureFn           acquire,
+                                void*                      userData,
                                 pxr::UsdTimeCode           timeCode) noexcept
 {
-  desc.baseColor      = ReadColor(shader, pxr::TfToken("base_color"),
-                                   hlslpp::float3{0.18f, 0.18f, 0.18f}, timeCode);
-  desc.baseWeight     = ReadFloat(shader, pxr::TfToken("base_weight"), 1.0f, timeCode);
-  desc.metalness      = ReadFloat(shader, pxr::TfToken("base_metalness"), 0.0f, timeCode);
-  desc.roughness      = ReadFloat(shader, pxr::TfToken("specular_roughness"), 0.5f, timeCode);
-  desc.specularWeight = ReadFloat(shader, pxr::TfToken("specular_weight"), 1.0f, timeCode);
-  desc.specularIor    = ReadFloat(shader, pxr::TfToken("specular_ior"), 1.5f, timeCode);
-  desc.opacity        = ReadFloat(shader, pxr::TfToken("geometry_opacity"), 1.0f, timeCode);
-  desc.coatWeight     = ReadFloat(shader, pxr::TfToken("coat_weight"), 0.0f, timeCode);
-  desc.coatRoughness  = ReadFloat(shader, pxr::TfToken("coat_roughness"), 0.0f, timeCode);
-  desc.transmissionWeight = ReadFloat(shader, pxr::TfToken("transmission_weight"), 0.0f, timeCode);
-  desc.emissionColor  = ReadColor(shader, pxr::TfToken("emission_color"),
-                                   hlslpp::float3{0.0f, 0.0f, 0.0f}, timeCode);
-  desc.emissionLuminance = ReadFloat(shader, pxr::TfToken("emission_luminance"), 0.0f, timeCode);
+  auto resolve = [&](const char* name) {
+    return ResolveMtlxInput(shader.GetInput(pxr::TfToken(name)), timeCode);
+  };
+  auto scalar = [&](const char* name, float fallback) -> float {
+    const MtlxResolved r = resolve(name);
+    if (r.kind == MtlxResolved::Kind::Constant && r.value.IsHolding<float>())
+      return r.value.UncheckedGet<float>();
+    return fallback;
+  };
+  auto color = [&](const char* name, hlslpp::float3 fallback) -> hlslpp::float3 {
+    const MtlxResolved r = resolve(name);
+    if (r.kind == MtlxResolved::Kind::Constant && r.value.IsHolding<pxr::GfVec3f>())
+    {
+      const pxr::GfVec3f c = r.value.UncheckedGet<pxr::GfVec3f>();
+      return hlslpp::float3{c[0], c[1], c[2]};
+    }
+    return fallback;
+  };
+  auto boolean = [&](const char* name, bool fallback) -> bool {
+    const MtlxResolved r = resolve(name);
+    if (r.kind == MtlxResolved::Kind::Constant)
+    {
+      if (r.value.IsHolding<bool>())  return r.value.UncheckedGet<bool>();
+      if (r.value.IsHolding<int>())   return r.value.UncheckedGet<int>() != 0;
+      if (r.value.IsHolding<float>()) return r.value.UncheckedGet<float>() > 0.0f;
+    }
+    return fallback;
+  };
+  // Scalar-or-texture: a direct image sets `outMap` (+ scalar 1, so texture × 1);
+  // a constant returns its value; otherwise the fallback.
+  auto scalarTex = [&](const char* name, float fallback, TextureKey::Role role,
+                       TextureHandle& outMap) -> float {
+    const MtlxResolved r = resolve(name);
+    if (r.kind == MtlxResolved::Kind::Texture)
+    {
+      outMap = AcquireTextureMaybeUdim(acquire, userData, r.file, r.udimPattern,
+                                       r.hasUdim, role);
+      return (outMap != TextureHandle::Invalid) ? 1.0f : fallback;
+    }
+    if (r.kind == MtlxResolved::Kind::Constant && r.value.IsHolding<float>())
+      return r.value.UncheckedGet<float>();
+    return fallback;
+  };
+  auto colorTex = [&](const char* name, hlslpp::float3 fallback,
+                      TextureKey::Role role, TextureHandle& outMap) -> hlslpp::float3 {
+    const MtlxResolved r = resolve(name);
+    if (r.kind == MtlxResolved::Kind::Texture)
+    {
+      outMap = AcquireTextureMaybeUdim(acquire, userData, r.file, r.udimPattern,
+                                       r.hasUdim, role);
+      if (outMap != TextureHandle::Invalid)
+        return hlslpp::float3{1.0f, 1.0f, 1.0f};  // texture × white
+      return fallback;
+    }
+    if (r.kind == MtlxResolved::Kind::Constant && r.value.IsHolding<pxr::GfVec3f>())
+    {
+      const pxr::GfVec3f c = r.value.UncheckedGet<pxr::GfVec3f>();
+      return hlslpp::float3{c[0], c[1], c[2]};
+    }
+    return fallback;
+  };
+
+  desc.baseColor      = colorTex("base_color", hlslpp::float3{0.18f, 0.18f, 0.18f},
+                                 TextureKey::Role::BaseColor, desc.baseColorMap);
+  desc.baseWeight     = scalar("base_weight", 1.0f);
+  desc.metalness      = scalarTex("base_metalness", 0.0f,
+                                  TextureKey::Role::RoughnessMetallic, desc.metallicMap);
+  desc.roughness      = scalarTex("specular_roughness", 0.5f,
+                                  TextureKey::Role::RoughnessMetallic, desc.roughnessMap);
+  desc.specularWeight = scalar("specular_weight", 1.0f);
+  desc.specularIor    = scalar("specular_ior", 1.5f);
+  desc.opacity        = scalarTex("geometry_opacity", 1.0f,
+                                  TextureKey::Role::Opacity, desc.opacityMap);
+  desc.coatWeight     = scalar("coat_weight", 0.0f);
+  desc.coatRoughness  = scalar("coat_roughness", 0.0f);
+  desc.transmissionWeight = scalar("transmission_weight", 0.0f);
+  desc.emissionColor  = colorTex("emission_color", hlslpp::float3{0.0f, 0.0f, 0.0f},
+                                 TextureKey::Role::Emission, desc.emissionMap);
+  desc.emissionLuminance = scalar("emission_luminance", 0.0f);
   // Q1 OpenPBR-complete — the remaining open_pbr_surface inputs map
   // field-for-field onto the Q1 desc extension. Fallbacks are the
   // OpenPBR spec defaults (= the desc defaults).
-  StoreRgb(ReadColor(shader, pxr::TfToken("specular_color"),
-                     hlslpp::float3{1.0f, 1.0f, 1.0f}, timeCode),
+  StoreRgb(color("specular_color", hlslpp::float3{1.0f, 1.0f, 1.0f}),
            desc.specularColorR, desc.specularColorG, desc.specularColorB);
-  desc.baseDiffuseRoughness =
-      ReadFloat(shader, pxr::TfToken("base_diffuse_roughness"), 0.0f, timeCode);
-  desc.specularRoughnessAnisotropy =
-      ReadFloat(shader, pxr::TfToken("specular_roughness_anisotropy"), 0.0f, timeCode);
-  StoreRgb(ReadColor(shader, pxr::TfToken("coat_color"),
-                     hlslpp::float3{1.0f, 1.0f, 1.0f}, timeCode),
+  desc.baseDiffuseRoughness = scalar("base_diffuse_roughness", 0.0f);
+  desc.specularRoughnessAnisotropy = scalar("specular_roughness_anisotropy", 0.0f);
+  StoreRgb(color("coat_color", hlslpp::float3{1.0f, 1.0f, 1.0f}),
            desc.coatColorR, desc.coatColorG, desc.coatColorB);
-  desc.coatIor       = ReadFloat(shader, pxr::TfToken("coat_ior"), 1.6f, timeCode);
-  desc.coatDarkening = ReadFloat(shader, pxr::TfToken("coat_darkening"), 1.0f, timeCode);
-  desc.fuzzWeight    = ReadFloat(shader, pxr::TfToken("fuzz_weight"), 0.0f, timeCode);
-  StoreRgb(ReadColor(shader, pxr::TfToken("fuzz_color"),
-                     hlslpp::float3{1.0f, 1.0f, 1.0f}, timeCode),
+  desc.coatIor       = scalar("coat_ior", 1.6f);
+  desc.coatDarkening = scalar("coat_darkening", 1.0f);
+  desc.fuzzWeight    = scalar("fuzz_weight", 0.0f);
+  StoreRgb(color("fuzz_color", hlslpp::float3{1.0f, 1.0f, 1.0f}),
            desc.fuzzColorR, desc.fuzzColorG, desc.fuzzColorB);
-  desc.fuzzRoughness = ReadFloat(shader, pxr::TfToken("fuzz_roughness"), 0.5f, timeCode);
-  StoreRgb(ReadColor(shader, pxr::TfToken("transmission_color"),
-                     hlslpp::float3{1.0f, 1.0f, 1.0f}, timeCode),
+  desc.fuzzRoughness = scalar("fuzz_roughness", 0.5f);
+  StoreRgb(color("transmission_color", hlslpp::float3{1.0f, 1.0f, 1.0f}),
            desc.transmissionColorR, desc.transmissionColorG, desc.transmissionColorB);
-  desc.subsurfaceWeight =
-      ReadFloat(shader, pxr::TfToken("subsurface_weight"), 0.0f, timeCode);
-  StoreRgb(ReadColor(shader, pxr::TfToken("subsurface_color"),
-                     hlslpp::float3{0.8f, 0.8f, 0.8f}, timeCode),
+  desc.subsurfaceWeight = scalar("subsurface_weight", 0.0f);
+  StoreRgb(color("subsurface_color", hlslpp::float3{0.8f, 0.8f, 0.8f}),
            desc.subsurfaceColorR, desc.subsurfaceColorG, desc.subsurfaceColorB);
-  desc.thinWalled =
-      ReadBoolish(shader, pxr::TfToken("geometry_thin_walled"), false, timeCode) ? 1u : 0u;
+  desc.thinWalled = boolean("geometry_thin_walled", false) ? 1u : 0u;
+  // Geometry normal — `ND_normalmap` wrapping a tangent-space image.
+  if (const MtlxResolved r = resolve("geometry_normal");
+      r.kind == MtlxResolved::Kind::Texture)
+    desc.normalMap = AcquireTextureMaybeUdim(acquire, userData, r.file,
+                                             r.udimPattern, r.hasUdim,
+                                             TextureKey::Role::NormalMap);
   // Dropped open_pbr_surface inputs with no Q1 desc slot (warn-skip;
   // logging lands caller-side — this static lib has no spdlog):
   // coat_roughness_anisotropy, coat_rotation, specular_rotation,
@@ -681,46 +899,98 @@ void TranslateMaterialXOpenPBR(const pxr::UsdShadeShader& shader,
   desc.source = OpenPBRMaterialDesc::Source::MaterialX;
 }
 
-// V2.A.18 — Autodesk standard_surface translator (MaterialX). Uses
+// V2.A.18 / Q3 — Autodesk standard_surface translator (MaterialX). Uses
 // `base` as the layer weight (not `base_weight` like OpenPBR) and
 // collapses the (float emission weight, color3 emission color) pair
-// into Pyxis's `emissionLuminance + emissionColor` fields.
+// into Pyxis's `emissionLuminance + emissionColor` fields. Like the
+// OpenPBR translator, inputs are resolved through the node graph so
+// connected textures + promoted interface constants are honoured.
 void TranslateMaterialXStandardSurface(const pxr::UsdShadeShader& shader,
                                         OpenPBRMaterialDesc&       desc,
+                                        AcquireTextureFn           acquire,
+                                        void*                      userData,
                                         pxr::UsdTimeCode           timeCode) noexcept
 {
-  desc.baseColor      = ReadColor(shader, pxr::TfToken("base_color"),
-                                   hlslpp::float3{0.18f, 0.18f, 0.18f}, timeCode);
-  desc.baseWeight     = ReadFloat(shader, pxr::TfToken("base"), 1.0f, timeCode);
-  desc.metalness      = ReadFloat(shader, pxr::TfToken("metalness"), 0.0f, timeCode);
-  desc.roughness      = ReadFloat(shader, pxr::TfToken("specular_roughness"), 0.5f, timeCode);
-  desc.specularWeight = ReadFloat(shader, pxr::TfToken("specular"), 1.0f, timeCode);
-  desc.specularIor    = ReadFloat(shader, pxr::TfToken("specular_IOR"), 1.5f, timeCode);
-  desc.coatWeight     = ReadFloat(shader, pxr::TfToken("coat"), 0.0f, timeCode);
-  desc.coatRoughness  = ReadFloat(shader, pxr::TfToken("coat_roughness"), 0.0f, timeCode);
-  desc.transmissionWeight = ReadFloat(shader, pxr::TfToken("transmission"), 0.0f, timeCode);
-  desc.emissionColor  = ReadColor(shader, pxr::TfToken("emission_color"),
-                                   hlslpp::float3{0.0f, 0.0f, 0.0f}, timeCode);
-  desc.emissionLuminance = ReadFloat(shader, pxr::TfToken("emission"), 0.0f, timeCode);
+  auto resolve = [&](const char* name) {
+    return ResolveMtlxInput(shader.GetInput(pxr::TfToken(name)), timeCode);
+  };
+  auto scalar = [&](const char* name, float fallback) -> float {
+    const MtlxResolved r = resolve(name);
+    if (r.kind == MtlxResolved::Kind::Constant && r.value.IsHolding<float>())
+      return r.value.UncheckedGet<float>();
+    return fallback;
+  };
+  auto color = [&](const char* name, hlslpp::float3 fallback) -> hlslpp::float3 {
+    const MtlxResolved r = resolve(name);
+    if (r.kind == MtlxResolved::Kind::Constant && r.value.IsHolding<pxr::GfVec3f>())
+    {
+      const pxr::GfVec3f c = r.value.UncheckedGet<pxr::GfVec3f>();
+      return hlslpp::float3{c[0], c[1], c[2]};
+    }
+    return fallback;
+  };
+  auto scalarTex = [&](const char* name, float fallback, TextureKey::Role role,
+                       TextureHandle& outMap) -> float {
+    const MtlxResolved r = resolve(name);
+    if (r.kind == MtlxResolved::Kind::Texture)
+    {
+      outMap = AcquireTextureMaybeUdim(acquire, userData, r.file, r.udimPattern,
+                                       r.hasUdim, role);
+      return (outMap != TextureHandle::Invalid) ? 1.0f : fallback;
+    }
+    if (r.kind == MtlxResolved::Kind::Constant && r.value.IsHolding<float>())
+      return r.value.UncheckedGet<float>();
+    return fallback;
+  };
+  auto colorTex = [&](const char* name, hlslpp::float3 fallback,
+                      TextureKey::Role role, TextureHandle& outMap) -> hlslpp::float3 {
+    const MtlxResolved r = resolve(name);
+    if (r.kind == MtlxResolved::Kind::Texture)
+    {
+      outMap = AcquireTextureMaybeUdim(acquire, userData, r.file, r.udimPattern,
+                                       r.hasUdim, role);
+      if (outMap != TextureHandle::Invalid)
+        return hlslpp::float3{1.0f, 1.0f, 1.0f};
+      return fallback;
+    }
+    if (r.kind == MtlxResolved::Kind::Constant && r.value.IsHolding<pxr::GfVec3f>())
+    {
+      const pxr::GfVec3f c = r.value.UncheckedGet<pxr::GfVec3f>();
+      return hlslpp::float3{c[0], c[1], c[2]};
+    }
+    return fallback;
+  };
+
+  desc.baseColor      = colorTex("base_color", hlslpp::float3{0.18f, 0.18f, 0.18f},
+                                 TextureKey::Role::BaseColor, desc.baseColorMap);
+  desc.baseWeight     = scalar("base", 1.0f);
+  desc.metalness      = scalarTex("metalness", 0.0f,
+                                  TextureKey::Role::RoughnessMetallic, desc.metallicMap);
+  desc.roughness      = scalarTex("specular_roughness", 0.5f,
+                                  TextureKey::Role::RoughnessMetallic, desc.roughnessMap);
+  desc.specularWeight = scalar("specular", 1.0f);
+  desc.specularIor    = scalar("specular_IOR", 1.5f);
+  desc.coatWeight     = scalar("coat", 0.0f);
+  desc.coatRoughness  = scalar("coat_roughness", 0.0f);
+  desc.transmissionWeight = scalar("transmission", 0.0f);
+  desc.emissionColor  = colorTex("emission_color", hlslpp::float3{0.0f, 0.0f, 0.0f},
+                                 TextureKey::Role::Emission, desc.emissionMap);
+  desc.emissionLuminance = scalar("emission", 0.0f);
   // Q1 OpenPBR-complete — Standard Surface → OpenPBR mapping for the
   // Q1 desc extension. Fallbacks are the desc (OpenPBR spec) defaults,
   // matching this translator's existing convention.
-  StoreRgb(ReadColor(shader, pxr::TfToken("specular_color"),
-                     hlslpp::float3{1.0f, 1.0f, 1.0f}, timeCode),
+  StoreRgb(color("specular_color", hlslpp::float3{1.0f, 1.0f, 1.0f}),
            desc.specularColorR, desc.specularColorG, desc.specularColorB);
-  desc.specularRoughnessAnisotropy =
-      ReadFloat(shader, pxr::TfToken("specular_anisotropy"), 0.0f, timeCode);
+  desc.specularRoughnessAnisotropy = scalar("specular_anisotropy", 0.0f);
   // Standard Surface sheen_* → OpenPBR fuzz_* (same lobe family; the
   // Zeltner LTC fuzz consumes these at Q2).
-  desc.fuzzWeight = ReadFloat(shader, pxr::TfToken("sheen"), 0.0f, timeCode);
-  StoreRgb(ReadColor(shader, pxr::TfToken("sheen_color"),
-                     hlslpp::float3{1.0f, 1.0f, 1.0f}, timeCode),
+  desc.fuzzWeight = scalar("sheen", 0.0f);
+  StoreRgb(color("sheen_color", hlslpp::float3{1.0f, 1.0f, 1.0f}),
            desc.fuzzColorR, desc.fuzzColorG, desc.fuzzColorB);
-  desc.fuzzRoughness = ReadFloat(shader, pxr::TfToken("sheen_roughness"), 0.5f, timeCode);
-  StoreRgb(ReadColor(shader, pxr::TfToken("coat_color"),
-                     hlslpp::float3{1.0f, 1.0f, 1.0f}, timeCode),
+  desc.fuzzRoughness = scalar("sheen_roughness", 0.5f);
+  StoreRgb(color("coat_color", hlslpp::float3{1.0f, 1.0f, 1.0f}),
            desc.coatColorR, desc.coatColorG, desc.coatColorB);
-  desc.coatIor = ReadFloat(shader, pxr::TfToken("coat_IOR"), 1.6f, timeCode);
+  desc.coatIor = scalar("coat_IOR", 1.6f);
   // Standard Surface's coat_affect_color / coat_affect_roughness have
   // NO OpenPBR equivalent — OpenPBR replaces them with coat_darkening
   // (default 1) and an always-on parameter-free roughening formula.
@@ -728,23 +998,30 @@ void TranslateMaterialXStandardSurface(const pxr::UsdShadeShader& shader,
   // anyway); any other authored value is warn-skipped, as is
   // coat_affect_roughness (logging lands caller-side — this static
   // lib has no spdlog).
-  {
-    float coatAffectColor = 0.0f;
-    if (ReadShaderInputFloat(shader, pxr::TfToken("coat_affect_color"), coatAffectColor)
-        && coatAffectColor > 0.0f)
-    {
-      desc.coatDarkening = 1.0f;
-    }
-  }
-  desc.subsurfaceWeight = ReadFloat(shader, pxr::TfToken("subsurface"), 0.0f, timeCode);
-  StoreRgb(ReadColor(shader, pxr::TfToken("subsurface_color"),
-                     hlslpp::float3{0.8f, 0.8f, 0.8f}, timeCode),
+  if (scalar("coat_affect_color", 0.0f) > 0.0f)
+    desc.coatDarkening = 1.0f;
+  desc.subsurfaceWeight = scalar("subsurface", 0.0f);
+  StoreRgb(color("subsurface_color", hlslpp::float3{0.8f, 0.8f, 0.8f}),
            desc.subsurfaceColorR, desc.subsurfaceColorG, desc.subsurfaceColorB);
-  StoreRgb(ReadColor(shader, pxr::TfToken("transmission_color"),
-                     hlslpp::float3{1.0f, 1.0f, 1.0f}, timeCode),
+  StoreRgb(color("transmission_color", hlslpp::float3{1.0f, 1.0f, 1.0f}),
            desc.transmissionColorR, desc.transmissionColorG, desc.transmissionColorB);
-  desc.thinWalled =
-      ReadBoolish(shader, pxr::TfToken("thin_walled"), false, timeCode) ? 1u : 0u;
+  {
+    const MtlxResolved r = resolve("thin_walled");
+    bool thinWalled = false;
+    if (r.kind == MtlxResolved::Kind::Constant)
+    {
+      if (r.value.IsHolding<bool>())  thinWalled = r.value.UncheckedGet<bool>();
+      else if (r.value.IsHolding<int>())   thinWalled = r.value.UncheckedGet<int>() != 0;
+      else if (r.value.IsHolding<float>()) thinWalled = r.value.UncheckedGet<float>() > 0.0f;
+    }
+    desc.thinWalled = thinWalled ? 1u : 0u;
+  }
+  // Geometry normal — direct tangent-space image or `ND_normalmap` wrap.
+  if (const MtlxResolved r = resolve("normal");
+      r.kind == MtlxResolved::Kind::Texture)
+    desc.normalMap = AcquireTextureMaybeUdim(acquire, userData, r.file,
+                                             r.udimPattern, r.hasUdim,
+                                             TextureKey::Role::NormalMap);
   // Dropped standard_surface inputs not in the Q1 mapping set
   // (warn-skip): diffuse_roughness, specular_rotation,
   // coat_anisotropy/rotation/normal, transmission_depth/scatter/
@@ -1081,10 +1358,10 @@ OpenPBRMaterialDesc FromUsdShade(const pxr::UsdShadeMaterial& material,
       TranslateMdl(match.shader, desc, acquire, userData, timeCode);
       return desc;
     case SurfaceMatch::Kind::MaterialXOpenPBR:
-      TranslateMaterialXOpenPBR(match.shader, desc, timeCode);
+      TranslateMaterialXOpenPBR(match.shader, desc, acquire, userData, timeCode);
       return desc;
     case SurfaceMatch::Kind::MaterialXStandardSurface:
-      TranslateMaterialXStandardSurface(match.shader, desc, timeCode);
+      TranslateMaterialXStandardSurface(match.shader, desc, acquire, userData, timeCode);
       return desc;
     case SurfaceMatch::Kind::UsdPreviewSurface:
       // UsdPreviewSurface path falls through to the texture-aware
