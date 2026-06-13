@@ -218,6 +218,13 @@ struct SsaaDownsampleUniforms {
 // Below this luminance a pixel is treated as background/unlit and excluded from
 // the average (keeps the dark background from dragging the key down).
 #define AUTO_EXPOSURE_MIN_LUM    1e-4
+// Auto-exposure exposes for the bright end, but clamps the MAX to at most this
+// many stops above the geometric-mean luminance — otherwise a single firefly /
+// a sliver of a visible light source dominates the max and crushes the whole
+// image to black (pure-max fragility). 2.5 stops puts the average near middle
+// grey when an outlier clamps, while letting the true max drive the exposure
+// when the scene has no outliers.
+#define AUTO_EXPOSURE_MAX_HEADROOM 2.5
 
 // AutoExposurePass compute uniforms — source (HDR radiance) dimensions. The
 // stats buffer (uint2: [0]=fixed-point log-lum sum, [1]=lit-pixel count) is a

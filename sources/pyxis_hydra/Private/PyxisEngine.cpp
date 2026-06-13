@@ -101,7 +101,7 @@ struct PyxisEngine::Impl {
   // adapters byte-for-byte (§25.O.3 parity).
   uint32_t openPbrFeatureMask = 0x3Fu;
   bool     autoExposure = false;      // pyxis:autoExposure render setting.
-  float    autoExposureKey = 0.18f;   // pyxis:autoExposureKey render setting.
+  float    autoExposureKey = 1.0f;    // pyxis:autoExposureKey (max→target).
   bool valid = false;
 };
 

@@ -131,11 +131,11 @@ TonemapPass::TonemapPass(nvrhi::IDevice* device, GpuScene& scene)
     }
   }
 
-  // 8-byte zero-filled raw buffer used for binding 13 when the caller doesn't
+  // 12-byte zero-filled raw buffer used for binding 13 when the caller doesn't
   // wire PassContext::autoExposureStats. count == 0 → shader uses manual exposure.
   {
     nvrhi::BufferDesc fbBufDesc;
-    fbBufDesc.byteSize = 8u;  // uint2: sum, count.
+    fbBufDesc.byteSize = 12u;  // uint3: sum, count, max.
     fbBufDesc.canHaveRawViews = true;
     fbBufDesc.debugName = "Tonemap.FbAutoExposureStats";
     fbBufDesc.initialState = nvrhi::ResourceStates::ShaderResource;
@@ -258,7 +258,7 @@ void TonemapPass::Execute(nvrhi::ICommandList* commandList, const PassContext& c
   params.autoExposureEnabled = context.settings->autoExposure;
   params.autoExposureKey = (context.settings->autoExposureKey > 0.0f)
                                ? context.settings->autoExposureKey
-                               : 0.18f;
+                               : 1.0f;
   params._pad2 = 0u;
   commandList->writeBuffer(_paramsBuffer, &params, sizeof(params));
 

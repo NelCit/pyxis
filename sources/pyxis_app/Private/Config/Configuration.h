@@ -47,7 +47,8 @@ struct RenderConfig {
   // OFF by default so existing goldens stay byte-equal. `autoExposureKey` is
   // the target middle-grey (0.18 = the photographic 18% card).
   bool  autoExposure = false;
-  float autoExposureKey = 0.18f;
+  // The linear level the brightest pixel maps to before ACES (1.0 = max→white).
+  float autoExposureKey = 1.0f;
   // M3+ extensions: maxBounces, enableAccumulation, toneMap,
   // debugView, accumulationFrameLimit, russianRouletteStartBounce,
   // fireflyClampLuminance, lowDiscrepancySampling, aovs, ...
