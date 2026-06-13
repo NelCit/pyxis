@@ -49,8 +49,18 @@ std::string ReadField(const nlohmann::json& parent, const char* key, T& out) {
     }
     out = found->get<bool>();
   }
+  else if constexpr (std::is_floating_point_v<T>)
+  {
+    // Floating-point destination (e.g. render.exposure in stops) — accept
+    // any JSON number, integer or real, positive or negative.
+    if (!found->is_number())
+    {
+      return std::string{key} + ": expected number";
+    }
+    out = found->get<T>();
+  }
   else
-  {  // numeric (uint32_t etc.)
+  {  // integral (uint32_t etc.)
     if (!found->is_number_unsigned() && !found->is_number_integer())
     {
       return std::string{key} + ": expected number";
@@ -107,6 +117,8 @@ std::expected<void, std::string> OverlayConfiguration(Configuration& target,
       failure = ReadField(*render, "samplesPerFrame", target.render.samplesPerFrame);
     if (failure.empty())
       failure = ReadField(*render, "seed", target.render.seed);
+    if (failure.empty())
+      failure = ReadField(*render, "exposure", target.render.exposure);
   }
   if (auto output = document.find("output"); output != document.end() && output->is_object())
   {

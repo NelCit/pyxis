@@ -30,7 +30,17 @@ struct RenderConfig {
   // for headless EXR — a zero seed defeats the byte-identical contract
   // and is rejected at validation time.
   uint32_t seed = 1;
-  // M3+ extensions: maxBounces, enableAccumulation, exposure, toneMap,
+  // Photographic exposure in STOPS, applied on TOP of any
+  // UsdGeomCamera.exposure the scene authors (added, then 2^stops in the
+  // TonemapPass before ACES). USD/UsdLux author lights in physical units
+  // (nits) paired with negative camera exposure to compress to display
+  // range (M8a); scenes that author neither a camera nor exposure — e.g.
+  // the OpenPBR Playground, whose area lights run 400..1500 — clip correct
+  // albedos to white at the default 0. This headless knob supplies the
+  // compensation the viewer's Exposure slider gives interactively. Default
+  // 0 = no change (byte-equal for existing goldens, which all author 0).
+  float exposure = 0.0f;
+  // M3+ extensions: maxBounces, enableAccumulation, toneMap,
   // debugView, accumulationFrameLimit, russianRouletteStartBounce,
   // fireflyClampLuminance, lowDiscrepancySampling, aovs, ...
 };

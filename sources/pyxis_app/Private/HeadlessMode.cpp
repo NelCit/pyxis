@@ -19,6 +19,7 @@
 #include <Pyxis/Platform/Device/Resolution.h>
 #include <Pyxis/Platform/Logging/Log.h>
 #include <Pyxis/Platform/Logging/LogCategories.h>
+#include <Pyxis/Renderer/Descs/CameraDesc.h>
 #include <Pyxis/Renderer/Descs/GpuSceneCreateDesc.h>
 #include <Pyxis/Renderer/Descs/RendererCreateDesc.h>
 #include <Pyxis/Renderer/Descs/RenderSettings.h>
@@ -574,6 +575,20 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
   const auto loadEndNs = std::chrono::steady_clock::now();
   const double loadWallMs =
       std::chrono::duration<double, std::milli>(loadEndNs - loadStartNs).count();
+
+  // Photographic exposure compensation (config.render.exposure, in stops),
+  // added on top of whatever UsdGeomCamera.exposure the scene authored. The
+  // TonemapPass applies 2^exposure before ACES. Physical-unit UsdLux lights
+  // pair with negative exposure to compress to display range (M8a); a scene
+  // that authors neither a camera nor exposure (the OpenPBR Playground) needs
+  // this so its now-correct albedos don't clip to white. Default 0 = no-op
+  // (keeps existing goldens byte-equal — they all author 0).
+  if (config.render.exposure != 0.0f)
+  {
+    CameraDesc cameraDesc = gpuScene.GetCamera();
+    cameraDesc.exposure += config.render.exposure;
+    gpuScene.SetCamera(cameraDesc);
+  }
 
   RendererCreateDesc rendererDesc{};
   rendererDesc.initialWidth = superWidth;
