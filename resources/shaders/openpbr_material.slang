@@ -19,15 +19,16 @@
 //       OpenPBRReflectionWeight  — deterministic mirror gate weight
 //       OpenPBRTransmittance     — per-surface T_pbr for the raygen loop
 //       OpenPBREmission          — coat-tinted L_e
-//   * Renderer direct-light convention (pre-existing — see the history
-//     notes in shading.slang): direct DIFFUSE-like lobes omit the 1/π
-//     Lambert normalization (contribution = ρ·NdotL, i.e. the proper
-//     BRDF × π) while microfacet SPECULAR lobes are true BRDF values
-//     (D·G·F). The dome-ambient path applies INV_PI explicitly. The
-//     EON / SSS / fuzz terms below are scaled to that same convention
-//     so the all-defaults image reproduces the historical look up to
-//     the documented energy-accounting changes; RELATIVE energy ratios
-//     between lobes still match the spec.
+//   * Renderer direct-light convention: ALL lobes are true BRDF values.
+//     Diffuse-like lobes (EON / SSS / fuzz) carry the 1/π Lambert
+//     normalization (contribution = ρ/π · NdotL) and microfacet SPECULAR
+//     lobes are D·G·F — so a directly-lit surface's diffuse matches both its
+//     specular and the dome-ambient path (which also applies INV_PI). NOTE:
+//     pre-fix the direct DIFFUSE/fuzz lobes OMITTED the 1/π ("π-boosted
+//     convention"), making direct diffuse ~π (≈3×) brighter than specular and
+//     than the ambient diffuse — a real energy bug. Fixed by multiplying
+//     fDiffuse + fFuzz by OPENPBR_INV_PI; goldens regenerated for the new
+//     (physically-correct, internally-consistent) look.
 //
 // Feature gates: ONE Vulkan specialization constant (bitmask), folded
 // by the driver at pipeline-creation time so disabled blocks compile
@@ -305,9 +306,10 @@ float3 EonRhoMs(float3 rho, float sigma) {
                float3(1.0, 1.0, 1.0) - rho * oneMinusAvg);
 }
 
-// Direct-light diffuse term in the renderer's π-boosted convention
-// (× π vs the spec BRDF; see the module header). Returns the
-// per-channel factor that multiplies NdotL × lightColor.
+// Direct-light diffuse term: returns the un-normalized ρ-scale reflectance
+// (σ = 0 ≡ exact Lambert ρ). The caller (EvaluateOpenPBRDirect) multiplies the
+// result by OPENPBR_INV_PI to form the physical ρ/π Lambert BRDF — consistent
+// with the ambient path and the spec; see the module header.
 float3 EonDiffuseDirect(float3 rho, float sigma, float3 N, float3 V, float3 L) {
     if (!OpenPBRFeature(OPENPBR_FEATURE_EON_DIFFUSE) || sigma <= 0.0)
         return rho;  // exact Lambert — gate invariant (σ = 0 ≡ gate off)
@@ -569,9 +571,15 @@ float3 EvaluateOpenPBRDirect(OpenPBRSurfaceParams p, float3 N, float3 V, float3 
     const float  diffuseSelector = OpenPBRDiffuseSelector(p);
     const float2 ab = GgxDirectionalAlbedoAB(NdotV, rPrime);
     const float3 eSpec = saturate(xiFs * saturate(p.specularColor) * ab.x + ab.y);
+    // INV_PI is the Lambert BRDF normalization — applied here so direct diffuse
+    // matches the ambient/dome path (EvaluateOpenPBRAmbient applies INV_PI to its
+    // whole all-diffuse result) and a true ρ/π Lambert BRDF. (Pre-fix the direct
+    // diffuse omitted it — the "π-boosted convention" — making direct diffuse ~π
+    // brighter than both specular and the ambient diffuse. Fixed; goldens rebaked.)
     const float3 fDiffuse = EonDiffuseDirect(rhoDiffuse, saturate(p.baseDiffuseRoughness), N, V, L)
                           * diffuseSelector
-                          * saturate(float3(1.0, 1.0, 1.0) - eSpec);
+                          * saturate(float3(1.0, 1.0, 1.0) - eSpec)
+                          * OPENPBR_INV_PI;
 
     // f_base-substrate = lerp(dielectric-base, conductor, M). (The
     // dielectric diffuse rides under (1 − M) — metals have no diffuse.)
@@ -609,9 +617,11 @@ float3 EvaluateOpenPBRDirect(OpenPBRSurfaceParams p, float3 N, float3 V, float3 
     if (OpenPBRFeature(OPENPBR_FEATURE_FUZZ) && p.fuzzWeight > 0.0) {
         const float Fw = saturate(p.fuzzWeight);
         const float eFuzz = FuzzDirectionalAlbedo(NdotV, p.fuzzRoughness);
-        // Cosine-lobe LOD of the LTC sheen in the renderer's π-boosted
-        // diffuse convention: f_fuzz·π = fuzz_color·E_fuzz(μ_o, α).
-        const float3 fFuzz = saturate(p.fuzzColor) * eFuzz;
+        // Cosine-lobe LOD of the LTC sheen. Physical f_fuzz = fuzz_color·E_fuzz·
+        // INV_PI — the INV_PI keeps the sheen consistent with the now-physical
+        // diffuse lobe (both ρ/π) and the ambient path. (Pre-fix this was the
+        // π-boosted convention, f_fuzz·π; fixed in lockstep with the diffuse 1/π.)
+        const float3 fFuzz = saturate(p.fuzzColor) * eFuzz * OPENPBR_INV_PI;
         result = Fw * fFuzz + (1.0 - Fw * eFuzz) * result;
     }
 
