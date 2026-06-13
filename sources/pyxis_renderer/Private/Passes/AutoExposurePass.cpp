@@ -139,8 +139,6 @@ void AutoExposurePass::Execute(nvrhi::ICommandList* commandList, const PassConte
   if (srcWidth == 0u || srcHeight == 0u)
     return;
 
-  const Profiler::GpuScope gpuScope(*context.profiler, commandList, "pass.AutoExposure");
-
   shaderinterop::AutoExposureUniforms params{};
   params.srcWidth = srcWidth;
   params.srcHeight = srcHeight;

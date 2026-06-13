@@ -534,8 +534,6 @@ void RaytracedGBufferPass::Execute(nvrhi::ICommandList* commandList,
   if (!_pipelines[projectionVariant] || !_shaderTables[projectionVariant])
     return;
 
-  const Profiler::GpuScope gpuScope(*context.profiler, commandList, "pass.RaytracedGBuffer");
-
   // ---- Upload camera uniforms ----------------------------------------
   // Identical derivation to the lighting pass's upload (the same
   // CameraDesc inputs produce the same bytes, so BuildCameraRay reads

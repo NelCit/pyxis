@@ -238,8 +238,6 @@ void TonemapPass::Execute(nvrhi::ICommandList* commandList, const PassContext& c
   if (destWidth == 0u || destHeight == 0u)
     return;
 
-  const Profiler::GpuScope gpuScope(*context.profiler, commandList, "pass.Tonemap");
-
   // Exposure from the same GpuScene camera RaytracedLightingPass uploads into
   // CameraUniforms.exposure (identical float, identical 2^exposure gain);
   // debugViewMode / worldPosPeriod from RenderSettings exactly as

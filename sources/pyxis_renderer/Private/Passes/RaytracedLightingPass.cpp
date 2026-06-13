@@ -993,8 +993,6 @@ void RaytracedLightingPass::Execute(nvrhi::ICommandList* commandList, const Pass
       || !variantIt->second.shaderTable)
     return;
 
-  const Profiler::GpuScope gpuScope(*context.profiler, commandList, "pass.RaytracedLighting");
-
   // ---- Drain prior-frame pick staging -------------------------------
   // M7 follow-up. The previous Execute() copied pickResult ->
   // pickResultStaging on the same queue our renderer submits on.
