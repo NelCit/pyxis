@@ -21,6 +21,7 @@
 #include "Pyxis/UsdIngest/StageWalker.h"
 
 #include "AnalyticGeom.h"
+#include "PrimvarBlockLayout.h"
 #include "SkelSkinning.h"
 #include "SubdivRefine.h"
 #include "VolumeLoader.h"
@@ -1467,6 +1468,45 @@ template <typename ScalarType>
     *whyInvalid = "indexed but indices array is missing or empty";
     return false;
   }
+
+  // elementSize is the number of typed values that make up one LOGICAL primvar
+  // element; an index i addresses the block values[i*E : i*E + E]. For the
+  // channels this is called on (normals / st / displayColor / tangents) a
+  // logical element is a single vec, so E is 1 — but we must tell two non-1
+  // cases apart rather than blanket-accept or blanket-reject:
+  //
+  //  (a) a COHERENT block primvar: values laid out as logicalCount*E with every
+  //      index addressing an in-range E-block (values.size() % E == 0 and
+  //      index < values.size()/E). USD supports this for array-per-element
+  //      primvars (e.g. skinning weights). A block is not a single vec, so we
+  //      can't consume it here — fall back, but only once it's PROVEN coherent.
+  //
+  //  (b) a BOGUS elementSize: DCC/FBX exporters mis-author it as values.size()
+  //      on an otherwise-standard indexed primvar (the OpenPBR Shader
+  //      Playground; the same malformed data also crashes Blender 4.5/5.0 and
+  //      Cinema4D 2026.1 — see OpenPBRShaderPlayground issue #15 / PR #18 "Fix
+  //      invalid normals primvars by removing elementSize"). Here the block
+  //      interpretation is wildly out of range, so we fall through and treat
+  //      the primvar as elementSize 1, recovering the authored values.
+  //
+  // Crucially we NEVER route the indexed path through UsdGeomPrimvar::
+  // ComputeFlattened, whose values->resize(indices.size() * elementSize) pre-
+  // sizes to ~indices.size()*values.size() (a 905 GB VtArray on the playground's
+  // 274k-vertex bubbles mesh -> std::bad_alloc -> fail-fast). The manual,
+  // bounds-checked flatten below allocates exactly indices.size() elements.
+  const int elementSize = primvar.GetElementSize();
+  if (IsCoherentBlockLayout(elementSize, authored.size(),
+                            primvarIndices.cdata(), primvarIndices.size()))
+  {
+    // A real array-per-element primvar; a single value per element is required
+    // for this channel, so treat it as unauthored. (An incoherent elementSize
+    // is bogus — we fall through and flatten as elementSize 1 below, recovering
+    // the authored values.)
+    *whyInvalid = "indexed block primvar (elementSize " + std::to_string(elementSize)
+                  + ") — one value per element required for this channel";
+    return false;
+  }
+
   for (const int index : primvarIndices)
   {
     if (index < 0 || static_cast<std::size_t>(index) >= authored.size())
