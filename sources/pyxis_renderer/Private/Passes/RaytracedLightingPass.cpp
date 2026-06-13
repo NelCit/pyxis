@@ -662,10 +662,14 @@ void RaytracedLightingPass::EnsureFeaturePipeline(uint32_t projectionMode,
     return;
   // Same normalization Execute's key uses: anything but 1 (including
   // out-of-range garbage) falls to perspective — matching the shader
-  // branch's `PROJECTION_MODE == 1u` shape exactly. The key is also
-  // latched as THE variant Execute selects this frame (pure lookup
-  // there), so a Q3 runtime mask flip takes effect the same frame its
-  // pipeline materializes.
+  // branch's `PROJECTION_MODE == 1u` shape exactly. Q3 review — the
+  // feature mask is clamped to OPENPBR_FEATURES_ALL via the SAME
+  // NormalizeFeatureMask VariantKey uses, so the spec constant baked
+  // into the pipeline below matches the key it is stored under (and
+  // arbitrary high bits can't materialize unbounded variants — see the
+  // VariantKey comment). The key is also latched as THE variant Execute
+  // selects this frame (pure lookup there), so a Q3 runtime mask flip
+  // takes effect the same frame its pipeline materializes.
   const std::uint64_t key = VariantKey(projectionMode, featureMask);
   _activeVariantKey = key;
   if (_variants.contains(key) || _variantBuildFailed.contains(key))
@@ -682,7 +686,7 @@ void RaytracedLightingPass::EnsureFeaturePipeline(uint32_t projectionMode,
        .closestHit = _closestHitShader,
        .anyHit = _anyHitShader,
        .projectionMode = (projectionMode == 1u) ? 1u : 0u,
-       .openPbrFeatureMask = featureMask,
+       .openPbrFeatureMask = NormalizeFeatureMask(featureMask),
        .logContext = "RaytracedLightingPass::EnsureFeaturePipeline"});
   if (!built.pipeline || !built.shaderTable)
   {

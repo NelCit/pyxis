@@ -196,8 +196,10 @@ float GgxSpecularDV(float NdotL, float NdotV, float NdotH, float roughness) {
 // Anisotropic D·G2 (Heitz 2014; Filament formulation). Spec
 // §"Microfacet model" eq. `openpbr-anisotropy-formula` is NORMATIVE:
 //   α_t = r² sqrt(2/(1 + (1 − a)²)),  α_b = (1 − a) α_t
-// ("This formulation satisfies α_t² + α_b² = 2α⁴ ... to preserve the
-// average roughness regardless of the anisotropy.") The isotropic
+// ("This formulation satisfies α_t² + α_b² = 2α² ... to preserve the
+// average roughness regardless of the anisotropy.") — with the
+// isotropic α = r², α_t² + α_b² = α_t²(1 + (1 − a)²) = 2r⁴ = 2α², so
+// the identity is in α², not α⁴. The isotropic
 // fallback α = r² is explicitly endorsed by the spec — the ANISOTROPY
 // gate (and a == 0 / missing tangent frame) takes the isotropic path.
 float GgxSpecularDVAniso(float3 N, float3 V, float3 L, float3 H,

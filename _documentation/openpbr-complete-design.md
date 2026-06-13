@@ -95,9 +95,10 @@ ShaderInterop.slang (dual-language):
   explicitly (fixes the existing un-hashed gap sourcePrim.._reserved AND the
   offsetof landmine; stale comments corrected). Dedup re-bucketing is
   value-identical so images hold.
-- `OpenPBRMaterialGPU` 128 B -> 192 B (private interop; new rows for
-  specularColor+aniso, coatColor+coatIor+coatDarkening, fuzz, transmission
-  color+subsurface, + reserved): static_asserts updated, PackMaterialGpu
+- `OpenPBRMaterialGPU` 128 B -> 240 B (private interop; new rows 8-14 for
+  specularColor+weight, coatColor+coatIor, coatDarkening+fuzz+baseDiffuseRoughness,
+  fuzzColor+aniso, transmissionColor+subsurfaceWeight, subsurfaceColor+baseWeight,
+  transmissionWeight + reserved tail): static_asserts updated, PackMaterialGpu
   extended.
 - MaterialFlag: new bits 18+ (ThinWalled; map-presence bits later), mirror
   kept in lockstep.

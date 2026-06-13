@@ -341,10 +341,13 @@ struct PickResult {
 // shader side indexes by `materialId` (set on the instance custom
 // index) and reads `flags` to short-circuit lobe evaluation.
 //
-// M5 ships the BASE LAYER only. The reserved* slots leave room for
-// the §11 specular / transmission / coat / sheen / subsurface
-// extensions to land at M5+ (post the user's full BSDF impl) without
-// reshuffling existing fields. Layout is 80 bytes (5 rows of 16).
+// Layout is 240 bytes (15 rows of 16). Rows 0-7 are the FROZEN
+// 128-B M9/V2.A.24 base layout (base color + flags, bindless texture
+// slots, base/dielectric/coat/emission scalars, emission RGB, UV
+// transform); rows 8-14 are the Q1 OpenPBR-complete extension
+// (specular/coat/fuzz/transmission/subsurface tints + weights). The
+// full field-by-field row map is documented on the rows 8-14 block
+// inside the struct below.
 //
 // **Scalars only** — no float3 / float4 vectors. Reason: `hlslpp::
 // float3` is SIMD-padded to 16 bytes on the C++ side while Slang's
@@ -425,9 +428,9 @@ struct OpenPBRMaterialGPU {
     // (15 rows of 16 — the tightest multiple-of-16 that fits the full
     // v1.1.1 parameter set; rows 0-7 above are byte-identical to the
     // 128-B layout so the Q1 packing change is image-safe). Packed by
-    // PackMaterialGpu (Private/GpuScene/Detail.h); consumed by the Q2
-    // openpbr_material.slang closure stack — NO shader reads rows 8-14
-    // in Q1. Row map:
+    // PackMaterialGpu (Private/GpuScene/Detail.h) and, since Q2, READ
+    // by the openpbr_material.slang closure stack (these rows feed the
+    // specular/coat/fuzz/transmission/subsurface lobes). Row map:
     //   Row  8 — specularColor RGB + specularWeight
     //   Row  9 — coatColor RGB + coatIor
     //   Row 10 — coatDarkening + fuzzWeight + fuzzRoughness

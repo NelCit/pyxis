@@ -29,6 +29,12 @@
 
 #include <nvrhi/nvrhi.h>
 
+// Q3 review — NormalizeFeatureMask clamps the incoming OpenPBR feature
+// mask to shaderinterop::OPENPBR_FEATURES_ALL (the dual-language interop
+// header is on the renderer's private include path; the same one
+// RaytracedLightingPass.cpp pulls for the spec-constant ids).
+#include "ShaderInterop.slang"
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -103,10 +109,31 @@ class RaytracedLightingPass final : public IRenderPass {
   // (`PROJECTION_MODE == 1u`); the OpenPBR feature mask rides in the
   // low 32 bits. Single normalization point so EnsureFeaturePipeline /
   // IsOperational / Execute can never disagree on a key.
+  //
+  // Q3 review — DEFENSIVE mask clamp at the renderer ingress. The mask
+  // arrives from RenderSettings::openPbrFeatureMask, a full uint32 a
+  // caller (CLI / Hydra setting / Omniverse carb path) can set to
+  // arbitrary bits. The shader only tests the defined bits
+  // (OPENPBR_FEATURES_ALL == 0x3F) — every other bit has NO image
+  // effect — so masking them off here is purely image-safe AND bounds
+  // the unbounded variant cache: a hostile/buggy caller sweeping the
+  // top 26 bits would otherwise materialize one RT pipeline + SBT per
+  // distinct uint32 (no eviction). With the clamp the cache is capped
+  // at <= 64 mask combos x 2 projection modes. The default mask (0x3F)
+  // is unchanged by the clamp, so no golden pixel moves. This is the
+  // ONE canonical clamp: every consumer (the key below, IsOperational,
+  // and Execute's _activeVariantKey lookup) routes through VariantKey,
+  // and EnsureFeaturePipeline re-derives the same normalized mask via
+  // NormalizeFeatureMask before it builds the pipeline so the spec
+  // constant baked into the variant matches the key it is stored under.
+  [[nodiscard]] static constexpr uint32_t NormalizeFeatureMask(
+      uint32_t featureMask) noexcept {
+    return featureMask & shaderinterop::OPENPBR_FEATURES_ALL;
+  }
   [[nodiscard]] static constexpr std::uint64_t VariantKey(
       uint32_t projectionMode, uint32_t featureMask) noexcept {
     const std::uint64_t proj = (projectionMode == 1u) ? 1u : 0u;
-    return (proj << 32) | static_cast<std::uint64_t>(featureMask);
+    return (proj << 32) | static_cast<std::uint64_t>(NormalizeFeatureMask(featureMask));
   }
 
   // Q2 — make sure the RT pipeline variant for the ACTIVE

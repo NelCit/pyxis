@@ -301,9 +301,11 @@ inline shaderinterop::OpenPBRMaterialGPU PackMaterialGpu(
   gpu._reserved3 = 0.0f;
   gpu._reserved4 = 0.0f;
   // Q1 OpenPBR-complete — rows 8-14 (see the row map on the struct in
-  // ShaderInterop.slang). Packed straight from the desc; NO shader
-  // reads these rows until the Q2 openpbr_material.slang closure
-  // lands, so this packing is image-safe by construction.
+  // ShaderInterop.slang). Packed straight from the desc. Since Q2 these
+  // rows ARE read by the openpbr_material.slang closure stack
+  // (specular/coat/fuzz/transmission/subsurface tints + weights), so
+  // the packing offsets below are now load-bearing for shading — pinned
+  // by the PackMaterialGpu round-trip unit test (PackMaterialGpuRows.cpp).
   gpu.specularColorR = desc.specularColorR;             // row 8
   gpu.specularColorG = desc.specularColorG;
   gpu.specularColorB = desc.specularColorB;
