@@ -108,6 +108,8 @@ target_sources(pyxis_renderer PRIVATE
     Private/Passes/RaytracedLightingPass.cpp
     Private/Passes/TonemapPass.h
     Private/Passes/TonemapPass.cpp
+    Private/Passes/AutoExposurePass.h
+    Private/Passes/AutoExposurePass.cpp
     Private/Passes/SsaaResolvePass.h
     Private/Passes/SsaaResolvePass.cpp
     Private/Passes/BlitToSrgbPass.h
@@ -377,6 +379,18 @@ pyxis_compile_slang_shader(
     ENTRY_POINT main
     STAGE       compute
     OUTPUT      tonemap.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP}
+)
+# Auto-exposure log-luminance reduction (compute). Optional pass between
+# lighting and tonemap: reduces the fp32 linearColor to a geometric-mean
+# luminance (deterministic fixed-point integer atomics) into an 8-byte stats
+# buffer the tonemap reads. No-op when RenderSettings::autoExposure is off.
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/auto_exposure.slang
+    ENTRY_POINT main
+    STAGE       compute
+    OUTPUT      auto_exposure.spv
     INCLUDES    ${PYXIS_SHADER_INTEROP}
 )
 # Viewer SSAA box-downsample resolve (compute). Reads the super-res

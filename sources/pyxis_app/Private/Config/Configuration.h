@@ -40,6 +40,14 @@ struct RenderConfig {
   // compensation the viewer's Exposure slider gives interactively. Default
   // 0 = no change (byte-equal for existing goldens, which all author 0).
   float exposure = 0.0f;
+  // Auto-exposure (AutoExposurePass). When true, the renderer derives the
+  // exposure from the frame's geometric-mean luminance so a scene with hot
+  // lights + no authored camera exposure (the OpenPBR Playground) displays
+  // without clipping to white; `exposure` above then rides on top as a bias.
+  // OFF by default so existing goldens stay byte-equal. `autoExposureKey` is
+  // the target middle-grey (0.18 = the photographic 18% card).
+  bool  autoExposure = false;
+  float autoExposureKey = 0.18f;
   // M3+ extensions: maxBounces, enableAccumulation, toneMap,
   // debugView, accumulationFrameLimit, russianRouletteStartBounce,
   // fireflyClampLuminance, lowDiscrepancySampling, aovs, ...

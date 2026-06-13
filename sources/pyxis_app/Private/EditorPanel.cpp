@@ -579,6 +579,16 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
         if (ImGui::SliderFloat("Exposure (stops)", &cameraDesc.exposure, -20.0f, 5.0f,
                                "%.2f"))
           cameraEdited = true;
+        // Auto-exposure (AutoExposurePass): derive the exposure from the
+        // frame's geometric-mean luminance so a scene with hot lights + no
+        // authored camera exposure (the OpenPBR Playground) displays without
+        // clipping to white. The manual Exposure slider above then rides on
+        // top as a bias. State lives on ImGuiHost; ViewerMode pushes it into
+        // RenderSettings each frame.
+        ImGui::Checkbox("Auto exposure", &_editorAutoExposure);
+        ImGui::BeginDisabled(!_editorAutoExposure);
+        ImGui::SliderFloat("AE target grey", &_editorAutoExposureKey, 0.02f, 1.0f, "%.3f");
+        ImGui::EndDisabled();
         ImGui::PopItemWidth();
 
         if (projectionEdited)

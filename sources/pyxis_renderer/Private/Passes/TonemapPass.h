@@ -57,7 +57,7 @@ class TonemapPass final : public IRenderPass {
   // policy as SsaaResolvePass / BlitToSrgbPass.
   [[nodiscard]] nvrhi::BindingSetHandle GetOrCreateBindingSet(
       nvrhi::ITexture* source, nvrhi::ITexture* dest,
-      nvrhi::ITexture* const (&aovs)[10]);
+      nvrhi::ITexture* const (&aovs)[10], nvrhi::IBuffer* autoExposureStats);
 
   nvrhi::IDevice* _device = nullptr;
   GpuScene* _scene = nullptr;
@@ -81,6 +81,12 @@ class TonemapPass final : public IRenderPass {
   nvrhi::TextureHandle _fallbackElementIdAov;
   nvrhi::TextureHandle _fallbackNormalEyeAov;
   nvrhi::TextureHandle _fallbackWorldPosEyeAov;
+
+  // 8-byte raw-buffer fallback for the auto-exposure stats SRV (binding 13),
+  // bound when the caller doesn't supply PassContext::autoExposureStats (Kit /
+  // tests that never enable auto-exposure). Zero-filled → count 0 → the shader's
+  // auto-exposure branch falls through to the manual exposure.
+  nvrhi::BufferHandle _fallbackAutoExposureStats;
 
   bool _ready = false;
 };

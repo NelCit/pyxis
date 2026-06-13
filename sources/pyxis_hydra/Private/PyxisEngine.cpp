@@ -100,6 +100,8 @@ struct PyxisEngine::Impl {
   // default MUST stay all-on so the Kit/usdview output matches the standalone
   // adapters byte-for-byte (§25.O.3 parity).
   uint32_t openPbrFeatureMask = 0x3Fu;
+  bool     autoExposure = false;      // pyxis:autoExposure render setting.
+  float    autoExposureKey = 0.18f;   // pyxis:autoExposureKey render setting.
   bool valid = false;
 };
 
@@ -137,6 +139,13 @@ void PyxisEngine::WaitIdle() noexcept {
 void PyxisEngine::SetOpenPbrFeatureMask(uint32_t mask) noexcept {
   if (_impl)
     _impl->openPbrFeatureMask = mask;
+}
+
+void PyxisEngine::SetAutoExposure(bool enabled, float key) noexcept {
+  if (_impl) {
+    _impl->autoExposure = enabled;
+    _impl->autoExposureKey = key;
+  }
 }
 
 bool PyxisEngine::Initialize(uint32_t width, uint32_t height) noexcept {
@@ -264,6 +273,10 @@ void PyxisEngine::RenderFrame() noexcept {
   // from the pyxis:openpbr* render settings (Kit Render Settings panel). The
   // default (0x3F, all on) reproduces the reference look byte-for-byte.
   settings.openPbrFeatureMask = impl.openPbrFeatureMask;
+  // Auto-exposure — pushed per-frame by the delegate's render pass from the
+  // pyxis:autoExposure render setting. OFF by default (parity-stable).
+  settings.autoExposure = impl.autoExposure ? 1u : 0u;
+  settings.autoExposureKey = impl.autoExposureKey;
   impl.renderer->RenderFrame(impl.commandList, settings, targets);
   // Leave the shared image in a layout the Kit side can sample after import.
   impl.commandList->setTextureState(impl.exportedColor.texture, nvrhi::AllSubresources,

@@ -129,6 +129,13 @@ class HdPyxisRenderDelegate final : public HdRenderDelegate {
   // and pushed into the engine via PyxisEngine::SetOpenPbrFeatureMask.
   [[nodiscard]] uint32_t ReadOpenPbrFeatureMask() const;
 
+  // Auto-exposure render settings (pyxis:autoExposure / pyxis:autoExposureKey),
+  // re-read per-frame by the render pass (same rationale as the OpenPBR gates)
+  // and pushed into the engine via PyxisEngine::SetAutoExposure. Default
+  // OFF / 0.18 so a bare usdview run keeps the parity-stable reference look.
+  [[nodiscard]] bool ReadAutoExposure() const;
+  [[nodiscard]] float ReadAutoExposureKey() const;
+
  private:
   void Init();
   // Resolve pyxis:persistEngine (render setting, default true) with the

@@ -146,7 +146,9 @@ void LogDeterminismPin(const Configuration& config, uint32_t framesInFlight) noe
                                                PyxisRenderer& renderer,
                                                const AovTextures& aovs,
                                                nvrhi::ITexture* renderTarget,
-                                               uint32_t openPbrFeatureMask) noexcept
+                                               uint32_t openPbrFeatureMask,
+                                               bool autoExposure,
+                                               float autoExposureKey) noexcept
 {
   commandList->open();
 
@@ -188,6 +190,10 @@ void LogDeterminismPin(const Configuration& config, uint32_t framesInFlight) noe
   // the reference look byte-for-byte; --openpbr-mask narrows it for
   // debugging / toggle-regression proofs.
   settings.openPbrFeatureMask = openPbrFeatureMask;
+  // Auto-exposure (config.render.autoExposure) — derive the exposure from the
+  // frame's geometric-mean luminance. OFF by default keeps EXR goldens byte-equal.
+  settings.autoExposure = autoExposure ? 1u : 0u;
+  settings.autoExposureKey = autoExposureKey;
   renderer.RenderFrame(commandList, settings, targets);
   // Force the offscreen RT into CopySource before we close the
   // command list. Without this we relied on NVRHI's auto-barrier
@@ -614,7 +620,8 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
   {
     const Profiler::CpuScope frameScope(profiler, "headless.frame");
     if (!RecordAndExecuteRenderFrame(device, commandList, gpuScene, renderer, aovs, renderTarget,
-                                     openPbrFeatureMask))
+                                     openPbrFeatureMask, config.render.autoExposure,
+                                     config.render.autoExposureKey))
     {
       return EXIT_RUNTIME_FAIL;
     }
@@ -785,7 +792,9 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
       {
         const Profiler::CpuScope frameScope(profiler, "headless.frame");
         frameOk = RecordAndExecuteRenderFrame(device, commandList, gpuScene, renderer,
-                                              aovs, renderTarget, openPbrFeatureMask);
+                                              aovs, renderTarget, openPbrFeatureMask,
+                                              config.render.autoExposure,
+                                              config.render.autoExposureKey);
       }
       deviceManager->EndFrame();
       profiler.EndFrame();

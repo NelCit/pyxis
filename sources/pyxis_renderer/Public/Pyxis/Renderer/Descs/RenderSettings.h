@@ -99,10 +99,26 @@ struct RenderSettings {
   // so the two cannot drift.
   uint32_t openPbrFeatureMask = 0x3Fu;
 
+  // Auto-exposure (AutoExposurePass) — consumes two §22.3 reserved tail slots
+  // (no sizeof growth). When non-zero, the renderer reduces the frame's HDR
+  // radiance to a geometric-mean luminance and TonemapPass derives an exposure
+  // that lands that average on `autoExposureKey` (middle grey); the camera's
+  // manual exposure then rides on top as a bias. Lets a scene with hot UsdLux
+  // lights and no authored camera exposure (the OpenPBR Playground) display
+  // without clipping to white. 0 (OFF) by default — headless EXR goldens and
+  // §25.O.3 adapter parity stay byte-equal (and the reduction is integer, so
+  // even ON is deterministic). Exposed via the viewer's ImGui editor + the
+  // Omniverse Render Settings `pyxis:autoExposure` toggle. uint32 (not bool)
+  // keeps the frozen-tail layout POD-clean.
+  uint32_t autoExposure = 0u;
+  // Target middle-grey the auto exposure maps the average luminance to
+  // (0.18 = the photographic 18% grey card). Ignored when autoExposure is 0.
+  float autoExposureKey = 0.18f;
+
   // §22.3 reserved tail — future RenderSettings additions consume
   // these slots (becoming typed members at MINOR) instead of growing
   // sizeof. Must stay zeroed.
-  uint32_t _reserved[4] = {0u, 0u, 0u, 0u};
+  uint32_t _reserved[2] = {0u, 0u};
 };
 
 }  // namespace pyxis

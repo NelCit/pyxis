@@ -1076,6 +1076,9 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
         settings.debugView = imguiHost.GetDebugView();
         settings.worldPosPeriod = imguiHost.GetWorldPosPeriod();
         settings.openPbrFeatureMask = imguiHost.GetOpenPbrFeatureMask();
+        // Auto-exposure (AutoExposurePass) — the editor's Exposure section.
+        settings.autoExposure = imguiHost.GetAutoExposure() ? 1u : 0u;
+        settings.autoExposureKey = imguiHost.GetAutoExposureKey();
       }
       // Picker pixel: pinned takes the latched normalised UV
       // (renormalised against the current AOV size each frame so a

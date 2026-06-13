@@ -36,6 +36,7 @@
 [[vk::binding(10, 0)]] Texture2D<float4> gAovWorldPosEye;  // RGBA32F eye-space hit pos
 [[vk::binding(11, 0)]] ConstantBuffer<TonemapUniforms> gParams;
 [[vk::binding(12, 0)]] RWTexture2D<float4> gOutput;        // BGRA8 display output
+[[vk::binding(13, 0)]] ByteAddressBuffer   gAutoExposureStats;  // uint2: [0]=log-lum sum, [4]=lit count
 
 // Narkowicz ACES Filmic -- moved verbatim from raygen.slang (P3 pass
 // split). Same constants; the display branch for DEBUG_VIEW_COLOR
@@ -94,7 +95,31 @@ void main(uint3 tid : SV_DispatchThreadID) {
         // (negative darkens, positive brightens). World Lobby et al.
         // calibrate light intensities for a strongly-negative camera
         // exposure (~-10 stops); without this scale the dome blows out.
-        const float exposureGain = exp2(gParams.exposure);
+        //
+        // Auto-exposure: when enabled, derive the exposure from the scene's
+        // geometric-mean luminance (AutoExposurePass accumulated
+        // sum(log2(lum)) + count over lit pixels). autoEV maps that average to
+        // the target middle-grey `key`; the manual `exposure` then rides on top
+        // as an artist bias. This is what lets a scene with hot UsdLux lights
+        // and no authored camera exposure (the OpenPBR Playground) display
+        // without clipping to white.
+        float effectiveExposure = gParams.exposure;
+        if (gParams.autoExposureEnabled != 0u)
+        {
+            const uint sum   = gAutoExposureStats.Load(0u);
+            const uint count = gAutoExposureStats.Load(4u);
+            if (count > 0u)
+            {
+                const float avgLog2Lum =
+                    (float(sum) / AUTO_EXPOSURE_LOG_SCALE) / float(count)
+                    - AUTO_EXPOSURE_LOG_OFFSET;
+                const float key = (gParams.autoExposureKey > 0.0)
+                                    ? gParams.autoExposureKey : 0.18;
+                const float autoEv = clamp(log2(key) - avgLog2Lum, -24.0, 8.0);
+                effectiveExposure = autoEv + gParams.exposure;
+            }
+        }
+        const float exposureGain = exp2(effectiveExposure);
         const float3 radiance = gLinearColor.Load(texel).xyz;
         displayColor = acesFilmic(radiance * exposureGain);
     }

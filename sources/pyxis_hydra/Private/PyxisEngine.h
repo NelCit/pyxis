@@ -62,6 +62,12 @@ class PyxisEngine {
   // every frame; a change takes effect same-frame.
   void SetOpenPbrFeatureMask(uint32_t mask) noexcept;
 
+  // Auto-exposure (AutoExposurePass), applied to the RenderSettings RenderFrame
+  // builds. The delegate's render pass pushes the value read from the
+  // pyxis:autoExposure / pyxis:autoExposureKey render settings every frame;
+  // a change takes effect same-frame. Default off (parity-stable reference).
+  void SetAutoExposure(bool enabled, float key) noexcept;
+
   [[nodiscard]] uint32_t Width() const noexcept;
   [[nodiscard]] uint32_t Height() const noexcept;
 

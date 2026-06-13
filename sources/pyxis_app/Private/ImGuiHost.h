@@ -195,6 +195,13 @@ class ImGuiHost {
   // factor clamped to [2,4] when enabled.
   bool                                  _editorSsaaEnabled = false;
   int                                   _editorSsaaFactor  = 2;
+  // Auto-exposure — the editor's Exposure section. ViewerMode reads
+  // GetAutoExposure()/GetAutoExposureKey() each frame into RenderSettings.
+  // Off by default (the manual Exposure slider is authoritative); when on,
+  // the renderer derives the exposure from the frame's average luminance and
+  // the manual slider rides on top as a bias.
+  bool                                  _editorAutoExposure    = false;
+  float                                 _editorAutoExposureKey = 0.18f;
   // Q3 OpenPBR feature gates — the editor's "OpenPBR Features"
   // section. One checkbox per OPENPBR_FEATURE_* bit; ViewerMode reads
   // GetOpenPbrFeatureMask() each frame and pushes the composed mask
@@ -333,6 +340,11 @@ class ImGuiHost {
   [[nodiscard]] uint32_t GetSsaaFactor() const noexcept {
     return _editorSsaaEnabled ? static_cast<uint32_t>(_editorSsaaFactor) : 1u;
   }
+
+  // Auto-exposure control — the editor's Exposure section. ViewerMode pushes
+  // these into RenderSettings::autoExposure / autoExposureKey each frame.
+  [[nodiscard]] bool GetAutoExposure() const noexcept { return _editorAutoExposure; }
+  [[nodiscard]] float GetAutoExposureKey() const noexcept { return _editorAutoExposureKey; }
 
   // Q3 OpenPBR feature gates — composes the editor's six checkboxes
   // into the RenderSettings::openPbrFeatureMask bitmask. ViewerMode
