@@ -38,6 +38,10 @@ struct ResolvedScene;
 // to IngestUsd alongside the existing `populationMask` + `frameNumber`
 // knobs. The viewer applies them on startup ingest (the editor's "Open
 // scene..." flow still goes through the no-override fast path).
+// `initialOpenPbrMask` (Q3 OpenPBR-complete): seeds
+// RenderSettings::openPbrFeatureMask. The ImGui "OpenPBR Features"
+// checkboxes take over once the editor is up (mirrors `initialSsaa`);
+// in --screenshot mode (ImGui off) the seed is the only source.
 int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScene,
                   std::string_view screenshotPath,
                   std::string_view shaderRebuildDirOverride = {},
@@ -45,6 +49,7 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
                   std::string_view variantSelections = {},
                   std::string_view renderPurpose = {},
                   bool compressTextures = true,
-                  uint32_t initialSsaa = 1) noexcept;
+                  uint32_t initialSsaa = 1,
+                  uint32_t initialOpenPbrMask = 0x3Fu) noexcept;
 
 }  // namespace pyxis::app

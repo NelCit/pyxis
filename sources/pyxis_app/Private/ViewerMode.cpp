@@ -386,13 +386,19 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
                   std::string_view variantSelections,
                   std::string_view renderPurpose,
                   bool compressTextures,
-                  uint32_t initialSsaa) noexcept {
+                  uint32_t initialSsaa,
+                  uint32_t initialOpenPbrMask) noexcept {
   auto& log = Logging::Get();
   // CLI --ssaa seeds the viewer's SSAA factor. The ImGui Anti-aliasing
   // control overrides it once the editor is up; in screenshot mode
   // (ImGui off) this is the only source, so `--screenshot --ssaa N`
   // exercises the supersampling path. Clamped to [1, 4].
   const uint32_t cliSsaa = (initialSsaa < 1u) ? 1u : (initialSsaa > 4u ? 4u : initialSsaa);
+  // CLI --openpbr-mask seeds the OpenPBR feature gates the same way:
+  // the ImGui "OpenPBR Features" checkboxes take over once the editor
+  // is up; in screenshot mode this seed is the only source. Already
+  // clamped to OPENPBR_FEATURES_ALL at parse time (CliArgs.cpp).
+  const uint32_t cliOpenPbrMask = initialOpenPbrMask;
 
   // ShaderMake rebuild latch + state machine. Click handler in
   // HandleShaderReloadStateMachine spawns a worker thread; main loop
@@ -1056,6 +1062,9 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
       settings.width = aovs.width;    // super-res render dims (base × ssaa)
       settings.height = aovs.height;
       settings.ssaaFactor = activeSsaa;  // SsaaResolvePass downsamples by this
+      // Q3 OpenPBR feature gates — CLI seed; the editor's checkboxes
+      // override below once ImGui is up (mirrors the SSAA flow).
+      settings.openPbrFeatureMask = cliOpenPbrMask;
       // Push the AOV inspector state into the renderer. The ImGui
       // Editor combo flips _editorDebugView; the cursor pump above
       // captures latestMousePixelXY from MouseMove events and we
@@ -1066,6 +1075,7 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
       {
         settings.debugView = imguiHost.GetDebugView();
         settings.worldPosPeriod = imguiHost.GetWorldPosPeriod();
+        settings.openPbrFeatureMask = imguiHost.GetOpenPbrFeatureMask();
       }
       // Picker pixel: pinned takes the latched normalised UV
       // (renormalised against the current AOV size each frame so a

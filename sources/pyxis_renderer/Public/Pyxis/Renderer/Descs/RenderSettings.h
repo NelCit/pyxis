@@ -76,6 +76,33 @@ struct RenderSettings {
   // no jitter, no accumulation. Clamp to a sane ceiling (4) at the
   // call site; the renderer honours whatever it's given.
   uint32_t ssaaFactor = 1;
+
+  // Q3 OpenPBR-complete (openpbr-complete-design.md "Control
+  // surface") — bitmask gating the OpenPBR closure blocks of
+  // openpbr_material.slang. Each bit selects a specialization-constant
+  // pipeline variant (built lazily, cached); a bit that is OFF
+  // produces EXACTLY the same image as that feature's weight being 0
+  // on every material (gate-OFF == weight-0 semantics). Bits:
+  //   bit 0 (0x01) — coat layer (GGX + absorption + darkening +
+  //                  roughening)
+  //   bit 1 (0x02) — fuzz (Zeltner LTC sheen)
+  //   bit 2 (0x04) — transmission (translucent base)
+  //   bit 3 (0x08) — subsurface (SSS-as-diffuse fallback)
+  //   bit 4 (0x10) — anisotropy (anisotropic GGX)
+  //   bit 5 (0x20) — energy-preserving (EON) diffuse; OFF = Lambert
+  // Default 0x3F = all six ON — image-identical to the pre-toggle
+  // renderer, so headless EXR goldens and §25.O.3 adapter parity stay
+  // stable. The value is a literal because this public header cannot
+  // include ShaderInterop.slang (§18.9 — the renderer is the only
+  // consumer of the interop file); a static_assert in
+  // PyxisRenderer.cpp pins it to shaderinterop::OPENPBR_FEATURES_ALL
+  // so the two cannot drift.
+  uint32_t openPbrFeatureMask = 0x3Fu;
+
+  // §22.3 reserved tail — future RenderSettings additions consume
+  // these slots (becoming typed members at MINOR) instead of growing
+  // sizeof. Must stay zeroed.
+  uint32_t _reserved[4] = {0u, 0u, 0u, 0u};
 };
 
 }  // namespace pyxis

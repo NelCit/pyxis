@@ -8,6 +8,8 @@
 
 #pragma once
 
+#include "OpenPbrFeatureBits.h"  // Q3 — OPENPBR_FEATURE_* mask bits
+
 #include <Pyxis/Renderer/Descs/CameraDesc.h>
 #include <Pyxis/Renderer/Descs/FrameProfile.h>
 #include <Pyxis/Renderer/Descs/FrameStats.h>
@@ -193,6 +195,18 @@ class ImGuiHost {
   // factor clamped to [2,4] when enabled.
   bool                                  _editorSsaaEnabled = false;
   int                                   _editorSsaaFactor  = 2;
+  // Q3 OpenPBR feature gates — the editor's "OpenPBR Features"
+  // section. One checkbox per OPENPBR_FEATURE_* bit; ViewerMode reads
+  // GetOpenPbrFeatureMask() each frame and pushes the composed mask
+  // into RenderSettings::openPbrFeatureMask. All default ON (0x3F) so
+  // the viewer matches headless / parity output until the user flips
+  // a gate.
+  bool                                  _editorOpenPbrCoat         = true;
+  bool                                  _editorOpenPbrFuzz         = true;
+  bool                                  _editorOpenPbrTransmission = true;
+  bool                                  _editorOpenPbrSubsurface   = true;
+  bool                                  _editorOpenPbrAnisotropy   = true;
+  bool                                  _editorOpenPbrEonDiffuse   = true;
   // ShaderMake rebuild status — pushed by ViewerMode each frame.
   // True while the worker thread is spawning cmake / waiting for
   // exit; the editor's Reload Shaders button shows "Rebuilding..."
@@ -318,6 +332,21 @@ class ImGuiHost {
   // Returns the effective factor (1 when the toggle is off).
   [[nodiscard]] uint32_t GetSsaaFactor() const noexcept {
     return _editorSsaaEnabled ? static_cast<uint32_t>(_editorSsaaFactor) : 1u;
+  }
+
+  // Q3 OpenPBR feature gates — composes the editor's six checkboxes
+  // into the RenderSettings::openPbrFeatureMask bitmask. ViewerMode
+  // pushes this each frame; a flip takes effect same-frame (the
+  // renderer builds + caches the matching pipeline variant lazily).
+  [[nodiscard]] uint32_t GetOpenPbrFeatureMask() const noexcept {
+    uint32_t mask = 0u;
+    if (_editorOpenPbrCoat)         mask |= OPENPBR_FEATURE_COAT;
+    if (_editorOpenPbrFuzz)         mask |= OPENPBR_FEATURE_FUZZ;
+    if (_editorOpenPbrTransmission) mask |= OPENPBR_FEATURE_TRANSMISSION;
+    if (_editorOpenPbrSubsurface)   mask |= OPENPBR_FEATURE_SUBSURFACE;
+    if (_editorOpenPbrAnisotropy)   mask |= OPENPBR_FEATURE_ANISOTROPY;
+    if (_editorOpenPbrEonDiffuse)   mask |= OPENPBR_FEATURE_EON_DIFFUSE;
+    return mask;
   }
 
   // ViewerMode pushes the live rebuild state each frame so the

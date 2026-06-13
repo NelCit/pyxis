@@ -311,7 +311,8 @@ int Run(int argc, char** argv) noexcept {
                                         cli.variantSelections,
                                         cli.renderPurpose,
                                         cli.compressTextures,
-                                        cli.ssaa);
+                                        cli.ssaa,
+                                        cli.openPbrMask);
         if (frameRc != 0)
           return frameRc;
       }
@@ -329,11 +330,12 @@ int Run(int argc, char** argv) noexcept {
                        cli.variantSelections,
                        cli.renderPurpose,
                        cli.compressTextures,
-                       cli.ssaa);
+                       cli.ssaa,
+                       cli.openPbrMask);
   }
   return RunViewer(config, scene, cli.screenshotPath, cli.shaderRebuildDir,
                    cli.loadMode, cli.variantSelections, cli.renderPurpose,
-                   cli.compressTextures, cli.ssaa);
+                   cli.compressTextures, cli.ssaa, cli.openPbrMask);
 }
 
 }  // namespace pyxis::app

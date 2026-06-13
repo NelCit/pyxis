@@ -2,6 +2,8 @@
 
 #include "CliArgs.h"
 
+#include "OpenPbrFeatureBits.h"  // Q3 — --openpbr-mask clamp
+
 #include <Pyxis/Renderer/Version.h>
 
 #include <cstdio>
@@ -34,6 +36,20 @@ bool ParseUInt32(const char* str, uint32_t& out) noexcept {
     return false;
   char* end = nullptr;
   const unsigned long val = std::strtoul(str, &end, 10);
+  if (end == str || *end != '\0')
+    return false;
+  out = static_cast<uint32_t>(val);
+  return true;
+}
+
+// Like ParseUInt32 but base-0: accepts "0x3E" hex, "076" octal, and
+// plain decimal. Used by --openpbr-mask, where the natural authoring
+// form is a hex bitmask.
+bool ParseUInt32AnyBase(const char* str, uint32_t& out) noexcept {
+  if (str == nullptr || *str == '\0')
+    return false;
+  char* end = nullptr;
+  const unsigned long val = std::strtoul(str, &end, 0);
   if (end == str || *end != '\0')
     return false;
   out = static_cast<uint32_t>(val);
@@ -321,6 +337,21 @@ CliArgs Parse(int argc, char** argv) noexcept {
       if (out.ssaa > 4u) out.ssaa = 4u;
       ++i;
     }
+    else if (Equals(arg, "--openpbr-mask"))
+    {
+      // Q3 OpenPBR-complete — per-lobe feature-gate override (debug /
+      // regression proof). Hex or decimal; bits above
+      // OPENPBR_FEATURES_ALL are masked off so a typo can't request
+      // pipeline variants the shader has no bits for.
+      if (i + 1 >= argc || !ParseUInt32AnyBase(argv[i + 1], out.openPbrMask))
+      {
+        out.invalid = true;
+        out.invalidArg = arg;
+        return out;
+      }
+      out.openPbrMask &= OPENPBR_FEATURES_ALL;
+      ++i;
+    }
     else if (Equals(arg, "--render-product"))
     {
       // V2.A.27 — pick a specific UsdRenderProduct from a stage that
@@ -451,6 +482,15 @@ void PrintUsage() noexcept {
       "                          1 = off (default), 2 = 2x2 (4 samples/px), up to 4.\n"
       "                          Noise-free anti-aliasing for high-frequency textures /\n"
       "                          edges (no jitter, no accumulation). Headless only.\n"
+      "  --openpbr-mask <m>      OpenPBR feature-gate bitmask (hex or decimal); gates\n"
+      "                          the closure blocks of the OpenPBR shading model.\n"
+      "                          Bits: 0x01 coat, 0x02 fuzz (sheen), 0x04 transmission,\n"
+      "                          0x08 subsurface, 0x10 anisotropy, 0x20 EON diffuse.\n"
+      "                          Default 0x3F = all on (the reference look). A cleared\n"
+      "                          bit shades as if that feature's weight were 0 on every\n"
+      "                          material. Debug / regression aid; in the viewer the\n"
+      "                          ImGui OpenPBR Features checkboxes take over once the\n"
+      "                          editor is up.\n"
       "\n"
       "Viewer extras:\n"
       "  --screenshot <path>     Run viewer briefly; write a PNG of the backbuffer.\n"

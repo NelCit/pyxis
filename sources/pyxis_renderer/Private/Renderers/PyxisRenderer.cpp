@@ -20,23 +20,24 @@
 #include <Pyxis/Renderer/PyxisRenderer.h>
 
 // Dual-language interop header (renderer-private include path) — Q2
-// pulls OPENPBR_FEATURES_ALL for the lighting pass's feature-mask
-// variant selection below.
+// pulls the OPENPBR_FEATURE_* bits for the lighting pass's
+// feature-mask variant selection below.
 #include "ShaderInterop.slang"
 
 #include <nvrhi/nvrhi.h>
 
-namespace {
-
-// Q2 (openpbr-complete-design.md) — the OpenPBR feature mask this
-// renderer requests from RaytracedLightingPass. Hardcoded to ALL for
-// the Q2 phase; Q3 threads RenderSettings::openPbrFeatureMask through
-// this call site (viewer ImGui checkboxes + Omniverse render-settings
-// rows compose the runtime value).
-constexpr uint32_t ACTIVE_OPENPBR_FEATURE_MASK =
-    pyxis::shaderinterop::OPENPBR_FEATURES_ALL;
-
-}  // namespace
+// Q3 (openpbr-complete-design.md "Control surface") — drift guard.
+// RenderSettings::openPbrFeatureMask defaults to the literal 0x3F
+// because the public header cannot include ShaderInterop.slang; this
+// TU sees both headers, so pin the literal to the interop constant
+// (and the POD's default to it) so neither can drift silently.
+static_assert(pyxis::shaderinterop::OPENPBR_FEATURES_ALL == 0x3Fu,
+              "OPENPBR_FEATURES_ALL changed — update the RenderSettings::openPbrFeatureMask "
+              "default literal (Public/Pyxis/Renderer/Descs/RenderSettings.h) in lockstep.");
+static_assert(pyxis::RenderSettings{}.openPbrFeatureMask
+                  == pyxis::shaderinterop::OPENPBR_FEATURES_ALL,
+              "RenderSettings::openPbrFeatureMask must default to OPENPBR_FEATURES_ALL — "
+              "headless goldens and §25.O.3 adapter parity depend on all-features-on.");
 
 namespace pyxis {
 
@@ -147,7 +148,7 @@ void PyxisRenderer::RenderFrame(nvrhi::ICommandList* commandList, const RenderSe
   }
   if (_lightingPass != nullptr) {
     static_cast<RaytracedLightingPass*>(_lightingPass)
-        ->EnsureFeaturePipeline(projectionMode, ACTIVE_OPENPBR_FEATURE_MASK);
+        ->EnsureFeaturePipeline(projectionMode, settings.openPbrFeatureMask);
   }
   // P6 review — pass-health degradation. The per-pass gates (_shadersOk,
   // latched variant-build failures) are pass-LOCAL and can fail
@@ -164,7 +165,7 @@ void PyxisRenderer::RenderFrame(nvrhi::ICommandList* commandList, const RenderSe
   const bool lightingOk =
       _lightingPass != nullptr
       && static_cast<RaytracedLightingPass*>(_lightingPass)
-             ->IsOperational(projectionMode, ACTIVE_OPENPBR_FEATURE_MASK);
+             ->IsOperational(projectionMode, settings.openPbrFeatureMask);
   if (!gbufferOk)
     context.visibility = nullptr;
   if (!gbufferOk || !lightingOk)

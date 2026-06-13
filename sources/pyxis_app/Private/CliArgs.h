@@ -132,6 +132,17 @@ struct CliArgs {
   // etc.). Clamped to [1, 4] (4×4 = 16× the pixel work + VRAM).
   uint32_t ssaa = 1;                   // --ssaa N
 
+  // Q3 OpenPBR-complete — debugging override for
+  // RenderSettings::openPbrFeatureMask (the per-lobe OpenPBR closure
+  // gates; bits documented in RenderSettings.h). Accepts hex (0x3E)
+  // or decimal; unknown bits above 0x3F are masked off at parse time
+  // (see OpenPbrFeatureBits.h). Default 0x3F = all features ON — the
+  // reference look headless goldens are baked against. In the viewer
+  // the ImGui "OpenPBR Features" checkboxes take over once the editor
+  // is up (mirrors --ssaa); in headless / --screenshot mode this flag
+  // is the only source.
+  uint32_t openPbrMask = 0x3Fu;        // --openpbr-mask <hex|dec>
+
   // ---- M7 follow-up: AOV save -----------------------------------------
   // --save-aov <list>  Comma-separated list of raw AOVs to dump
   // alongside the regular `--output` BGRA8 EXR. The path stem of

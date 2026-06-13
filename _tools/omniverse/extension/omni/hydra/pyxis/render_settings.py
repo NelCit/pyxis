@@ -41,6 +41,58 @@ _PERSIST_TOOLTIP = (
     "scenes. Applies on the next renderer switch."
 )
 
+# Q3 OpenPBR feature gates (openpbr-complete-design.md "Control surface").
+# One BOOL row per OPENPBR_FEATURE_* bit; each carb path bridges to the
+# delegate's GetRenderSetting(TfToken("pyxis:openpbr<Name>")) via the same
+# token->path convention as persistEngine. The delegate re-composes the
+# RenderSettings::openPbrFeatureMask from these every frame, so a toggle
+# takes effect immediately. All default ON (the reference look); a gate
+# that is OFF shades exactly as if that lobe's weight were 0 on every
+# material.
+_OPENPBR_ROOT = "/persistent/app/hydra/delegates/HdPyxisRendererPlugin/settings/pyxis"
+_OPENPBR_ROWS = (
+    (
+        f"{_OPENPBR_ROOT}/openpbrCoat/value",
+        "Coat",
+        "Gate the OpenPBR coat lobe: the clear reflective layer above the base "
+        "(GGX coat specular + coat absorption + darkening + base roughening). "
+        "OFF shades as if coat_weight were 0 on every material.",
+    ),
+    (
+        f"{_OPENPBR_ROOT}/openpbrFuzz/value",
+        "Fuzz (sheen)",
+        "Gate the OpenPBR fuzz lobe: the Zeltner-LTC sheen layer for cloth-like "
+        "grazing retroreflection. OFF shades as if fuzz_weight were 0 on every "
+        "material.",
+    ),
+    (
+        f"{_OPENPBR_ROOT}/openpbrTransmission/value",
+        "Transmission",
+        "Gate the OpenPBR transmission lobe: the translucent dielectric base "
+        "(glass-like refraction + transmission color). OFF shades as if "
+        "transmission_weight were 0 on every material.",
+    ),
+    (
+        f"{_OPENPBR_ROOT}/openpbrSubsurface/value",
+        "Subsurface",
+        "Gate the OpenPBR subsurface lobe (SSS-as-diffuse fallback in v1). OFF "
+        "shades as if subsurface_weight were 0 on every material.",
+    ),
+    (
+        f"{_OPENPBR_ROOT}/openpbrAnisotropy/value",
+        "Anisotropy",
+        "Gate anisotropic GGX on the base specular lobe (alpha_t/alpha_b from "
+        "specular_roughness_anisotropy). OFF shades isotropic, as if the "
+        "anisotropy parameter were 0 on every material.",
+    ),
+    (
+        f"{_OPENPBR_ROOT}/openpbrEonDiffuse/value",
+        "Energy-preserving diffuse (EON)",
+        "Gate the EON (energy-preserving Oren-Nayar) diffuse lobe. OFF falls "
+        "back to plain Lambert diffuse.",
+    ),
+)
+
 
 class PyxisSettingsFrame(SettingsCollectionFrame):
     def _build_ui(self):
@@ -52,6 +104,15 @@ class PyxisSettingsFrame(SettingsCollectionFrame):
             cleartext_path="Keep renderer resident on switch",
             has_reset=True,
         )
+        for path, name, tooltip in _OPENPBR_ROWS:
+            self._add_setting(
+                setting_type=SettingType.BOOL,
+                path=path,
+                name=f"OpenPBR: {name}",
+                tooltip=tooltip,
+                cleartext_path=f"OpenPBR: {name}",
+                has_reset=True,
+            )
 
 
 class PyxisSettingsStack(RTXSettingsStack):
