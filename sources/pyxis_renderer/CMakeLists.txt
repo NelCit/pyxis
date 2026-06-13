@@ -270,6 +270,10 @@ set(PYXIS_SHADER_INTEROP    ${CMAKE_SOURCE_DIR}/resources/shaders/ShaderInterop.
 set(PYXIS_SHADER_CAMERA_RAY ${CMAKE_SOURCE_DIR}/resources/shaders/camera_ray.slang)
 set(PYXIS_SHADER_DOME       ${CMAKE_SOURCE_DIR}/resources/shaders/dome_sample.slang)
 set(PYXIS_SHADER_SHADING    ${CMAKE_SOURCE_DIR}/resources/shaders/shading.slang)
+# Q2 (openpbr-complete-design.md) — the OpenPBR closure module included by
+# shading.slang; listed on every entry whose include chain reaches it so a
+# closure edit recompiles the lighting raygen + closesthit.
+set(PYXIS_SHADER_OPENPBR    ${CMAKE_SOURCE_DIR}/resources/shaders/openpbr_material.slang)
 set(PYXIS_SHADER_ANYHIT     ${CMAKE_SOURCE_DIR}/resources/shaders/raytraced_anyhit.slang)
 
 # --- RT pipeline A: RaytracedGBufferPass (visibility buffer) ---------
@@ -317,7 +321,7 @@ pyxis_compile_slang_shader(
     STAGE       raygen
     OUTPUT      raytraced_lighting_raygen.spv
     INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
-                ${PYXIS_SHADER_SHADING}
+                ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR}
 )
 pyxis_compile_slang_shader(
     TARGET      pyxis_renderer
@@ -326,7 +330,7 @@ pyxis_compile_slang_shader(
     STAGE       closesthit
     OUTPUT      raytraced_lighting_closesthit.spv
     INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
-                ${PYXIS_SHADER_SHADING}
+                ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR}
 )
 pyxis_compile_slang_shader(
     TARGET      pyxis_renderer

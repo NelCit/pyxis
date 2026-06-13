@@ -255,8 +255,30 @@ static const uint SPEC_ID_PROJECTION_MODE          = 0;  // camera_ray.slang (bo
 static const uint SPEC_ID_MAX_RAY_RECURSION        = 1;  // shading.slang (lighting raygen + closesthit)
 static const uint SPEC_ID_MAX_TRANSPARENT_SEGMENTS = 2;  // raytraced_lighting_raygen.slang
 static const uint SPEC_ID_REFL_MAX_SEGMENTS        = 3;  // shading.slang (lighting raygen + closesthit)
+static const uint SPEC_ID_OPENPBR_FEATURES         = 4;  // openpbr_material.slang (lighting raygen + closesthit)
 //   Compute modules:
 static const uint SPEC_ID_SSAA_FACTOR              = 0;  // ssaa_resolve.slang
+
+// Q2 OpenPBR-complete (openpbr-complete-design.md) — feature bits of
+// the OPENPBR_FEATURE_MASK specialization constant
+// (SPEC_ID_OPENPBR_FEATURES above). Each bit compiles one closure
+// block of openpbr_material.slang in/out at pipeline-creation time.
+// INVARIANT (load-bearing for the Q3 runtime toggles): a bit that is
+// OFF produces EXACTLY the same image as that feature's weight
+// parameter authored 0 (COAT off == coat_weight 0, FUZZ off ==
+// fuzz_weight 0, …) — the shader short-circuits zero weights to the
+// identical floats. The metal F82 lobe and the exact dielectric
+// Fresnel are ALWAYS on (core correctness, not gated).
+static const uint OPENPBR_FEATURE_COAT        = 1u << 0;  // coat layer (GGX + absorption + darkening + roughening)
+static const uint OPENPBR_FEATURE_FUZZ        = 1u << 1;  // Zeltner LTC sheen
+static const uint OPENPBR_FEATURE_TRANSMISSION = 1u << 2; // translucent base → T_pbr composite
+static const uint OPENPBR_FEATURE_SUBSURFACE  = 1u << 3;  // SSS-as-diffuse fallback
+static const uint OPENPBR_FEATURE_ANISOTROPY  = 1u << 4;  // anisotropic GGX (α_t/α_b)
+static const uint OPENPBR_FEATURE_EON_DIFFUSE = 1u << 5;  // EON diffuse (off = Lambert)
+static const uint OPENPBR_FEATURES_ALL =
+    OPENPBR_FEATURE_COAT | OPENPBR_FEATURE_FUZZ | OPENPBR_FEATURE_TRANSMISSION
+    | OPENPBR_FEATURE_SUBSURFACE | OPENPBR_FEATURE_ANISOTROPY
+    | OPENPBR_FEATURE_EON_DIFFUSE;
 
 // PickResult — one-element RWStructuredBuffer the raygen writes when
 // the dispatched pixel matches camera.mousePixel. The viewer copies
