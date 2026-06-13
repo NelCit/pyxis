@@ -174,6 +174,11 @@ target_include_directories(pyxis_renderer PRIVATE ${Stb_INCLUDE_DIR})
 # for the input / decode side.
 find_package(tinyexr CONFIG REQUIRED)
 
+# libtiff — TIFF decode (LZW/packbits/none via the lean default-features-off
+# port). stb_image has no TIFF support; production USD + the OpenPBR Playground
+# ship LZW 8-bit TIFF maps. TextureCache (Commit.cpp) calls TIFFReadRGBAImage.
+find_package(TIFF REQUIRED)
+
 # OpenMP — fans the per-texture decode + gamma-aware mip build + BCn
 # encode across the pool in GpuScene::Impl::UploadPendingTextures
 # (Commit.cpp). That pass dominated first-frame load on the World Lobby
@@ -241,6 +246,7 @@ target_link_libraries(pyxis_renderer
         $<TARGET_NAME_IF_EXISTS:flecs::flecs_static>
         $<TARGET_NAME_IF_EXISTS:flecs::flecs>
         unofficial::tinyexr::tinyexr
+        TIFF::TIFF
 )
 
 # Debug-only: PYXIS_DEBUG_TOOLS toggles Flecs Explorer (§30.11).

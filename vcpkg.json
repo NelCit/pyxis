@@ -54,6 +54,11 @@
       "$comment": "stb_image / stb_image_write — LDR decode + PNG output. Plan §4."
     },
     {
+      "name": "tiff",
+      "default-features": false,
+      "$comment": "TIFF decode (libtiff). stb_image can't decode TIFF; production USD assets (and the OpenPBR Shader Playground — ~137 LZW 8-bit TIFFs) ship base-color/normal/roughness maps as TIFF. default-features off keeps it lean — libtiff core covers none/LZW/packbits, which is the playground set; add the `zip`/`jpeg`/`lzma` features if a future scene needs Deflate/JPEG-in-TIFF. Linked PRIVATE into pyxis_renderer's TextureCache. Plan §4."
+    },
+    {
       "name": "mikktspace",
       "$comment": "Tangent-space generation for normal maps. Plan §4 / §14."
     },
