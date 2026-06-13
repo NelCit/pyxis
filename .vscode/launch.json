@@ -108,8 +108,9 @@
           "value": "${workspaceFolder}/build/omniverse/usd-deps/usd/lib;${workspaceFolder}/build/omniverse/usd-deps/usd/bin;D:/packman-repo/chk/python/3.12.13+nv1-windows-x86_64;${workspaceFolder}/build/dev/bin/Release;${env:PATH}"
         },
         {
+          "//": "No usd-deps lib/usd here: the exe loads the usd_*.dll staged next to it and auto-discovers <bin>/usd; a second core plugin tree makes Plug lazy-load duplicate usd DLL copies that spin in their static initializers (see _tools/omniverse/run_smoke.ps1).",
           "name": "PXR_PLUGINPATH_NAME",
-          "value": "${workspaceFolder}/build/omniverse/usd-deps/usd/lib/usd;${workspaceFolder}/build/omniverse/usd-deps/usd/plugin/usd"
+          "value": "${workspaceFolder}/build/omniverse/usd-deps/usd/plugin/usd"
         }
       ],
       "preLaunchTask": "omni:prebuild-smoke"

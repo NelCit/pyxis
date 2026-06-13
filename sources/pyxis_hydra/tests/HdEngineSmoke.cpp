@@ -8,6 +8,7 @@
 // Success = the synced mesh shows up in the committed scene (instanceCount >= 1)
 // and a frame reads back. Exit 0 = pass, non-zero = fail.
 
+#include "AovColorEncode.h"
 #include "PyxisEngine.h"
 #include "PyxisHydraHost.h"
 
@@ -182,7 +183,7 @@ int main(int argc, char** argv) {
   // Verify the delegate COMPOSITED Pyxis's color into the host's bound render
   // buffer (the presentation path a viewport/usdview uses) — count non-zero px.
   uint64_t nonZeroAovPixels = 0;
-  bool aovMatchesEngine = false;  // composited AOV == sRGB(flip(engine render))?
+  bool aovMatchesEngine = false;  // composited AOV == encode(flip(engine render))?
   if (const auto* aov = static_cast<const uint16_t*>(colorBuffer->Map())) {
     const uint32_t bufW = colorBuffer->GetWidth();
     const uint32_t bufH = colorBuffer->GetHeight();
@@ -194,11 +195,17 @@ int main(int argc, char** argv) {
       if (r != 0.f || g != 0.f || b != 0.f)
         ++nonZeroAovPixels;
     }
-    // WritePyxisColorToAov is the host PRESENTATION transform: it sRGB-encodes RGB
-    // (so Kit/usdview present display-ready values matching RTX) and flips rows
-    // (Vulkan top-down -> GL bottom-up). Verify the AOV is EXACTLY that transform
-    // of the engine's linear readback (the §25.O.3 display contract), within the
-    // half<->float round-trip epsilon.
+    // WritePyxisColorToAov is the host PRESENTATION transform: it row-flips
+    // (Vulkan top-down -> GL bottom-up) and writes the engine's ACES-tonemapped
+    // LINEAR readback through EncodeAovColorChannel — clamped-linear VERBATIM by
+    // default, because the Hydra hosts (Kit pxr viewport / usdview via
+    // HdxColorCorrectionTask) apply the sRGB OETF themselves on present; the
+    // delegate pre-encoding sRGB would double-apply it (see AovColorEncode.h, the
+    // single source of truth this check shares with the delegate; the
+    // PYXIS_OMNI_AOV_SRGB escape flips it for a verbatim-present host). Verify the
+    // AOV is EXACTLY that transform of the engine's readback (the §25.O.3 display
+    // contract), within the half<->float round-trip epsilon.
+    const bool encodeSrgb = std::getenv("PYXIS_OMNI_AOV_SRGB") != nullptr;
     if (readback && pixels.size() == total * 8 && width == bufW && height == bufH) {
       const auto* eng = reinterpret_cast<const uint16_t*>(pixels.data());
       aovMatchesEngine = true;
@@ -207,9 +214,9 @@ int main(int argc, char** argv) {
         for (uint32_t x = 0; x < bufW; ++x) {
           for (int c = 0; c < 3; ++c) {
             const float a = pyxis::color::HalfToFloat(aov[(uint64_t(y) * bufW + x) * 4 + c]);
-            const float e =
-                pyxis::color::LinearToSrgb(pyxis::color::HalfToFloat(
-                    eng[(uint64_t(srcY) * bufW + x) * 4 + c]));
+            const float e = pyxis::hydra::EncodeAovColorChannel(
+                pyxis::color::HalfToFloat(eng[(uint64_t(srcY) * bufW + x) * 4 + c]), c,
+                encodeSrgb);
             if (std::fabs(a - e) > 0.01f) {
               aovMatchesEngine = false;
               break;
@@ -256,8 +263,9 @@ int main(int argc, char** argv) {
   }
   if (!aovMatchesEngine) {
     std::fprintf(stderr,
-                 "FAIL: composited AOV is not the sRGB-encoded, row-flipped engine render "
-                 "(WritePyxisColorToAov display contract).\n");
+                 "FAIL: composited AOV is not the EncodeAovColorChannel-encoded (linear "
+                 "verbatim by default), row-flipped engine render (WritePyxisColorToAov "
+                 "display contract, AovColorEncode.h).\n");
     return 9;
   }
   std::printf("PASS: HdEngine drove the Pyxis delegate end-to-end + composited into the host AOV.\n");

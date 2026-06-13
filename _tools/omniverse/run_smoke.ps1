@@ -27,10 +27,21 @@ $releaseBin = Join-Path $repoRoot "build\dev\bin\Release"
 # exe") finds them with no extra staging.
 $smoke = Join-Path $releaseBin "pyxis_hydra_omni_smoke.exe"
 
-# nv-usd 25.11 FIRST so its usd_*.dll / tbb12.dll win over any same-named DLL in
-# the Pyxis Release bin (pyxis_renderer is USD-free, so it won't grab nv-usd's).
+# nv-usd 25.11 on PATH as the FALLBACK import source (only used when the staged
+# copies next to the exe are absent — the app dir always wins the DLL search).
 $env:PATH = "$PXR_USD_ROOT\lib;$PXR_USD_ROOT\bin;$PYTHON_ROOT;$releaseBin;" + $env:PATH
-$env:PXR_PLUGINPATH_NAME = "$PXR_USD_ROOT\lib\usd;$PXR_USD_ROOT\plugin\usd"
+# PXR_PLUGINPATH_NAME must NOT include "$PXR_USD_ROOT\lib\usd": the exe loads the
+# usd_*.dll copies STAGED NEXT TO IT (pyxis_app POST_BUILD; app dir beats PATH), and
+# USD auto-discovers the matching <exe-dir>\usd core plugin tree relative to those
+# loaded modules. Listing usd-deps\lib\usd here registers a SECOND core tree whose
+# records win Plug's name dedup, so the first lazy PlugPlugin::Load (e.g. plugin
+# 'usdImaging' inside UsdImagingCreateSceneIndices) LoadLibrary's a SECOND COPY of an
+# already-loaded usd DLL by a different path — its static initializers self-deadlock
+# USD's registry and busy-spin (SwitchToThread) forever. pyxis.exe is immune because
+# Application.cpp::EnsureUsdPluginPath overwrites this var with <exe-dir>\usd; the
+# hydra test exes inherit it, so only second-tier plugins (plugin\usd: usdAbc,
+# hioOiio, ... — unique DLLs, never duplicated by the staging) may be listed.
+$env:PXR_PLUGINPATH_NAME = "$PXR_USD_ROOT\plugin\usd"
 
 & $smoke
 exit $LASTEXITCODE
