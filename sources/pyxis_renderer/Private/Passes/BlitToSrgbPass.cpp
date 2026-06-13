@@ -140,8 +140,6 @@ void BlitToSrgbPass::Execute(nvrhi::ICommandList* commandList, const PassContext
   if (destWidth == 0u || destHeight == 0u)
     return;
 
-  const Profiler::GpuScope gpuScope(*context.profiler, commandList, "pass.BlitToSrgb");
-
   BlitToSrgbUniforms params{};
   params.destWidth = destWidth;
   params.destHeight = destHeight;

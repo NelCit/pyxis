@@ -182,8 +182,6 @@ void SsaaResolvePass::Execute(nvrhi::ICommandList* commandList,
   if (destWidth == 0u || destHeight == 0u)
     return;
 
-  const Profiler::GpuScope gpuScope(*context.profiler, commandList, "pass.SsaaResolve");
-
   // P5 — select the pre-built per-factor pipeline (pure array lookup,
   // no creation §30.10). Every producer clamps the factor to [1, 4]
   // (CliArgs --ssaa, EditorPanel slider, HeadlessMode, ViewerMode), so
