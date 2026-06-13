@@ -28,6 +28,7 @@ target_sources(pyxis_unit_tests PRIVATE
     SceneResolver.cpp
     UsdShadeToOpenPBR.cpp
     AnalyticGeomTessellation.cpp
+    PrimvarBlockLayout.cpp
     XformOpsComposition.cpp
     UdimAndInvisibleIds.cpp
     SceneBoundsAggregate.cpp
