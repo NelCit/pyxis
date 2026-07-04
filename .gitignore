@@ -122,11 +122,5 @@ Thumbs.db
 .DS_Store
 desktop.ini
 
-# Claude Code machine-local artifacts (see initialize_claude.md):
-# NVIDIA marketplace skills install per-machine via `npx skills add` (license
-# hygiene — not redistributed here); skills-lock.json tracks that local install.
-.claude/skills/omniverse-*/
-skills-lock.json
-
 # Tracy capture files consumed by the tracy MCP server — per-machine, large.
 captures/

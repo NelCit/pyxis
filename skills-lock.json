@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "skills": {
+    "omniverse-realtime-viewer": {
+      "source": "nvidia/skills",
+      "sourceType": "github",
+      "skillPath": "skills/omniverse-realtime-viewer/SKILL.md",
+      "computedHash": "8f8d123853bb2984d07ece3732928363f3b13da52692a774f72b25c7368fdba2"
+    },
+    "omniverse-usd-performance-tuning": {
+      "source": "nvidia/skills",
+      "sourceType": "github",
+      "skillPath": "skills/omniverse-usd-performance-tuning/SKILL.md",
+      "computedHash": "823e7da432b4dd89769de74ec1b6223890260b064780bb7fb6c3e8ada5d4213b"
+    }
+  }
+}

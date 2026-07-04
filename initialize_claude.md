@@ -170,7 +170,9 @@ claude mcp add -s user -t http kit-dev-mcp http://localhost:9902/mcp
   (api-surface-check, ci-golden-file-check, coding-rules-enforce, flecs-conventions-audit,
   ingest-parity-check, milestone-exit-criteria, profiler-scope-lint, rfc-required) and
   `slang-debugging-reference` (distilled from shader-slang/slang's upstream CLAUDE.md). Nothing to do.
-- **NVIDIA-verified skills** (signed catalog, per machine/agent — not committed here for license hygiene):
+- **NVIDIA-verified skills ship with this repo too** (`omniverse-usd-performance-tuning`,
+  `omniverse-realtime-viewer` + `skills-lock.json`) — Apache-2.0 per their skill-cards, signed
+  (`skill.oms.sig`). Nothing to do on a new machine. To update to newer catalog versions:
 
 ```powershell
 npx -y skills add nvidia/skills --skill omniverse-usd-performance-tuning --agent claude-code --yes
