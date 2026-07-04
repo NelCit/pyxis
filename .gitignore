@@ -121,3 +121,6 @@ tests/regression/**/profile.json
 Thumbs.db
 .DS_Store
 desktop.ini
+
+# Tracy capture files consumed by the tracy MCP server — per-machine, large.
+captures/
