@@ -844,6 +844,39 @@ float3 OpenPBRReflectionWeight(OpenPBRSurfaceParams p, float3 N, float3 V) {
     return saturate(weight);
 }
 
+// RTX-alignment glass forensics (rtx-realtime-alignment-design.md,
+// 2026-07-06) — thin-walled (two-parallel-interface) incoherent
+// multiple-reflection sum, used ONLY by reflections.slang's primary-
+// surface specWeight boost (NOT by OpenPBRTransmittance below — see
+// that function's doc comment for why). A THIN-WALLED surface
+// (p.thinWalled) is modelled as two parallel dielectric interfaces of
+// the same single-interface reflectance R separated by an absorptive
+// medium whose one-way (single-pass) transmittance is T — exactly
+// transmission_color at this renderer's depth-0 constant-tint
+// semantics. Summing every internal bounce (R, RT²R, RT²R²T²R, … — a
+// geometric series in R²T²) gives the standard incoherent thin-film
+// reflectance closed form:
+//   R_thin = R + (1 − R)² R T² / (1 − R² T²)
+// which reduces EXACTLY to R_thin = 2R/(1+R) at T = 1 (non-absorbing —
+// id2's Clear_Glass, glass_color ≈ white; the "Airy doubling" this
+// helper replaces). For a STRONGLY TINTED medium (id30's Tinted_Glass,
+// transmission_color 0.35) T² damps the extra term: the second
+// interface's contribution is absorbed on its round trip through the
+// tint before it can re-emerge, so R_thin stays close to the plain
+// single-interface R — this is the "gate the doubling off for
+// absorptive glass" behavior, parameterized by the material's own
+// transmission_color rather than a per-material special case.
+void OpenPBRThinFilmSum(float3 R, float3 T, out float3 rThin, out float3 tThin) {
+    const float3 one = float3(1.0, 1.0, 1.0);
+    const float3 Rc = saturate(R);
+    const float3 Tc = saturate(T);
+    const float3 T2 = Tc * Tc;
+    const float3 denom = max(one - Rc * Rc * T2, float3(1e-3, 1e-3, 1e-3));
+    const float3 oneMinusR = one - Rc;
+    rThin = saturate(Rc + oneMinusR * oneMinusR * Rc * T2 / denom);
+    tThin = saturate(oneMinusR * oneMinusR * Tc / denom);
+}
+
 // Per-surface straight-through transmittance for the raygen's
 // front-to-back composite — the spec's own transparent-shadow formula
 // (§"Opacity / Transparency"):
@@ -868,6 +901,27 @@ float3 OpenPBRReflectionWeight(OpenPBRSurfaceParams p, float3 N, float3 V) {
 // semantics COINCIDE with that — both modes share this exact path; the
 // flag is honored in the sense that no second-interface term is added
 // for either.
+//
+// RTX-alignment glass forensics (2026-07-06) — deliberately NOT using
+// OpenPBRThinFilmSum's T_thin here, even though reflections.slang's
+// specWeight boost now does: ground-truthed against the World Lobby's
+// actual MDL source (Materials/Base/Templates/GlassWithVolume.mdl,
+// which Tinted_Glass and Clear_Glass both instantiate) — its BSDF is
+// `df::fresnel_layer(ior, 1.0, reflect_bsdf, transmit_bsdf, normal)`,
+// a PLAIN single-interface Fresnel split (reflect weighted by R(ior,
+// angle), transmit by 1−R); MDL has no "two parallel interfaces"
+// construct at all, so ovrtx's own transmittance for these materials
+// IS exactly transmission_color·(1−R) — this function's original
+// formula. (The thin-walled flag only switches transmission_color
+// between a constant tint and a depth-based Beer-Lambert volume
+// absorption in that MDL graph — it never changes the reflect/transmit
+// SPLIT itself.) Matching ovrtx's ACTUAL model here, rather than a more
+// "physically complete" two-interface derivation, avoids introducing a
+// bias ovrtx itself doesn't have: an earlier version of this fix tried
+// the T_thin formula here too and measurably regressed both id30's own
+// luma (moved further from ovrtx, already-darker-than-target) and the
+// World Lobby's whole-frame RMSE (0.1770 → 0.1846) — this function
+// stays on the MDL-faithful single-interface formula.
 //
 // Opaque exactness: α = 1, T = 0 → T_pbr = 1 − 1·(1 − 0) = 0 EXACTLY —
 // no epsilon gate needed for the raygen loop's break.

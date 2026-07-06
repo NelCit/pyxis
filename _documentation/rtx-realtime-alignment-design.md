@@ -376,6 +376,57 @@ PyxisRenderer.cpp). Denoiser real-time sub-levers (SIGMA temporal state,
 foliage coherence, adaptive à-trous phi, firefly clamp) are SECONDARY —
 they help the real-time few-frame viewer, not the converged 0.05 metric.
 
+**AccumulationPass shipped (2026-07-06).** New compute pass
+(accumulate.slang, Private/Passes/AccumulationPass.{h,cpp}) with a
+persistent RGBA32F running-mean buffer, registered between CompositePass
+and DlssPass. Design choice per the recommendation above: accumulates the
+RAW composite — when `RealTimeQuality::passMask` bit 7
+(`PASS_MASK_ACCUMULATE`, ShaderInterop.slang, driven off the EXISTING
+passMask config field — no RenderSettings POD change) is set,
+`PyxisRenderer::RenderFrame` unconditionally force-clears the
+DENOISE/TAA passMask bits on its local settings copy (same "local copy,
+single gate" shape the DLSS force-masking already uses), so the
+denoiser's own EMA and TAA's own history never double-average against
+this pass. Bit clear (every existing config) → AccumulationPass is a
+pure passthrough; verified byte-identical two ways: (a) code inspection
+— `Execute()`'s first branch returns before touching any resource when
+inactive; (b) same config rendered twice with the post-change binary
+is bit-exact (max abs diff 0.0). `PyxisRenderer::ResetAccumulation()`
+(a long-reserved §18.6 stub) now actually resets the running-mean
+counter; also resets on a resolution change and an inactive→active
+transition.
+
+Measured (World Lobby, CamLobbyWide, 1920×1080, seed 42, denoiser=builtin
+baseline reproduced at RMSE 0.177053 ≈ the 0.1771 scoreboard entry —
+methodology validated):
+
+| N | accum-mode RMSE vs ovrtx | accum-mode hf (noise proxy) |
+|---|---|---|
+| 1 | 0.3645 (= denoise-off single frame, unchanged) | 0.2283 |
+| 16 | 0.2080 | 0.0928 |
+| 32 | 0.1963 | 0.0719 |
+| 64 | 0.1901 | 0.0573 |
+| 96 | 0.1880 | 0.0510 |
+| 200 | 0.1858 | 0.0427 |
+
+Both RMSE and hf decrease monotonically with N — the core bug (denoise-OFF
+flat across N, reconfirmed here as a control: hf 0.22835→0.22902 for
+N=1→96 with the new bit NOT set) is fixed; accumulation now does
+real work. Fitting hf ≈ a + b/√N (R² ≈ 1 across N=16/32/96/200) gives an
+extrapolated N→∞ floor **a ≈ 0.023, well BELOW the denoiser's 0.038**
+(same scene/res) — confirming the denoiser's EMA cap, not the scene
+signal, is the noise floor being removed. However convergence is the
+classic MC 1/√N rate: RMSE has NOT yet crossed below the denoiser-EMA
+baseline (0.186 @ N=200 vs 0.177 baseline) — extrapolating the hf fit,
+the crossover is ≈N=340 for the noise proxy alone, and the RMSE crossover
+(bias+noise combined) needs low thousands of frames given the residual
+noise-only component shrinks slowly. "Closer than them" via raw
+accumulation is a real, working lever, but not a free win at
+accumulationFrames=96 — it needs either many more frames (quality/offline
+mode) or pairing with the denoiser sub-levers above for the interactive
+range. Cost: one extra RGBA32F copy + lerp dispatch per frame when active
+(~free relative to path-trace cost); zero cost when inactive.
+
 ## Determinism & regression strategy (the hard constraint)
 
 Stochastic sampling + temporal passes change every golden image. Strategy:

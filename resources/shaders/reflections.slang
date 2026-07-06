@@ -254,7 +254,128 @@ void RayGenMain() {
         worldHit, worldDirXyz, vis.hitT,
         inst.objectToWorld, worldToObject);
     const float3 viewDir = normalize(-worldDirXyz);
-    const float3 specWeight = OpenPBRReflectionWeight(surf.pbr, surf.normalWorld, viewDir);
+    float3 specWeight = OpenPBRReflectionWeight(surf.pbr, surf.normalWorld, viewDir);
+
+    // RTX-alignment window forensics (rtx-realtime-alignment-design.md,
+    // 2026-07-06) — two corrections to the PRIMARY surface's specWeight,
+    // measured against ovrtx on the World Lobby's window facade (mullion
+    // materialId 6, glass materialId 2). Applied HERE (gReflectionWeight
+    // is CompositePass's own SpecWeight input, consumed nowhere else) and
+    // NOT inside OpenPBRReflectionWeight itself: that closure is also
+    // called by shading.slang's ShadeSurfaceHit for TranslucencyPass's
+    // front-to-back segments (whatever is visible THROUGH a transmissive
+    // surface, e.g. a mullion glimpsed through an adjacent glass pane) —
+    // an earlier version of this fix lived in the shared closure and
+    // measurably regressed materialId 2/30 (both partly-glass) by
+    // dimming metal content seen *through* them, even though those
+    // materials' OWN primary-surface weight was untouched (metalness/
+    // thin-walled gates were 0 for them). Scoping to this raygen's own
+    // gReflectionWeight write keeps the fix confined to the primary-
+    // surface reflection blend CompositePass performs.
+    //
+    // (1) Metalness-gated extra glossy damping. World Lobby's "Iron"
+    // mullion is a genuine PARTIAL metal (OmniPBR metallic_constant =
+    // 0.5, reflection_roughness_constant = 0.5) — an unusual middle-of-
+    // the-road case most materials don't hit. Phase B's GGX-VNDF trace +
+    // 96-frame accumulation already converges gReflections to the true
+    // solid-angle-weighted average of whatever the lobe sees (dark
+    // interior most of the time, this scene's flat untextured 12000-
+    // intensity dome light on the facade orientations that catch sky —
+    // see REFLECTION_TRACE_ROUGHNESS_CEILING's own doc comment above for
+    // that dome's "no HDRI, flat colour-only" status, itself scene/
+    // ingest debt outside this module's reach). Measured: on the sky-
+    // catching facade segments OpenPBRReflectionWeight's (1-r)² glossy
+    // fade let ~2x too much of that flat, converged-bright sample
+    // through (0.29 vs ovrtx's 0.13-0.15 local mean at the affected
+    // NdotV band) while the SAME-roughness dielectric floor/table
+    // materials (Paint_Satin, metalness 0) the reflection-ambient commit
+    // just tuned are NOT over-bright — i.e. the excess is specifically
+    // the metal fraction's grazing rise, not a generic roughness-damping
+    // shortfall. An EXTRA (1-r')^(2·M) factor (M = base_metalness)
+    // compounds with the existing (1-r')² to give an effective (1-r')^
+    // (2+2M) curve — a no-op at metalness 0 (every dielectric: floor,
+    // tables, this same glass, is untouched), while a partial-to-full
+    // metal gets a steeper falloff at the SAME roughness (net exponent
+    // 3 at M=0.5, 4 at M=1). Gated on `metalness > 0` rather than
+    // relying on pow(x, 0) == 1 for the no-op case: a FULLY ROUGH
+    // dielectric (roughness == 1, common for matte materials — concrete,
+    // stucco, fabric) makes the pow() base (1 - r') exactly 0, and
+    // GPU pow()'s exp2(y * log2(x)) implementation computes
+    // 0 * log2(0) = 0 * (-inf) = NaN even at y = 0 (IEEE754 "0 * inf"
+    // is NaN, not the mathematically-expected pow(0,0) = 1) — an actual
+    // NaN measured on several fully-rough materials (materialId 15/16/
+    // 17/21/26 in the World Lobby) that corrupted their whole composite.
+    // Skipping the multiply entirely for metalness == 0 sidesteps the
+    // edge case exactly where it would fire, at zero cost (it was a
+    // no-op there anyway).
+    if (surf.pbr.baseMetalness > 0.0) {
+        const float rPrimeForDamping = OpenPBRCoatRoughenedRoughness(surf.pbr);
+        const float extraMetalExponent = 2.0 * saturate(surf.pbr.baseMetalness);
+        specWeight *= pow(saturate(1.0 - rPrimeForDamping), extraMetalExponent);
+    }
+
+    // (2) Thin-walled second-interface reflectance. `p.thinWalled` (set
+    // for the World Lobby's Clear_Glass OmniGlass, ior 1.52) is carried
+    // in OpenPBRSurfaceParams but OpenPBRReflectionWeight never consumes
+    // it. A real thin sheet of glass has TWO parallel dielectric
+    // interfaces at the same visual depth; a viewer sees BOTH surfaces'
+    // reflections layered together (the familiar "double image" ghost
+    // reflection in a windowpane) — measured against ovrtx, the World
+    // Lobby window glass's structural (non-glare) reflection lobe was
+    // ~2.4x too dark (0.30 vs 0.73).
+    //
+    // RTX-alignment glass forensics follow-up (2026-07-06) — the ORIGINAL
+    // fix here used the non-absorbing Airy-doubling closed form
+    // R_thin = 2R/(1+R), which implicitly assumes the medium between the
+    // two interfaces is CLEAR (single-pass transmittance T = 1): true for
+    // this facade's Clear_Glass (glass_color ~= white) but NOT for the
+    // World Lobby's second thin-walled glass surface, materialId 30's
+    // Tinted_Glass (transmission_color 0.35 — a strongly absorptive
+    // medium). Applying the same non-absorbing doubling to BOTH measurably
+    // regressed id30 (local RMSE 0.3110 -> 0.3152 at the largest blend
+    // that didn't regress the whole-frame number) because a tinted pane's
+    // second-interface light has to cross the tint TWICE (round trip)
+    // before it can re-emerge, so it should be damped by transmission_
+    // color², not passed through at full (T=1) strength. Switched to
+    // OpenPBRThinFilmSum (openpbr_material.slang) — the general absorbing-
+    // medium incoherent thin-film sum this non-absorbing formula is the
+    // T=1 special case of — parameterized by the material's OWN
+    // transmissionColor: Clear_Glass (T ~= 1) still gets ~the full
+    // doubling; Tinted_Glass (T = 0.35, T² ~= 0.12) gets most of the boost
+    // naturally suppressed, without a per-material special case and
+    // without touching any non-thin-walled material (mullion, floor,
+    // tables, mirrors all have thinWalled = 0 and take the untouched R
+    // path).
+    //
+    // OpenPBRTransmittance is deliberately NOT switched to this helper's
+    // T_thin (see that function's own doc comment): ground-truthed
+    // against the World Lobby's actual MDL source
+    // (Templates/GlassWithVolume.mdl), ovrtx's own transmittance for
+    // BOTH these materials is the plain single-interface
+    // transmission_color·(1−R) this renderer already had — MDL's
+    // `fresnel_layer` never applies a two-interface term to either lobe.
+    // The R_thin reflectance boost here is this renderer's own pre-
+    // existing (Airy-doubling) approximation for the "double image"
+    // ghost reflection a real viewer sees in a windowpane, generalized
+    // to also account for absorption; it is not itself claimed to be
+    // what ovrtx's MDL evaluator does, only tuned to move id2 measurably
+    // closer without disturbing any other material (confirmed by a full
+    // per-material RMSE sweep: only materialId 30 changed at all before
+    // vs after this fix, id2/id6 bit-identical).
+    //
+    // Still blended at a FRACTION (0.15, the previously-measured-safe
+    // strength) rather than applied at full weight: id30's OWN traced
+    // gReflections carries more per-pixel Monte-Carlo variance than id2's
+    // does, and even the now-much-smaller absorption-damped delta is
+    // safer left partial than risking a repeat of the variance-driven
+    // RMSE regression the flat non-absorbing version caused.
+    if (surf.pbr.thinWalled) {
+        float3 rThin;
+        float3 tThinUnused;
+        OpenPBRThinFilmSum(specWeight, saturate(surf.pbr.transmissionColor), rThin, tThinUnused);
+        specWeight = lerp(specWeight, rThin, 0.15);
+    }
+
     gReflectionWeight[launchIndex] = float4(specWeight, 1.0f);
 
     // WP2-final — runtime RealTimeQuality.reflectionMaxRoughness (SceneBindings
