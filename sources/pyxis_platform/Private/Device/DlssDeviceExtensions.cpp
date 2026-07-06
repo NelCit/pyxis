@@ -167,38 +167,31 @@ DlssDeviceRequirements TryBootstrapStreamlineForVulkan() noexcept {
   // (_tools/setup_dlss.py) and should never silently pull a
   // network-downloaded plugin.
   //
-  // DLSS Stage 2b -- kFeatureDLSS_RR (Ray Reconstruction, sl.dlss_d.dll) is
-  // DELIBERATELY NOT in featuresToLoad, despite RR needing the plugin
-  // loaded to ever become usable. SAFETY FINDING (2026-07-06, this
-  // machine): loading kFeatureDLSS_RR here made slSetVulkanInfo (called
-  // later, once a device exists, from DlssProvider::Initialize in
-  // pyxis_renderer) drive NGX's own model-cache bootstrap for the DLSSD
-  // snippet (commonEntry.cpp's NGXSecureLoadFeature/LaunchNGXUpdater path
-  // -- NOT gated by eAllowOTA/eLoadDownloadedPlugins above, which only
-  // cover Streamline's OWN plugin OTA, not NGX's per-feature model
-  // updater). On a machine whose local NGX model cache lacks a validated
-  // dlssd snippet for the runtime's cmsid AND has no working network path
-  // to complete the update, this spawned dozens of `nvngx_update.exe`
-  // child processes per run, accumulating UNBOUNDED (100+ observed across
-  // two short smoke-test runs) until manually killed -- a de-facto
-  // process-spawn storm on a machine shared with other concurrent agents.
-  // No documented sl::Preferences flag disables it (checked every
-  // ProgrammingGuide*.md in the vendored SDK).
+  // DLSS Stage 2b -- kFeatureDLSS_RR (Ray Reconstruction, sl.dlss_d.dll).
+  // RESOLVED + LIVE (2026-07-06): "DLSS-RR is usable ... dlss: RR active".
   //
-  // Owner-directed retry (2026-07-06) — RR RE-ENABLED (kept on per owner).
-  // Blocker root-caused to a snippet/model VERSION mismatch: SR works
-  // (effective=Dlss) but RR fails slIsFeatureSupported (sl::Result=32) and
-  // loops nvngx_update.exe, because this machine's installed driver
-  // (596.36) provisioned dlssd MODELS
-  // (C:\ProgramData\NVIDIA\NGX\models\dlssd\versions\2031xxxx\...\
-  // 160_E658700.bin) but ships NO dlssd snippet DLL in the DriverStore
-  // (only nvngx_dlssg.dll), while the nvngx_dlssd.dll we stage from
-  // Streamline SDK 2.12.0 expects model 160_E658703.bin via `versions\0`.
-  // FIX = update the NVIDIA driver to latest (ships a matching
-  // dlssd snippet + models) OR let NGX OTA fetch the expected model with
-  // network access. RR flips live the moment slIsFeatureSupported passes;
-  // if the storm recurs while unresolved, kill nvngx_update.exe and (if
-  // needed for a stable machine) drop kFeatureDLSS_RR here again.
+  // History + the two-part fix (both required together):
+  //  1. VERSION PAIRING. The earlier storm (100-400 `nvngx_update.exe`
+  //     spawned per run, accumulating until killed) was NGX looping to
+  //     OTA-fetch a DLSS-D model the staged snippet wanted but the machine
+  //     lacked. This machine's NGX cache has DLSS-D model 160_E658700.bin
+  //     (== 310.6.0 generation), but Streamline SDK 2.12.0's nvngx_dlssd.dll
+  //     (v310.7.0) wants the 310.7 model (160_E658703.bin) which was never
+  //     provisioned here and OTA never fetched. FIX: stage the Streamline
+  //     2.11.1 runtime DLL set (nvngx_dlssd.dll v310.6.0 -- an EXACT match
+  //     to the cached model), so RR resolves LOCALLY with no OTA. Result:
+  //     the updater spawns drop to a small bounded burst that self-clears
+  //     in <4s (normal per-launch model-currency check), NOT the runaway.
+  //     _tools/setup_dlss.py stages 2.11.1; headers stay 2.12.0 (sl_dlss_d.h
+  //     / sl_result.h are byte-identical across the two -- verified).
+  //  2. projectId (below). 2.11.1 hard-enforces a valid NGX app identifier
+  //     where 2.12.0 tolerated an empty one; without it 2.11.1 disables ALL
+  //     NGX features (SR included). See pref.projectId.
+  //
+  // If ever staged against a driver/Streamline pairing where the cached
+  // model and the snippet DIVERGE again, the storm can recur -- kill
+  // nvngx_update.exe, re-pair versions (match nvngx_dlssd.dll's FileVersion
+  // to the models\dlssd cache generation), or drop kFeatureDLSS_RR here.
   const sl::Feature featuresToLoad[] = {sl::kFeatureDLSS, sl::kFeatureDLSS_RR};
   const wchar_t* pluginPaths[] = {interposer.directoryWide.c_str()};
 
@@ -215,6 +208,18 @@ DlssDeviceRequirements TryBootstrapStreamlineForVulkan() noexcept {
   pref.renderAPI = sl::RenderAPI::eVulkan;  // required for correct slGetFeatureRequirements (guide 5.2.1 note)
   pref.engine = sl::EngineType::eCustom;
   pref.engineVersion = "1";
+  // projectId — a developer-chosen GUID string. REQUIRED: when engineVersion
+  // is non-empty, sl.common's slInit takes the Project_Id NGX-identifier
+  // branch (commonEntry.cpp) and passes projectId straight to
+  // NVSDK_NGX_VULKAN_GetFeatureRequirements. Leaving it empty makes that a
+  // zero-length string -> NGX 0xbad00005 (FAIL_InvalidParameter) -> "Please
+  // provide correct application id ... NGX based features will be disabled".
+  // Streamline 2.12.0 silently tolerated the empty id for DLSS-SR; 2.11.1
+  // (pinned to match this machine's cached DLSS-RR model 310.6.0 — see the
+  // featuresToLoad comment above) enforces it and disables ALL NGX features
+  // without it. A self-generated GUID satisfies the dev/non-registered path
+  // (no NVIDIA app-id registration needed for a private tool).
+  pref.projectId = "a1b2c3d4-e5f6-4a5b-8c9d-0e1f2a3b4c5d";
   pref.pathsToPlugins = pluginPaths;
   pref.numPathsToPlugins = 1;
   pref.featuresToLoad = featuresToLoad;

@@ -129,9 +129,17 @@ def main() -> int:
     )
     parser.add_argument(
         "--version",
-        default="2.7.1",
+        default="2.11.1",
         help="Streamline release tag to fetch (default: %(default)s). Browse "
-        f"available releases at {STREAMLINE_RELEASES_URL}",
+        f"available releases at {STREAMLINE_RELEASES_URL}. NOTE: 2.11.1 is "
+        "pinned deliberately -- its nvngx_dlssd.dll (v310.6.0) matches the "
+        "DLSS-RR model generation NVIDIA drivers currently provision "
+        "(160_E658700.bin / 310.6.0), so Ray Reconstruction resolves LOCALLY "
+        "with no OTA (no nvngx_update storm). The newer 2.12.0 snippet wants "
+        "a 310.7 model that isn't provisioned yet and storms trying to fetch "
+        "it. Re-pin upward only when a driver ships the matching newer model "
+        "(check C:/ProgramData/NVIDIA/NGX/models/dlssd against the DLL "
+        "FileVersion). See DlssDeviceExtensions.cpp's featuresToLoad comment.",
     )
     parser.add_argument(
         "--url",
