@@ -156,6 +156,14 @@ target_sources(pyxis_renderer PRIVATE
     # recombining the five signal passes' outputs into the final radiance.
     Private/Passes/CompositePass.h
     Private/Passes/CompositePass.cpp
+    # RTX-alignment design (rtx-realtime-alignment-design.md), "KEY FINDING
+    # (2026-07-06): no true accumulation buffer" — AccumulationPass,
+    # registered between CompositePass and DlssPass (PyxisRenderer.cpp): a
+    # true progressive running-mean average of the raw composite radiance,
+    # replacing the denoiser's capped EMA as the convergence mechanism at
+    # high accumulationFrames.
+    Private/Passes/AccumulationPass.h
+    Private/Passes/AccumulationPass.cpp
     Private/Passes/TonemapPass.h
     Private/Passes/TonemapPass.cpp
     Private/Passes/AutoExposurePass.h
@@ -831,6 +839,19 @@ pyxis_compile_slang_shader(
     ENTRY_POINT main
     STAGE       compute
     OUTPUT      denoise_ao.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP}
+)
+
+# RTX-alignment design (rtx-realtime-alignment-design.md), "KEY FINDING
+# (2026-07-06): no true accumulation buffer" — AccumulationPass: a true
+# progressive running-mean average of CompositePass's raw linear radiance,
+# registered between CompositePass and DlssPass (PyxisRenderer.cpp).
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/accumulate.slang
+    ENTRY_POINT main
+    STAGE       compute
+    OUTPUT      accumulate.spv
     INCLUDES    ${PYXIS_SHADER_INTEROP}
 )
 

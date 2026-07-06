@@ -5,6 +5,7 @@
 // Tonemap → SsaaResolve → BlitToSrgb, all linear (§9).
 
 #include "Dlss/DlssProvider.h"
+#include "Passes/AccumulationPass.h"
 #include "Passes/AmbientOcclusionPass.h"
 #include "Passes/AutoExposurePass.h"
 #include "Passes/BlitToSrgbPass.h"
@@ -220,6 +221,16 @@ PyxisRenderer::PyxisRenderer(nvrhi::IDevice* device, GpuScene& scene, Profiler& 
                                                    denoiseAtrousRaw, denoiseAoRaw);
   _compositePass = composite.get();
   _graph->AddPass(std::move(composite));
+  // RTX-alignment design (rtx-realtime-alignment-design.md), "KEY FINDING
+  // (2026-07-06): no true accumulation buffer" — AccumulationPass runs
+  // next, between CompositePass and DlssPass: a true progressive running-
+  // mean average of the raw composite radiance (see the pass's own header
+  // for the full rationale). Gated on RealTimeQuality::passMask bit 7
+  // (PASS_MASK_ACCUMULATE), clear by default (pure passthrough — byte-
+  // identical to today's behaviour for every existing config/golden).
+  auto accumulation = std::make_unique<AccumulationPass>(device);
+  _accumulationPass = accumulation.get();
+  _graph->AddPass(std::move(accumulation));
   // DLSS Stage 2a (rtx-realtime-alignment-design.md) — DlssPass runs next,
   // between CompositePass and AutoExposurePass: no-ops unless the
   // effective denoiser resolves to Dlss (RenderFrame's own resolution
@@ -270,7 +281,8 @@ PyxisRenderer::PyxisRenderer(nvrhi::IDevice* device, GpuScene& scene, Profiler& 
   Logging::Get().Info(log::RENDER,
                       "PyxisRenderer: initialised (RaytracedGBuffer + 5 signal passes + "
                       "5-pass denoiser chain (Shadow/Temporal/HistoryFix/Atrous/Ao) + Composite + "
-                      "Dlss + AutoExposure + Taa + Tonemap + SsaaResolve + BlitToSrgb registered)");
+                      "Accumulation + Dlss + AutoExposure + Taa + Tonemap + SsaaResolve + "
+                      "BlitToSrgb registered)");
 }
 
 // Out-of-line dtor lives here so unique_ptr<RenderGraph>'s (and, since
@@ -428,6 +440,28 @@ void PyxisRenderer::RenderFrame(nvrhi::ICommandList* commandList, const RenderSe
     effectiveSettings.realTimeQuality.passMask &= ~shaderinterop::PASS_MASK_TAA;
   }
   else if (effectiveDenoiser == DENOISER_OFF)
+  {
+    effectiveSettings.realTimeQuality.passMask &=
+        ~(shaderinterop::PASS_MASK_DENOISE | shaderinterop::PASS_MASK_TAA);
+  }
+
+  // RTX-alignment design (rtx-realtime-alignment-design.md), "KEY FINDING
+  // (2026-07-06): no true accumulation buffer" — PASS_MASK_ACCUMULATE is
+  // an UNCONDITIONAL override on top of every branch above (checked
+  // against the AUTHORED `settings`, not `effectiveSettings`, so it can't
+  // be masked out by whatever the DLSS/builtin logic just decided).
+  // AccumulationPass (registered between CompositePass and DlssPass)
+  // accumulates the composite output CompositePass writes to linearColor;
+  // the denoiser's own EMA history and TAA's own history are BOTH already
+  // temporal averages, so leaving either enabled while this pass ALSO
+  // averages across frames would double-average and bias the converged
+  // result away from the true unbiased estimate this pass exists to reach
+  // (see AccumulationPass.h's file header). Forcing both off here — the
+  // same "local copy, single gate" shape the DLSS forcing above uses —
+  // means CompositePass reads the raw (undenoised) signal-pass outputs
+  // and TaaPass's own passMask self-gate no-ops, without either pass's
+  // source needing to know AccumulationPass exists.
+  if ((settings.realTimeQuality.passMask & shaderinterop::PASS_MASK_ACCUMULATE) != 0u)
   {
     effectiveSettings.realTimeQuality.passMask &=
         ~(shaderinterop::PASS_MASK_DENOISE | shaderinterop::PASS_MASK_TAA);
@@ -678,13 +712,14 @@ void PyxisRenderer::RenderFrame(nvrhi::ICommandList* commandList, const RenderSe
   const Profiler::CpuScope frameScope(*_profiler, "render.frame.cpu");
   // The graph runs RaytracedGBuffer → [DirectLighting, IndirectDiffuse,
   // AmbientOcclusion, Reflections, Translucency] → 5-pass denoiser chain
-  // (Shadow, Temporal, HistoryFix, Atrous, Ao) → Composite → Dlss →
-  // AutoExposure → Taa → Tonemap → SsaaResolve →
-  // BlitToSrgb. Dlss no-ops unless effective denoiser == Dlss (in which
-  // case Taa's own passMask bit is already forced off above — they never
-  // both run); SsaaResolve no-ops at factor < 2; BlitToSrgb no-ops when
-  // colorResolved is unbound (Kit's path), so the headless / Omniverse
-  // paths are unaffected.
+  // (Shadow, Temporal, HistoryFix, Atrous, Ao) → Composite → Accumulation →
+  // Dlss → AutoExposure → Taa → Tonemap → SsaaResolve →
+  // BlitToSrgb. Accumulation no-ops unless PASS_MASK_ACCUMULATE is set (in
+  // which case denoise+TAA are already forced off above); Dlss no-ops
+  // unless effective denoiser == Dlss (in which case Taa's own passMask
+  // bit is already forced off above — they never both run); SsaaResolve
+  // no-ops at factor < 2; BlitToSrgb no-ops when colorResolved is unbound
+  // (Kit's path), so the headless / Omniverse paths are unaffected.
   _graph->Execute(commandList, context);
 }
 
@@ -697,8 +732,17 @@ void PyxisRenderer::Resize(uint32_t /*width*/, uint32_t /*height*/) {
 }
 
 void PyxisRenderer::ResetAccumulation() {
-  // No-op until M5+ adds an accumulation buffer to clear. The
-  // path-tracer renders one sample per frame straight to the AOV.
+  // RTX-alignment design (rtx-realtime-alignment-design.md), "KEY FINDING
+  // (2026-07-06): no true accumulation buffer" — AccumulationPass now
+  // owns the one true accumulation buffer this method was always reserved
+  // for (plan §18.6's doc comment predates the pass by name but describes
+  // exactly this). Callers (viewer camera/settings-change handlers) call
+  // this so the NEXT frame starts a fresh running mean instead of
+  // blending against a stale one. No-op when the pass failed to
+  // construct (shader/pipeline load failure — same defensive null check
+  // every other borrowed pass pointer in this file uses).
+  if (_accumulationPass != nullptr)
+    static_cast<AccumulationPass*>(_accumulationPass)->Reset();
 }
 
 FrameProfile PyxisRenderer::LastFrameProfile() const {

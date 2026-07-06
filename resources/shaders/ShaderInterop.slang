@@ -1121,6 +1121,26 @@ struct DlssDepthUniforms {
     float farClip;
 };
 
+// AccumulationPass — RTX-alignment design (rtx-realtime-alignment-
+// design.md), "KEY FINDING (2026-07-06): no true accumulation buffer —
+// top lever for <0.05". A true progressive-accumulation (running-mean)
+// buffer sitting after CompositePass, before AutoExposurePass: unlike the
+// denoiser's EMA history (capped at maxAccumFrames — a fixed noise
+// FLOOR), this converges toward the true unbiased path-traced image as
+// N grows. Gated CPU-side on RealTimeQuality::passMask bit 7
+// (PASS_MASK_ACCUMULATE below) — no shader body branches on that bit,
+// same "C++-only gate" convention as PASS_MASK_DENOISE/PASS_MASK_TAA.
+// `sampleWeight` is precomputed CPU-side as 1/(sampleIndex+1) (the exact
+// running-mean lerp weight) so the shader is a plain per-pixel lerp, no
+// per-pixel divide; `sampleIndex` itself is carried only for
+// debug/inspection (not read by accumulate.slang).
+struct AccumulationUniforms {
+    uint  destWidth;
+    uint  destHeight;
+    uint  sampleIndex;
+    float sampleWeight;
+};
+
 #ifdef __cplusplus
     // HitInfo is shader-only (see the `#ifndef __cplusplus` guard
     // above), so its size assert lives shader-side only too. Below
@@ -1240,6 +1260,10 @@ struct DlssDepthUniforms {
                   "DenoiseAoUniforms must be 32 bytes (2 cbuffer rows).");
     static_assert(sizeof(DenoiseAoUniforms) % 16 == 0,
                   "DenoiseAoUniforms must be 16-byte aligned (cbuffer std140 rule).");
+    static_assert(sizeof(AccumulationUniforms) == 16,
+                  "AccumulationUniforms must be 16 bytes (1 cbuffer row).");
+    static_assert(sizeof(AccumulationUniforms) % 16 == 0,
+                  "AccumulationUniforms must be 16-byte aligned (cbuffer std140 rule).");
 
     // Sentinel bindless slot meaning "no texture bound for this lobe".
     // The closesthit checks the matching MaterialFlag bit before
@@ -1260,6 +1284,20 @@ struct DlssDepthUniforms {
     // RenderSettings POD change — passMask is already a uint32_t bitmask.
     constexpr uint32_t PASS_MASK_DENOISE = 1u << 5;  // 0x20 — SIGMA-shadow + ReLAX diffuse/specular chain
     constexpr uint32_t PASS_MASK_TAA     = 1u << 6;  // 0x40 — TaaPass (camera jitter + reprojection)
+    // RTX-alignment design (rtx-realtime-alignment-design.md), "KEY FINDING
+    // (2026-07-06): no true accumulation buffer" — CPU-only gate for
+    // AccumulationPass (same convention as the two bits above: only
+    // PyxisRenderer::RenderFrame + AccumulationPass::Execute read it, no
+    // shader body does). When set, PyxisRenderer::RenderFrame ALSO forces
+    // PASS_MASK_DENOISE/PASS_MASK_TAA off on the local settings copy for
+    // that frame — see its own doc comment for why (the denoiser's EMA and
+    // TAA's own history would otherwise double-average against the raw
+    // signal this pass accumulates, biasing the converged result). Driven
+    // from the EXISTING `render.realTimeQuality.passMask` config field —
+    // no RenderSettings POD change (§18 frozen during concurrent Phase B
+    // work); a config author sets bit 0x80 alongside `render.
+    // accumulationFrames > 1` to opt into progressive-accumulation mode.
+    constexpr uint32_t PASS_MASK_ACCUMULATE = 1u << 7;  // 0x80 — AccumulationPass (progressive running mean)
 
     }  // namespace pyxis::shaderinterop
 #endif

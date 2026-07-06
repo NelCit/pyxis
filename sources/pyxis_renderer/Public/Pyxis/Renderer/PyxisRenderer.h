@@ -73,14 +73,20 @@ class PYXIS_RENDERER_API PyxisRenderer final {
   void RenderFrame(nvrhi::ICommandList* commandList, const RenderSettings& settings,
                    const RenderTargets& targets);
 
-  // Resize internal AOV / accumulation buffers. M3 path-trace writes
-  // into a caller-allocated AOV color texture (no internal buffers
-  // yet), so this is still a no-op; M5+ accumulation wires here.
+  // Resize internal AOV / accumulation buffers. Still effectively a no-op
+  // body (RenderFrame's own per-pass Ensure*/EnsureBuffer calls already
+  // detect a resize and reset their own scratch — including
+  // AccumulationPass's running-mean buffer, RTX-alignment design "KEY
+  // FINDING (2026-07-06): no true accumulation buffer" — on the next
+  // RenderFrame call), kept for API-contract symmetry with
+  // ResetAccumulation() below.
   void Resize(uint32_t width, uint32_t height);
 
-  // Resets accumulation. No-op until the M5+ accumulation buffer
-  // exists — the M3 path-tracer renders one sample per frame straight
-  // to the AOV color texture.
+  // Resets accumulation (camera/settings change, etc.) — the NEXT
+  // RenderFrame starts AccumulationPass's running mean fresh (weight 1.0)
+  // instead of blending against a stale one. No-op when
+  // RealTimeQuality::passMask's PASS_MASK_ACCUMULATE bit is clear (the
+  // default), since there is then no running mean to reset.
   void ResetAccumulation();
 
   [[nodiscard]] FrameProfile LastFrameProfile() const;
@@ -170,6 +176,16 @@ class PYXIS_RENDERER_API PyxisRenderer final {
   // drops its passes first by member-order). Same forward-declared-
   // IRenderPass* + impl-side cast pattern as _gbufferPass.
   class IRenderPass* _compositePass = nullptr;
+  // RTX-alignment design (rtx-realtime-alignment-design.md), "KEY FINDING
+  // (2026-07-06): no true accumulation buffer" — borrowed pointer to
+  // AccumulationPass, registered between _compositePass and _dlssPass.
+  // Kept so RenderFrame can call its Reset() from ResetAccumulation() —
+  // same forward-declared-IRenderPass* + impl-side cast pattern as every
+  // other pass pointer here. A true progressive running-mean average of
+  // the raw composite radiance (see the pass's own header for the design
+  // rationale); gated on RealTimeQuality::passMask bit 7
+  // (PASS_MASK_ACCUMULATE), clear by default (pure passthrough).
+  class IRenderPass* _accumulationPass = nullptr;
   // Borrowed pointer to the SsaaResolvePass the graph owns — kept so RenderFrame
   // can ask it for its base-res LINEAR downsample target (EnsureLinearOutput) and
   // thread it into PassContext::colorLinearResolved for BlitToSrgbPass. Same
