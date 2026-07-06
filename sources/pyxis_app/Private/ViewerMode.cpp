@@ -576,11 +576,14 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
   auto loadScene = [&](std::string_view             path,
                        std::string_view             adapterLabel,
                        ImGuiHost::IngestProfile&    outProfile) -> bool {
+    // RTX-alignment design (rtx-realtime-alignment-design.md), WP2-final —
+    // config.scene.camera (--camera / JSON scene.camera) overrides
+    // StageWalker's auto-pick; empty = unchanged auto-pick behavior.
     const pyxis::usd_ingest::IngestResult result =
         IngestUsd(adapterLabel, path, gpuScene,
                   /*populationMask*/ {}, /*frameNumber*/ -1.0,
                   loadModeForSession, variantsForSession,
-                  renderPurposeForSession);
+                  renderPurposeForSession, config.scene.camera);
     const pyxis::usd_ingest::IngestStats& stats = result.Stats();
     outProfile.totalMs           = stats.timings.totalMs;
     outProfile.stageOpenMs       = stats.timings.stageOpenMs;
@@ -662,7 +665,11 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
   // RaytracedLightingPass's picker readback). Viewer pins FIF=1 today via
   // its device-creation params.
   rendererDesc.framesInFlight = deviceManager->GetFramesInFlight();
-  PyxisRenderer renderer{device, gpuScene, profiler, rendererDesc};
+  // DLSS Stage 2a (rtx-realtime-alignment-design.md) — same VulkanContext
+  // ImGuiHost already pulls for its own Vulkan backend; DlssProvider needs
+  // it to call slSetVulkanInfo (Private/Dlss/DlssProvider.cpp).
+  const VulkanContext dlssVulkanContext = deviceManager->GetVulkanContext();
+  PyxisRenderer renderer{device, gpuScene, profiler, rendererDesc, &dlssVulkanContext};
 
   // ---- SSAA state (ImGui-driven, deterministic supersampling) --------
   // `aovs` are sized at base×ssaa (super-res); when ssaa > 1 the
@@ -1055,6 +1062,9 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
       targets.elementIdAov      = aovs.elementId.Get();
       targets.normalEyeAov      = aovs.normalEye.Get();
       targets.worldPosEyeAov    = aovs.worldPosEye.Get();
+      // RTX-alignment design (Phase A / WP1) — denoiser-guide AOVs.
+      targets.viewZAov          = aovs.viewZ.Get();
+      targets.motionVector      = aovs.motionVector.Get();
       targets.pickResult        = aovs.pickResult.Get();
       targets.pickResultStaging = aovs.pickResultStaging.Get();
 
@@ -1062,9 +1072,50 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
       settings.width = aovs.width;    // super-res render dims (base × ssaa)
       settings.height = aovs.height;
       settings.ssaaFactor = activeSsaa;  // SsaaResolvePass downsamples by this
+      // RTX-alignment design, "interior illumination" follow-up — config
+      // seed (was a fixed SceneBindings.cpp default); no ImGui override
+      // exists for this yet (out of scope for this follow-up).
+      settings.seed = config.render.seed;
       // Q3 OpenPBR feature gates — CLI seed; the editor's checkboxes
       // override below once ImGui is up (mirrors the SSAA flow).
       settings.openPbrFeatureMask = cliOpenPbrMask;
+      // RTX-alignment design (rtx-realtime-alignment-design.md), WP2-final —
+      // config seed; the editor's "Real-Time Quality" section overrides
+      // below once ImGui is up (mirrors the OpenPBR flow above).
+      settings.realTimeQuality.passMask = config.render.realTimeQuality.passMask;
+      settings.realTimeQuality.directSamples = config.render.realTimeQuality.directSamples;
+      settings.realTimeQuality.indirectSamples = config.render.realTimeQuality.indirectSamples;
+      settings.realTimeQuality.indirectMaxBounces =
+          config.render.realTimeQuality.indirectMaxBounces;
+      settings.realTimeQuality.reflectionSamples =
+          config.render.realTimeQuality.reflectionSamples;
+      settings.realTimeQuality.reflectionMaxRoughness =
+          config.render.realTimeQuality.reflectionMaxRoughness;
+      settings.realTimeQuality.refractionMaxBounces =
+          config.render.realTimeQuality.refractionMaxBounces;
+      settings.realTimeQuality.aoRayLength = config.render.realTimeQuality.aoRayLength;
+      settings.realTimeQuality.maxRayIntensityDirect =
+          config.render.realTimeQuality.maxRayIntensityDirect;
+      settings.realTimeQuality.maxRayIntensityIndirect =
+          config.render.realTimeQuality.maxRayIntensityIndirect;
+      settings.realTimeQuality.maxRayIntensityReflections =
+          config.render.realTimeQuality.maxRayIntensityReflections;
+      // RTX-alignment design (rtx-realtime-alignment-design.md), Phase C —
+      // config seed; the editor's Camera-section checkboxes / "Real-Time
+      // Quality" combo override below once ImGui is up.
+      settings.realTimeQuality.tonemapOperator = config.render.realTimeQuality.tonemapOperator;
+      settings.realTimeQuality.physicalCameraFStop =
+          config.render.realTimeQuality.physicalCameraFStop;
+      settings.realTimeQuality.physicalCameraIso = config.render.realTimeQuality.physicalCameraIso;
+      settings.realTimeQuality.physicalCameraExposureTimeSeconds =
+          config.render.realTimeQuality.physicalCameraExposureTimeSeconds;
+      // DLSS Stage 1 (rtx-realtime-alignment-design.md) — config seed; the
+      // editor's Denoiser / DLSS Mode combos override below once ImGui is
+      // up (mirrors the rest of the Real-Time Quality flow).
+      settings.realTimeQuality.denoiser = config.render.realTimeQuality.denoiser;
+      settings.realTimeQuality.dlssExecMode = config.render.realTimeQuality.dlssExecMode;
+      settings.exposureMode = config.render.exposureMode;
+      settings.exposureResponsivity = config.render.exposureResponsivity;
       // Push the AOV inspector state into the renderer. The ImGui
       // Editor combo flips _editorDebugView; the cursor pump above
       // captures latestMousePixelXY from MouseMove events and we
@@ -1077,8 +1128,19 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
         settings.worldPosPeriod = imguiHost.GetWorldPosPeriod();
         settings.openPbrFeatureMask = imguiHost.GetOpenPbrFeatureMask();
         // Auto-exposure (AutoExposurePass) — the editor's Exposure section.
-        settings.autoExposure = imguiHost.GetAutoExposure() ? 1u : 0u;
+        // RTX-alignment design (rtx-realtime-alignment-design.md), Phase C —
+        // GetAutoExposureMode() folds the legacy/histogram sub-toggle in
+        // (0=off / 1=on-legacy / 2=on-histogram).
+        settings.autoExposure = imguiHost.GetAutoExposureMode();
         settings.autoExposureKey = imguiHost.GetAutoExposureKey();
+        // RTX-alignment design (rtx-realtime-alignment-design.md), Phase C —
+        // physical-camera exposure model — the editor's Camera section.
+        settings.exposureMode = imguiHost.GetExposureMode();
+        // RTX-alignment design (rtx-realtime-alignment-design.md), WP2-final —
+        // the editor's "Real-Time Quality" section (Phase C added the
+        // tonemap operator + physical-camera fStop/iso/exposureTime fields
+        // to GetRealTimeQuality()'s composed result — see ImGuiHost.h).
+        settings.realTimeQuality = imguiHost.GetRealTimeQuality();
       }
       // Picker pixel: pinned takes the latched normalised UV
       // (renormalised against the current AOV size each frame so a
@@ -1101,6 +1163,10 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
       {
         const PickResult pickThisFrame = renderer.LastPickResult();
         imguiHost.SetLastPickResult(pickThisFrame);
+        // DLSS Stage 1 (rtx-realtime-alignment-design.md) — the Real-Time
+        // Quality section's read-only status line mirrors whatever
+        // RenderFrame (just called above) resolved this frame.
+        imguiHost.SetDlssStatus(renderer.GetDlssStatus());
         imguiHost.SetRenderDims(aovs.width, aovs.height);
         // Drain the click latch the event sink set on a non-drag
         // LMB release. The picker is one frame stale by design (raygen

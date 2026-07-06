@@ -35,7 +35,7 @@ struct FrameProfile {
   };
 
   struct PassTiming {
-    ScopeName name;  // e.g. "pass.RaytracedLighting", "render.frame.cpu"
+    ScopeName name;  // e.g. "pass.Composite", "render.frame.cpu"
     ScopeKind kind = ScopeKind::Cpu;
     double durationMs = 0.0;
     uint32_t depth = 0;

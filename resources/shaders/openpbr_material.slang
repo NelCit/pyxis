@@ -628,6 +628,117 @@ float3 EvaluateOpenPBRDirect(OpenPBRSurfaceParams p, float3 N, float3 V, float3 
     return result * NdotL * lightColor;
 }
 
+// RTX-alignment design (rtx-realtime-alignment-design.md), WP2-signals —
+// diffuse/specular-SEPARATED sibling of EvaluateOpenPBRDirect above, for
+// DirectLightingPass's demodulated gDirectDiffuse / gDirectSpecular
+// outputs. Appended (EvaluateOpenPBRDirect above is untouched — the
+// megakernel's byte-identical contract is unaffected) rather than
+// refactored-in-place, so the existing golden-tested path can never pick
+// up a codegen difference from this split.
+//
+// Reuses every pure lobe helper EvaluateOpenPBRDirect calls (Fresnel /
+// GGX / EON / coat / fuzz); only the TOP-LEVEL composition duplicates
+// (necessarily) to track two running accumulators instead of one. The
+// split is an EXACT algebraic decomposition of EvaluateOpenPBRDirect's
+// composition (diffuseOut + specularOut == EvaluateOpenPBRDirect's
+// return, modulo floating-point-op-order — not bit-identical, which is
+// fine: this function's callers are new, previously-nonexistent AOVs):
+//   * base substrate: fBase = lerp(fSpecDielectric + fDiffuse, fSpecMetal, M)
+//       -> diffusePart  = (1-M)·fDiffuse
+//          specularPart = lerp(fSpecDielectric, fSpecMetal, M)
+//   * coat: result = C·fCoat + lerp(1, tCoat·(1-eCoat), C)·(fBase·darkening)
+//       -> the common factor lerp(...)·darkening multiplies BOTH parts;
+//          fCoat (coat's own mirror lobe) adds entirely to specular.
+//   * fuzz: result = Fw·fFuzz + (1-Fw·eFuzz)·result
+//       -> the throughput (1-Fw·eFuzz) multiplies BOTH parts; fFuzz (a
+//          grazing sheen highlight, not a Lambertian lobe) is bucketed
+//          into specular — a documented approximation (fuzz has no
+//          "clean albedo" to demodulate against, same rationale as the
+//          un-demodulated specular output DirectLightingPass produces).
+void EvaluateOpenPBRDirectSplit(OpenPBRSurfaceParams p, float3 N, float3 V, float3 L,
+                                float3 lightColor, out float3 diffuseOut,
+                                out float3 specularOut) {
+    diffuseOut = float3(0.0, 0.0, 0.0);
+    specularOut = float3(0.0, 0.0, 0.0);
+    const float NdotL = dot(N, L);
+    if (NdotL <= 0.0)
+        return;
+    const float NdotV = max(1e-4, dot(N, V));
+    const float3 H = normalize(V + L);
+    const float NdotH = max(1e-4, dot(N, H));
+    const float VdotH = max(1e-4, dot(V, H));
+
+    float xiFs;
+    const float etaPrime = OpenPBRModulatedIor(p.specularIor, p.specularWeight,
+                                               p.coatIor,
+                                               OpenPBRFeature(OPENPBR_FEATURE_COAT)
+                                                   ? saturate(p.coatWeight) : 0.0,
+                                               xiFs);
+    const float rPrime = OpenPBRCoatRoughenedRoughness(p);
+
+    float specDV;
+    const bool useAniso = OpenPBRFeature(OPENPBR_FEATURE_ANISOTROPY)
+                          && p.specularRoughnessAnisotropy > 0.0
+                          && dot(p.tangentWorld, p.tangentWorld) > 1e-8;
+    if (useAniso) {
+        specDV = GgxSpecularDVAniso(N, V, L, H, p.tangentWorld, p.bitangentWorld,
+                                    rPrime, p.specularRoughnessAnisotropy);
+    } else {
+        specDV = GgxSpecularDV(max(1e-4, NdotL), NdotV, NdotH, rPrime);
+    }
+    const float3 fSpecDielectric =
+        specDV * saturate(p.specularColor) * FresnelDielectricExact(VdotH, etaPrime);
+    const float3 fSpecMetal =
+        specDV * OpenPBRConductorFresnel(VdotH, p.baseColor, p.baseWeight,
+                                         p.specularColor, p.specularWeight);
+
+    const float3 rhoDiffuse = OpenPBRDiffuseRho(p);
+    const float  diffuseSelector = OpenPBRDiffuseSelector(p);
+    const float2 ab = GgxDirectionalAlbedoAB(NdotV, rPrime);
+    const float3 eSpec = saturate(xiFs * saturate(p.specularColor) * ab.x + ab.y);
+    const float3 fDiffuse = EonDiffuseDirect(rhoDiffuse, saturate(p.baseDiffuseRoughness), N, V, L)
+                          * diffuseSelector
+                          * saturate(float3(1.0, 1.0, 1.0) - eSpec)
+                          * OPENPBR_INV_PI;
+
+    const float M = saturate(p.baseMetalness);
+    float3 diffusePart  = (1.0 - M) * fDiffuse;
+    float3 specularPart = lerp(fSpecDielectric, fSpecMetal, M);
+
+    if (OpenPBRFeature(OPENPBR_FEATURE_COAT) && p.coatWeight > 0.0) {
+        const float C = saturate(p.coatWeight);
+        const float etaC = max(1e-2, p.coatIor);
+        const float coatDV = GgxSpecularDV(max(1e-4, NdotL), NdotV, NdotH,
+                                           max(0.04, p.coatRoughness));
+        const float3 fCoat = float3(1.0, 1.0, 1.0)
+                           * (coatDV * FresnelDielectricExact(VdotH, etaC));
+        const float f0Base = (etaC - 1.0) / (etaC + 1.0);
+        const float f0Coat = f0Base * f0Base;
+        const float2 abc = GgxDirectionalAlbedoAB(NdotV, max(0.04, p.coatRoughness));
+        const float eCoat = saturate(f0Coat * abc.x + abc.y);
+        const float3 tCoat = CoatViewTransmittance(saturate(p.coatColor),
+                                                   saturate(NdotL), NdotV, etaC);
+        const float3 darkening = CoatDarkeningFactor(p, NdotV, xiFs,
+                                                     rhoDiffuse, diffuseSelector);
+        const float3 underCoat = lerp(float3(1.0, 1.0, 1.0), tCoat * (1.0 - eCoat), C)
+                                * darkening;
+        diffusePart  = underCoat * diffusePart;
+        specularPart = C * fCoat + underCoat * specularPart;
+    }
+
+    if (OpenPBRFeature(OPENPBR_FEATURE_FUZZ) && p.fuzzWeight > 0.0) {
+        const float Fw = saturate(p.fuzzWeight);
+        const float eFuzz = FuzzDirectionalAlbedo(NdotV, p.fuzzRoughness);
+        const float3 fFuzz = saturate(p.fuzzColor) * eFuzz * OPENPBR_INV_PI;
+        const float fuzzThroughput = 1.0 - Fw * eFuzz;
+        diffusePart  = fuzzThroughput * diffusePart;
+        specularPart = Fw * fFuzz + fuzzThroughput * specularPart;
+    }
+
+    diffuseOut  = diffusePart * NdotL * lightColor;
+    specularOut = specularPart * NdotL * lightColor;
+}
+
 // Dome-diffuse response (the "fast diffuse IBL" path). `domeRadiance`
 // is the caller's light-color × mip-biased dome sample; this applies
 // the Lambert 1/π normalization the pre-Q2 path applied, the AO

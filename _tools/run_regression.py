@@ -259,10 +259,27 @@ _KPI_COLUMNS = [
     # pass.RaytracedGBuffer + pass.RaytracedLighting (+ pass.Tonemap). The
     # rolling KPI history restarts at these columns; rt_total_* is the
     # closest like-for-like successor of the old pathtrace_gpu_* numbers.
+    #
+    # RTX-alignment design (rtx-realtime-alignment-design.md), WP2-final —
+    # pass.RaytracedLighting is RETIRED; the lighting_gpu_* columns are
+    # replaced by pass.Composite's composite_gpu_* plus one column per
+    # Phase A signal pass. The rolling KPI history restarts AGAIN here
+    # (_rotate_kpi_csv_on_schema_change fires on this header change);
+    # rt_total_* now sums GBuffer + every signal pass + Composite.
     'gbuffer_gpu_p50_ms',
     'gbuffer_gpu_p99_ms',
-    'lighting_gpu_p50_ms',
-    'lighting_gpu_p99_ms',
+    'direct_lighting_gpu_p50_ms',
+    'direct_lighting_gpu_p99_ms',
+    'indirect_diffuse_gpu_p50_ms',
+    'indirect_diffuse_gpu_p99_ms',
+    'ambient_occlusion_gpu_p50_ms',
+    'ambient_occlusion_gpu_p99_ms',
+    'reflections_gpu_p50_ms',
+    'reflections_gpu_p99_ms',
+    'translucency_gpu_p50_ms',
+    'translucency_gpu_p99_ms',
+    'composite_gpu_p50_ms',
+    'composite_gpu_p99_ms',
     'tonemap_gpu_p50_ms',
     'tonemap_gpu_p99_ms',
     'rt_total_gpu_p50_ms',
@@ -336,14 +353,36 @@ def _append_kpi_csv(csv_path: Path, fixture: Fixture, outcome: RunOutcome,
         'bench_frames': bench.get('frames', 0) if isinstance(bench, dict) else 0,
         'gbuffer_gpu_p50_ms': _extract_pass_metric(passes, 'pass.RaytracedGBuffer', 'Gpu', 'p50_ms'),
         'gbuffer_gpu_p99_ms': _extract_pass_metric(passes, 'pass.RaytracedGBuffer', 'Gpu', 'p99_ms'),
-        'lighting_gpu_p50_ms': _extract_pass_metric(passes, 'pass.RaytracedLighting', 'Gpu', 'p50_ms'),
-        'lighting_gpu_p99_ms': _extract_pass_metric(passes, 'pass.RaytracedLighting', 'Gpu', 'p99_ms'),
+        'direct_lighting_gpu_p50_ms':
+            _extract_pass_metric(passes, 'pass.DirectLighting', 'Gpu', 'p50_ms'),
+        'direct_lighting_gpu_p99_ms':
+            _extract_pass_metric(passes, 'pass.DirectLighting', 'Gpu', 'p99_ms'),
+        'indirect_diffuse_gpu_p50_ms':
+            _extract_pass_metric(passes, 'pass.IndirectDiffuse', 'Gpu', 'p50_ms'),
+        'indirect_diffuse_gpu_p99_ms':
+            _extract_pass_metric(passes, 'pass.IndirectDiffuse', 'Gpu', 'p99_ms'),
+        'ambient_occlusion_gpu_p50_ms':
+            _extract_pass_metric(passes, 'pass.AmbientOcclusion', 'Gpu', 'p50_ms'),
+        'ambient_occlusion_gpu_p99_ms':
+            _extract_pass_metric(passes, 'pass.AmbientOcclusion', 'Gpu', 'p99_ms'),
+        'reflections_gpu_p50_ms': _extract_pass_metric(passes, 'pass.Reflections', 'Gpu', 'p50_ms'),
+        'reflections_gpu_p99_ms': _extract_pass_metric(passes, 'pass.Reflections', 'Gpu', 'p99_ms'),
+        'translucency_gpu_p50_ms':
+            _extract_pass_metric(passes, 'pass.Translucency', 'Gpu', 'p50_ms'),
+        'translucency_gpu_p99_ms':
+            _extract_pass_metric(passes, 'pass.Translucency', 'Gpu', 'p99_ms'),
+        'composite_gpu_p50_ms': _extract_pass_metric(passes, 'pass.Composite', 'Gpu', 'p50_ms'),
+        'composite_gpu_p99_ms': _extract_pass_metric(passes, 'pass.Composite', 'Gpu', 'p99_ms'),
         'tonemap_gpu_p50_ms': _extract_pass_metric(passes, 'pass.Tonemap', 'Gpu', 'p50_ms'),
         'tonemap_gpu_p99_ms': _extract_pass_metric(passes, 'pass.Tonemap', 'Gpu', 'p99_ms'),
         'rt_total_gpu_p50_ms': _sum_pass_metrics(
-            passes, ('pass.RaytracedGBuffer', 'pass.RaytracedLighting'), 'Gpu', 'p50_ms'),
+            passes, ('pass.RaytracedGBuffer', 'pass.DirectLighting', 'pass.IndirectDiffuse',
+                    'pass.AmbientOcclusion', 'pass.Reflections', 'pass.Translucency',
+                    'pass.Composite'), 'Gpu', 'p50_ms'),
         'rt_total_gpu_p99_ms': _sum_pass_metrics(
-            passes, ('pass.RaytracedGBuffer', 'pass.RaytracedLighting'), 'Gpu', 'p99_ms'),
+            passes, ('pass.RaytracedGBuffer', 'pass.DirectLighting', 'pass.IndirectDiffuse',
+                    'pass.AmbientOcclusion', 'pass.Reflections', 'pass.Translucency',
+                    'pass.Composite'), 'Gpu', 'p99_ms'),
         'commit_resources_cpu_p50_ms':
             _extract_pass_metric(passes, 'render.commitResources', 'Cpu', 'p50_ms'),
         'commit_resources_cpu_p99_ms':

@@ -49,6 +49,88 @@ struct RenderConfig {
   bool  autoExposure = false;
   // The linear level the brightest pixel maps to before ACES (1.0 = max→white).
   float autoExposureKey = 1.0f;
+  // RTX-alignment design (rtx-realtime-alignment-design.md), Phase C —
+  // sub-mode when `autoExposure` above is true: false (default, schema
+  // default) = the pre-Phase-C legacy clamped-max reduction; true = the
+  // ovrtx-parity 64-bucket histogram (median filter). Kept as a separate
+  // JSON key ("render.autoExposureHistogram") rather than widening
+  // `autoExposure` itself into a 3-way enum, so existing
+  // `"autoExposure": true/false` configs stay valid unchanged.
+  // HeadlessMode / ViewerMode fold {autoExposure, autoExposureHistogram}
+  // into the single RenderSettings::autoExposure uint32 (0=off / 1=on-legacy
+  // / 2=on-histogram).
+  bool  autoExposureHistogram = false;
+  // RTX-alignment design, Phase B follow-up — headless temporal
+  // convergence: render this many frames back-to-back in one renderer
+  // session before writing the EXR (temporal denoiser + TAA history
+  // accumulate across them; the RNG decorrelates per frameIndex). The
+  // comparison harness renders NVIDIA's ovrtx reference at 128+ stepped
+  // frames — this is the Pyxis-side equivalent. 1 (default) = the
+  // pre-existing single-frame behaviour, byte-equal for all goldens.
+  uint32_t accumulationFrames = 1;
+
+  // RTX-alignment design (rtx-realtime-alignment-design.md), Phase C —
+  // mirrors pyxis::RenderSettings::exposureMode / exposureResponsivity 1:1
+  // (both live at the RenderSettings TOP level, not nested under
+  // RealTimeQuality — see that struct's doc comment for why the physical-
+  // camera exposure block ended up split across two §22.3 reserved tails).
+  // 0 = Legacy (pre-Phase-C manual/auto exposure, byte-identical default),
+  // 1 = PhysicalCamera (OmniRtxCameraExposureAPI parity — see
+  // RealTimeQualityConfig::physicalCamera* below for the other four
+  // exposure-model inputs).
+  uint32_t exposureMode = 0u;
+  float exposureResponsivity = 0.8821367311933349f;
+
+  // RTX-alignment design (rtx-realtime-alignment-design.md), WP2-final —
+  // mirrors pyxis::RenderSettings::RealTimeQuality 1:1 (JSON section
+  // "render.realTimeQuality"); HeadlessMode / ViewerMode copy this
+  // field-for-field into RenderSettings::realTimeQuality each run. See
+  // that struct's doc comment (Public/Pyxis/Renderer/Descs/RenderSettings.h)
+  // for which fields are live vs. Phase-B-reserved no-ops today.
+  struct RealTimeQualityConfig {
+    uint32_t passMask = 0x1Fu;
+    uint32_t directSamples = 2u;
+    uint32_t indirectSamples = 1u;
+    uint32_t indirectMaxBounces = 2u;
+    uint32_t reflectionSamples = 1u;
+    float reflectionMaxRoughness = 0.3f;
+    uint32_t refractionMaxBounces = 6u;
+    // RTX-alignment design, Phase C — 0.35 m (35 ovrtx stage units == 35 cm
+    // for World Lobby's metersPerUnit=0.01); see RenderSettings.h's
+    // aoRayLength doc comment for the full unit-reconciliation trace.
+    float aoRayLength = 0.35f;
+    float maxRayIntensityDirect = 6400.0f;
+    float maxRayIntensityIndirect = 6400.0f;
+    float maxRayIntensityReflections = 19200.0f;
+    // RTX-alignment design (rtx-realtime-alignment-design.md), Phase C —
+    // mirrors pyxis::RenderSettings::RealTimeQuality's own Phase C fields.
+    // tonemapOperator: TONEMAP_OPERATOR_* index (ShaderInterop.slang);
+    // default 6 = AcesApproximation (byte-identical to pre-Phase-C).
+    uint32_t tonemapOperator = 6u;
+    // physicalCamera{FStop,Iso,ExposureTimeSeconds}: active only when
+    // RenderConfig::exposureMode above is PhysicalCamera (1). Defaults
+    // mirror ovrtx's OmniRtxCameraExposureAPI schema (fStop 5, iso 100,
+    // time 1).
+    float physicalCameraFStop = 5.0f;
+    float physicalCameraIso = 100.0f;
+    float physicalCameraExposureTimeSeconds = 1.0f;
+
+    // DLSS Stage 1 (rtx-realtime-alignment-design.md, "DLSS — corrected
+    // stance" + "DLSS scope includes upscaling") — mirrors
+    // pyxis::RenderSettings::RealTimeQuality::{denoiser,dlssExecMode} 1:1
+    // (DENOISER_*/DLSS_EXEC_MODE_* constants, RenderSettings.h). JSON
+    // accepts either the string form ("dlss"/"builtin"/"off",
+    // "auto"/"quality"/"balanced"/"performance"/"dlaa") or the raw integer
+    // — see Configuration.cpp's ReadDenoiserField / ReadDlssExecModeField.
+    // denoiser defaults to Dlss (matches RenderSettings' own default);
+    // headless/golden configs don't author this key, so the probe's
+    // Dlss->Builtin downgrade is the only outcome they ever see (§33.7 —
+    // byte-identical regardless, since passMask's own denoise/TAA bits
+    // already default OFF).
+    uint32_t denoiser = 0u;        // 0=dlss, 1=builtin, 2=off
+    uint32_t dlssExecMode = 0u;    // 0=auto,1=quality,2=balanced,3=performance,4=dlaa
+  } realTimeQuality;
+
   // M3+ extensions: maxBounces, enableAccumulation, toneMap,
   // debugView, accumulationFrameLimit, russianRouletteStartBounce,
   // fireflyClampLuminance, lowDiscrepancySampling, aovs, ...
@@ -86,6 +168,19 @@ struct PathsConfig {
   std::string scene;
 };
 
+// ----- §27.scene -----------------------------------------------------------
+// RTX-alignment design (rtx-realtime-alignment-design.md), WP2-final. Scene-
+// content selectors that aren't filesystem paths (those live in
+// PathsConfig above).
+struct SceneConfig {
+  // Empty = auto (StageWalker's existing boundCamera-hint + first-in-
+  // SdfPath-order fallback). Non-empty = the exact SdfPath of the
+  // UsdGeomCamera to make active; --camera <sdfPath> / JSON
+  // "scene.camera" both feed this. StageWalker warns + falls back to
+  // auto when the path doesn't match any camera the stage authors.
+  std::string camera;
+};
+
 // ----- §27.app -----------------------------------------------------------
 // Application-wide knobs that don't fit the render / output / paths
 // buckets. M4 adds `ingest`; M5+ may add `theme`, `language`, etc.
@@ -112,6 +207,7 @@ struct Configuration {
   DiagnosticsConfig diagnostics;
   LimitsConfig limits;
   PathsConfig paths;
+  SceneConfig scene;
   AppConfig app;
   // M5+ sections (textures, geometry, hydra, profiling) land
   // alongside the systems that consume them.

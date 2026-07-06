@@ -57,6 +57,12 @@ namespace pyxis::app {
 // touches the root layer on disk). The stage recomposes automatically;
 // WalkStage observes the chosen variants. Empty = honour authored
 // variantSelection.
+//
+// `cameraPath` (RTX-alignment design, WP2-final): exact UsdGeomCamera
+// SdfPath to make the active camera — forwarded verbatim to
+// StageWalker::WalkFile/WalkStage's `cameraPathOverride`. Empty (default)
+// = StageWalker's existing auto-pick (boundCamera hint, then first-in-
+// SdfPath-order).
 pyxis::usd_ingest::IngestResult IngestUsd(std::string_view adapter,
                                           std::string_view usdPath,
                                           GpuScene& scene,
@@ -64,6 +70,7 @@ pyxis::usd_ingest::IngestResult IngestUsd(std::string_view adapter,
                                           double frameNumber = -1.0,
                                           std::string_view loadMode = {},
                                           std::string_view variantSelections = {},
-                                          std::string_view renderPurpose = {});
+                                          std::string_view renderPurpose = {},
+                                          std::string_view cameraPath = {});
 
 }  // namespace pyxis::app

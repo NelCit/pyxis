@@ -17,9 +17,10 @@
 // is just visual — the hit-shading dome term (shading.slang) continues
 // to use the fast-diffuse-IBL mip-bias approximation.
 //
-// Declares the light table + dome HDRI + dome sampler — binding numbers
-// (5 / 9 / 33) match the RaytracedLightingPass layout, the only pipeline
-// that consumes this module.
+// Declares the light table + dome HDRI + dome sampler — RTX-alignment
+// design WP2 rewrite: binding numbers (5 / 10 / 11) are the canonical
+// SceneBindings Set-0 slots (Private/Passes/SceneBindings.h), shared
+// verbatim by every RT pipeline that includes this module.
 
 #ifndef PYXIS_DOME_SAMPLE_SLANG
 #define PYXIS_DOME_SAMPLE_SLANG
@@ -27,10 +28,10 @@
 #include "ShaderInterop.slang"
 
 [[vk::binding(5, 0)]]  StructuredBuffer<LightGpu> gLights;
-[[vk::binding(9, 0)]]  Texture2D<float4>          gDomeEnvMap;
-// M9-fidelity per-role samplers: dome moved to binding 33 (Wrap-Clamp-Wrap).
-// Binding 10 is the material sampler (Wrap-Wrap-Wrap), used by shading.slang.
-[[vk::binding(33, 0)]] SamplerState               gDomeSampler;
+[[vk::binding(10, 0)]] Texture2D<float4>          gDomeEnvMap;
+// M9-fidelity per-role samplers: dome at binding 11 (Wrap-Clamp-Wrap).
+// Binding 12 is the material sampler (Wrap-Wrap-Wrap), used by shading.slang.
+[[vk::binding(11, 0)]] SamplerState               gDomeSampler;
 
 static const float PYXIS_PI         = 3.14159265358979323846;
 static const float PYXIS_TWO_PI     = 6.28318530717958647692;
@@ -105,6 +106,26 @@ float3 SampleDomeBackground(float3 rayDir) {
         : domeTint;
 
     return background;
+}
+
+// RTX-alignment design (rtx-realtime-alignment-design.md), Phase B follow-
+// up ("interior illumination" fix) — true iff the scene authors at least
+// one ENABLED (intensity > 0) Dome light. DirectLightingPass's new dome-IBL
+// direct-diffuse term (direct_lighting.slang) gates on this so scenes with
+// NO dome light are byte-for-byte unchanged: SampleDomeBackground's own
+// "no dome" fallback above (the soft sky-blue tint) is a MISS-ray visual
+// convenience, not a light source — sampling it unconditionally as a
+// DIRECT contribution would fabricate light in dome-less fixtures (furnace
+// tests, M3-M6 scenes) and silently change their goldens.
+bool DomeLightExists() {
+    uint lightCount;
+    uint _stride;
+    gLights.GetDimensions(lightCount, _stride);
+    for (uint i = 0; i < lightCount; ++i) {
+        if (gLights[i].intensity > 0.0 && gLights[i].kind == LIGHT_KIND_DOME)
+            return true;
+    }
+    return false;
 }
 
 #endif  // PYXIS_DOME_SAMPLE_SLANG

@@ -11,6 +11,7 @@
 #include "OpenPbrFeatureBits.h"  // Q3 — OPENPBR_FEATURE_* mask bits
 
 #include <Pyxis/Renderer/Descs/CameraDesc.h>
+#include <Pyxis/Renderer/Descs/DlssStatus.h>
 #include <Pyxis/Renderer/Descs/FrameProfile.h>
 #include <Pyxis/Renderer/Descs/FrameStats.h>
 #include <Pyxis/Renderer/Descs/PickResult.h>
@@ -202,6 +203,21 @@ class ImGuiHost {
   // the manual slider rides on top as a bias.
   bool                                  _editorAutoExposure    = false;
   float                                 _editorAutoExposureKey = 1.0f;  // max→target
+  // RTX-alignment design (rtx-realtime-alignment-design.md), Phase C —
+  // auto-exposure sub-mode (only meaningful when _editorAutoExposure is
+  // on): false (default, schema default) = the pre-Phase-C legacy
+  // clamped-max reduction; true = the ovrtx-parity 64-bucket histogram.
+  bool                                  _editorAutoExposureHistogram = false;
+  // Physical-camera exposure model (OmniRtxCameraExposureAPI parity).
+  // false (default) = Legacy (Pyxis's pre-Phase-C manual/auto exposure,
+  // byte-identical output); true = PhysicalCamera — TonemapPass multiplies
+  // linearColor by an exposureScale derived from the three sliders below
+  // (+ the fixed schema responsivity constant) BEFORE the manual/auto
+  // exposure stops, which still ride on top unchanged.
+  bool                                  _editorPhysicalCameraExposure = false;
+  float                                 _editorPhysicalCameraFStop = 5.0f;
+  float                                 _editorPhysicalCameraIso = 100.0f;
+  float                                 _editorPhysicalCameraExposureTimeSeconds = 1.0f;
   // Q3 OpenPBR feature gates — the editor's "OpenPBR Features"
   // section. One checkbox per OPENPBR_FEATURE_* bit; ViewerMode reads
   // GetOpenPbrFeatureMask() each frame and pushes the composed mask
@@ -214,6 +230,42 @@ class ImGuiHost {
   bool                                  _editorOpenPbrSubsurface   = true;
   bool                                  _editorOpenPbrAnisotropy   = true;
   bool                                  _editorOpenPbrEonDiffuse   = true;
+  // RTX-alignment design (rtx-realtime-alignment-design.md), WP2-final —
+  // the editor's "Real-Time Quality" section, mirroring
+  // RenderSettings::RealTimeQuality 1:1. ViewerMode reads
+  // GetRealTimeQuality() each frame and pushes it into
+  // RenderSettings::realTimeQuality. Defaults match the POD's own
+  // omni:rtx:rt-mirroring defaults so the viewer matches headless until
+  // the user touches a slider. The five passMask checkboxes gate whether
+  // PyxisRenderer even dispatches that signal pass this frame.
+  bool                                  _editorRtqDirectEnabled       = true;
+  bool                                  _editorRtqIndirectEnabled     = true;
+  bool                                  _editorRtqAoEnabled           = true;
+  bool                                  _editorRtqReflectionsEnabled  = true;
+  bool                                  _editorRtqTranslucencyEnabled = true;
+  int                                   _editorRtqDirectSamples             = 2;
+  int                                   _editorRtqIndirectSamples           = 1;
+  int                                   _editorRtqIndirectMaxBounces        = 2;
+  int                                   _editorRtqReflectionSamples         = 1;
+  float                                 _editorRtqReflectionMaxRoughness    = 0.3f;
+  int                                   _editorRtqRefractionMaxBounces      = 6;
+  float                                 _editorRtqAoRayLength               = 35.0f;
+  float                                 _editorRtqMaxRayIntensityDirect       = 6400.0f;
+  float                                 _editorRtqMaxRayIntensityIndirect     = 6400.0f;
+  float                                 _editorRtqMaxRayIntensityReflections  = 19200.0f;
+  // RTX-alignment design (rtx-realtime-alignment-design.md), Phase C —
+  // tonemap operator selector (TONEMAP_OPERATOR_* index, ShaderInterop.slang);
+  // default 6 = AcesApproximation (byte-identical to the pre-Phase-C look).
+  int                                   _editorTonemapOperator = 6;
+  // DLSS Stage 1 (rtx-realtime-alignment-design.md, "DLSS — corrected
+  // stance" + "DLSS scope includes upscaling") — the editor's Denoiser /
+  // DLSS Mode combos. Mirrors RenderSettings::RealTimeQuality::denoiser's
+  // DENOISER_* encoding (0=Dlss default, 1=Builtin, 2=Off) and
+  // dlssExecMode's DLSS_EXEC_MODE_* encoding (0=Auto..4=Dlaa). Defaults
+  // match RenderSettings' own defaults so the viewer matches headless
+  // until the user touches the combo.
+  int                                   _editorRtqDenoiser = 0;      // DENOISER_DLSS
+  int                                   _editorRtqDlssExecMode = 0;  // DLSS_EXEC_MODE_AUTO
   // ShaderMake rebuild status — pushed by ViewerMode each frame.
   // True while the worker thread is spawning cmake / waiting for
   // exit; the editor's Reload Shaders button shows "Rebuilding..."
@@ -226,6 +278,12 @@ class ImGuiHost {
   // readout (color, normal, depth, instance id).
   PickResult                            _editorLastPick{};
   // (Save-AOV path latch moved into _latches.saveAovPath above.)
+
+  // DLSS Stage 1 (rtx-realtime-alignment-design.md) — the renderer's
+  // GetDlssStatus() result, pushed each frame by ViewerMode (same
+  // push-then-display pattern as _editorLastPick above). The Real-Time
+  // Quality section's read-only status line reads this directly.
+  DlssStatus                             _lastDlssStatus{};
 
   // Render dims of the AOV the renderer dispatches into. ViewerMode
   // pushes these each frame so:
@@ -345,6 +403,26 @@ class ImGuiHost {
   // these into RenderSettings::autoExposure / autoExposureKey each frame.
   [[nodiscard]] bool GetAutoExposure() const noexcept { return _editorAutoExposure; }
   [[nodiscard]] float GetAutoExposureKey() const noexcept { return _editorAutoExposureKey; }
+  // RTX-alignment design (rtx-realtime-alignment-design.md), Phase C —
+  // composes {_editorAutoExposure, _editorAutoExposureHistogram} into the
+  // RenderSettings::autoExposure 3-way value (0=off / 1=on-legacy /
+  // 2=on-histogram; see that field's doc comment).
+  [[nodiscard]] uint32_t GetAutoExposureMode() const noexcept {
+    if (!_editorAutoExposure) return 0u;
+    return _editorAutoExposureHistogram ? 2u : 1u;
+  }
+  // Physical-camera exposure model — ViewerMode pushes this into
+  // RenderSettings::exposureMode each frame (exposureMode lives at
+  // RenderSettings' TOP level, not inside RealTimeQuality, hence its own
+  // accessor here — the fStop/iso/exposureTime sliders instead flow through
+  // GetRealTimeQuality() below, alongside aoRayLength / reflectionMaxRoughness
+  // / etc., since THEY live inside RealTimeQuality). exposureResponsivity is
+  // NOT editor-exposed (fixed at ovrtx's own schema calibration constant —
+  // see RenderSettings.h) to keep the panel from growing an eighth
+  // rarely-touched slider.
+  [[nodiscard]] uint32_t GetExposureMode() const noexcept {
+    return _editorPhysicalCameraExposure ? 1u : 0u;
+  }
 
   // Q3 OpenPBR feature gates — composes the editor's six checkboxes
   // into the RenderSettings::openPbrFeatureMask bitmask. ViewerMode
@@ -361,6 +439,39 @@ class ImGuiHost {
     return mask;
   }
 
+  // RTX-alignment design (rtx-realtime-alignment-design.md), WP2-final —
+  // composes the editor's "Real-Time Quality" section into a
+  // RenderSettings::RealTimeQuality. ViewerMode pushes the result into
+  // RenderSettings::realTimeQuality each frame (mirrors GetOpenPbrFeatureMask's
+  // "compose editor state into the POD" shape).
+  [[nodiscard]] RenderSettings::RealTimeQuality GetRealTimeQuality() const noexcept {
+    RenderSettings::RealTimeQuality quality{};
+    quality.passMask = (_editorRtqDirectEnabled ? 0x01u : 0u)
+                      | (_editorRtqIndirectEnabled ? 0x02u : 0u)
+                      | (_editorRtqAoEnabled ? 0x04u : 0u)
+                      | (_editorRtqReflectionsEnabled ? 0x08u : 0u)
+                      | (_editorRtqTranslucencyEnabled ? 0x10u : 0u);
+    quality.directSamples = static_cast<uint32_t>(_editorRtqDirectSamples);
+    quality.indirectSamples = static_cast<uint32_t>(_editorRtqIndirectSamples);
+    quality.indirectMaxBounces = static_cast<uint32_t>(_editorRtqIndirectMaxBounces);
+    quality.reflectionSamples = static_cast<uint32_t>(_editorRtqReflectionSamples);
+    quality.reflectionMaxRoughness = _editorRtqReflectionMaxRoughness;
+    quality.refractionMaxBounces = static_cast<uint32_t>(_editorRtqRefractionMaxBounces);
+    quality.aoRayLength = _editorRtqAoRayLength;
+    quality.maxRayIntensityDirect = _editorRtqMaxRayIntensityDirect;
+    quality.maxRayIntensityIndirect = _editorRtqMaxRayIntensityIndirect;
+    quality.maxRayIntensityReflections = _editorRtqMaxRayIntensityReflections;
+    // RTX-alignment design (rtx-realtime-alignment-design.md), Phase C.
+    quality.tonemapOperator = static_cast<uint32_t>(_editorTonemapOperator);
+    quality.physicalCameraFStop = _editorPhysicalCameraFStop;
+    quality.physicalCameraIso = _editorPhysicalCameraIso;
+    quality.physicalCameraExposureTimeSeconds = _editorPhysicalCameraExposureTimeSeconds;
+    // DLSS Stage 1 (rtx-realtime-alignment-design.md).
+    quality.denoiser = static_cast<uint32_t>(_editorRtqDenoiser);
+    quality.dlssExecMode = static_cast<uint32_t>(_editorRtqDlssExecMode);
+    return quality;
+  }
+
   // ViewerMode pushes the live rebuild state each frame so the
   // editor's Reload Shaders button can show "Rebuilding..." +
   // disable itself while the worker thread is in flight.
@@ -371,6 +482,11 @@ class ImGuiHost {
   // ViewerMode pushes the renderer's LastPickResult() into the panel
   // each frame; the Editor displays the hover-pixel values.
   void SetLastPickResult(const PickResult& pick) noexcept { _editorLastPick = pick; }
+
+  // DLSS Stage 1 (rtx-realtime-alignment-design.md) — ViewerMode pushes
+  // the renderer's GetDlssStatus() each frame; the Real-Time Quality
+  // section's read-only status line displays it.
+  void SetDlssStatus(const DlssStatus& status) noexcept { _lastDlssStatus = status; }
 
   // ViewerMode pushes the renderer's current AOV dims each frame.
   // The Camera section's FOV / focal-length sliders use the aspect

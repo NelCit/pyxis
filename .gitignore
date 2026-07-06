@@ -4,6 +4,11 @@ out/
 _build/
 _audit_build/
 _deps/
+
+# Locally staged proprietary SDKs never vendored into the repo (e.g.
+# NVIDIA Streamline/DLSS binaries via _tools/setup_dlss.py — see
+# rtx-realtime-alignment-design.md, "DLSS — corrected stance").
+_local/
 *.cmake.cache
 CMakeUserPresets.json
 CMakeFiles/

@@ -114,6 +114,14 @@ class VkDeviceManager final : public IDeviceManager {
   uint32_t _framesInFlight = 1;
   Resolution _backbuffer{};
   bool _ready = false;
+
+  // DLSS Stage 2a (rtx-realtime-alignment-design.md) — true iff
+  // Device/DlssDeviceExtensions.h's TryBootstrapStreamlineForVulkan()
+  // succeeded during Bringup() (slInit + slGetFeatureRequirements both
+  // OK). Teardown() calls ShutdownStreamlineIfActive(_dlssStreamlineActive)
+  // before destroying the device/instance, per ProgrammingGuideDLSS.md's
+  // "call slShutdown() before destroying ... instances, devices" contract.
+  bool _dlssStreamlineActive = false;
 };
 
 }  // namespace pyxis

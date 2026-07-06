@@ -19,6 +19,18 @@
 
 [[vk::binding(0, 0)]] ConstantBuffer<CameraUniforms> gCamera;
 
+// RTX-alignment design (rtx-realtime-alignment-design.md), WP2-final —
+// the shared RealTimeQuality knobs (SceneBindings binding 15), uploaded
+// once per frame alongside gCamera. See ShaderInterop.slang's
+// RealTimeQualityUniforms doc comment for which fields are live today.
+[[vk::binding(15, 0)]] ConstantBuffer<RealTimeQualityUniforms> gQuality;
+
+// RTX-alignment design, Phase B — the RNG seed / frame index / TAA jitter
+// cbuffer (SceneBindings binding 16). See ShaderInterop.slang's
+// RtxSamplingUniforms doc comment. `jitterX`/`jitterY` are applied to the
+// primary-ray pixel center below (zero when PASS_MASK_TAA is clear).
+[[vk::binding(16, 0)]] ConstantBuffer<RtxSamplingUniforms> gSampling;
+
 // P5 (design D2) — camera projection mode as a Vulkan specialization
 // constant. The C++ pass builds one pipeline VARIANT per mode
 // (0 = perspective, 1 = orthographic; Raytraced{GBuffer,Lighting}Pass::
@@ -40,7 +52,20 @@ void BuildCameraRay(uint2 launchIndex, uint2 launchDim,
     // NDC pixel center: map [0, dim) integer pixel coords to
     // [-1, +1] device coordinates (Y flipped — we treat row 0 as the
     // top of the image, while NDC's +Y is up).
-    const float2 pixelCenter = float2(launchIndex) + 0.5f;
+    //
+    // RTX-alignment design, Phase B — TAA sub-pixel jitter (gSampling,
+    // binding 16) is added HERE, before the NDC conversion, so every
+    // pass that calls BuildCameraRay (the GBuffer raygen that actually
+    // traces the primary ray, AND every signal pass + CompositePass that
+    // reconstructs `worldOrigin + hitT*worldDir` from the visibility
+    // buffer) agrees on the identical jittered ray for a given pixel +
+    // frame — the same §33.7 byte-identical-reconstruction contract this
+    // function's header already requires, just extended to cover the
+    // jitter term. `jitterX`/`jitterY` are exactly 0.0 when PASS_MASK_TAA
+    // is clear (headless default), so `+0.0f` is a no-op in IEEE 754 —
+    // the pre-Phase-B byte-equal path is untouched bit-for-bit.
+    const float2 pixelCenter =
+        float2(launchIndex) + 0.5f + float2(gSampling.jitterX, gSampling.jitterY);
     const float2 ndc = float2(
         ( pixelCenter.x / float(launchDim.x)) * 2.0f - 1.0f,
         -((pixelCenter.y / float(launchDim.y)) * 2.0f - 1.0f));

@@ -184,6 +184,49 @@ struct OpenPBRMaterialDesc {
   float subsurfaceColorB = 0.8f;
   uint32_t thinWalled = 0;  // OpenPBR `geometry_thin_walled` (boolean; 0 = false)
 
+  // 2026-07-05 RTX-alignment (rtx-realtime-alignment-design.md) — MDL
+  // OmniPBR / "Base" library "Albedo Adjustments" group
+  // (`albedo_brightness` / `albedo_desaturation` / `albedo_add`,
+  // OmniPBR_ClearCoat.mdl). Applied to the SAMPLED base-color texture
+  // (post sRGB-decode, in linear space) BEFORE the diffuse_tint
+  // multiply:
+  //   scaled      = texture_sample * albedoBrightness + albedoAdd
+  //   desaturated = lerp(scaled, luminance(scaled), albedoDesaturation)
+  //   base_color  = desaturated * diffuse_tint
+  // Every World Lobby "Base/*" MDL material (Oak, OakDark, Terrazzo,
+  // Paint_Satin, the Aperture Emissives) authors these explicitly, as
+  // does the Modern reception "White" OmniPBR leaf material
+  // (albedo_brightness = 0.07). The translator previously read
+  // diffuse_tint but dropped these three grading knobs, which was the
+  // dominant per-material albedo-fidelity gap measured against ovrtx
+  // (2-14x too bright depending on the material's authored brightness).
+  // Defaults (1, 0, 0) are the MDL function defaults — a material that
+  // never authors them round-trips byte-identically (no-op) through
+  // the closesthit formula above, so UsdPreviewSurface / MaterialX /
+  // RenderMan-sourced materials are unaffected.
+  float albedoBrightness   = 1.0f;  // (was _reserved[0])
+  float albedoDesaturation = 0.0f;  // (was _reserved[1])
+  float albedoAdd          = 0.0f;  // (was _reserved[2])
+
+  // 2026-07-06 RTX-alignment round 2 (materials chapter) — OmniPBR's
+  // constant/texture blend weights. OmniPBR lerps a per-lobe constant
+  // against its sampled texture by these weights rather than letting
+  // the texture unconditionally win once bound; the translator +
+  // closesthit previously always used a binary "texture if bound,
+  // else constant" choice, which is a silent no-op for the (common)
+  // influence=1 authoring but was measured wrong for at least one
+  // World Lobby material (`rh_table_short`'s "Paint_Satin": authors
+  // metallic_texture_influence=0 — i.e. "ignore the ORM's metal mask
+  // entirely, this is a non-metal paint" — while an ORM texture is
+  // still bound for its roughness/AO channels, so the old binary
+  // logic rendered the satin tabletop chrome-white). Defaults (1, 1,
+  // 0) match the MDL OmniPBR function defaults exactly, so a material
+  // that never authors them (i.e. every other material measured in
+  // this scene) round-trips byte-identically — no-op.
+  float metallicTextureInfluence           = 1.0f;  // (was _reserved[3])
+  float reflectionRoughnessTextureInfluence = 1.0f;  // (was _reserved[4])
+  float aoToDiffuse                         = 0.0f;  // (was _reserved[5])
+
   // §22.3 reserved padding — FRESH budget after the Q1 extension
   // above. Post-Q1 fields consume these slots one at a time, keeping
   // the layout byte-stable across MINOR bumps. Once exhausted,
@@ -194,7 +237,7 @@ struct OpenPBRMaterialDesc {
   // field, add it to HashMaterialDesc (Private/GpuScene/Detail.h) —
   // the dedup hash is an explicit field list, not a byte sweep.
   // NOLINTNEXTLINE(readability-identifier-naming)
-  uint32_t _reserved[16] = {};
+  uint32_t _reserved[10] = {};
 };
 
 }  // namespace pyxis

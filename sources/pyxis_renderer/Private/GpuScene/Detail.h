@@ -195,6 +195,15 @@ inline std::uint64_t HashMaterialDesc(const OpenPBRMaterialDesc& desc) noexcept
   mixF(desc.subsurfaceColorG);
   mixF(desc.subsurfaceColorB);
   mixU(desc.thinWalled);
+  // 2026-07-05 RTX-alignment — MDL OmniPBR albedo-adjustment fields.
+  mixF(desc.albedoBrightness);
+  mixF(desc.albedoDesaturation);
+  mixF(desc.albedoAdd);
+  // 2026-07-06 RTX-alignment round 2 — OmniPBR constant/texture blend
+  // weights (materials chapter).
+  mixF(desc.metallicTextureInfluence);
+  mixF(desc.reflectionRoughnessTextureInfluence);
+  mixF(desc.aoToDiffuse);
   return hash;
 }
 
@@ -331,9 +340,20 @@ inline shaderinterop::OpenPBRMaterialGPU PackMaterialGpu(
   gpu.subsurfaceColorB = desc.subsurfaceColorB;
   gpu.baseWeight = desc.baseWeight;
   gpu.transmissionWeight = desc.transmissionWeight;     // row 14
+  // 2026-07-05 RTX-alignment — MDL OmniPBR "Albedo Adjustments"
+  // (albedo_brightness / albedo_desaturation / albedo_add), applied by
+  // the closesthit to the sampled base-color texture (shading.slang).
+  gpu.albedoBrightness   = desc.albedoBrightness;
+  gpu.albedoDesaturation = desc.albedoDesaturation;
+  gpu.albedoAdd          = desc.albedoAdd;
+  // 2026-07-06 RTX-alignment round 2 (materials chapter) — row 15:
+  // OmniPBR constant/texture blend weights. See the desc field
+  // comments (OpenPBRMaterialDesc.h) for the rationale; read by
+  // shading.slang's roughness/metalness/baseColor blend.
+  gpu.metallicTextureInfluence            = desc.metallicTextureInfluence;
+  gpu.reflectionRoughnessTextureInfluence = desc.reflectionRoughnessTextureInfluence;
+  gpu.aoToDiffuse                         = desc.aoToDiffuse;
   gpu._reserved5 = 0.0f;
-  gpu._reserved6 = 0.0f;
-  gpu._reserved7 = 0.0f;
   return gpu;
 }
 

@@ -72,9 +72,13 @@ std::expected<AovTextures, std::string> AovTextures::Create(nvrhi::IDevice* devi
   result.elementId   = makeAov(nvrhi::Format::R32_UINT,     "aov.elementId");
   result.normalEye   = makeAov(nvrhi::Format::RGBA16_FLOAT, "aov.normalEye");
   result.worldPosEye = makeAov(nvrhi::Format::RGBA32_FLOAT, "aov.worldPosEye");
+  // RTX-alignment design (Phase A / WP1) — denoiser-guide AOVs.
+  result.viewZ       = makeAov(nvrhi::Format::R32_FLOAT,    "aov.viewZ");
+  result.motionVector = makeAov(nvrhi::Format::RG16_FLOAT,  "aov.motionVector");
   if (!result.colorHdr || !result.normal || !result.depth || !result.primId
       || !result.materialId || !result.baseColor || !result.worldPos
-      || !result.alpha || !result.elementId || !result.normalEye || !result.worldPosEye)
+      || !result.alpha || !result.elementId || !result.normalEye || !result.worldPosEye
+      || !result.viewZ || !result.motionVector)
   {
     return std::unexpected{std::string{"AovTextures::Create: createTexture(raw AOV) failed"}};
   }

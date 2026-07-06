@@ -26,18 +26,20 @@
 // payload type, keeping visibility semantics bit-identical across the
 // two pipelines (§33.7).
 //
-// Both pipelines place the two tables this reads at the same slots:
-// gMaterials at binding 3, gInstanceInfo at binding 4 (set 0).
+// Both pipelines place the two tables this reads at the same slots —
+// RTX-alignment design WP2 rewrite: gMaterials at binding 2,
+// gInstanceInfo at binding 3 (set 0 / SceneBindings — see
+// Private/Passes/SceneBindings.h for the full canonical slot map).
 
 #ifndef PYXIS_RAYTRACED_ANYHIT_SLANG
 #define PYXIS_RAYTRACED_ANYHIT_SLANG
 
 #include "ShaderInterop.slang"
 
-[[vk::binding(3, 0)]] StructuredBuffer<OpenPBRMaterialGPU> gMaterials;
+[[vk::binding(2, 0)]] StructuredBuffer<OpenPBRMaterialGPU> gMaterials;
 // P2 packing — the packed per-instance record (materialSlot half) replaces the
 // old gInstanceMaterial uint table at the same binding.
-[[vk::binding(4, 0)]] StructuredBuffer<InstanceInfoGpu>    gInstanceInfo;
+[[vk::binding(3, 0)]] StructuredBuffer<InstanceInfoGpu>    gInstanceInfo;
 
 // V2.B follow-up — only IgnoreHit for true alpha cutout
 // (`MATERIAL_FLAG_ALPHA_TESTED`). Translucent + transmission
@@ -68,6 +70,28 @@ bool AnyHitIsTransmissive() {
     const uint materialId = gInstanceInfo[instanceId].materialSlot;
     const OpenPBRMaterialGPU mat = gMaterials[materialId];
     return (mat.flags & MATERIAL_FLAG_TRANSMISSION_ENABLED) != 0u;
+}
+
+// RTX-alignment design (rtx-realtime-alignment-design.md), Phase B follow-
+// up ("interior illumination" fix) — the hit material's RAW transmission
+// tint (transmissionColor x transmissionWeight, saturated), a cheap
+// material-table lookup with NO UV/texture evaluation (anyhit has no
+// derivatives to sample with). Used by IndirectDiffusePass's bounce ray
+// (indirect_diffuse.slang) to attenuate its throughput when continuing
+// THROUGH a transmissive surface instead of shading it as an opaque wall,
+// so a GI ray aimed at a glazed curtain wall can still reach the sky. This
+// is a cheap tinted-passthrough approximation, not the full
+// OpenPBRTransmittance formula (fresnel/opacity/metalness terms) the real
+// closesthit transparency loop (translucency.slang) uses — same "binary-
+// approximation, colored attenuation is a follow-up" spirit as
+// AnyHitIsTransmissive's shadow-ray passthrough above (commit eed2ad9),
+// just one step further (tinted instead of flat 1.0).
+float3 AnyHitTransmissionTint() {
+    const uint instanceId = InstanceID();
+    const uint materialId = gInstanceInfo[instanceId].materialSlot;
+    const OpenPBRMaterialGPU mat = gMaterials[materialId];
+    return saturate(float3(mat.transmissionColorR, mat.transmissionColorG, mat.transmissionColorB))
+         * saturate(mat.transmissionWeight);
 }
 
 #endif  // PYXIS_RAYTRACED_ANYHIT_SLANG

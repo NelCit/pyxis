@@ -9,6 +9,7 @@
 
 #include "Device/VkDeviceManager.h"
 
+#include "Device/DlssDeviceExtensions.h"
 #include "Device/ExternalInterop.h"
 #include "Device/NvrhiCallback.h"
 #include "Device/VulkanFeatureCheck.h"
@@ -64,6 +65,7 @@ const char* StatusName(DeviceManagerCreateStatus status) noexcept {
 }
 
 VkInstance CreateInstance(bool enableValidation, std::string_view appName, uint32_t appVersion,
+                          const std::vector<std::string>& extraInstanceExtensions,
                           DeviceManagerCreateStatus* outStatus) noexcept {
   VkApplicationInfo appInfo{};
   appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
@@ -78,6 +80,11 @@ VkInstance CreateInstance(bool enableValidation, std::string_view appName, uint3
   std::vector<const char*> extensions;
   extensions.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
   extensions.push_back(VK_KHR_WIN32_SURFACE_EXTENSION_NAME);
+  // DLSS Stage 2a — extra instance extensions Streamline's
+  // slGetFeatureRequirements(kFeatureDLSS) requested (empty when the SDK
+  // isn't staged or the feature wasn't loaded); see DlssDeviceExtensions.h.
+  for (const std::string& extra : extraInstanceExtensions)
+    extensions.push_back(extra.c_str());
 
   std::vector<const char*> layers;
   if (enableValidation)
@@ -141,10 +148,21 @@ DeviceManagerCreateStatus VkDeviceManager::Bringup(const DeviceCreationParams& p
   // vulkan.hpp's per-call assertion fires.
   VulkanHppInitFromLoader(&vkGetInstanceProcAddr);
 
+  // ---- DLSS Stage 2a — Streamline pre-device bootstrap ------------------
+  // ProgrammingGuideManualHooking.md 3.0/5.2.1: for Vulkan, slInit() must
+  // run BEFORE vkCreateInstance, and slGetFeatureRequirements() must run
+  // before vkCreateInstance/vkCreateDevice so its extension requests can
+  // be folded into the creation lists below. Guarded/optional: on any
+  // failure (SDK not staged, non-NVIDIA adapter, etc.) this returns an
+  // empty result and device creation proceeds exactly as before.
+  const DlssDeviceRequirements dlssRequirements = TryBootstrapStreamlineForVulkan();
+  _dlssStreamlineActive = dlssRequirements.streamlineActive;
+
   // ---- VkInstance ------------------------------------------------------
   DeviceManagerCreateStatus instStatus = DeviceManagerCreateStatus::Ok;
   _instance = CreateInstance(params.enableValidation, params.applicationName,
-                             params.applicationVersion, &instStatus);
+                             params.applicationVersion, dlssRequirements.instanceExtensions,
+                             &instStatus);
   if (_instance == VK_NULL_HANDLE)
   {
     log.Error(log::PLATFORM, "VkDeviceManager: VkInstance creation failed");
@@ -299,6 +317,12 @@ DeviceManagerCreateStatus VkDeviceManager::Bringup(const DeviceCreationParams& p
                       externalInteropSupported
                           ? "VkDeviceManager: external-memory interop enabled (RFC 0004)"
                           : "VkDeviceManager: external-memory interop NOT available on this adapter");
+
+  // DLSS Stage 2a — device extensions Streamline's slGetFeatureRequirements
+  // requested (empty when the pre-device bootstrap above didn't run or
+  // found no requirements). Additive, same as the interop extensions above.
+  for (const std::string& extra : dlssRequirements.deviceExtensions)
+    deviceExtensions.push_back(extra.c_str());
 
   // Vulkan 1.3 features chain — sync2 + dynamic rendering + timeline semaphores
   // are mandatory per §5.b.
@@ -682,6 +706,11 @@ void VkDeviceManager::Teardown() noexcept {
   }
   _nvrhiDevice = nullptr;
   _nvrhiVulkan = nullptr;
+  // DLSS Stage 2a — ProgrammingGuideDLSS.md 1.0: "Call slShutdown() before
+  // destroying dxgi/d3d11/d3d12/vk instances, devices". No-op when the
+  // pre-device bootstrap never activated Streamline.
+  ShutdownStreamlineIfActive(_dlssStreamlineActive);
+  _dlssStreamlineActive = false;
   if (_device != VK_NULL_HANDLE)
   {
     vkDestroyDevice(_device, nullptr);

@@ -130,8 +130,11 @@ TEST(PublicDescLayout, OpenPBRDefaultsMatchSpec) {
 static_assert(sizeof(OpenPBRMaterialDesc) == 352,
               "OpenPBRMaterialDesc must be 352 bytes — the frozen 184-byte "
               "pre-Q1 prefix + the 92-byte Q1 OpenPBR-complete extension + "
-              "uint32_t _reserved[16] + tail padding to the hlslpp 16-byte "
-              "alignment. Growing it again is a MAJOR version event.");
+              "the 12-byte 2026-07-05 RTX-alignment albedo-adjustment fields "
+              "(consumed from the Q1 _reserved[16] budget, now _reserved[13]) "
+              "+ tail padding to the hlslpp 16-byte alignment. Growing it "
+              "again beyond the remaining reserved slots is a MAJOR version "
+              "event.");
 static_assert(alignof(OpenPBRMaterialDesc) == 16,
               "OpenPBRMaterialDesc alignment is set by the embedded "
               "hlslpp::float3 (16-byte SIMD).");
@@ -176,9 +179,20 @@ static_assert(offsetof(OpenPBRMaterialDesc, subsurfaceColorR)   == 260);
 static_assert(offsetof(OpenPBRMaterialDesc, subsurfaceColorG)   == 264);
 static_assert(offsetof(OpenPBRMaterialDesc, subsurfaceColorB)   == 268);
 static_assert(offsetof(OpenPBRMaterialDesc, thinWalled)         == 272);
+// 2026-07-05 RTX-alignment — MDL OmniPBR albedo-adjustment fields,
+// consumed from the Q1 _reserved[16] budget (was _reserved[0..2]).
+static_assert(offsetof(OpenPBRMaterialDesc, albedoBrightness)   == 276);
+static_assert(offsetof(OpenPBRMaterialDesc, albedoDesaturation) == 280);
+static_assert(offsetof(OpenPBRMaterialDesc, albedoAdd)          == 284);
+// 2026-07-06 RTX-alignment round 2 (materials chapter) — OmniPBR
+// constant/texture blend weights, consumed from the same budget
+// (were _reserved[3..5]).
+static_assert(offsetof(OpenPBRMaterialDesc, metallicTextureInfluence)            == 288);
+static_assert(offsetof(OpenPBRMaterialDesc, reflectionRoughnessTextureInfluence) == 292);
+static_assert(offsetof(OpenPBRMaterialDesc, aoToDiffuse)                        == 296);
 // Fresh reserved tail (last member).
-static_assert(offsetof(OpenPBRMaterialDesc, _reserved)          == 276);
-static_assert(sizeof(OpenPBRMaterialDesc::_reserved) == 16 * sizeof(uint32_t));
+static_assert(offsetof(OpenPBRMaterialDesc, _reserved)          == 300);
+static_assert(sizeof(OpenPBRMaterialDesc::_reserved) == 10 * sizeof(uint32_t));
 
 // Q1 extension — default values are the OpenPBR v1.1.1 spec defaults
 // (load-bearing: the byte-frozen POD ships them; translators rely on

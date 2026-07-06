@@ -2,6 +2,7 @@
 
 #include "Passes/TonemapPass.h"
 
+#include "Passes/ExposureMath.h"
 #include "RenderGraph/PassContext.h"
 #include "RenderGraph/ShaderLoad.h"
 #include "Scene/SceneResources.h"  // RFC 0003 — TLAS gate mirrors RaytracedLightingPass.
@@ -131,11 +132,15 @@ TonemapPass::TonemapPass(nvrhi::IDevice* device, GpuScene& scene)
     }
   }
 
-  // 12-byte zero-filled raw buffer used for binding 13 when the caller doesn't
-  // wire PassContext::autoExposureStats. count == 0 → shader uses manual exposure.
+  // Zero-filled raw buffer used for binding 13 when the caller doesn't wire
+  // PassContext::autoExposureStats. count == 0 (legacy mode) → shader uses
+  // manual exposure; sized to AUTO_EXPOSURE_STATS_TOTAL_BYTES (Phase C — the
+  // legacy uint3 sum/count/max PLUS the histogram-mode buckets + resolved
+  // median, so a caller that enables histogram mode without wiring the real
+  // stats buffer can't read out-of-bounds off this fallback).
   {
     nvrhi::BufferDesc fbBufDesc;
-    fbBufDesc.byteSize = 12u;  // uint3: sum, count, max.
+    fbBufDesc.byteSize = AUTO_EXPOSURE_STATS_TOTAL_BYTES;
     fbBufDesc.canHaveRawViews = true;
     fbBufDesc.debugName = "Tonemap.FbAutoExposureStats";
     fbBufDesc.initialState = nvrhi::ResourceStates::ShaderResource;
@@ -252,12 +257,41 @@ void TonemapPass::Execute(nvrhi::ICommandList* commandList, const PassContext& c
   params.destHeight = destHeight;
   // Auto-exposure (AutoExposurePass populated context.autoExposureStats this
   // frame when enabled); the shader's COLOR path reads the stats only when
-  // autoExposureEnabled != 0, otherwise it uses the manual `exposure`.
+  // autoExposureEnabled != 0, otherwise it uses the manual `exposure`. Mode:
+  // RenderSettings::autoExposure is 0=off / 1=on-legacy / 2=on-histogram (see
+  // RenderSettings.h's autoExposure doc comment) — split into the two
+  // separate cbuffer fields the shader reads.
   params.autoExposureEnabled = context.settings->autoExposure;
+  params.autoExposureMode = (context.settings->autoExposure >= 2u)
+                                ? AUTO_EXPOSURE_MODE_HISTOGRAM
+                                : AUTO_EXPOSURE_MODE_LEGACY;
   params.autoExposureKey = (context.settings->autoExposureKey > 0.0f)
                                ? context.settings->autoExposureKey
                                : 1.0f;
-  params._pad2 = 0u;
+  // RTX-alignment design (rtx-realtime-alignment-design.md), Phase C —
+  // tonemap operator selector, mirrored straight from RenderSettings (no
+  // remapping needed: RealTimeQuality::tonemapOperator already matches the
+  // TONEMAP_OPERATOR_* enum 1:1).
+  params.tonemapOperator = context.settings->realTimeQuality.tonemapOperator;
+  // Physical-camera exposure scale (OmniRtxCameraExposureAPI parity). 1.0
+  // (no-op, "legacy exposure stops ride on top" unchanged) unless
+  // RenderSettings::exposureMode selects PhysicalCamera. Formula cited from
+  // USD's UsdGeomCamera::ComputeLinearExposureScale documentation
+  // (openusd.org, verified 2026-07-05): "linearExposureScale =
+  // exposureResponsivity * (exposureTime * (exposureIso/100) *
+  // pow(2, exposure)) / (exposureFStop * exposureFStop)". The `pow(2,
+  // exposure)` term is USD's own log2 exposure-compensation stop, which
+  // Pyxis's `exposure`/auto-exposure stops (above, applied separately as
+  // `exp2(effectiveExposure)` in the shader) already covers — folding it in
+  // here too would double-apply the manual/auto stops, so this computes the
+  // formula with that term implicitly 1 (exposure=0) and lets the existing
+  // stops gain ride on top, exactly as the task spec directs.
+  // ExposureMath.h — ONE shared definition with SceneBindings::Update's
+  // firefly-clamp descale (RTX-alignment design "unexposed intensity" fix);
+  // behaviour unchanged (byte-identical expression, just factored out).
+  params.exposureScale = ComputePhysicalCameraExposureScale(*context.settings);
+  params._tmPad0 = 0u;
+  params._tmPad1 = 0u;
   commandList->writeBuffer(_paramsBuffer, &params, sizeof(params));
 
   // Resolve the 10 debug-view AOVs — caller's texture or the 1×1 fallback.

@@ -2,8 +2,8 @@
 //
 // Plan §35. Synchronous: dispatches a TextureReadback against the
 // supplied AOV texture, maps the staging buffer, repacks the per-AOV
-// native format (RGBA16_FLOAT / RGBA32_FLOAT / R32_FLOAT / R32_UINT)
-// into the interleaved RGBA float32 layout WriteExrRgba32f wants,
+// native format (RGBA16_FLOAT / RGBA32_FLOAT / R32_FLOAT / R32_UINT /
+// RG16_FLOAT) into the interleaved RGBA float32 layout WriteExrRgba32f wants,
 // and writes the EXR. Same per-format conversion table the
 // viewer's "Save current AOV..." button uses; lives here so the
 // headless `--save-aov` path doesn't need to duplicate it.

@@ -179,7 +179,8 @@ pyxis::usd_ingest::IngestResult IngestUsd(std::string_view adapter,
                                           double frameNumber,
                                           std::string_view loadMode,
                                           std::string_view variantSelections,
-                                          std::string_view renderPurpose) {
+                                          std::string_view renderPurpose,
+                                          std::string_view cameraPath) {
   auto& log = Logging::Get();
 
   // Banner format: "IngestUsd[<adapter>]: loading <path>". Adapter
@@ -258,7 +259,7 @@ pyxis::usd_ingest::IngestResult IngestUsd(std::string_view adapter,
       || !variantSelections.empty()
       || (loadSet != pxr::UsdStage::LoadAll);
   if (!needsCustomOpen)
-    return walker.WalkFile(usdPath, scene, frameNumber, purposeFilter);
+    return walker.WalkFile(usdPath, scene, frameNumber, purposeFilter, cameraPath);
 
   // Custom-open path: we open the stage ourselves so we can apply
   // variant overrides + pick the population-mask + load-set. WalkStage
@@ -312,7 +313,7 @@ pyxis::usd_ingest::IngestResult IngestUsd(std::string_view adapter,
                            + " selection(s) to session layer.");
   }
 
-  return walker.WalkStage(stage, scene, frameNumber, purposeFilter);
+  return walker.WalkStage(stage, scene, frameNumber, purposeFilter, cameraPath);
 }
 
 }  // namespace pyxis::app

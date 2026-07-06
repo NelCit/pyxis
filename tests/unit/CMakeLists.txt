@@ -70,9 +70,12 @@ target_sources(pyxis_unit_tests PRIVATE
     AovColorEncodeFixture.cpp
     TextureReadbackFixture.cpp
     # Q3 review — OpenPBR-complete defensive bound + packing/parse pins.
+    # (VariantKeyClamp.cpp retired with RaytracedLightingPass — the
+    # (projectionMode, featureMask) variant cache it pinned was deleted by
+    # the RTX-alignment WP2-final graph switch; see
+    # _documentation/rtx-realtime-alignment-design.md.)
     PackMaterialGpuRows.cpp
     OpenPbrMaskParsing.cpp
-    VariantKeyClamp.cpp
 
     # V2.A.14 — BCn encoder helper. Recompiled here so the test exe
     # exercises the real helper directly instead of going through the

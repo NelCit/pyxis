@@ -27,30 +27,55 @@
 //
 // Resource declarations live HERE (one place per translation unit);
 // gCamera comes via camera_ray.slang, the dome/light resources via
-// dome_sample.slang. Binding numbers match the RaytracedLightingPass
-// layout — the only pipeline that consumes this module.
+// dome_sample.slang, gMaterials/gInstanceInfo via raytraced_anyhit.slang
+// (RTX-alignment WP2 rewrite — dedupes the two declarations that used
+// to live separately here AND in raytraced_anyhit.slang). Binding
+// numbers are the canonical SceneBindings Set-0 slots
+// (Private/Passes/SceneBindings.h), shared verbatim by every RT
+// pipeline that includes this module — today RaytracedLightingPass
+// (via raytraced_lighting_{raygen,closesthit}.slang) and
+// RaytracedGBufferPass (via raytraced_gbuffer.slang, which reuses
+// EvaluateSurfaceMaterial below for its primary-hit material eval).
 
 #ifndef PYXIS_SHADING_SLANG
 #define PYXIS_SHADING_SLANG
 
 #include "ShaderInterop.slang"
 #include "camera_ray.slang"   // gCamera (binding 0) — pixelSpreadRadians for ray-cone LOD
-#include "dome_sample.slang"  // gLights (5) + gDomeEnvMap (9) + gDomeSampler (33) + PYXIS_PI/TWO_PI
+#include "dome_sample.slang"  // gLights (5) + gDomeEnvMap (10) + gDomeSampler (11) + PYXIS_PI/TWO_PI
+#include "raytraced_anyhit.slang"  // gMaterials (2) + gInstanceInfo (3) + alpha-test helpers
 #include "openpbr_material.slang"  // Q2 — the complete OpenPBR closure (pure math, spec-constant gated)
 
 // Shadow / AO / reflection rays trace against the same TLAS the
 // primary rays traversed. Same binding-set entry as the pre-split
 // pipeline — no new layout slot.
 [[vk::binding(1, 0)]]  RaytracingAccelerationStructure     gTlas;
-[[vk::binding(3, 0)]]  StructuredBuffer<OpenPBRMaterialGPU> gMaterials;
-[[vk::binding(4, 0)]]  StructuredBuffer<InstanceInfoGpu>    gInstanceInfo;
-[[vk::binding(6, 0)]]  StructuredBuffer<MeshInfoGpu>        gMeshInfo;
-[[vk::binding(7, 0)]]  StructuredBuffer<float4>             gMeshFaceNormals;
-[[vk::binding(10, 0)]] SamplerState                         gBindlessSampler;
-[[vk::binding(24, 0)]] StructuredBuffer<float2>             gMeshUvs;
-[[vk::binding(26, 0)]] StructuredBuffer<uint>               gMeshIndices;
-[[vk::binding(28, 0)]] Texture2D                            gBindlessTextures[BINDLESS_TEXTURES_CAP];
-[[vk::binding(29, 0)]] StructuredBuffer<VertexAttribGpu>    gMeshVertexAttribs;
+[[vk::binding(4, 0)]]  StructuredBuffer<MeshInfoGpu>        gMeshInfo;
+[[vk::binding(9, 0)]]  StructuredBuffer<float4>             gMeshFaceNormals;
+[[vk::binding(12, 0)]] SamplerState                         gBindlessSampler;
+[[vk::binding(7, 0)]]  StructuredBuffer<float2>             gMeshUvs;
+[[vk::binding(6, 0)]]  StructuredBuffer<uint>               gMeshIndices;
+[[vk::binding(13, 0)]] Texture2D                            gBindlessTextures[BINDLESS_TEXTURES_CAP];
+[[vk::binding(8, 0)]]  StructuredBuffer<VertexAttribGpu>    gMeshVertexAttribs;
+
+// USD st → image-space V flip (Seahorn root-cause close-out, RTX-
+// alignment design "Measured gap" notes). UsdGeomPrimvar `st` puts
+// (0,0) at the image's LOWER-left (UsdUVTexture / MDL uv convention);
+// image files store rows top-first and Pyxis's TextureCache uploads
+// them in file order, so a spec-correct lookup must flip V at the
+// image boundary. Pyxis historically sampled raw `st` — invisible on
+// tileable/noise content (wood, terrazzo: statistically v-symmetric)
+// but catastrophic on bake atlases, where un-flipped island UVs land
+// in the dilation gutters BETWEEN chart rows (= the Seahorn vase's
+// striped sector; verified empirically: the flip turns the striped
+// back view into the same coherent glaze ovrtx renders, with authored
+// UVs byte-verified against pxr ComputeFlattened). The flip lives
+// HERE — after the MDL texture_rotate/scale/translate transforms,
+// which operate in MDL's own bottom-left UV space — not at ingest.
+// Golden impact: every textured fixture rebakes (tracked debt).
+float2 StToImageUv(float2 uv) {
+    return float2(uv.x, 1.0 - uv.y);
+}
 
 // Per-texture LOD-aware sample. Picks a mip level from the ray-cone
 // footprint (radius at the hit, in world units) × the texture's own
@@ -65,7 +90,7 @@ float3 SampleByCone(uint texIdx, float2 uv, float coneRadius) {
     gBindlessTextures[texIdx].GetDimensions(texW, texH);
     const float texSize = sqrt(texW * texH);
     const float lod = max(0.0, log2(max(coneRadius * texSize, 1.0)));
-    return gBindlessTextures[texIdx].SampleLevel(gBindlessSampler, uv, lod).rgb;
+    return gBindlessTextures[texIdx].SampleLevel(gBindlessSampler, StToImageUv(uv), lod).rgb;
 }
 
 float4 SampleByConeRGBA(uint texIdx, float2 uv, float coneRadius) {
@@ -74,7 +99,7 @@ float4 SampleByConeRGBA(uint texIdx, float2 uv, float coneRadius) {
     gBindlessTextures[texIdx].GetDimensions(texW, texH);
     const float texSize = sqrt(texW * texH);
     const float lod = max(0.0, log2(max(coneRadius * texSize, 1.0)));
-    return gBindlessTextures[texIdx].SampleLevel(gBindlessSampler, uv, lod);
+    return gBindlessTextures[texIdx].SampleLevel(gBindlessSampler, StToImageUv(uv), lod);
 }
 
 // Anisotropic sample via hardware SampleGrad. `ddxUv` / `ddyUv` are the
@@ -85,12 +110,50 @@ float4 SampleByConeRGBA(uint texIdx, float2 uv, float coneRadius) {
 // along the minor axis, filtered along the stretched major axis. This
 // is the NVIDIA RTX texture-LOD approach and removes grazing-angle
 // moiré/streaking that isotropic mip selection (SampleByCone) can't.
+// Fragmented-UV footprint guard (Seahorn root-cause close-out, RTX-
+// alignment design "Measured gap" notes). The ray-cone → UV-gradient
+// derivation assumes a locally continuous parametrization; on meshes
+// whose primvar is authored as thousands of disjoint per-quad islands
+// (Omniverse bake-tool output — Seahorn: ~5120 islands, avg extent
+// 0.017 UV), neighbouring-texel-density estimates produce enormous
+// and misoriented gradient ellipses, and hardware anisotropic
+// filtering then streaks across unrelated atlas charts (verified
+// empirically: bypassing the gradient path removes the artifact; the
+// authored UVs and the ingest stream are byte-exact vs USD ground
+// truth). Clamping each gradient axis to a bounded texel span is an
+// exact no-op for continuous UVs — a 64-texel footprint at the
+// clamp means the true gradients are already far past any useful
+// anisotropic ratio — and bounds the damage on fragmented islands to
+// sub-chart scale instead of atlas scale.
+static const float MAX_GRAD_FOOTPRINT_TEXELS = 64.0;
+
+void ClampGradFootprint(uint texIdx, inout float2 ddxUv, inout float2 ddyUv) {
+    float texW;
+    float texH;
+    gBindlessTextures[texIdx].GetDimensions(texW, texH);
+    const float maxUvSpan = MAX_GRAD_FOOTPRINT_TEXELS / max(sqrt(texW * texH), 1.0);
+    const float lenX = length(ddxUv);
+    const float lenY = length(ddyUv);
+    if (lenX > maxUvSpan)
+        ddxUv *= maxUvSpan / lenX;
+    if (lenY > maxUvSpan)
+        ddyUv *= maxUvSpan / lenY;
+}
+
 float3 SampleByGrad(uint texIdx, float2 uv, float2 ddxUv, float2 ddyUv) {
-    return gBindlessTextures[texIdx].SampleGrad(gBindlessSampler, uv, ddxUv, ddyUv).rgb;
+    ClampGradFootprint(texIdx, ddxUv, ddyUv);
+    // StToImageUv negates the V axis; the gradients live in the same
+    // UV space, so their V components flip sign with it.
+    return gBindlessTextures[texIdx].SampleGrad(gBindlessSampler, StToImageUv(uv),
+                                                float2(ddxUv.x, -ddxUv.y),
+                                                float2(ddyUv.x, -ddyUv.y)).rgb;
 }
 
 float4 SampleByGradRGBA(uint texIdx, float2 uv, float2 ddxUv, float2 ddyUv) {
-    return gBindlessTextures[texIdx].SampleGrad(gBindlessSampler, uv, ddxUv, ddyUv);
+    ClampGradFootprint(texIdx, ddxUv, ddyUv);
+    return gBindlessTextures[texIdx].SampleGrad(gBindlessSampler, StToImageUv(uv),
+                                                float2(ddxUv.x, -ddxUv.y),
+                                                float2(ddyUv.x, -ddyUv.y));
 }
 
 // PYXIS_PI / PYXIS_TWO_PI come from dome_sample.slang (identical
@@ -177,22 +240,43 @@ struct SurfaceShadeResult {
     uint   materialId;     // → payload.materialId (material slot)
 };
 
-// Shade one surface hit — the pre-split closesthit body, verbatim,
-// with the trace-dependent inputs parameterized:
+// RTX-alignment design (rtx-realtime-alignment-design.md), WP2-core —
+// the material+geometry evaluation subset of the pre-split closesthit
+// body, extracted into its OWN function so RaytracedGBufferPass's
+// raygen (raytraced_gbuffer.slang) can evaluate the primary hit's
+// material ONCE, bit-identically to what ShadeSurfaceHit below computes
+// for the SAME hit (same function, same inputs — not a duplicated
+// reimplementation). Everything LIGHTING-dependent (the per-light loop,
+// shadow rays, reflection trace, front-to-back composite) stays in
+// ShadeSurfaceHit, which calls this first. `emission` is filled in here
+// too (§"M9 emission" below) — it depends only on the material + UV/LOD
+// pipeline, not on the light loop, so hoisting it above the loop changes
+// nothing about its value (independent floating-point expressions;
+// see the design's determinism note on reusing shared functions).
+struct SurfaceMaterialEval {
+    OpenPBRSurfaceParams pbr;    // complete, incl. pbr.emission (self-emission, pre coat tint)
+    float3 baseColor;            // post-texture albedo
+    float3 normalWorld;          // final shading normal (post normal-map, horizon-clamped)
+    uint   materialId;           // material slot
+    float  opacity;              // mat.opacity, RAW (pbr.geometryOpacity is saturate() of this;
+                                  // ShadeSurfaceHit's final composite needs the unsaturated value)
+};
+
+// Evaluate the material + UV/LOD/normal pipeline for one surface hit —
+// the pre-split closesthit body, verbatim, with the trace-dependent
+// inputs parameterized:
 //   instanceId      = InstanceID()                 (or VisibilityGpu.instanceId)
 //   primitiveIndex  = PrimitiveIndex()             (or VisibilityGpu.primitiveIndex)
-//   bary            = attribs.barycentrics         (or VisibilityGpu.bary)
+//   bary            = attribs.barycentrics         (or VisibilityGpu.bary, f16-packed)
 //   worldHit        = WorldRayOrigin() + RayTCurrent() * WorldRayDirection()
 //                                                  (or origin + hitT·dir, reconstructed)
 //   rayDir          = WorldRayDirection()          (or the BuildCameraRay direction)
 //   hitT            = RayTCurrent()                (or VisibilityGpu.hitT)
 //   objectToWorld   = ObjectToWorld3x4()           (or gInstanceInfo[id].objectToWorld)
 //   worldToObject   = WorldToObject3x4()           (or InvertAffine3x4(objectToWorld))
-//   recursionDepth  = payload.recursionDepth       (or 0 for the deferred first hit)
-SurfaceShadeResult ShadeSurfaceHit(uint instanceId, uint primitiveIndex, float2 bary,
-                                   float3 worldHit, float3 rayDir, float hitT,
-                                   float3x4 objectToWorld, float3x4 worldToObject,
-                                   uint recursionDepth) {
+SurfaceMaterialEval EvaluateSurfaceMaterial(uint instanceId, uint primitiveIndex, float2 bary,
+                                            float3 worldHit, float3 rayDir, float hitT,
+                                            float3x4 objectToWorld, float3x4 worldToObject) {
     // §15: instanceId is the per-instance slot. The packed instance
     // record resolves it to a material slot (0 = "no material assigned"
     // → sentinel grey material at materials[0]) + the mesh slot whose
@@ -425,27 +509,84 @@ SurfaceShadeResult ShadeSurfaceHit(uint instanceId, uint primitiveIndex, float2 
     float3 baseColor = float3(mat.baseColorR, mat.baseColorG, mat.baseColorB);
     if ((mat.flags & MATERIAL_FLAG_HAS_BASE_COLOR_MAP) != 0u
         && mat.baseColorTex < BINDLESS_TEXTURES_CAP) {
-        baseColor *= SampleByGrad(mat.baseColorTex, uv, ddxUv, ddyUv);
+        const float3 texSample = SampleByGrad(mat.baseColorTex, uv, ddxUv, ddyUv);
+        // 2026-07-05 RTX-alignment — MDL OmniPBR / "Base" library
+        // "Albedo Adjustments" (OmniPBR_ClearCoat.mdl: gain + lift
+        // applied to the decoded texel in linear space, THEN a
+        // desaturate-toward-luminance lerp, all BEFORE the diffuse_tint
+        // multiply above). Every World Lobby "Base/*" material (Oak,
+        // OakDark, Terrazzo, Paint_Satin) and several OmniPBR leaf
+        // materials (the Modern reception "White" fixture,
+        // albedo_brightness = 0.07) author non-default values here;
+        // skipping this step was the dominant per-material albedo
+        // brightness/saturation error measured against ovrtx (2-14x
+        // too bright). Rec.709 luma weights match MDL's
+        // base::mono_luminance. Defaults (brightness=1, add=0,
+        // desaturation=0) make this an exact no-op.
+        float3 graded = texSample * mat.albedoBrightness + mat.albedoAdd;
+        const float mono = dot(graded, float3(0.2126, 0.7152, 0.0722));
+        graded = lerp(graded, float3(mono, mono, mono), saturate(mat.albedoDesaturation));
+        baseColor *= graded;
+    }
+
+    // 2026-07-06 RTX-alignment round 2 (materials chapter) — OmniPBR
+    // `ao_to_diffuse`: blends the ORM texture's AO channel (.r) into
+    // baseColor. Reuses whichever ORM-bound slot is valid
+    // (roughnessTex/metallicTex both point at the same ORM texture
+    // when OmniPBR's ORM packing is used — see TranslateMdl in
+    // UsdShadeToOpenPBR.cpp) rather than adding a dedicated AO texture
+    // slot. Gated on aoToDiffuse > 0 so the default (no-op) case skips
+    // the extra sample; default 0 is the MDL function default, so
+    // every material that doesn't author it — everything measured in
+    // World Lobby — round-trips byte-identically.
+    if (mat.aoToDiffuse > 0.0) {
+        uint aoTex = BINDLESS_TEXTURES_CAP;
+        if ((mat.flags & MATERIAL_FLAG_HAS_ROUGHNESS_MAP) != 0u
+            && mat.roughnessTex < BINDLESS_TEXTURES_CAP) {
+            aoTex = mat.roughnessTex;
+        } else if ((mat.flags & MATERIAL_FLAG_HAS_METALLIC_MAP) != 0u
+            && mat.metallicTex < BINDLESS_TEXTURES_CAP) {
+            aoTex = mat.metallicTex;
+        }
+        if (aoTex < BINDLESS_TEXTURES_CAP) {
+            const float aoSample = SampleByGradRGBA(aoTex, uv, ddxUv, ddyUv).r;
+            baseColor = lerp(baseColor, baseColor * aoSample, saturate(mat.aoToDiffuse));
+        }
     }
 
     // M9-fidelity: roughness + metallic from per-material textures.
     // Both default to the scalar in the material; per-texture sample
-    // overrides when the matching MATERIAL_FLAG_HAS_*_MAP bit is set
-    // (PackMaterialGpu sets the bit when the texture handle is valid).
+    // blends toward the scalar by the OmniPBR constant/texture
+    // influence weight (PackMaterialGpu sets the matching
+    // MATERIAL_FLAG_HAS_*_MAP bit when the texture handle is valid).
     // Roughness samples the .g channel (the GLTF / OpenPBR convention
     // for ORM packed maps); metallic samples .b. UsdPreviewSurface
     // authoring can split them across separate textures, in which
     // case the .g read still hits the data channel for a single-
     // channel roughness map.
+    //
+    // 2026-07-06 RTX-alignment round 2 — previously the sampled value
+    // unconditionally won once a texture was bound (an implicit
+    // influence=1). OmniPBR's `metallic_texture_influence` /
+    // `reflection_roughness_texture_influence` lerp the constant
+    // against the sample instead; the World Lobby's `rh_table_short`
+    // "Paint_Satin" authors metallic_texture_influence=0 (a non-metal
+    // satin paint that still binds an ORM texture for its roughness/AO
+    // channels) — the old binary logic read the ORM's metal mask at
+    // full strength regardless, rendering the tabletop chrome-white.
+    // Defaults (1, 1) reproduce the old unconditional-override
+    // behaviour exactly, so every other measured material is unchanged.
     float roughness = mat.roughness;
     float metalness = mat.metalness;
     if ((mat.flags & MATERIAL_FLAG_HAS_ROUGHNESS_MAP) != 0u
         && mat.roughnessTex < BINDLESS_TEXTURES_CAP) {
-        roughness = SampleByGradRGBA(mat.roughnessTex, uv, ddxUv, ddyUv).g;
+        const float roughnessSample = SampleByGradRGBA(mat.roughnessTex, uv, ddxUv, ddyUv).g;
+        roughness = lerp(mat.roughness, roughnessSample, saturate(mat.reflectionRoughnessTextureInfluence));
     }
     if ((mat.flags & MATERIAL_FLAG_HAS_METALLIC_MAP) != 0u
         && mat.metallicTex < BINDLESS_TEXTURES_CAP) {
-        metalness = SampleByGradRGBA(mat.metallicTex, uv, ddxUv, ddyUv).b;
+        const float metalnessSample = SampleByGradRGBA(mat.metallicTex, uv, ddxUv, ddyUv).b;
+        metalness = lerp(mat.metalness, metalnessSample, saturate(mat.metallicTextureInfluence));
     }
     roughness = clamp(roughness, 0.04, 1.0);  // floor avoids singular GGX
     metalness = saturate(metalness);
@@ -672,11 +813,67 @@ SurfaceShadeResult ShadeSurfaceHit(uint instanceId, uint primitiveIndex, float2 
     pbr.fuzzWeight = saturate(mat.fuzzWeight);
     pbr.fuzzColor = saturate(float3(mat.fuzzColorR, mat.fuzzColorG, mat.fuzzColorB));
     pbr.fuzzRoughness = saturate(mat.fuzzRoughness);
-    pbr.emission = float3(0.0, 0.0, 0.0);  // filled after the emission-map sample below
     pbr.geometryOpacity = saturate(mat.opacity);
     pbr.thinWalled = (mat.flags & MATERIAL_FLAG_THIN_WALLED) != 0u;
     pbr.tangentWorld = anisoTangentW;
     pbr.bitangentWorld = anisoBitangentW;
+
+    // M9 emission. Emissive materials (UsdPreviewSurface authored
+    // `emissiveColor` non-zero, MaterialFlag::EMISSIVE bit set by
+    // PackMaterialGpu) add their authored radiance directly to the
+    // output — independent of NdotL, distance falloff, or any
+    // incoming light. Per-material emissionTex (when authored)
+    // multiplies the constant emissionColor pointwise; no UV-set
+    // indirection beyond what the baseColor sample already did.
+    // Hoisted above the (lighting-only) caller's light loop — WP2-core
+    // moved this block up from its pre-split position (it never
+    // depended on the light loop, only on `mat` / `uv` / `ddxUv` /
+    // `ddyUv`, all already in scope) so EvaluateSurfaceMaterial can
+    // return a complete `pbr` (with `emission` filled) to BOTH callers.
+    float3 emissionRaw = float3(0.0, 0.0, 0.0);
+    if ((mat.flags & MATERIAL_FLAG_EMISSIVE) != 0u) {
+        emissionRaw = float3(mat.emissionR, mat.emissionG, mat.emissionB)
+                      * mat.emissionLuminance;
+        if ((mat.flags & MATERIAL_FLAG_HAS_EMISSION_MAP) != 0u
+            && mat.emissionTex < BINDLESS_TEXTURES_CAP) {
+            const float3 sampledEmission =
+                SampleByGrad(mat.emissionTex, uv, ddxUv, ddyUv);
+            emissionRaw *= sampledEmission;
+        }
+    }
+    pbr.emission = emissionRaw;
+
+    SurfaceMaterialEval result;
+    result.pbr = pbr;
+    result.baseColor = baseColor;
+    result.normalWorld = nWorld;
+    result.materialId = materialId;
+    result.opacity = mat.opacity;
+    return result;
+}
+
+// Shade one surface hit — calls EvaluateSurfaceMaterial above (bit-
+// identical material/geometry eval, shared with RaytracedGBufferPass's
+// raygen), then runs the per-light loop + shadow rays + deterministic
+// mirror reflection + front-to-back composite exactly as the pre-split
+// closesthit did. `recursionDepth` gates the reflection branch's ray
+// budget (V2.B) — the ONE input EvaluateSurfaceMaterial doesn't need
+// (it does no tracing).
+SurfaceShadeResult ShadeSurfaceHit(uint instanceId, uint primitiveIndex, float2 bary,
+                                   float3 worldHit, float3 rayDir, float hitT,
+                                   float3x4 objectToWorld, float3x4 worldToObject,
+                                   uint recursionDepth) {
+    const SurfaceMaterialEval surf = EvaluateSurfaceMaterial(
+        instanceId, primitiveIndex, bary, worldHit, rayDir, hitT, objectToWorld, worldToObject);
+    OpenPBRSurfaceParams pbr = surf.pbr;
+    float3 baseColor          = surf.baseColor;
+    float3 nWorld             = surf.normalWorld;
+    const uint materialId     = surf.materialId;
+    const float opacity       = surf.opacity;
+    // Q2 — the boxed closure's EDF row: emission sits BELOW the coat, so
+    // the coat absorbs it (L_e = lerp(1, T_coat, C)·E). See
+    // EvaluateSurfaceMaterial above for where `pbr.emission` is filled.
+    const float3 emission = OpenPBREmission(pbr);
 
     // M7-simple lighting + NdotL Lambert for direct lights. Loop
     // over every authored light, accumulate the per-light Lambert
@@ -986,31 +1183,6 @@ SurfaceShadeResult ShadeSurfaceHit(uint instanceId, uint primitiveIndex, float2 
         totalContribution += L.intensity;
     }
 
-    // M9 emission. Emissive materials (UsdPreviewSurface authored
-    // `emissiveColor` non-zero, MaterialFlag::EMISSIVE bit set by
-    // PackMaterialGpu) add their authored radiance directly to the
-    // output — independent of NdotL, distance falloff, or any
-    // incoming light. Per-material emissionTex (when authored)
-    // multiplies the constant emissionColor pointwise; no UV-set
-    // indirection beyond what the baseColor sample already did.
-    float3 emissionRaw = float3(0.0, 0.0, 0.0);
-    if ((mat.flags & MATERIAL_FLAG_EMISSIVE) != 0u) {
-        emissionRaw = float3(mat.emissionR, mat.emissionG, mat.emissionB)
-                      * mat.emissionLuminance;
-        if ((mat.flags & MATERIAL_FLAG_HAS_EMISSION_MAP) != 0u
-            && mat.emissionTex < BINDLESS_TEXTURES_CAP) {
-            const float3 sampledEmission =
-                SampleByGrad(mat.emissionTex, uv, ddxUv, ddyUv);
-            emissionRaw *= sampledEmission;
-        }
-    }
-    // Q2 — the boxed closure's EDF row: emission sits BELOW the coat,
-    // so the coat absorbs it (L_e = lerp(1, T_coat, C)·E). The closure
-    // module applies that tint; with no coat this is `emissionRaw`
-    // unchanged.
-    pbr.emission = emissionRaw;
-    const float3 emission = OpenPBREmission(pbr);
-
     // Q2 composite: EvaluateOpenPBRDirect folds diffuse + specular per
     // light (with the spec's energy accounting), EvaluateOpenPBRAmbient
     // folds the dome chain (incl. the historical baseColor ×
@@ -1056,7 +1228,7 @@ SurfaceShadeResult ShadeSurfaceHit(uint instanceId, uint primitiveIndex, float2 
     float3 reflColorOut  = float3(0.0, 0.0, 0.0);
     float3 reflWeightOut = float3(0.0, 0.0, 0.0);
     if (recursionDepth + 1u < MAX_RAY_RECURSION
-        && (metalness > 0.05 || roughness < 0.5))
+        && (pbr.baseMetalness > 0.05 || pbr.specularRoughness < 0.5))
     {
         // Geometric mirror direction. rayDir (the TraceRay direction)
         // is FROM eye TO surface; `reflect(d, n)` returns the mirror
@@ -1176,8 +1348,8 @@ SurfaceShadeResult ShadeSurfaceHit(uint instanceId, uint primitiveIndex, float2 
     //   - Metal gates transmission via (1 − M) (metal slab is opaque).
     const float3 oneMinusRefl = float3(1.0, 1.0, 1.0) - reflWeightOut;
     const float3 emitted = reflWeightOut * reflColorOut
-                         + oneMinusRefl * lit * mat.opacity
-                         + emission * mat.opacity;
+                         + oneMinusRefl * lit * opacity
+                         + emission * opacity;
 
     SurfaceShadeResult result;
     result.emitted = emitted;
@@ -1186,6 +1358,190 @@ SurfaceShadeResult ShadeSurfaceHit(uint instanceId, uint primitiveIndex, float2 
     result.baseColor   = baseColor;
     result.materialId  = materialId;
     return result;
+}
+
+// RTX-alignment design (rtx-realtime-alignment-design.md), WP2-signals —
+// per-light selection + attenuation, extracted so DirectLightingPass and
+// ReflectionsPass share the exact same light-loop math instead of each
+// re-deriving it (the "reuse/extract shared helpers rather than
+// duplicating math" mandate). APPENDED after ShadeSurfaceHit — that
+// function's own inline per-light loop (above) is left byte-for-byte
+// untouched, so the existing megakernel's golden-tested output can never
+// pick up a codegen difference from this addition.
+//
+// Returns false for Dome lights (ambient — IndirectDiffusePass's domain,
+// not this loop's) and disabled/sentinel lights. On true, `lightDir` /
+// `lightColor` are ready for EvaluateOpenPBRDirect / EvaluateOpenPBRDirectSplit,
+// and `attenuation` folds distance falloff × shaping-cone × (optional)
+// shadow visibility — multiply the closure's return by it, exactly as
+// ShadeSurfaceHit's own loop does.
+//
+// `traceShadow` selects whether an occlusion ray is fired: DirectLightingPass
+// passes true (one shadow ray per light, "today's" flags/bias); ReflectionsPass
+// passes false for its Phase-A single-bounce hit (deliberately cheap — no
+// shadow rays there, see reflections.slang). When false, `attenuation` omits
+// the visibility factor entirely (assumed 1.0) — NOT a "trace and ignore the
+// result" shortcut, so ReflectionsPass never pays for the TraceRay it doesn't
+// want.
+bool EvaluateDirectLightSample(LightGpu L, float3 hitWorld, float3 nWorld,
+                               uint recursionDepth, bool traceShadow,
+                               out float3 lightDir, out float3 lightColor,
+                               out float attenuation, out float occluderHitT) {
+    lightDir = float3(0.0, 0.0, 0.0);
+    lightColor = float3(0.0, 0.0, 0.0);
+    attenuation = 0.0;
+    // 0.0 = "unshadowed" sentinel (DirectLightingPass's dominant-light
+    // guide channel — see OcclusionPayload's doc comment in
+    // ShaderInterop.slang); only overwritten inside the traceShadow branch
+    // below when the shadow ray actually hits an occluder.
+    occluderHitT = 0.0;
+    if (L.intensity <= 0.0 || L.kind == LIGHT_KIND_DOME)
+        return false;
+
+    lightColor = float3(L.colorR, L.colorG, L.colorB) * L.intensity;
+    float falloff = 1.0;
+    if (L.kind == LIGHT_KIND_DISTANT) {
+        lightDir = -float3(L.dirX, L.dirY, L.dirZ);
+    } else {
+        const float3 toLight = float3(L.posX, L.posY, L.posZ) - hitWorld;
+        const float  distSq  = dot(toLight, toLight);
+        falloff  = 1.0 / max(distSq, 0.01);
+        lightDir = toLight * rsqrt(max(distSq, 1e-12));
+    }
+    const float NdotL = max(0.0, dot(nWorld, lightDir));
+
+    // Same UsdLuxShapingAPI cone gate as ShadeSurfaceHit's loop.
+    float coneAttenuation = 1.0;
+    if (L.shapingConeCosOuter > 1e-4) {
+        float3 coneAxis;
+        if (L.kind == LIGHT_KIND_RECT) {
+            const float3 axisU = float3(L.axisUx, L.axisUy, L.axisUz);
+            const float3 axisV = float3(L.axisVx, L.axisVy, L.axisVz);
+            coneAxis = normalize(cross(axisU, axisV));
+        } else {
+            coneAxis = float3(L.dirX, L.dirY, L.dirZ);
+        }
+        const float3 lightToSurface = (L.kind == LIGHT_KIND_DISTANT)
+                                          ? float3(L.dirX, L.dirY, L.dirZ)
+                                          : -lightDir;
+        const float cosAngle = dot(normalize(lightToSurface), coneAxis);
+        coneAttenuation = smoothstep(L.shapingConeCosOuter, L.shapingConeCosInner, cosAngle);
+    }
+
+    float visibility = 1.0;
+    if (traceShadow && NdotL > 0.0 && coneAttenuation > 0.0
+        && recursionDepth + 1u < MAX_RAY_RECURSION) {
+        float lightDist = 1e30;
+        if (L.kind != LIGHT_KIND_DISTANT) {
+            const float3 toLight = float3(L.posX, L.posY, L.posZ) - hitWorld;
+            lightDist = length(toLight);
+        }
+        RayDesc shadowRay;
+        shadowRay.Origin    = hitWorld + nWorld * 1e-3;
+        shadowRay.Direction = lightDir;
+        shadowRay.TMin      = 1e-3;
+        shadowRay.TMax      = max(1e-3, lightDist - 1e-3);
+        OcclusionPayload shadowPayload;
+        shadowPayload.visible = 0.0;  // pre-trace = occluded
+        TraceRay(gTlas,
+                 RAY_FLAG_SKIP_CLOSEST_HIT_SHADER
+                   | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH,
+                 0xFFu,
+                 /*RayContributionToHitGroupIndex*/ 0,
+                 /*MultiplierForGeometryContributionToHitGroupIndex*/ 0,
+                 /*MissShaderIndex*/ 1,
+                 shadowRay,
+                 shadowPayload);
+        visibility = shadowPayload.visible;
+        occluderHitT = shadowPayload.hitT;
+    }
+
+    attenuation = falloff * coneAttenuation * visibility;
+    return true;
+}
+
+// RTX-alignment design (rtx-realtime-alignment-design.md), WP2-signals —
+// IndirectDiffusePass's Phase A estimator: the dome-finding + lat-long UV
+// + mip-bias sample ShadeSurfaceHit's inline LIGHT_KIND_DOME branch (above)
+// uses, WITHOUT that branch's AO ray (AmbientOcclusionPass's job now —
+// callers pass `aoVisibility` from the new AO signal, or 1.0 if unavailable).
+// APPENDED (duplicated, not refactored out of ShadeSurfaceHit) for the same
+// byte-identical-golden reason EvaluateDirectLightSample documents above.
+// Accumulates over every enabled Dome light in the scene (matches
+// ShadeSurfaceHit's loop, which never `break`s on the first one). Returns
+// false iff the scene authors no enabled Dome light (ambientOut stays 0).
+bool EvaluateDomeAmbient(OpenPBRSurfaceParams pbr, float3 nWorld, float3 viewDir,
+                         float aoVisibility, out float3 ambientOut) {
+    ambientOut = float3(0.0, 0.0, 0.0);
+    bool foundDome = false;
+    uint lightCount;
+    uint _stride;
+    gLights.GetDimensions(lightCount, _stride);
+    for (uint i = 0; i < lightCount; ++i) {
+        LightGpu L = gLights[i];
+        if (L.intensity <= 0.0 || L.kind != LIGHT_KIND_DOME)
+            continue;
+        foundDome = true;
+        const float3 Lcol = float3(L.colorR, L.colorG, L.colorB) * L.intensity;
+
+        float3 sampleDir = nWorld;
+        if (abs(L.domeRotationYRadians) > 1e-4) {
+            const float cosR = cos(-L.domeRotationYRadians);
+            const float sinR = sin(-L.domeRotationYRadians);
+            sampleDir = float3(cosR * nWorld.x + sinR * nWorld.z,
+                                nWorld.y,
+                                -sinR * nWorld.x + cosR * nWorld.z);
+        }
+        const float u = atan2(sampleDir.x, sampleDir.z) / PYXIS_TWO_PI + 0.5;
+        const float v = acos(clamp(sampleDir.y, -1.0, 1.0)) / PYXIS_PI;
+
+        float domeWidth;
+        float domeHeight;
+        float domeMipLevels;
+        gDomeEnvMap.GetDimensions(0, domeWidth, domeHeight, domeMipLevels);
+        const float targetMip = min(6.0, max(0.0, domeMipLevels - 1.0));
+        const float3 domeRadiance =
+            gDomeEnvMap.SampleLevel(gDomeSampler, float2(u, v), targetMip).rgb;
+
+        ambientOut += EvaluateOpenPBRAmbient(pbr, nWorld, viewDir, Lcol * domeRadiance, aoVisibility);
+    }
+    return foundDome;
+}
+
+// RTX-alignment design (rtx-realtime-alignment-design.md), WP2-signals —
+// shared per-channel demodulation: divides a radiance signal by the
+// surface's albedo so the NRD-style denoiser guides carry texture detail
+// separately from the lighting estimate (re-modulated in the eventual
+// CompositePass) — used by DirectLightingPass's gDirectDiffuse (see that
+// pass's file header: gIndirectDiffuse does NOT use this — its bounce
+// estimator never multiplies by primary albedo in the first place, so
+// there's nothing to divide back out).
+//
+// Halo-fix note (rtx-realtime-alignment-design.md, "denoiser chain" /
+// white-fringe forensics, 2026-07-05): the divisor used to be guarded only
+// against near-zero (`albedo > 1e-4`, zeroing the channel below that). That
+// guard is far too small a floor — a dark-but-not-black surface (the World
+// Lobby black vase measures ~0.02 linear) still divides through almost
+// unguarded, amplifying this pass's 1-shadow-ray-per-pixel Monte-Carlo
+// noise by roughly 1/albedo^2. DenoiseShadowPass's spatial filter (the only
+// denoiser that touches this channel) has no albedo/material edge-stop of
+// its own (normal + occluder-hitT only), so a tap that crosses the
+// silhouette into a bright neighbor carries this blown-up value straight
+// into CompositePass's remodulation there — a white/bright halo baked
+// around every dark object's edge. Flooring the divisor at
+// MIN_DEMODULATION_ALBEDO bounds the amplification. CompositePass
+// (composite.slang) re-modulates gDirectDiffuse with the IDENTICAL floor
+// (mirror this constant there if it ever changes) so the denoise-off round
+// trip stays exact: signal / max(albedo, floor) * max(albedo, floor) ==
+// signal, for ANY floor value — the floor only bounds the amplitude the
+// denoiser sees, it does not change the undenoised result.
+static const float MIN_DEMODULATION_ALBEDO = 0.04;
+
+float3 DemodulateByAlbedo(float3 signal, float3 albedo) {
+    return float3(
+        signal.x / max(albedo.x, MIN_DEMODULATION_ALBEDO),
+        signal.y / max(albedo.y, MIN_DEMODULATION_ALBEDO),
+        signal.z / max(albedo.z, MIN_DEMODULATION_ALBEDO));
 }
 
 #endif  // PYXIS_SHADING_SLANG

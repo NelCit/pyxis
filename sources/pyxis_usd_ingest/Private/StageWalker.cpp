@@ -1052,19 +1052,16 @@ void EmitLight(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xformCache,
           resolvedPath = assetPath.GetAssetPath();
       }
     }
-    // Fallback: when the scene authors a DomeLight without an
-    // env-map (Omniverse Lobby, default cube fixtures, etc.), bind
-    // the bundled `Resources/scenes/default_sky.exr` so the miss
-    // shader has a real lat-long texture to sample. Without this
-    // the dome falls back to flat color × intensity which gives
-    // either a pitch-black or fully-saturated background.
-    if (resolvedPath.empty())
-    {
-      const Path bundled =
-          AssetLocator{}.LocateResource("scenes/default_sky.exr");
-      if (!bundled.View().empty())
-        resolvedPath.assign(bundled.View());
-    }
+    // Texture-less DomeLight = uniform radiance `color × intensity`
+    // (UsdLux semantics; matches the Omniverse RTX renderer, which the
+    // World Lobby's authored `/World/DomeLight` — no texture, white,
+    // intensity 12000 — relies on for its daylight flood). The shader
+    // side already collapses to `tint × scale` via the 1×1 WHITE
+    // no-HDRI fallback (dome_sample.slang). The earlier substitution
+    // of the bundled default_sky.exr here made Pyxis light such
+    // scenes with a blue sky NVIDIA never sees — removed as part of
+    // the RTX-alignment interior-illumination fix; default.usd is
+    // unaffected (it references `@./default_sky.exr@` explicitly).
     if (!resolvedPath.empty())
     {
       TextureKey key;
@@ -2025,6 +2022,28 @@ PreparedMesh PrepareMesh(const pxr::UsdPrim& prim, pxr::UsdGeomXformCache& xform
                            + "); dropping UVs for this mesh.");
   }
 
+  // Seahorn-vase UV-correspondence forensics (H2 check) — one-shot
+  // diagnostic dumping the fully-flattened per-face-vertex "st" stream
+  // exactly as `getUv`/`pushVertex` below will consume it, so it can be
+  // numerically diffed (fv-index for fv-index) against the Python
+  // ground truth (`UsdGeomPrimvar::ComputeFlattened()` via
+  // potdiag/check_seam_tris.py) to rule in/out a flatten or
+  // triangulation/dedup correspondence bug independent of which
+  // material network samples the result. Same opt-in-via-presence
+  // pattern as PYXIS_OMNI_MATDUMP/PYXIS_OMNI_LIGHTDUMP above; leave
+  // unset for normal runs (unfiltered, so only point it at small/
+  // isolated assets — a full-scene ingest would flood stderr).
+  if (hasUvs && std::getenv("PYXIS_OMNI_UVDUMP") != nullptr)
+  {
+    for (std::size_t fv = 0; fv < stUvs.size(); ++fv)
+    {
+      std::fprintf(stderr, "PYXIS_UVDUMP %s fv=%zu u=%.9g v=%.9g\n", primPath.c_str(), fv,
+                   static_cast<double>(stUvs[fv][0]), static_cast<double>(stUvs[fv][1]));
+    }
+    std::fprintf(stderr, "PYXIS_UVDUMP %s total=%zu interpolation=%s\n", primPath.c_str(),
+                 stUvs.size(), stInterpolation.GetText());
+  }
+
   for (const SubsetEmitInfo& subset : subsetInfos)
   {
     // M9-fidelity hard-edge dedup. Walks the face-vertex stream once
@@ -2607,7 +2626,8 @@ uint32_t ParsePurposeFilterSpec(std::string_view spec) noexcept
 
 IngestResult StageWalker::WalkFile(std::string_view usdPath, GpuScene& scene,
                                    double frameNumber,
-                                   uint32_t purposeFilter) {
+                                   uint32_t purposeFilter,
+                                   std::string_view cameraPathOverride) {
   auto& log = Logging::Get();
   const std::string pathString{usdPath};
 
@@ -2653,7 +2673,7 @@ IngestResult StageWalker::WalkFile(std::string_view usdPath, GpuScene& scene,
     failed.GetImpl().stats.timings.totalMs = failed.GetImpl().stats.timings.stageOpenMs;
     return failed;
   }
-  IngestResult result = WalkStage(stage, scene, frameNumber, purposeFilter);
+  IngestResult result = WalkStage(stage, scene, frameNumber, purposeFilter, cameraPathOverride);
   const auto walkEnd = Clock::now();
   // stageOpenMs is local to WalkFile (WalkStage didn't open the
   // stage); fold it in + recompute totalMs to include it.
@@ -2690,7 +2710,8 @@ IngestResult StageWalker::WalkFile(std::string_view usdPath, GpuScene& scene,
 IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
                                     GpuScene& scene,
                                     double frameNumber,
-                                    uint32_t purposeFilter) {
+                                    uint32_t purposeFilter,
+                                    std::string_view cameraPathOverride) {
   IngestResult result;
   if (!stage)
     return result;
@@ -2956,26 +2977,33 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
                    materialDesc.roughnessMap != TextureHandle::Invalid);
     }
 
-    // V2.A.23 follow-up — per-material texture-binding diagnostic.
-    // Logs which lobes resolved to a texture handle vs fell back to
-    // the scalar value, so operators can see at ingest time whether a
-    // material's maps were actually fetched (the "is normal even
-    // loading?" question). Debug level — one line per material, only
-    // surfaced when the operator turns the category up.
+    const MaterialHandle handle = scene.AcquireMaterial(materialDesc);
+    materialsByPath.emplace(primPath, handle);
+
+    // V2.A.23 follow-up — per-material texture-binding diagnostic, now
+    // carrying the slot index too (2026-07-05 RTX-alignment forensics —
+    // slot is exactly the materialId AOV's value written at
+    // gInstanceMaterial/instanceInfo.materialSlot, so this line is the
+    // slot -> SdfPath -> texture-binding key operators need to interpret
+    // a per-material albedo AOV mask). Debug level — one line per
+    // material, only surfaced when the operator turns the category up
+    // (file sink defaults to Debug; console stays at Info).
     {
       auto bound = [](TextureHandle tex) { return tex != TextureHandle::Invalid ? "Y" : "-"; };
+      const uint32_t slot = static_cast<uint32_t>(handle) & ((1u << HANDLE_SLOT_BITS) - 1u);
       Logging::Get().Debug(log::APP,
-          "StageWalker material textures " + primPath
-          + ": base=" + bound(materialDesc.baseColorMap)
+          "StageWalker material textures slot=" + std::to_string(slot) + " " + primPath
+          + ": source=" + std::to_string(static_cast<int>(materialDesc.source))
+          + " base=" + bound(materialDesc.baseColorMap)
           + " normal=" + bound(materialDesc.normalMap)
           + " rough=" + bound(materialDesc.roughnessMap)
           + " metal=" + bound(materialDesc.metallicMap)
           + " emit=" + bound(materialDesc.emissionMap)
-          + " opacity=" + bound(materialDesc.opacityMap));
+          + " opacity=" + bound(materialDesc.opacityMap)
+          + " baseColor=(" + std::to_string(materialDesc.baseColor.x) + ","
+          + std::to_string(materialDesc.baseColor.y) + ","
+          + std::to_string(materialDesc.baseColor.z) + ")");
     }
-
-    const MaterialHandle handle = scene.AcquireMaterial(materialDesc);
-    materialsByPath.emplace(primPath, handle);
     // Track which materials carry a normal map so the mesh pass can
     // skip MikkTSpace tangent generation on meshes that don't need
     // them. ~40% of lobby materials are normal-map-free; skipping
@@ -3481,15 +3509,19 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
       "StageWalker pass3c (serial drain + cameras + lights): "
           + std::to_string(static_cast<int>(pass3cMs)) + "ms");
 
-  // Active-camera selection. Honour the root-layer's `boundCamera`
-  // hint if present (Omniverse + DCC convention: the camera the
-  // scene's authoring tool was last looking through). Fall back to
-  // first-in-SdfPath-order — preserves the M4 "first camera wins"
-  // contract for fixtures that don't author a hint. activeCameraIndex
-  // stays -1 only when the scene authored zero cameras.
+  // Active-camera selection. RTX-alignment design (rtx-realtime-
+  // alignment-design.md), WP2-final — three tiers, highest priority
+  // first: (1) the caller's explicit `cameraPathOverride` (--camera /
+  // scene.camera), (2) the root-layer's `boundCamera` hint (Omniverse +
+  // DCC convention: the camera the scene's authoring tool was last
+  // looking through), (3) first-in-SdfPath-order — preserves the M4
+  // "first camera wins" contract for fixtures that author neither.
+  // activeCameraIndex stays -1 only when the scene authored zero
+  // cameras. A non-empty override that matches no discovered camera
+  // warns and falls through to tier 2/3 instead of failing the load.
   if (!cameras.empty())
   {
-    int activeIdx = 0;  // first-in-SdfPath-order fallback
+    int activeIdx = 0;  // first-in-SdfPath-order fallback (tier 3)
     if (!boundCameraHintPath.empty())
     {
       for (std::size_t i = 0; i < cameras.size(); ++i)
@@ -3501,8 +3533,34 @@ IngestResult StageWalker::WalkStage(const pxr::UsdStageRefPtr& stage,
         }
       }
     }
+    if (!cameraPathOverride.empty())
+    {
+      bool matched = false;
+      for (std::size_t i = 0; i < cameras.size(); ++i)
+      {
+        if (cameras[i].name == cameraPathOverride)
+        {
+          activeIdx = static_cast<int>(i);
+          matched = true;
+          break;
+        }
+      }
+      if (!matched)
+      {
+        Logging::Get().Warn(log::APP,
+            "StageWalker: cameraPathOverride \"" + std::string{cameraPathOverride}
+                + "\" matches no camera in the stage; falling back to "
+                  "boundCamera hint / first-in-order.");
+      }
+    }
     stats.activeCameraIndex = activeIdx;
     scene.SetCamera(cameras[static_cast<std::size_t>(activeIdx)].desc);
+  }
+  else if (!cameraPathOverride.empty())
+  {
+    Logging::Get().Warn(log::APP,
+        "StageWalker: cameraPathOverride \"" + std::string{cameraPathOverride}
+            + "\" requested but the stage authors no cameras.");
   }
 
   const auto meshPassEnd = Clock::now();

@@ -54,6 +54,9 @@ target_sources(pyxis_platform PUBLIC
 target_sources(pyxis_platform PRIVATE
     Private/Device/NvrhiCallback.h
     Private/Device/NvrhiCallback.cpp
+    Private/Device/DlssDeviceExtensions.h
+    Private/Device/DlssDeviceExtensions.cpp
+    Private/Device/ExternalInterop.h
     Private/Device/VkDeviceManager.h
     Private/Device/VkDeviceManager.cpp
     Private/Device/VkDeviceManagerHeadless.h
@@ -100,6 +103,16 @@ target_link_libraries(pyxis_platform
 # Windows libs needed for FormatMessage / WideCharToMultiByte on the Path
 # helpers and SetUnhandledExceptionFilter on the future crash reporter.
 target_link_libraries(pyxis_platform PRIVATE Dbghelp Shlwapi)
+
+# DLSS Stage 2a (rtx-realtime-alignment-design.md) — vendored Streamline
+# MIT headers (thirdparty/streamline/, see its LICENSE.txt). Header-only:
+# every sl* entry point is resolved at runtime via GetProcAddress
+# (Device/DlssDeviceExtensions.cpp), so this adds an include path only —
+# no import lib, no link dependency, and the build is identical whether or
+# not the proprietary DLLs (_local/dlss/, never committed) are staged.
+target_include_directories(pyxis_platform PRIVATE
+    ${CMAKE_SOURCE_DIR}/thirdparty/streamline/include
+)
 
 # GLFW_INCLUDE_VULKAN is defined here, not via #define in GlfwWindow.cpp
 # (the all-caps macro otherwise trips clang-tidy's identifier-naming

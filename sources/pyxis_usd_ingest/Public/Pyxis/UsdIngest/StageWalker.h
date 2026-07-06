@@ -142,17 +142,28 @@ class PYXIS_USD_INGEST_API StageWalker final {
   // controlling which UsdGeomImageable `purpose` LODs emit. Default
   // = default + render. Pass `PURPOSE_FILTER_DEFAULT | PURPOSE_FILTER_PROXY`
   // for fast-preview proxy-only renders, etc.
+  //
+  // RTX-alignment design (rtx-realtime-alignment-design.md), WP2-final —
+  // `cameraPathOverride`: an exact UsdGeomCamera SdfPath (e.g.
+  // "/World/Cameras/CamLobbyReception") to make the active camera,
+  // taking priority over BOTH the root layer's customLayerData
+  // "boundCamera" hint and the first-in-SdfPath-order fallback. Empty
+  // (default) = the pre-existing auto-pick behavior, unchanged. A
+  // non-matching override path logs a warning and falls back to auto.
   IngestResult WalkFile(std::string_view usdPath, GpuScene& scene,
                         double frameNumber = -1.0,
-                        uint32_t purposeFilter = PURPOSE_FILTER_DEFAULT_MASK);
+                        uint32_t purposeFilter = PURPOSE_FILTER_DEFAULT_MASK,
+                        std::string_view cameraPathOverride = {});
 
   // Variant taking an already-opened stage. Used by the cross-adapter
   // regression harness so both paths share a single stage open. The
   // pxr::UsdStageRefPtr argument is USD's reference-counted handle —
   // the renderer never persists it past `Walk` (§25.O.2 contract).
+  // `cameraPathOverride` — see WalkFile's doc comment above.
   IngestResult WalkStage(const pxr::UsdStageRefPtr& stage, GpuScene& scene,
                          double frameNumber = -1.0,
-                         uint32_t purposeFilter = PURPOSE_FILTER_DEFAULT_MASK);
+                         uint32_t purposeFilter = PURPOSE_FILTER_DEFAULT_MASK,
+                         std::string_view cameraPathOverride = {});
 };
 
 // PR6 — parse a comma-separated purpose list ("default,render",

@@ -23,9 +23,12 @@
 
 #include <array>
 #include <cctype>
+#include <charconv>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace pyxis::material_translation {
@@ -150,6 +153,295 @@ struct SurfaceMatch {
   return false;
 }
 
+// 2026-07-06 RTX-alignment round 2 — broader probe than
+// `HasMdlSourceAssetWithAuthoredInputs`'s fixed 12-name allowlist: true
+// if the candidate shader authors ANY `inputs:*` override at all. Used
+// as the last-resort MDL-classification tier (after the named-probe
+// and the OmniPBR-preset-file parse both miss) for generic OmniPBR/
+// OmniGlass instances that only override inputs outside that
+// allowlist — e.g. the World Lobby's FountainGrass ground-cover, which
+// authors just `albedo_brightness` + `diffuse_texture` on the shared
+// `OmniPBR.mdl` module.
+bool HasAnyAuthoredMdlInput(const pxr::UsdShadeShader& shader) noexcept
+{
+  for (const pxr::UsdShadeInput& input : shader.GetInputs())
+  {
+    if (input.GetAttr().HasAuthoredValue())
+      return true;
+  }
+  return false;
+}
+
+// 2026-07-06 RTX-alignment round 2 (materials chapter) — MDL "Base"
+// library preset materials. `Steel_Carbon` / `Concrete_Formed` /
+// `Stucco` (and others under `Materials/Base/**`) are each a single
+// per-material .mdl file that calls the shared OmniPBR base function
+// with every parameter BAKED as a literal argument:
+//
+//   export material Steel_Carbon(*)
+//    = ::OmniPBR::OmniPBR(diffuse_color_constant: color(0.2, 0.2, 0.2),
+//                         metallic_constant: 0.f, ...);
+//
+// and author NO USD `inputs:*` overrides at all (the artist never
+// touched the material in Composer), so `HasMdlSourceAssetWithAuthoredInputs`
+// (which only probes a handful of commonly-overridden input names) never
+// fires and the translator fell through to the UsdPreviewSurface network
+// or, when that's also absent, the flat 0.18-grey `Default` fallback —
+// the round-1 forensics "Steel_Carbon/Stucco fully grey,
+// Concrete_Formed textureless" gap. This helper re-reads the same .mdl
+// file the Shader prim points at and recovers those literals so
+// TranslateMdl can use them as its per-field fallback instead of its
+// own generic hardcoded defaults, while any USD-authored `inputs:*`
+// value (the Oak/OakDark authoring pattern) still wins as it did
+// before — see the `PresetXxx()` call sites in TranslateMdl below.
+//
+// Deliberately narrow: only recognizes a direct call to an OmniPBR-
+// family base function (`OmniPBR`, `OmniPBRBase`, `OmniGlass`, ...).
+// `Plaster_Wall_Cracked` (vMaterials' bespoke multi-layer `df::`
+// BSDF graph, `= Plaster_Wall(...)`) fails this check by design —
+// interpreting an arbitrary MDL DF graph is out of scope, and that
+// material already has a legitimate baked-texture UsdPreviewSurface
+// fallback network authored alongside it, which stays untouched.
+struct MdlPreset {
+  bool                                        valid = false;
+  std::string                                 dir;   // .mdl file's directory (relative texture paths anchor here).
+  std::unordered_map<std::string, std::string> args;  // key -> raw literal text (trimmed).
+};
+
+// Parses a float literal with an optional trailing MDL `f`/`F` suffix
+// (e.g. "0.200000003f", "90", "0.5"). Returns `fallback` on any parse
+// failure — never throws (this TU has exceptions enabled for USD, but
+// every helper in this file stays defensive/noexcept by convention).
+float ParseMdlFloatLiteral(std::string_view text, float fallback) noexcept
+{
+  std::size_t start = 0;
+  while (start < text.size() && std::isspace(static_cast<unsigned char>(text[start])))
+    ++start;
+  std::size_t end = text.size();
+  while (end > start && std::isspace(static_cast<unsigned char>(text[end - 1])))
+    --end;
+  if (start < end && (text[end - 1] == 'f' || text[end - 1] == 'F'))
+    --end;
+  if (start >= end)
+    return fallback;
+  float value = fallback;
+  const auto [ptr, ec] = std::from_chars(text.data() + start, text.data() + end, value);
+  (void)ptr;
+  return (ec == std::errc()) ? value : fallback;
+}
+
+// Finds the ')' matching the '(' at `text[openParenPos]`, honoring
+// nested parens and double-quoted string literals (asset paths) so a
+// paren inside a comment-free quoted path never desyncs the count.
+// Returns `npos` on an unbalanced/malformed call.
+std::size_t FindMatchingParen(const std::string& text, std::size_t openParenPos) noexcept
+{
+  if (openParenPos >= text.size() || text[openParenPos] != '(')
+    return std::string::npos;
+  int  depth = 0;
+  bool inString = false;
+  for (std::size_t i = openParenPos; i < text.size(); ++i)
+  {
+    const char c = text[i];
+    if (inString)
+    {
+      if (c == '"')
+        inString = false;
+      continue;
+    }
+    if (c == '"')
+      inString = true;
+    else if (c == '(')
+      ++depth;
+    else if (c == ')')
+    {
+      --depth;
+      if (depth == 0)
+        return i;
+    }
+  }
+  return std::string::npos;
+}
+
+// Splits the unwrapped argument text of an MDL call into top-level
+// "key: value" pairs (depth/quote-aware, so a comma inside a nested
+// `color(...)`, `texture_2d(...)`, or a `/* tag N, version M */`
+// comment never splits early).
+void SplitMdlCallArgs(const std::string&                            argsText,
+                      std::unordered_map<std::string, std::string>& outArgs) noexcept
+{
+  const auto trim = [](std::string s) {
+    std::size_t b = 0;
+    while (b < s.size() && std::isspace(static_cast<unsigned char>(s[b])))
+      ++b;
+    std::size_t e = s.size();
+    while (e > b && std::isspace(static_cast<unsigned char>(s[e - 1])))
+      --e;
+    return s.substr(b, e - b);
+  };
+  int         depth = 0;
+  bool        inString = false;
+  std::size_t segStart = 0;
+  const auto flush = [&](std::size_t segEnd) {
+    if (segEnd <= segStart)
+      return;
+    const std::string segment = argsText.substr(segStart, segEnd - segStart);
+    const std::size_t colon = segment.find(':');
+    if (colon == std::string::npos)
+      return;
+    std::string key = trim(segment.substr(0, colon));
+    std::string value = trim(segment.substr(colon + 1));
+    if (!key.empty())
+      outArgs.emplace(std::move(key), std::move(value));
+  };
+  for (std::size_t i = 0; i < argsText.size(); ++i)
+  {
+    const char c = argsText[i];
+    if (inString)
+    {
+      if (c == '"')
+        inString = false;
+      continue;
+    }
+    if (c == '"')
+      inString = true;
+    else if (c == '(')
+      ++depth;
+    else if (c == ')')
+      --depth;
+    else if (c == ',' && depth == 0)
+    {
+      flush(i);
+      segStart = i + 1;
+    }
+  }
+  flush(argsText.size());
+}
+
+// OmniPBR-family base-function names this parser understands. Strips
+// `::module::` qualification so both `OmniPBR(` (via `using ::OmniPBR
+// import OmniPBR;`) and `::OmniPBR::OmniPBR(` name the same function.
+bool IsRecognizedOmniPbrFamilyCall(std::string_view baseName) noexcept
+{
+  const std::size_t   lastSep = baseName.rfind("::");
+  const std::string_view leaf = (lastSep == std::string_view::npos)
+                                     ? baseName
+                                     : baseName.substr(lastSep + 2);
+  return leaf == "OmniPBR" || leaf == "OmniPBRBase" || leaf == "OmniGlass"
+         || leaf == "OmniPBR_ClearCoat" || leaf == "OmniSurface";
+}
+
+// Loads + parses the referenced .mdl file's `export material
+// <subIdentifier>(...) = <BaseCall>(...)` declaration, returning the
+// baked argument literals when `<BaseCall>` is OmniPBR-family.
+// `preset.valid` stays false (empty args) for: unresolvable/missing
+// files (e.g. a bare `@OmniPBR.mdl@` Kit-library reference with no
+// local path to resolve — TranslateMdl's own hardcoded defaults are
+// already OmniPBR-shaped, so this is a safe no-op fallback), a
+// declaration that isn't found, or a base call that isn't recognized
+// (e.g. Plaster_Wall_Cracked's bespoke `df::` network).
+MdlPreset LoadMdlPresetIfOmniPbr(const pxr::UsdShadeShader& shader) noexcept
+{
+  MdlPreset preset;
+  static const pxr::TfToken sourceAssetAttrName("info:mdl:sourceAsset");             // NOLINT
+  static const pxr::TfToken subIdentifierAttrName("info:mdl:sourceAsset:subIdentifier"); // NOLINT
+  const pxr::UsdAttribute assetAttr = shader.GetPrim().GetAttribute(sourceAssetAttrName);
+  const pxr::UsdAttribute subIdAttr = shader.GetPrim().GetAttribute(subIdentifierAttrName);
+  if (!assetAttr || !assetAttr.HasAuthoredValue() || !subIdAttr || !subIdAttr.HasAuthoredValue())
+    return preset;
+  pxr::VtValue assetValue;
+  pxr::VtValue subIdValue;
+  if (!assetAttr.Get(&assetValue) || !assetValue.IsHolding<pxr::SdfAssetPath>())
+    return preset;
+  if (!subIdAttr.Get(&subIdValue) || !subIdValue.IsHolding<pxr::TfToken>())
+    return preset;
+  const pxr::SdfAssetPath assetPath = assetValue.UncheckedGet<pxr::SdfAssetPath>();
+  const std::string subIdentifier = subIdValue.UncheckedGet<pxr::TfToken>().GetString();
+
+  std::string mdlPath = assetPath.GetResolvedPath();
+  if (mdlPath.empty())
+    mdlPath = assetPath.GetAssetPath();
+  if (mdlPath.empty())
+    return preset;
+  std::error_code existsErr;
+  if (!std::filesystem::exists(mdlPath, existsErr) || existsErr)
+    return preset;  // e.g. a bare Kit-library "OmniPBR.mdl" we can't resolve locally.
+
+  std::ifstream file(mdlPath, std::ios::binary);
+  if (!file.is_open())
+    return preset;
+  const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+
+  // Find "material <subIdentifier>" at a token boundary — not a
+  // prefix match against a longer sibling declaration in the same
+  // file (e.g. "Plaster_Wall" must not match inside
+  // "Plaster_Wall_Cracked" or vice versa).
+  const std::string needle = "material " + subIdentifier;
+  std::size_t       searchPos = 0;
+  std::size_t       declEnd = std::string::npos;  // one past the name, at/before '('.
+  while (searchPos < text.size())
+  {
+    const std::size_t found = text.find(needle, searchPos);
+    if (found == std::string::npos)
+      break;
+    const std::size_t afterName = found + needle.size();
+    if (afterName < text.size()
+        && (std::isalnum(static_cast<unsigned char>(text[afterName])) || text[afterName] == '_'))
+    {
+      searchPos = afterName;  // e.g. matched "Plaster_Wall" prefix of "Plaster_Wall_Cracked".
+      continue;
+    }
+    declEnd = afterName;
+    break;
+  }
+  if (declEnd == std::string::npos)
+    return preset;
+
+  const std::size_t nameParenStart = text.find('(', declEnd);
+  if (nameParenStart == std::string::npos)
+    return preset;
+  const std::size_t nameParenEnd = FindMatchingParen(text, nameParenStart);
+  if (nameParenEnd == std::string::npos)
+    return preset;
+  std::size_t cursor = nameParenEnd + 1;
+  const auto skipSpace = [&]() {
+    while (cursor < text.size() && std::isspace(static_cast<unsigned char>(text[cursor])))
+      ++cursor;
+  };
+  skipSpace();
+  if (cursor + 1 < text.size() && text[cursor] == '[' && text[cursor + 1] == '[')
+  {
+    const std::size_t annoEnd = text.find("]]", cursor + 2);
+    if (annoEnd == std::string::npos)
+      return preset;
+    cursor = annoEnd + 2;
+  }
+  skipSpace();
+  if (cursor >= text.size() || text[cursor] != '=')
+    return preset;
+  ++cursor;
+  skipSpace();
+  const std::size_t baseNameStart = cursor;
+  while (cursor < text.size()
+         && (std::isalnum(static_cast<unsigned char>(text[cursor])) || text[cursor] == '_'
+             || text[cursor] == ':'))
+    ++cursor;
+  const std::string baseName = text.substr(baseNameStart, cursor - baseNameStart);
+  if (!IsRecognizedOmniPbrFamilyCall(baseName))
+    return preset;
+  skipSpace();
+  if (cursor >= text.size() || text[cursor] != '(')
+    return preset;
+  const std::size_t callParenEnd = FindMatchingParen(text, cursor);
+  if (callParenEnd == std::string::npos)
+    return preset;
+  const std::string argsText = text.substr(cursor + 1, callParenEnd - cursor - 1);
+  SplitMdlCallArgs(argsText, preset.args);
+  preset.valid = !preset.args.empty();
+  preset.dir = std::filesystem::path(mdlPath).parent_path().string();
+  return preset;
+}
+
 [[nodiscard]] SurfaceMatch TryRenderContext(const pxr::UsdShadeMaterial& material,
                                              const pxr::TfToken&          contextToken) noexcept
 {
@@ -179,10 +471,58 @@ struct SurfaceMatch {
   // least one OmniPBR input authored — see
   // `HasMdlSourceAssetWithAuthoredInputs` for the rationale.
   static const pxr::TfToken mdlContext("mdl");  // NOLINT
-  if (match.kind == SurfaceMatch::Kind::None && contextToken == mdlContext
-      && HasMdlSourceAssetWithAuthoredInputs(candidate))
+  if (match.kind == SurfaceMatch::Kind::None && contextToken == mdlContext)
   {
-    match.kind = SurfaceMatch::Kind::Mdl;
+    if (HasMdlSourceAssetWithAuthoredInputs(candidate))
+    {
+      match.kind = SurfaceMatch::Kind::Mdl;
+    }
+    else if (LoadMdlPresetIfOmniPbr(candidate).valid)
+    {
+      // 2026-07-06 RTX-alignment round 2 — an OmniPBR-family "Base"
+      // library preset (Steel_Carbon / Concrete_Formed / Stucco / ...)
+      // that bakes every parameter as a literal MDL argument and
+      // authors NO USD `inputs:*` overrides at all, so the probe above
+      // never fires. TranslateMdl re-parses the same .mdl file (see
+      // LoadMdlPresetIfOmniPbr) to recover those literals.
+      match.kind = SurfaceMatch::Kind::Mdl;
+    }
+    else if (HasAnyAuthoredMdlInput(candidate))
+    {
+      // A generic OmniPBR/OmniGlass instance that only overrides
+      // inputs outside the narrow probe above (e.g. the World Lobby's
+      // FountainGrass ground-cover, which authors just
+      // `albedo_brightness` + `diffuse_texture` directly on the
+      // shared `OmniPBR.mdl` module — subIdentifier is literally
+      // "OmniPBR", not a custom material name). TranslateMdl's own
+      // OmniPBR-shaped defaults are the right fallback for whatever it
+      // doesn't author.
+      //
+      // Gated on the subIdentifier itself naming a recognized OmniPBR-
+      // family function (not just "any authored input") — a custom-
+      // named MDL material (e.g. vMaterials' "Iron_Brushed_Medium_
+      // Brushing", a bespoke `df::` network under a name that doesn't
+      // match `IsRecognizedOmniPbrFamilyCall`) can authored-override
+      // one of ITS OWN parameters without being OmniPBR-shaped at all;
+      // reading it as OmniPBR (diffuse_color_constant / metallic_
+      // constant / ...) produces flat-grey garbage, which regressed
+      // this exact material from its working UsdPreviewSurface-
+      // fallback texture set to untextured grey when this tier
+      // ignored the subIdentifier. `LoadMdlPresetIfOmniPbr` above
+      // already covers the "custom name but IS an OmniPBR preset
+      // call" case (Steel_Carbon et al.), so by the time we get here
+      // the subIdentifier itself must be the tell.
+      static const pxr::TfToken subIdentifierAttr(  // NOLINT
+          "info:mdl:sourceAsset:subIdentifier");
+      pxr::VtValue subIdValue;
+      if (const pxr::UsdAttribute subIdAttr =
+              candidate.GetPrim().GetAttribute(subIdentifierAttr);
+          subIdAttr && subIdAttr.Get(&subIdValue) && subIdValue.IsHolding<pxr::TfToken>()
+          && IsRecognizedOmniPbrFamilyCall(subIdValue.UncheckedGet<pxr::TfToken>().GetString()))
+      {
+        match.kind = SurfaceMatch::Kind::Mdl;
+      }
+    }
   }
   if (match.kind != SurfaceMatch::Kind::None)
     match.shader = candidate;
@@ -1174,11 +1514,21 @@ void TranslateMaterialXStandardSurface(const pxr::UsdShadeShader& shader,
   (void)colorspace;  // role-derived sRGB/Linear is the renderer's call
 }
 
-// Q1 OpenPBR-complete — OmniGlass detection. Three signals, any of
+// Q1 OpenPBR-complete — OmniGlass detection. Four signals, any of
 // which marks the prim as glass: the universal `info:id` (e.g.
-// "mdl::OmniGlass"), the Omniverse sourceAsset subIdentifier, or an
-// authored glass-only input (covers re-exports that strip both ids).
-[[nodiscard]] bool IsOmniGlass(const pxr::UsdShadeShader& shader) noexcept
+// "mdl::OmniGlass"), the Omniverse sourceAsset subIdentifier, an
+// authored glass-only input (covers re-exports that strip both ids),
+// or (2026-07-06 RTX-alignment round 2) a glass-only key recovered
+// from an OmniGlass-family preset file (the World Lobby's
+// "Clear_Glass": `export material Clear_Glass(*) =
+// OmniGlass::OmniGlass(glass_color: ..., glass_ior: 1.52f, ...)` with
+// NO USD-authored overrides at all, so the subIdentifier is
+// "Clear_Glass" — not "OmniGlass" — and every USD-input probe above
+// misses; without this the translator couldn't tell this material
+// apart from a plain untextured OmniPBR default and it rendered as
+// flat 0.18-grey OPAQUE instead of clear see-through glass).
+[[nodiscard]] bool IsOmniGlass(const pxr::UsdShadeShader& shader,
+                               const MdlPreset&           preset) noexcept
 {
   pxr::TfToken shaderId;
   if (shader.GetShaderId(&shaderId)
@@ -1206,18 +1556,146 @@ void TranslateMaterialXStandardSurface(const pxr::UsdShadeShader& shader,
     if (input && input.GetAttr().HasAuthoredValue())
       return true;
   }
+  static constexpr std::array<const char*, 3> GLASS_PRESET_PROBE{
+      "glass_color", "glass_ior", "frosting_roughness"};
+  for (const char* key : GLASS_PRESET_PROBE)
+  {
+    if (preset.args.contains(key))
+      return true;
+  }
   return false;
 }
 
-// V2.A.23 — MDL OmniPBR / OmniGlass translator. Inputs match
-// Omniverse's OmniPBR.mdl shader. Inputs missing on a given variant
-// fall through to the OpenPBR scalar defaults.
+float PresetFloat(const MdlPreset& preset, const char* key, float fallback) noexcept
+{
+  const auto it = preset.args.find(key);
+  return (it == preset.args.end()) ? fallback : ParseMdlFloatLiteral(it->second, fallback);
+}
+
+hlslpp::float3 PresetColor(const MdlPreset& preset, const char* key,
+                           hlslpp::float3 fallback) noexcept
+{
+  const auto it = preset.args.find(key);
+  if (it == preset.args.end())
+    return fallback;
+  const std::string& value = it->second;
+  const std::size_t  open = value.find('(');
+  const std::size_t  close = value.rfind(')');
+  if (open == std::string::npos || close == std::string::npos || close <= open)
+    return fallback;
+  const std::string inner = value.substr(open + 1, close - open - 1);
+  std::vector<float> comps;
+  std::size_t start = 0;
+  while (start <= inner.size())
+  {
+    const std::size_t comma = inner.find(',', start);
+    const std::size_t segEnd = (comma == std::string::npos) ? inner.size() : comma;
+    comps.push_back(ParseMdlFloatLiteral(inner.substr(start, segEnd - start), 0.0f));
+    if (comma == std::string::npos)
+      break;
+    start = comma + 1;
+  }
+  if (comps.size() == 1)
+    return hlslpp::float3{comps[0], comps[0], comps[0]};
+  if (comps.size() >= 3)
+    return hlslpp::float3{comps[0], comps[1], comps[2]};
+  return fallback;
+}
+
+bool PresetBool(const MdlPreset& preset, const char* key, bool fallback) noexcept
+{
+  const auto it = preset.args.find(key);
+  if (it == preset.args.end())
+    return fallback;
+  if (it->second == "true")
+    return true;
+  if (it->second == "false")
+    return false;
+  return fallback;
+}
+
+// Parses an MDL `float2(x, y)` (or the single-value splat `float2(v)`)
+// literal. Returns false (leaving outX/outY untouched) when the key
+// is absent or malformed, matching `ReadShaderInputFloat2`'s contract.
+bool PresetFloat2(const MdlPreset& preset, const char* key, float& outX, float& outY) noexcept
+{
+  const auto it = preset.args.find(key);
+  if (it == preset.args.end())
+    return false;
+  const std::string& value = it->second;
+  const std::size_t  open = value.find('(');
+  const std::size_t  close = value.rfind(')');
+  if (open == std::string::npos || close == std::string::npos || close <= open)
+    return false;
+  const std::string inner = value.substr(open + 1, close - open - 1);
+  const std::size_t comma = inner.find(',');
+  if (comma == std::string::npos)
+  {
+    const float v = ParseMdlFloatLiteral(inner, 0.0f);
+    outX = v;
+    outY = v;
+    return true;
+  }
+  outX = ParseMdlFloatLiteral(inner.substr(0, comma), 0.0f);
+  outY = ParseMdlFloatLiteral(inner.substr(comma + 1), 0.0f);
+  return true;
+}
+
+// Extracts the first quoted path out of an MDL `texture_2d("path"
+// /* tag N, version M */, ::tex::gamma_X)` literal. Returns "" for
+// `texture_2d()` (no texture authored) or a missing key.
+std::string PresetTexturePath(const MdlPreset& preset, const char* key) noexcept
+{
+  const auto it = preset.args.find(key);
+  if (it == preset.args.end())
+    return {};
+  const std::string& value = it->second;
+  const std::size_t  firstQuote = value.find('"');
+  if (firstQuote == std::string::npos)
+    return {};
+  const std::size_t secondQuote = value.find('"', firstQuote + 1);
+  if (secondQuote == std::string::npos)
+    return {};
+  return value.substr(firstQuote + 1, secondQuote - firstQuote - 1);
+}
+
+// USD-authored input wins (via ReadMdlTextureInput); otherwise falls
+// back to the preset's parsed texture path, resolved relative to the
+// .mdl file's own directory (matching how the .mdl's `texture_2d`
+// paths are always written relative to the file that declares them).
+TextureHandle ReadMdlTextureInputOrPreset(
+    const pxr::UsdShadeShader& shader, const pxr::TfToken& name, const MdlPreset& preset,
+    const char* presetKey, AcquireTextureFn acquire, void* userData, TextureKey::Role role,
+    TextureKey::Color colorspace) noexcept
+{
+  const TextureHandle authored =
+      ReadMdlTextureInput(shader, name, acquire, userData, role, colorspace);
+  if (authored != TextureHandle::Invalid || acquire == nullptr)
+    return authored;
+  const std::string relPath = PresetTexturePath(preset, presetKey);
+  if (relPath.empty() || preset.dir.empty())
+    return TextureHandle::Invalid;
+  const std::string absPath = (std::filesystem::path(preset.dir) / relPath).lexically_normal().string();
+  return acquire(absPath, role, userData);
+}
+
 void TranslateMdl(const pxr::UsdShadeShader& shader,
                    OpenPBRMaterialDesc&      desc,
                    AcquireTextureFn          acquire,
                    void*                     userData,
                    pxr::UsdTimeCode          timeCode) noexcept
 {
+  // 2026-07-06 RTX-alignment round 2 — see LoadMdlPresetIfOmniPbr's
+  // comment above. `preset.valid` is false (empty args) whenever the
+  // shader isn't a locally-resolvable OmniPBR-family preset call, in
+  // which case every `PresetXxx(preset, key, fallback)` call below is
+  // a plain pass-through to `fallback` — byte-identical to the
+  // pre-round-2 behaviour for every material that doesn't hit this
+  // gap (Oak/OakDark/Felt/... already author their relevant inputs in
+  // USD, so `ReadFloat`/`ReadColor`/etc. resolve those first and never
+  // consult the preset fallback at all).
+  const MdlPreset preset = LoadMdlPresetIfOmniPbr(shader);
+
   // Base albedo = diffuse_color_constant × diffuse_tint, matching the
   // MDL OmniPBR / Plain shading-graph convention. Two real authoring
   // patterns appear in the World Lobby:
@@ -1236,31 +1714,80 @@ void TranslateMdl(const pxr::UsdShadeShader& shader,
   // tint). When a diffuse_texture is bound the constant is IGNORED — the
   // texture IS the albedo — so a green-tinted white felt weave reads
   // green, while a tint-1 textured material (oak) is unchanged.
-  const hlslpp::float3 diffuseTint = ReadColor(shader, pxr::TfToken("diffuse_tint"),
-                                               hlslpp::float3{1.0f, 1.0f, 1.0f}, timeCode);
+  const hlslpp::float3 diffuseTint = ReadColor(
+      shader, pxr::TfToken("diffuse_tint"),
+      PresetColor(preset, "diffuse_tint", hlslpp::float3{1.0f, 1.0f, 1.0f}), timeCode);
   {
     const pxr::UsdShadeInput constInput =
         shader.GetInput(pxr::TfToken("diffuse_color_constant"));
     const bool hasConst = constInput && constInput.GetAttr().HasAuthoredValue();
     const pxr::UsdShadeInput tintInput = shader.GetInput(pxr::TfToken("diffuse_tint"));
     const bool hasTint = tintInput && tintInput.GetAttr().HasAuthoredValue();
+    const bool presetHasConst = preset.args.contains("diffuse_color_constant");
     const hlslpp::float3 base =
         hasConst ? ReadColor(shader, pxr::TfToken("diffuse_color_constant"),
                              hlslpp::float3{0.18f, 0.18f, 0.18f}, timeCode)
-                 : (hasTint ? hlslpp::float3{1.0f, 1.0f, 1.0f}
-                            : hlslpp::float3{0.18f, 0.18f, 0.18f});
+                 : (presetHasConst
+                        ? PresetColor(preset, "diffuse_color_constant",
+                                     hlslpp::float3{0.18f, 0.18f, 0.18f})
+                        : (hasTint ? hlslpp::float3{1.0f, 1.0f, 1.0f}
+                                   : hlslpp::float3{0.18f, 0.18f, 0.18f}));
     desc.baseColor = base * diffuseTint;
   }
-  desc.metalness = ReadFloat(shader, pxr::TfToken("metallic_constant"), 0.0f, timeCode);
-  desc.roughness = ReadFloat(shader, pxr::TfToken("reflection_roughness_constant"),
-                              ReadFloat(shader, pxr::TfToken("roughness_constant"), 0.5f, timeCode),
-                              timeCode);
-  desc.opacity   = ReadFloat(shader, pxr::TfToken("opacity_constant"), 1.0f, timeCode);
+  // 2026-07-05 RTX-alignment (rtx-realtime-alignment-design.md, per-
+  // material albedo forensics) — MDL OmniPBR / "Base" library "Albedo
+  // Adjustments" group. OmniPBR_ClearCoat.mdl applies these to the
+  // SAMPLED diffuse_texture (in linear space, post sRGB-decode) before
+  // the diffuse_tint multiply:
+  //   scaled      = texture_sample * albedo_brightness + albedo_add
+  //   desaturated = lerp(scaled, luminance(scaled), albedo_desaturation)
+  //   base_color  = desaturated * diffuse_tint
+  // The closesthit (shading.slang) applies the formula once the texture
+  // is sampled; here we just carry the three authored scalars through.
+  // Every World Lobby "Base/*" material (Oak, OakDark, Terrazzo,
+  // Paint_Satin, the Aperture Emissives) authors these explicitly, and
+  // so do some OmniPBR leaf materials (the Modern reception "White"
+  // fixture: albedo_brightness = 0.07). Defaults (1, 0, 0) are the MDL
+  // function defaults — an unauthored material is a no-op here.
+  desc.albedoBrightness = ReadFloat(shader, pxr::TfToken("albedo_brightness"),
+                                    PresetFloat(preset, "albedo_brightness", 1.0f), timeCode);
+  desc.albedoDesaturation = ReadFloat(shader, pxr::TfToken("albedo_desaturation"),
+                                      PresetFloat(preset, "albedo_desaturation", 0.0f), timeCode);
+  desc.albedoAdd = ReadFloat(shader, pxr::TfToken("albedo_add"),
+                             PresetFloat(preset, "albedo_add", 0.0f), timeCode);
+  desc.metalness = ReadFloat(shader, pxr::TfToken("metallic_constant"),
+                             PresetFloat(preset, "metallic_constant", 0.0f), timeCode);
+  desc.roughness = ReadFloat(
+      shader, pxr::TfToken("reflection_roughness_constant"),
+      ReadFloat(shader, pxr::TfToken("roughness_constant"),
+               PresetFloat(preset, "reflection_roughness_constant",
+                          PresetFloat(preset, "roughness_constant", 0.5f)),
+               timeCode),
+      timeCode);
+  desc.opacity = ReadFloat(shader, pxr::TfToken("opacity_constant"),
+                           PresetFloat(preset, "opacity_constant", 1.0f), timeCode);
+  // 2026-07-06 RTX-alignment round 2 (materials chapter) — OmniPBR's
+  // constant/texture blend weights. See the OpenPBRMaterialDesc field
+  // comments for the full rationale; `ao_to_diffuse` blends the ORM
+  // AO channel into baseColor, the other two lerp the sampled
+  // roughness/metallic against the scalar instead of the texture
+  // unconditionally winning once bound (both consumed in
+  // shading.slang's material-eval region). Defaults (0, 1, 1) are the
+  // MDL OmniPBR function defaults.
+  desc.aoToDiffuse = ReadFloat(shader, pxr::TfToken("ao_to_diffuse"),
+                               PresetFloat(preset, "ao_to_diffuse", 0.0f), timeCode);
+  desc.metallicTextureInfluence =
+      ReadFloat(shader, pxr::TfToken("metallic_texture_influence"),
+               PresetFloat(preset, "metallic_texture_influence", 1.0f), timeCode);
+  desc.reflectionRoughnessTextureInfluence =
+      ReadFloat(shader, pxr::TfToken("reflection_roughness_texture_influence"),
+               PresetFloat(preset, "reflection_roughness_texture_influence", 1.0f), timeCode);
   // V2.A.23 follow-up — OmniPBR `bump_factor` scales the normal-map
   // strength. Default 1.0 = full authored bump. Production content
   // authors 0.6..10; honoring it keeps polished surfaces from looking
   // over-bumped + lets detailed-matte surfaces dial relief up.
-  desc.normalStrength = ReadFloat(shader, pxr::TfToken("bump_factor"), 1.0f, timeCode);
+  desc.normalStrength = ReadFloat(shader, pxr::TfToken("bump_factor"),
+                                  PresetFloat(preset, "bump_factor", 1.0f), timeCode);
   // V2.A.24 — UV transform (OmniPBR texture_scale / texture_rotate /
   // texture_translate) + normal-map tangent flips. Reuses the
   // baseColorUv* desc slots (V2.A.18) which the closesthit now applies
@@ -1271,29 +1798,38 @@ void TranslateMdl(const pxr::UsdShadeShader& shader,
   {
     float scaleX = 1.0f;
     float scaleY = 1.0f;
-    if (ReadShaderInputFloat2(shader, pxr::TfToken("texture_scale"), scaleX, scaleY))
+    if (ReadShaderInputFloat2(shader, pxr::TfToken("texture_scale"), scaleX, scaleY)
+        || PresetFloat2(preset, "texture_scale", scaleX, scaleY))
     {
       desc.baseColorUvScaleX = scaleX;
       desc.baseColorUvScaleY = scaleY;
     }
-    desc.baseColorUvRotationDeg =
-        ReadFloat(shader, pxr::TfToken("texture_rotate"), 0.0f, timeCode);
+    desc.baseColorUvRotationDeg = ReadFloat(shader, pxr::TfToken("texture_rotate"),
+                                            PresetFloat(preset, "texture_rotate", 0.0f), timeCode);
     float transX = 0.0f;
     float transY = 0.0f;
-    if (ReadShaderInputFloat2(shader, pxr::TfToken("texture_translate"), transX, transY))
+    if (ReadShaderInputFloat2(shader, pxr::TfToken("texture_translate"), transX, transY)
+        || PresetFloat2(preset, "texture_translate", transX, transY))
     {
       desc.baseColorUvTranslationX = transX;
       desc.baseColorUvTranslationY = transY;
     }
-    desc.flipTangentU =
-        ReadBoolish(shader, pxr::TfToken("flip_tangent_u"), false, timeCode) ? 1u : 0u;
-    desc.flipTangentV =
-        ReadBoolish(shader, pxr::TfToken("flip_tangent_v"), false, timeCode) ? 1u : 0u;
+    desc.flipTangentU = ReadBoolish(shader, pxr::TfToken("flip_tangent_u"),
+                                    PresetBool(preset, "flip_tangent_u", false), timeCode)
+                            ? 1u
+                            : 0u;
+    desc.flipTangentV = ReadBoolish(shader, pxr::TfToken("flip_tangent_v"),
+                                    PresetBool(preset, "flip_tangent_v", false), timeCode)
+                            ? 1u
+                            : 0u;
   }
   desc.emissionColor = ReadColor(shader, pxr::TfToken("emissive_color"),
-                                  hlslpp::float3{0.0f, 0.0f, 0.0f}, timeCode);
-  desc.emissionLuminance = ReadFloat(shader, pxr::TfToken("emissive_intensity"), 0.0f, timeCode);
-  desc.specularIor = ReadFloat(shader, pxr::TfToken("ior_constant"), 1.5f, timeCode);
+                                 PresetColor(preset, "emissive_color", hlslpp::float3{0.0f, 0.0f, 0.0f}),
+                                 timeCode);
+  desc.emissionLuminance = ReadFloat(shader, pxr::TfToken("emissive_intensity"),
+                                     PresetFloat(preset, "emissive_intensity", 0.0f), timeCode);
+  desc.specularIor = ReadFloat(shader, pxr::TfToken("ior_constant"),
+                               PresetFloat(preset, "ior_constant", 1.5f), timeCode);
   // V2.A.23 follow-up — OmniPBR's `enable_emission` flag, when off,
   // suppresses the surface-lighting contribution even if a non-zero
   // emissive_color / emissive_intensity is authored (the MDL stores
@@ -1305,7 +1841,7 @@ void TranslateMdl(const pxr::UsdShadeShader& shader,
   // leaked the sentinel red as authored emission on every wood / floor
   // / stucco material that authored emissive_color "just in case".
   if (!ReadBoolish(shader, pxr::TfToken("enable_emission"),
-                    /*fallback=*/false, timeCode))
+                   PresetBool(preset, "enable_emission", false), timeCode))
   {
     desc.emissionLuminance = 0.0f;
     desc.emissionColor     = hlslpp::float3{0.0f, 0.0f, 0.0f};
@@ -1318,17 +1854,23 @@ void TranslateMdl(const pxr::UsdShadeShader& shader,
   // instead of showing their baseColor texture. Role + colorspace
   // map to TextureKey's renderer-side EOTF decision: BaseColor /
   // Emission = sRGB; everything else = linear.
-  desc.baseColorMap   = ReadMdlTextureInput(shader, pxr::TfToken("diffuse_texture"),
-                                             acquire, userData,
-                                             TextureKey::Role::BaseColor, TextureKey::Color::SRgb);
+  //
+  // 2026-07-06 RTX-alignment round 2 — `ReadMdlTextureInputOrPreset`
+  // falls back to the preset-parsed texture path (relative to the
+  // .mdl file) when the USD Shader prim authors no override, which is
+  // what recovers Steel_Carbon/Concrete_Formed/Stucco's real
+  // BaseColor/ORM/Normal maps instead of the untextured grey fallback.
+  desc.baseColorMap = ReadMdlTextureInputOrPreset(
+      shader, pxr::TfToken("diffuse_texture"), preset, "diffuse_texture", acquire, userData,
+      TextureKey::Role::BaseColor, TextureKey::Color::SRgb);
   // When a diffuse_texture is bound it provides the albedo; the constant
   // is dropped and only the tint modulates (closesthit does texture ×
   // baseColor). Felt's white weave × green tint → green felt.
   if (desc.baseColorMap != TextureHandle::Invalid)
     desc.baseColor = diffuseTint;
-  desc.normalMap      = ReadMdlTextureInput(shader, pxr::TfToken("normalmap_texture"),
-                                             acquire, userData,
-                                             TextureKey::Role::NormalMap, TextureKey::Color::Linear);
+  desc.normalMap = ReadMdlTextureInputOrPreset(
+      shader, pxr::TfToken("normalmap_texture"), preset, "normalmap_texture", acquire, userData,
+      TextureKey::Role::NormalMap, TextureKey::Color::Linear);
 
   // V2.A.23 follow-up — OmniPBR packs Occlusion-Roughness-Metallic
   // into a single `ORM_texture` (R = AO, G = roughness, B = metallic;
@@ -1347,21 +1889,19 @@ void TranslateMdl(const pxr::UsdShadeShader& shader,
   // false in the MDL, but a material that authored an ORM asset path
   // without the flag clearly intends to use it, so we also accept a
   // bound ORM path as implicit-enable.
-  const TextureHandle ormTex =
-      ReadMdlTextureInput(shader, pxr::TfToken("ORM_texture"), acquire, userData,
-                          TextureKey::Role::RoughnessMetallic, TextureKey::Color::Linear);
-  const bool ormEnabled =
-      ReadBoolish(shader, pxr::TfToken("enable_ORM_texture"), false, timeCode)
-      || (ormTex != TextureHandle::Invalid);
+  const TextureHandle ormTex = ReadMdlTextureInputOrPreset(
+      shader, pxr::TfToken("ORM_texture"), preset, "ORM_texture", acquire, userData,
+      TextureKey::Role::RoughnessMetallic, TextureKey::Color::Linear);
+  const bool ormEnabled = ReadBoolish(shader, pxr::TfToken("enable_ORM_texture"),
+                                     PresetBool(preset, "enable_ORM_texture", false), timeCode)
+                          || (ormTex != TextureHandle::Invalid);
 
-  const TextureHandle roughnessTex =
-      ReadMdlTextureInput(shader, pxr::TfToken("reflectionroughness_texture"),
-                          acquire, userData,
-                          TextureKey::Role::RoughnessMetallic, TextureKey::Color::Linear);
-  const TextureHandle metallicTex =
-      ReadMdlTextureInput(shader, pxr::TfToken("metallic_texture"),
-                          acquire, userData,
-                          TextureKey::Role::RoughnessMetallic, TextureKey::Color::Linear);
+  const TextureHandle roughnessTex = ReadMdlTextureInputOrPreset(
+      shader, pxr::TfToken("reflectionroughness_texture"), preset, "reflectionroughness_texture",
+      acquire, userData, TextureKey::Role::RoughnessMetallic, TextureKey::Color::Linear);
+  const TextureHandle metallicTex = ReadMdlTextureInputOrPreset(
+      shader, pxr::TfToken("metallic_texture"), preset, "metallic_texture", acquire, userData,
+      TextureKey::Role::RoughnessMetallic, TextureKey::Color::Linear);
 
   desc.roughnessMap = (roughnessTex != TextureHandle::Invalid)
                           ? roughnessTex
@@ -1370,12 +1910,12 @@ void TranslateMdl(const pxr::UsdShadeShader& shader,
                           ? metallicTex
                           : (ormEnabled ? ormTex : TextureHandle::Invalid);
 
-  desc.emissionMap    = ReadMdlTextureInput(shader, pxr::TfToken("emissive_mask_texture"),
-                                             acquire, userData,
-                                             TextureKey::Role::Emission, TextureKey::Color::SRgb);
-  desc.opacityMap     = ReadMdlTextureInput(shader, pxr::TfToken("opacity_texture"),
-                                             acquire, userData,
-                                             TextureKey::Role::Opacity, TextureKey::Color::Linear);
+  desc.emissionMap = ReadMdlTextureInputOrPreset(
+      shader, pxr::TfToken("emissive_mask_texture"), preset, "emissive_mask_texture", acquire,
+      userData, TextureKey::Role::Emission, TextureKey::Color::SRgb);
+  desc.opacityMap = ReadMdlTextureInputOrPreset(
+      shader, pxr::TfToken("opacity_texture"), preset, "opacity_texture", acquire, userData,
+      TextureKey::Role::Opacity, TextureKey::Color::Linear);
   // RFC 0005 — generalized planar projection, driven purely by the
   // material's authored OmniPBR inputs and applied to EVERY material (no
   // wood-name special case — the prior V2.B `sourceAsset`-path sniff is
@@ -1391,10 +1931,10 @@ void TranslateMdl(const pxr::UsdShadeShader& shader,
   // projection — and `uv_space_index` is never authored as the secondary
   // set, so no UV-set path is needed here).
   {
-    const bool projectUvw =
-        ReadBoolish(shader, pxr::TfToken("project_uvw"), false, timeCode);
-    const bool objectSpace =
-        ReadBoolish(shader, pxr::TfToken("world_or_object"), false, timeCode);
+    const bool projectUvw = ReadBoolish(shader, pxr::TfToken("project_uvw"),
+                                        PresetBool(preset, "project_uvw", false), timeCode);
+    const bool objectSpace = ReadBoolish(shader, pxr::TfToken("world_or_object"),
+                                         PresetBool(preset, "world_or_object", false), timeCode);
     desc.projectionMode = projectUvw ? (objectSpace ? 2u : 1u) : 0u;
   }
   // Q1 OpenPBR-complete — OmniPBR clearcoat → OpenPBR coat. Gated on
@@ -1402,15 +1942,20 @@ void TranslateMdl(const pxr::UsdShadeShader& shader,
   // means "use the MDL default" = disabled — same convention as
   // enable_emission above), so disabled-clearcoat materials keep the
   // desc coat fields at their defaults and dedup cleanly.
-  if (ReadBoolish(shader, pxr::TfToken("enable_clearcoat"), /*fallback=*/false, timeCode))
+  if (ReadBoolish(shader, pxr::TfToken("enable_clearcoat"),
+                  PresetBool(preset, "enable_clearcoat", false), timeCode))
   {
-    desc.coatWeight = ReadFloat(shader, pxr::TfToken("clearcoat_weight"), 1.0f, timeCode);
+    desc.coatWeight = ReadFloat(shader, pxr::TfToken("clearcoat_weight"),
+                                PresetFloat(preset, "clearcoat_weight", 1.0f), timeCode);
     StoreRgb(ReadColor(shader, pxr::TfToken("clearcoat_tint"),
-                       hlslpp::float3{1.0f, 1.0f, 1.0f}, timeCode),
+                       PresetColor(preset, "clearcoat_tint", hlslpp::float3{1.0f, 1.0f, 1.0f}),
+                       timeCode),
              desc.coatColorR, desc.coatColorG, desc.coatColorB);
-    desc.coatIor = ReadFloat(shader, pxr::TfToken("clearcoat_ior"), 1.6f, timeCode);
+    desc.coatIor = ReadFloat(shader, pxr::TfToken("clearcoat_ior"),
+                             PresetFloat(preset, "clearcoat_ior", 1.6f), timeCode);
     desc.coatRoughness =
-        ReadFloat(shader, pxr::TfToken("clearcoat_reflection_roughness"), 0.0f, timeCode);
+        ReadFloat(shader, pxr::TfToken("clearcoat_reflection_roughness"),
+                 PresetFloat(preset, "clearcoat_reflection_roughness", 0.0f), timeCode);
     // Dropped OmniPBR clearcoat inputs with no OpenPBR equivalent
     // (warn-skip; logging lands caller-side — no spdlog here):
     // clearcoat_transparency, clearcoat_bump_factor, clearcoat_flatten,
@@ -1422,17 +1967,34 @@ void TranslateMdl(const pxr::UsdShadeShader& shader,
   // drives the dielectric Fresnel, frosting_roughness replaces the
   // OmniPBR roughness chain (OmniGlass authors no
   // reflection_roughness_constant — smooth glass default 0).
-  if (IsOmniGlass(shader))
+  if (IsOmniGlass(shader, preset))
   {
     desc.transmissionWeight = 1.0f;
     StoreRgb(ReadColor(shader, pxr::TfToken("glass_color"),
-                       hlslpp::float3{1.0f, 1.0f, 1.0f}, timeCode),
+                       PresetColor(preset, "glass_color", hlslpp::float3{1.0f, 1.0f, 1.0f}),
+                       timeCode),
              desc.transmissionColorR, desc.transmissionColorG, desc.transmissionColorB);
-    desc.specularIor = ReadFloat(shader, pxr::TfToken("glass_ior"), desc.specularIor,
-                                 timeCode);
-    desc.roughness = ReadFloat(shader, pxr::TfToken("frosting_roughness"), 0.0f, timeCode);
-    desc.thinWalled =
-        ReadBoolish(shader, pxr::TfToken("thin_walled"), false, timeCode) ? 1u : 0u;
+    desc.specularIor = ReadFloat(shader, pxr::TfToken("glass_ior"),
+                                 PresetFloat(preset, "glass_ior", desc.specularIor), timeCode);
+    desc.roughness = ReadFloat(shader, pxr::TfToken("frosting_roughness"),
+                               PresetFloat(preset, "frosting_roughness", 0.0f), timeCode);
+    desc.thinWalled = ReadBoolish(shader, pxr::TfToken("thin_walled"),
+                                  PresetBool(preset, "thin_walled", false), timeCode)
+                          ? 1u
+                          : 0u;
+    // 2026-07-05 RTX-alignment — OmniGlass is a pure dielectric
+    // transmitter with no diffuse_color_constant / diffuse_tint inputs
+    // at all, so the top-of-function base-albedo block above always
+    // fell through to the neutral 0.18-grey fallback (no diffuse
+    // network authored → base = fallback). A glass surface has no
+    // OpenPBR base (diffuse) lobe, so carrying a mid-grey "albedo"
+    // through was wrong on its face and measured as a large flat-grey
+    // over-bright region in the baseColor/albedo AOV (the closesthit's
+    // lit shading was already correct — OpenPBRDiffuseSelector zeroes
+    // the base contribution once transmissionWeight > 0 — this only
+    // fixed the raw diagnostic AOV). Zero it so the albedo AOV reads
+    // black for glass, matching "no diffuse component."
+    desc.baseColor = hlslpp::float3{0.0f, 0.0f, 0.0f};
     // Dropped OmniGlass inputs not in the Q1 mapping set (warn-skip):
     // depth, glass_color_texture, reflection_color_texture,
     // roughness_texture_influence.
@@ -1460,6 +2022,15 @@ void TranslateMdl(const pxr::UsdShadeShader& shader,
              desc.specularColorR, desc.specularColorG, desc.specularColorB);
     desc.thinWalled =
         ReadBoolish(shader, pxr::TfToken("thin_walled"), false, timeCode) ? 1u : 0u;
+    // 2026-07-05 RTX-alignment — same reasoning as the OmniGlass branch
+    // above: this generic dielectric-transmitter MDL (e.g. the World
+    // Lobby's "Tinted_Glass") authors no diffuse_color_constant /
+    // diffuse_tint either, so base-albedo fell through to the neutral
+    // 0.18-grey fallback — measured as the single largest flat-grey
+    // over-bright region in the per-material albedo forensics (396530
+    // px, the lobby's glass facade). Zero it; glass has no base
+    // (diffuse) lobe.
+    desc.baseColor = hlslpp::float3{0.0f, 0.0f, 0.0f};
   }
   desc.source = OpenPBRMaterialDesc::Source::Mdl;
 }

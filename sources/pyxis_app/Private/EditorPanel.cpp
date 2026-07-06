@@ -454,6 +454,153 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
                                                        : "  (reduced model)");
     }
 
+    // ---- Real-Time Quality ---------------------------------------------
+    // RTX-alignment design (rtx-realtime-alignment-design.md), WP2-final —
+    // mirrors RenderSettings::RealTimeQuality (which itself mirrors
+    // ovrtx's own omni:rtx:rt:* defaults). ViewerMode reads
+    // GetRealTimeQuality() each frame. The five checkboxes gate whether
+    // PyxisRenderer dispatches that signal pass at all this frame;
+    // aoRayLength / reflectionMaxRoughness are consumed live by
+    // AmbientOcclusionPass / ReflectionsPass today — everything else is
+    // plumbed through for Phase B and currently a no-op (see
+    // RenderSettings::RealTimeQuality's doc comment).
+    if (ImGui::CollapsingHeader("Real-Time Quality"))
+    {
+      ImGui::TextDisabled("Signal passes");
+      ImGui::Checkbox("Direct lighting", &_editorRtqDirectEnabled);
+      ImGui::Checkbox("Indirect diffuse", &_editorRtqIndirectEnabled);
+      ImGui::Checkbox("Ambient occlusion", &_editorRtqAoEnabled);
+      ImGui::Checkbox("Reflections", &_editorRtqReflectionsEnabled);
+      ImGui::Checkbox("Translucency", &_editorRtqTranslucencyEnabled);
+      ImGui::Separator();
+      // DLSS Stage 1 (rtx-realtime-alignment-design.md, "DLSS — corrected
+      // stance" + "DLSS scope includes upscaling") — denoiser + DLSS mode
+      // selectors. GetRealTimeQuality() composes these into
+      // RenderSettings::RealTimeQuality::{denoiser,dlssExecMode} each
+      // frame; PyxisRenderer resolves the actual outcome (downgrading Dlss
+      // -> Builtin whenever DlssProvider's capability probe reports
+      // unusable — the only reachable outcome until Stage 2's Streamline
+      // hookup lands) and the status line below shows exactly what it
+      // decided, straight from GetDlssStatus() (pushed by ViewerMode).
+      ImGui::TextDisabled("Denoiser");
+      {
+        static const char* const DENOISER_NAMES[] = {"Dlss", "Builtin", "Off"};
+        const int denoiserCount =
+            static_cast<int>(sizeof(DENOISER_NAMES) / sizeof(DENOISER_NAMES[0]));
+        const int currentDenoiser =
+            (_editorRtqDenoiser >= 0 && _editorRtqDenoiser < denoiserCount) ? _editorRtqDenoiser
+                                                                             : 0;
+        if (ImGui::BeginCombo("Denoiser", DENOISER_NAMES[currentDenoiser]))
+        {
+          for (int i = 0; i < denoiserCount; ++i)
+          {
+            const bool isSelected = (i == currentDenoiser);
+            if (ImGui::Selectable(DENOISER_NAMES[i], isSelected))
+              _editorRtqDenoiser = i;
+            if (isSelected)
+              ImGui::SetItemDefaultFocus();
+          }
+          ImGui::EndCombo();
+        }
+      }
+      {
+        static const char* const DLSS_MODE_NAMES[] = {
+            "Auto", "Quality", "Balanced", "Performance", "DLAA",
+        };
+        const int modeCount =
+            static_cast<int>(sizeof(DLSS_MODE_NAMES) / sizeof(DLSS_MODE_NAMES[0]));
+        const int currentMode = (_editorRtqDlssExecMode >= 0 && _editorRtqDlssExecMode < modeCount)
+                                    ? _editorRtqDlssExecMode
+                                    : 0;
+        // Disabled unless the denoiser is set to Dlss — the exec mode has
+        // nothing to drive otherwise (Stage 2 wires it into Streamline).
+        const bool dlssModeEnabled = (_editorRtqDenoiser == 0);  // DENOISER_DLSS
+        ImGui::BeginDisabled(!dlssModeEnabled);
+        if (ImGui::BeginCombo("DLSS Mode", DLSS_MODE_NAMES[currentMode]))
+        {
+          for (int i = 0; i < modeCount; ++i)
+          {
+            const bool isSelected = (i == currentMode);
+            if (ImGui::Selectable(DLSS_MODE_NAMES[i], isSelected))
+              _editorRtqDlssExecMode = i;
+            if (isSelected)
+              ImGui::SetItemDefaultFocus();
+          }
+          ImGui::EndCombo();
+        }
+        ImGui::EndDisabled();
+      }
+      // Read-only status line — mirrors PyxisRenderer::RenderFrame's own
+      // "denoiser: requested=... effective=..." log line so the viewer
+      // shows the SAME resolution without re-deriving it.
+      {
+        static const char* const STATUS_NAMES[] = {"Dlss", "Builtin", "Off"};
+        const auto denoiserLabel = [](uint32_t value) -> const char* {
+          return value < 3u ? STATUS_NAMES[value] : "Unknown";
+        };
+        if (_lastDlssStatus.requestedDenoiser == _lastDlssStatus.effectiveDenoiser)
+        {
+          ImGui::TextDisabled("Effective: %s", denoiserLabel(_lastDlssStatus.effectiveDenoiser));
+        }
+        else
+        {
+          const std::string_view reasonView = _lastDlssStatus.reason.View();
+          ImGui::TextDisabled("Effective: %s (requested %s \xE2\x80\x94 %.*s)",
+                              denoiserLabel(_lastDlssStatus.effectiveDenoiser),
+                              denoiserLabel(_lastDlssStatus.requestedDenoiser),
+                              static_cast<int>(reasonView.size()), reasonView.data());
+        }
+      }
+      ImGui::Separator();
+      ImGui::PushItemWidth(180.0f);
+      ImGui::SliderFloat("AO ray length", &_editorRtqAoRayLength, 0.1f, 100.0f);
+      ImGui::SliderFloat("Reflection max roughness", &_editorRtqReflectionMaxRoughness, 0.0f, 1.0f);
+      ImGui::Separator();
+      // RTX-alignment design (rtx-realtime-alignment-design.md), Phase C —
+      // tonemap operator selector; index order mirrors ovrtx's own
+      // OmniRtxTonemapAPI enum 1:1 (TONEMAP_OPERATOR_* in ShaderInterop.slang).
+      {
+        static const char* const TONEMAP_OPERATOR_NAMES[] = {
+            "Raw (identity)",       "None (linear, exposure only)",
+            "Reinhard",             "Modified Reinhard",
+            "Heji/Hable ALU",       "Hable Uncharted 2",
+            "ACES approximation",   "Iray",
+        };
+        const int operatorCount =
+            static_cast<int>(sizeof(TONEMAP_OPERATOR_NAMES) / sizeof(TONEMAP_OPERATOR_NAMES[0]));
+        const int currentOperator =
+            (_editorTonemapOperator >= 0 && _editorTonemapOperator < operatorCount)
+                ? _editorTonemapOperator
+                : 0;
+        if (ImGui::BeginCombo("Tonemap operator", TONEMAP_OPERATOR_NAMES[currentOperator]))
+        {
+          for (int i = 0; i < operatorCount; ++i)
+          {
+            const bool isSelected = (i == currentOperator);
+            if (ImGui::Selectable(TONEMAP_OPERATOR_NAMES[i], isSelected))
+              _editorTonemapOperator = i;
+            if (isSelected)
+              ImGui::SetItemDefaultFocus();
+          }
+          ImGui::EndCombo();
+        }
+      }
+      ImGui::Separator();
+      ImGui::TextDisabled("Phase B (plumbed, no-op today)");
+      ImGui::SliderInt("Direct samples", &_editorRtqDirectSamples, 1, 8);
+      ImGui::SliderInt("Indirect samples", &_editorRtqIndirectSamples, 1, 8);
+      ImGui::SliderInt("Indirect max bounces", &_editorRtqIndirectMaxBounces, 1, 8);
+      ImGui::SliderInt("Reflection samples", &_editorRtqReflectionSamples, 1, 8);
+      ImGui::SliderInt("Refraction max bounces", &_editorRtqRefractionMaxBounces, 1, 16);
+      ImGui::SliderFloat("Max ray intensity (direct)", &_editorRtqMaxRayIntensityDirect,
+                         0.0f, 65504.0f);
+      ImGui::SliderFloat("Max ray intensity (indirect)", &_editorRtqMaxRayIntensityIndirect,
+                         0.0f, 65504.0f);
+      ImGui::SliderFloat("Max ray intensity (reflections)",
+                         &_editorRtqMaxRayIntensityReflections, 0.0f, 65504.0f);
+      ImGui::PopItemWidth();
+    }
+
     // ---- Camera section ----------------------------------------------
     // FOV (vertical, degrees) and Focal length (mm) are linked via a
     // 24mm full-frame sensor height. Any projection-affecting slider
@@ -593,6 +740,26 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
         ImGui::BeginDisabled(!_editorAutoExposure);
         ImGui::SliderFloat("AE target (max\xE2\x86\x92)", &_editorAutoExposureKey, 0.1f, 4.0f,
                            "%.2f");
+        // RTX-alignment design (rtx-realtime-alignment-design.md), Phase C —
+        // legacy (pre-Phase-C clamped-max, schema default) vs. ovrtx-parity
+        // 64-bucket histogram (median filter).
+        ImGui::Checkbox("Histogram (ovrtx-parity)", &_editorAutoExposureHistogram);
+        ImGui::EndDisabled();
+
+        // RTX-alignment design (rtx-realtime-alignment-design.md), Phase C —
+        // physical-camera exposure model (OmniRtxCameraExposureAPI parity).
+        // Mutually additive with the manual/auto exposure above (NOT
+        // exclusive): when enabled, TonemapPass multiplies linearColor by
+        // the fStop/iso/time-derived exposureScale BEFORE the stops-based
+        // gain, which still applies on top exactly as it does today.
+        ImGui::Checkbox("Physical camera exposure", &_editorPhysicalCameraExposure);
+        ImGui::BeginDisabled(!_editorPhysicalCameraExposure);
+        ImGui::SliderFloat("f-stop", &_editorPhysicalCameraFStop, 0.7f, 32.0f, "%.2f",
+                           ImGuiSliderFlags_Logarithmic);
+        ImGui::SliderFloat("ISO", &_editorPhysicalCameraIso, 25.0f, 6400.0f, "%.0f",
+                           ImGuiSliderFlags_Logarithmic);
+        ImGui::SliderFloat("Exposure time (s)", &_editorPhysicalCameraExposureTimeSeconds,
+                           0.001f, 4.0f, "%.3f", ImGuiSliderFlags_Logarithmic);
         ImGui::EndDisabled();
         ImGui::PopItemWidth();
 

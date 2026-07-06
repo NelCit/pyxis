@@ -87,6 +87,48 @@ std::string ReadField(const nlohmann::json& parent, const char* key, T& out) {
   return {};
 }
 
+// DLSS Stage 1 (rtx-realtime-alignment-design.md) — render.realTimeQuality.
+// denoiser accepts either the JSON string form ("dlss"/"builtin"/"off") or
+// a raw integer (0/1/2, falling back to ReadField's normal integral path).
+// Unrecognised strings are rejected with a precise error rather than
+// silently keeping the default — a denoiser typo silently picking a
+// different chain would be a nasty footgun.
+std::string ReadDenoiserField(const nlohmann::json& parent, const char* key, uint32_t& out) {
+  const auto found = parent.find(key);
+  if (found == parent.end() || found->is_null())
+    return {};
+  if (found->is_string())
+  {
+    const std::string value = found->get<std::string>();
+    if (value == "dlss") { out = 0u; return {}; }
+    if (value == "builtin") { out = 1u; return {}; }
+    if (value == "off") { out = 2u; return {}; }
+    return std::string{key} + ": expected \"dlss\" | \"builtin\" | \"off\" (got \"" + value + "\")";
+  }
+  return ReadField(parent, key, out);
+}
+
+// Same shape as ReadDenoiserField for render.realTimeQuality.dlssExecMode
+// ("auto"/"quality"/"balanced"/"performance"/"dlaa" or 0..4).
+std::string ReadDlssExecModeField(const nlohmann::json& parent, const char* key, uint32_t& out) {
+  const auto found = parent.find(key);
+  if (found == parent.end() || found->is_null())
+    return {};
+  if (found->is_string())
+  {
+    const std::string value = found->get<std::string>();
+    if (value == "auto") { out = 0u; return {}; }
+    if (value == "quality") { out = 1u; return {}; }
+    if (value == "balanced") { out = 2u; return {}; }
+    if (value == "performance") { out = 3u; return {}; }
+    if (value == "dlaa") { out = 4u; return {}; }
+    return std::string{key}
+         + ": expected \"auto\" | \"quality\" | \"balanced\" | \"performance\" | \"dlaa\" (got \""
+         + value + "\")";
+  }
+  return ReadField(parent, key, out);
+}
+
 }  // namespace
 
 std::expected<void, std::string> OverlayConfiguration(Configuration& target,
@@ -123,6 +165,73 @@ std::expected<void, std::string> OverlayConfiguration(Configuration& target,
       failure = ReadField(*render, "autoExposure", target.render.autoExposure);
     if (failure.empty())
       failure = ReadField(*render, "autoExposureKey", target.render.autoExposureKey);
+    // RTX-alignment design (rtx-realtime-alignment-design.md), Phase C.
+    if (failure.empty())
+      failure = ReadField(*render, "autoExposureHistogram", target.render.autoExposureHistogram);
+    // RTX-alignment design, Phase B follow-up — headless temporal
+    // convergence: render N frames back-to-back in ONE renderer session
+    // (temporal denoiser + TAA history accumulate across them, RNG
+    // decorrelates via frameIndex) and write the EXR after the last.
+    // 1 = today's single-frame behaviour (byte-equal default).
+    if (failure.empty())
+      failure = ReadField(*render, "accumulationFrames", target.render.accumulationFrames);
+    if (failure.empty())
+      failure = ReadField(*render, "exposureMode", target.render.exposureMode);
+    if (failure.empty())
+      failure = ReadField(*render, "exposureResponsivity", target.render.exposureResponsivity);
+    // RTX-alignment design, WP2-final — render.realTimeQuality.* (mirrors
+    // pyxis::RenderSettings::RealTimeQuality; see Configuration.h).
+    if (auto rtq = render->find("realTimeQuality");
+        rtq != render->end() && rtq->is_object())
+    {
+      if (failure.empty())
+        failure = ReadField(*rtq, "passMask", target.render.realTimeQuality.passMask);
+      if (failure.empty())
+        failure = ReadField(*rtq, "directSamples", target.render.realTimeQuality.directSamples);
+      if (failure.empty())
+        failure = ReadField(*rtq, "indirectSamples", target.render.realTimeQuality.indirectSamples);
+      if (failure.empty())
+        failure = ReadField(*rtq, "indirectMaxBounces",
+                            target.render.realTimeQuality.indirectMaxBounces);
+      if (failure.empty())
+        failure =
+            ReadField(*rtq, "reflectionSamples", target.render.realTimeQuality.reflectionSamples);
+      if (failure.empty())
+        failure = ReadField(*rtq, "reflectionMaxRoughness",
+                            target.render.realTimeQuality.reflectionMaxRoughness);
+      if (failure.empty())
+        failure = ReadField(*rtq, "refractionMaxBounces",
+                            target.render.realTimeQuality.refractionMaxBounces);
+      if (failure.empty())
+        failure = ReadField(*rtq, "aoRayLength", target.render.realTimeQuality.aoRayLength);
+      if (failure.empty())
+        failure = ReadField(*rtq, "maxRayIntensityDirect",
+                            target.render.realTimeQuality.maxRayIntensityDirect);
+      if (failure.empty())
+        failure = ReadField(*rtq, "maxRayIntensityIndirect",
+                            target.render.realTimeQuality.maxRayIntensityIndirect);
+      if (failure.empty())
+        failure = ReadField(*rtq, "maxRayIntensityReflections",
+                            target.render.realTimeQuality.maxRayIntensityReflections);
+      // RTX-alignment design (rtx-realtime-alignment-design.md), Phase C.
+      if (failure.empty())
+        failure = ReadField(*rtq, "tonemapOperator", target.render.realTimeQuality.tonemapOperator);
+      if (failure.empty())
+        failure = ReadField(*rtq, "physicalCameraFStop",
+                            target.render.realTimeQuality.physicalCameraFStop);
+      if (failure.empty())
+        failure = ReadField(*rtq, "physicalCameraIso",
+                            target.render.realTimeQuality.physicalCameraIso);
+      if (failure.empty())
+        failure = ReadField(*rtq, "physicalCameraExposureTimeSeconds",
+                            target.render.realTimeQuality.physicalCameraExposureTimeSeconds);
+      // DLSS Stage 1 (rtx-realtime-alignment-design.md).
+      if (failure.empty())
+        failure = ReadDenoiserField(*rtq, "denoiser", target.render.realTimeQuality.denoiser);
+      if (failure.empty())
+        failure = ReadDlssExecModeField(*rtq, "dlssExecMode",
+                                        target.render.realTimeQuality.dlssExecMode);
+    }
   }
   if (auto output = document.find("output"); output != document.end() && output->is_object())
   {
@@ -149,6 +258,12 @@ std::expected<void, std::string> OverlayConfiguration(Configuration& target,
   {
     if (failure.empty())
       failure = ReadField(*paths, "scene", target.paths.scene);
+  }
+  if (auto sceneNode = document.find("scene");
+      sceneNode != document.end() && sceneNode->is_object())
+  {
+    if (failure.empty())
+      failure = ReadField(*sceneNode, "camera", target.scene.camera);
   }
   if (auto appNode = document.find("app"); appNode != document.end() && appNode->is_object())
   {
@@ -182,6 +297,32 @@ std::optional<std::string> ReadFileToString(const std::string& path) noexcept {
   std::ostringstream buffer;
   buffer << stream.rdbuf();
   return buffer.str();
+}
+
+// DLSS Stage 1 — inverse of ReadDenoiserField / ReadDlssExecModeField, used
+// by WriteEffectiveConfig so the on-disk dump stays in the same
+// human-readable string form the JSON loader accepts (rather than the
+// harder-to-read raw integer every other realTimeQuality field uses).
+std::string DenoiserToString(uint32_t value) noexcept {
+  switch (value)
+  {
+    case 0u: return "dlss";
+    case 1u: return "builtin";
+    case 2u: return "off";
+    default: return "dlss";
+  }
+}
+
+std::string DlssExecModeToString(uint32_t value) noexcept {
+  switch (value)
+  {
+    case 0u: return "auto";
+    case 1u: return "quality";
+    case 2u: return "balanced";
+    case 3u: return "performance";
+    case 4u: return "dlaa";
+    default: return "auto";
+  }
 }
 
 // %LOCALAPPDATA%/Pyxis/parameters.json. Mirrors AssetLocator::LocalAppData
@@ -289,10 +430,14 @@ void ApplyCliOverrides(Configuration& config, const CliArgs& cli) noexcept {
     log.Info(log::APP, std::string{"--scene "} + std::string{cli.scenePath}
                            + " parsed but ignored (M3.5 default-scene + M4 ingest).");
   }
+  // RTX-alignment design (rtx-realtime-alignment-design.md), WP2-final —
+  // --camera now really overrides scene.camera (StageWalker prefers the
+  // SdfPath match over its boundCamera-hint / first-in-order fallback;
+  // see IngestUsd -> StageWalker::WalkFile/WalkStage).
   if (!cli.cameraSdfPath.empty())
   {
-    log.Info(log::APP, std::string{"--camera "} + std::string{cli.cameraSdfPath}
-                           + " parsed but ignored (M3+ scene.camera).");
+    config.scene.camera = std::string{cli.cameraSdfPath};
+    log.Info(log::APP, std::string{"--camera "} + config.scene.camera + " applied.");
   }
   if (!cli.profilePath.empty())
   {
@@ -350,6 +495,49 @@ std::expected<void, std::string> WriteEffectiveConfig(const Configuration& confi
   document["render"]["height"] = config.render.height;
   document["render"]["samplesPerFrame"] = config.render.samplesPerFrame;
   document["render"]["seed"] = config.render.seed;
+  document["render"]["exposure"] = config.render.exposure;
+  document["render"]["autoExposure"] = config.render.autoExposure;
+  document["render"]["autoExposureKey"] = config.render.autoExposureKey;
+  document["render"]["autoExposureHistogram"] = config.render.autoExposureHistogram;
+  document["render"]["accumulationFrames"] = config.render.accumulationFrames;
+  document["render"]["exposureMode"] = config.render.exposureMode;
+  document["render"]["exposureResponsivity"] = config.render.exposureResponsivity;
+  document["render"]["realTimeQuality"]["passMask"] = config.render.realTimeQuality.passMask;
+  document["render"]["realTimeQuality"]["directSamples"] =
+      config.render.realTimeQuality.directSamples;
+  document["render"]["realTimeQuality"]["indirectSamples"] =
+      config.render.realTimeQuality.indirectSamples;
+  document["render"]["realTimeQuality"]["indirectMaxBounces"] =
+      config.render.realTimeQuality.indirectMaxBounces;
+  document["render"]["realTimeQuality"]["reflectionSamples"] =
+      config.render.realTimeQuality.reflectionSamples;
+  document["render"]["realTimeQuality"]["reflectionMaxRoughness"] =
+      config.render.realTimeQuality.reflectionMaxRoughness;
+  document["render"]["realTimeQuality"]["refractionMaxBounces"] =
+      config.render.realTimeQuality.refractionMaxBounces;
+  document["render"]["realTimeQuality"]["aoRayLength"] = config.render.realTimeQuality.aoRayLength;
+  document["render"]["realTimeQuality"]["maxRayIntensityDirect"] =
+      config.render.realTimeQuality.maxRayIntensityDirect;
+  document["render"]["realTimeQuality"]["maxRayIntensityIndirect"] =
+      config.render.realTimeQuality.maxRayIntensityIndirect;
+  document["render"]["realTimeQuality"]["maxRayIntensityReflections"] =
+      config.render.realTimeQuality.maxRayIntensityReflections;
+  document["render"]["realTimeQuality"]["tonemapOperator"] =
+      config.render.realTimeQuality.tonemapOperator;
+  document["render"]["realTimeQuality"]["physicalCameraFStop"] =
+      config.render.realTimeQuality.physicalCameraFStop;
+  document["render"]["realTimeQuality"]["physicalCameraIso"] =
+      config.render.realTimeQuality.physicalCameraIso;
+  document["render"]["realTimeQuality"]["physicalCameraExposureTimeSeconds"] =
+      config.render.realTimeQuality.physicalCameraExposureTimeSeconds;
+  // DLSS Stage 1 (rtx-realtime-alignment-design.md) — dumped as strings
+  // (not raw integers, unlike every other realTimeQuality field) so the
+  // effective-config sidecar stays readable and round-trips through
+  // ReadDenoiserField / ReadDlssExecModeField unchanged.
+  document["render"]["realTimeQuality"]["denoiser"] =
+      DenoiserToString(config.render.realTimeQuality.denoiser);
+  document["render"]["realTimeQuality"]["dlssExecMode"] =
+      DlssExecModeToString(config.render.realTimeQuality.dlssExecMode);
   document["output"]["image"] = config.output.image;
   document["output"]["ldr"] = config.output.ldr;
   document["output"]["effectiveConfig"] = config.output.effectiveConfig;
@@ -357,6 +545,7 @@ std::expected<void, std::string> WriteEffectiveConfig(const Configuration& confi
   document["diagnostics"]["aftermath"] = config.diagnostics.aftermath;
   document["limits"]["framesInFlight"] = config.limits.framesInFlight;
   document["paths"]["scene"] = config.paths.scene;
+  document["scene"]["camera"] = config.scene.camera;
   document["app"]["ingest"] = config.app.ingest;
 
   std::ofstream stream(config.output.effectiveConfig, std::ios::binary | std::ios::trunc);

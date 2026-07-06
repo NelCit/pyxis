@@ -40,6 +40,11 @@ struct RenderTargets {
   nvrhi::ITexture* depth = nullptr;
   nvrhi::ITexture* normal = nullptr;
   nvrhi::ITexture* albedo = nullptr;
+  // RTX-alignment design (Phase A / WP1) — RaytracedLightingPass's
+  // raygen now writes this: RG16F screen-space motion vector, in
+  // PIXELS, of the primary hit (see viewZAov below for its denoiser-
+  // guide sibling). Was declared but unwired since the M1-era draft
+  // of this struct; still optional / caller-allocated like every AOV.
   nvrhi::ITexture* motionVector = nullptr;
   nvrhi::ITexture* materialId = nullptr;
   nvrhi::ITexture* primId = nullptr;
@@ -78,6 +83,20 @@ struct RenderTargets {
   nvrhi::ITexture* elementIdAov   = nullptr;
   nvrhi::ITexture* normalEyeAov   = nullptr;
   nvrhi::ITexture* worldPosEyeAov = nullptr;
+
+  // RTX-alignment design (rtx-realtime-alignment-design.md), Phase A /
+  // WP1 — denoiser-guide AOVs. New optional RenderTargets AOV slots
+  // (§22.3 MINOR-additive). Caller-allocated + caller-owned like every
+  // other AOV above; RaytracedLightingPass binds 1×1 fallbacks when null.
+  //   viewZAov     : R32F  view-space Z of the primary hit — positive
+  //                  distance along the camera's forward axis (0 on miss)
+  //   motionVector : RG16F screen-space motion vector in PIXELS
+  //                  (current pixel minus the previous frame's pixel
+  //                  position of the same world point; (0,0) on miss
+  //                  and on the first frame). This field has existed
+  //                  since the M1-era draft of this struct but stayed
+  //                  unwired until WP1.
+  nvrhi::ITexture* viewZAov = nullptr;
 
   // 1-element RWStructuredBuffer<PickResult> the raygen writes when
   // the dispatched pixel matches RenderSettings::mousePixel{X,Y}.

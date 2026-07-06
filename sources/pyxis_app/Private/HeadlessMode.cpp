@@ -114,10 +114,13 @@ void LogDeterminismPin(const Configuration& config, uint32_t framesInFlight) noe
   bool sceneLoaded = false;
   if (!resolvedScene.path.empty())
   {
+    // RTX-alignment design (rtx-realtime-alignment-design.md), WP2-final —
+    // config.scene.camera (--camera / JSON scene.camera) overrides
+    // StageWalker's auto-pick; empty = unchanged auto-pick behavior.
     const pyxis::usd_ingest::IngestResult result =
         IngestUsd(config.app.ingest, resolvedScene.path, gpuScene,
                   populationMask, frameNumber, loadMode, variantSelections,
-                  renderPurpose);
+                  renderPurpose, config.scene.camera);
     const pyxis::usd_ingest::IngestStats& stats = result.Stats();
     sceneLoaded = stats.meshesEmitted > 0 || stats.camerasEmitted > 0;
     if (outStats != nullptr)
@@ -136,10 +139,11 @@ void LogDeterminismPin(const Configuration& config, uint32_t framesInFlight) noe
   return true;
 }
 
-// Open the command list, drain GpuScene mutations, dispatch one
-// RaytracedLightingPass via PyxisRenderer, transition the offscreen RT to
-// CopySource, close + execute. Returns false if CommitResources
-// failed; caller's responsibility to clean up after a false return.
+// Open the command list, drain GpuScene mutations, dispatch one frame via
+// PyxisRenderer (RaytracedGBuffer -> signal passes -> CompositePass ->
+// Tonemap), transition the offscreen RT to CopySource, close + execute.
+// Returns false if CommitResources failed; caller's responsibility to
+// clean up after a false return.
 [[nodiscard]] bool RecordAndExecuteRenderFrame(nvrhi::IDevice* device,
                                                nvrhi::ICommandList* commandList,
                                                GpuScene& gpuScene,
@@ -148,7 +152,13 @@ void LogDeterminismPin(const Configuration& config, uint32_t framesInFlight) noe
                                                nvrhi::ITexture* renderTarget,
                                                uint32_t openPbrFeatureMask,
                                                bool autoExposure,
-                                               float autoExposureKey) noexcept
+                                               float autoExposureKey,
+                                               bool autoExposureHistogram,
+                                               uint32_t exposureMode,
+                                               float exposureResponsivity,
+                                               const RenderConfig::RealTimeQualityConfig&
+                                                   realTimeQuality,
+                                               uint32_t seed) noexcept
 {
   commandList->open();
 
@@ -168,9 +178,10 @@ void LogDeterminismPin(const Configuration& config, uint32_t framesInFlight) noe
   targets.color = renderTarget;
   // M7 follow-up — bind the raw AOV outputs so the user can dump
   // them via --save-aov. Always bound (not just when --save-aov is
-  // set) because RaytracedLightingPass's UAV writes are unconditional;
-  // without these the writes go to the 1×1 fallbacks RaytracedLightingPass
-  // owns, which is fine but wastes the already-allocated AovTextures
+  // set) because the writing pass's (CompositePass for colorHdr/alpha;
+  // RaytracedGBufferPass for the rest) UAV writes are unconditional;
+  // without these the writes go to the 1×1 fallbacks the owning pass
+  // carries, which is fine but wastes the already-allocated AovTextures
   // memory. Same RenderTargets shape ViewerMode wires.
   targets.colorHdr       = aovs.colorHdr.Get();
   targets.normalAov      = aovs.normal.Get();
@@ -183,17 +194,60 @@ void LogDeterminismPin(const Configuration& config, uint32_t framesInFlight) noe
   targets.elementIdAov   = aovs.elementId.Get();
   targets.normalEyeAov   = aovs.normalEye.Get();
   targets.worldPosEyeAov = aovs.worldPosEye.Get();
+  // RTX-alignment design (Phase A / WP1) — denoiser-guide AOVs.
+  targets.viewZAov       = aovs.viewZ.Get();
+  targets.motionVector   = aovs.motionVector.Get();
   RenderSettings settings{};
   settings.width = renderTarget->getDesc().width;
   settings.height = renderTarget->getDesc().height;
+  // RTX-alignment design, "interior illumination" follow-up — wire the
+  // caller's seed through (was a fixed SceneBindings.cpp default); §33.7
+  // already guarantees this is non-zero in headless.
+  settings.seed = seed;
   // Q3 OpenPBR feature gates. The default (0x3F, all on) reproduces
   // the reference look byte-for-byte; --openpbr-mask narrows it for
   // debugging / toggle-regression proofs.
   settings.openPbrFeatureMask = openPbrFeatureMask;
-  // Auto-exposure (config.render.autoExposure) — derive the exposure from the
-  // frame's geometric-mean luminance. OFF by default keeps EXR goldens byte-equal.
-  settings.autoExposure = autoExposure ? 1u : 0u;
+  // Auto-exposure (config.render.autoExposure{,Histogram}) — derive the
+  // exposure from the frame's luminance. OFF (0) by default keeps EXR
+  // goldens byte-equal. RenderSettings::autoExposure is 0=off / 1=on-legacy
+  // / 2=on-histogram (RTX-alignment design Phase C — see its doc comment).
+  settings.autoExposure = !autoExposure ? 0u : (autoExposureHistogram ? 2u : 1u);
   settings.autoExposureKey = autoExposureKey;
+  // RTX-alignment design (rtx-realtime-alignment-design.md), Phase C —
+  // physical-camera exposure model selector + calibration constant (both
+  // live at RenderSettings' TOP level — see its doc comment).
+  settings.exposureMode = exposureMode;
+  settings.exposureResponsivity = exposureResponsivity;
+  // RTX-alignment design (rtx-realtime-alignment-design.md), WP2-final —
+  // field-for-field copy from Configuration::RenderConfig::RealTimeQualityConfig
+  // (JSON "render.realTimeQuality"; see that struct's doc comment).
+  settings.realTimeQuality.passMask = realTimeQuality.passMask;
+  settings.realTimeQuality.directSamples = realTimeQuality.directSamples;
+  settings.realTimeQuality.indirectSamples = realTimeQuality.indirectSamples;
+  settings.realTimeQuality.indirectMaxBounces = realTimeQuality.indirectMaxBounces;
+  settings.realTimeQuality.reflectionSamples = realTimeQuality.reflectionSamples;
+  settings.realTimeQuality.reflectionMaxRoughness = realTimeQuality.reflectionMaxRoughness;
+  settings.realTimeQuality.refractionMaxBounces = realTimeQuality.refractionMaxBounces;
+  settings.realTimeQuality.aoRayLength = realTimeQuality.aoRayLength;
+  settings.realTimeQuality.maxRayIntensityDirect = realTimeQuality.maxRayIntensityDirect;
+  settings.realTimeQuality.maxRayIntensityIndirect = realTimeQuality.maxRayIntensityIndirect;
+  settings.realTimeQuality.maxRayIntensityReflections =
+      realTimeQuality.maxRayIntensityReflections;
+  // RTX-alignment design (rtx-realtime-alignment-design.md), Phase C.
+  settings.realTimeQuality.tonemapOperator = realTimeQuality.tonemapOperator;
+  settings.realTimeQuality.physicalCameraFStop = realTimeQuality.physicalCameraFStop;
+  settings.realTimeQuality.physicalCameraIso = realTimeQuality.physicalCameraIso;
+  settings.realTimeQuality.physicalCameraExposureTimeSeconds =
+      realTimeQuality.physicalCameraExposureTimeSeconds;
+  // DLSS Stage 1 (rtx-realtime-alignment-design.md) — config's own
+  // "dlss"/"builtin"/"off" default (Dlss) resolves inside PyxisRenderer::
+  // RenderFrame via DlssProvider's capability probe; headless configs
+  // don't author this key, so the probe's Dlss->Builtin downgrade is the
+  // only outcome ever exercised here (byte-identical to pre-Stage-1
+  // output — passMask's own denoise/TAA bits already default OFF).
+  settings.realTimeQuality.denoiser = realTimeQuality.denoiser;
+  settings.realTimeQuality.dlssExecMode = realTimeQuality.dlssExecMode;
   renderer.RenderFrame(commandList, settings, targets);
   // Force the offscreen RT into CopySource before we close the
   // command list. Without this we relied on NVRHI's auto-barrier
@@ -228,7 +282,8 @@ void LogDeterminismPin(const Configuration& config, uint32_t framesInFlight) noe
 
 // Run TextureReadback through phase 1 (record copy) + phase 2 (map
 // the staging buffer), warn if the entire image is black (silent
-// RaytracedLightingPass no-op detector), then write the BGRA8 image to disk.
+// render-graph no-op detector — CompositePass/TonemapPass since WP2-final),
+// then write the BGRA8 image to disk.
 // File format is selected by the `outputPath` extension: `.png`
 // dispatches to WritePngBgra8 (sRGB-encoded, human-inspectable,
 // golden-test friendly); anything else dispatches to WriteExrBgra8
@@ -328,8 +383,9 @@ void LogDeterminismPin(const Configuration& config, uint32_t framesInFlight) noe
   }
   // Sanity check: a render that worked has SOME non-black pixels
   // (cube colour from closesthit or sky from miss). All-zero output
-  // would mean RaytracedLightingPass silently no-op'd; surface that as a
-  // log warning so a regression doesn't go quietly.
+  // would mean CompositePass (or an upstream signal pass / TonemapPass)
+  // silently no-op'd; surface that as a log warning so a regression
+  // doesn't go quietly.
   {
     const auto* bytes = static_cast<const uint8_t*>(readback->Data());
     bool anyNonBlack = false;
@@ -347,7 +403,7 @@ void LogDeterminismPin(const Configuration& config, uint32_t framesInFlight) noe
     }
     log.Info(log::APP,
              anyNonBlack ? "headless: render produced non-black pixels (looks valid)"
-                         : "headless: render output is fully black — RaytracedLightingPass likely skipped");
+                         : "headless: render output is fully black — render graph likely skipped");
   }
 
   // SSAA resolve: gamma-aware box-downsample the super-resolution
@@ -386,6 +442,7 @@ void LogDeterminismPin(const Configuration& config, uint32_t framesInFlight) noe
 void SaveAovsFromList(std::string_view saveAovList,
                       std::string_view aovPrefix,
                       const AovTextures& aovs,
+                      const PyxisRenderer& renderer,
                       nvrhi::IDevice* device,
                       nvrhi::ICommandList* commandList) noexcept
 {
@@ -410,6 +467,42 @@ void SaveAovsFromList(std::string_view saveAovList,
     }
   };
   auto resolveAndSave = [&](std::string_view aovName) {
+    // RTX-alignment design (Phase A / WP1) — denoiser-guide AOVs. These
+    // aren't inspector-selectable DebugView entries (no editor combo /
+    // TonemapPass display branch backs them yet), so they live outside
+    // AOV_REGISTRY and get resolved here directly, before falling
+    // through to the registry lookup below.
+    if (aovName == "motionVector")
+    {
+      saveOne(aovName, aovs.motionVector.Get());
+      return;
+    }
+    if (aovName == "viewZ")
+    {
+      saveOne(aovName, aovs.viewZ.Get());
+      return;
+    }
+    // RTX-alignment design (rtx-realtime-alignment-design.md), WP2-signals
+    // — the five Phase A signal passes' outputs. These are renderer-
+    // internal scratch (not RenderTargets AOVs — see PyxisRenderer::
+    // DebugSignalTexture's doc comment), so they're resolved via that
+    // accessor instead of an AovTextures member pointer, same "outside
+    // AOV_REGISTRY, resolved here directly" pattern WP1's viewZ/
+    // motionVector branches above established.
+    // WP2-final — "composite" added: CompositePass's own recombined
+    // pre-tonemap radiance, for sanity-checking the composite path.
+    static constexpr std::string_view SIGNAL_AOV_NAMES[] = {
+        "directDiffuse", "directSpecular", "indirectDiffuse",
+        "ao",            "reflections",    "translucency",   "composite",
+    };
+    for (const std::string_view signalName : SIGNAL_AOV_NAMES)
+    {
+      if (aovName == signalName)
+      {
+        saveOne(aovName, renderer.DebugSignalTexture(aovName));
+        return;
+      }
+    }
     // Single source of truth for the name -> texture mapping —
     // matches ViewerMode's Save AOV button via the same registry.
     const AovEntry* entry = FindAovByName(aovName);
@@ -419,7 +512,9 @@ void SaveAovsFromList(std::string_view saveAovList,
                              + std::string{aovName}
                              + "' (recognised: color,normal,depth,primId,"
                                "materialId,baseColor,worldPos,alpha,elementId,"
-                               "normalEye,worldPosEye,all)");
+                               "normalEye,worldPosEye,motionVector,viewZ,"
+                               "directDiffuse,directSpecular,indirectDiffuse,ao,"
+                               "reflections,translucency,composite,all)");
       return;
     }
     saveOne(entry->name, (aovs.*entry->texturePtr).Get());
@@ -553,7 +648,7 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
   // ---- Profiler + GpuScene + Renderer --------------------------------
   // GpuScene is the canonical scene-mutation API (§18.5) and owns the
   // §8 Flecs SceneWorld internally (RFC 0009); PyxisRenderer's ctor
-  // takes it by reference per §18.6 and RaytracedLightingPass binds its TLAS +
+  // takes it by reference per §18.6 and the RT passes bind its TLAS +
   // camera every frame.
   Profiler profiler{device};
   GpuSceneCreateDesc gpuSceneDesc{};
@@ -602,33 +697,49 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
   // Headless raises FIF to MAX_FRAMES_IN_FLIGHT (= 3) for §33.7
   // byte-equal EXR — propagate so the renderer's PassContext sees
   // the real value. Picker isn't driven in headless so the FIF=1
-  // assert in RaytracedLightingPass doesn't fire.
+  // assert on the picker readback path doesn't fire.
   rendererDesc.framesInFlight = deviceManager->GetFramesInFlight();
-  PyxisRenderer renderer{device, gpuScene, profiler, rendererDesc};
+  // DLSS Stage 2a (rtx-realtime-alignment-design.md) — see ViewerMode.cpp's
+  // identical wiring; the task's own verification renders headless with
+  // render.realTimeQuality.denoiser="dlss", so headless needs this exactly
+  // like the viewer, not a stub.
+  const VulkanContext dlssVulkanContext = deviceManager->GetVulkanContext();
+  PyxisRenderer renderer{device, gpuScene, profiler, rendererDesc, &dlssVulkanContext};
 
   const nvrhi::CommandListHandle commandListHandle = device->createCommandList();
   nvrhi::ICommandList* const commandList = commandListHandle.Get();
 
-  // ---- One render frame ----------------------------------------------
-  // Single render. RaytracedLightingPass is one-sample-per-frame with no
-  // accumulation today, so iterating buys nothing —
-  // `samplesPerFrame * accumulationFrameLimit` wires in once the
-  // accumulation buffer lands (post-M7).
-  profiler.BeginFrame();
-  deviceManager->BeginFrame();
-
+  // ---- Render frames ---------------------------------------------------
+  // RTX-alignment design, Phase B follow-up: `render.accumulationFrames`
+  // renders N frames back-to-back in this one renderer session so the
+  // temporal denoiser + TAA histories converge (the RNG decorrelates per
+  // frameIndex), then the EXR is written from the LAST frame. N = 1
+  // (default) reproduces the pre-existing single-frame behaviour
+  // byte-for-byte. Deterministic for fixed seed + N (§33.7).
+  const uint32_t accumulationFrames =
+      config.render.accumulationFrames == 0u ? 1u : config.render.accumulationFrames;
+  for (uint32_t accumFrame = 0; accumFrame < accumulationFrames; ++accumFrame)
   {
-    const Profiler::CpuScope frameScope(profiler, "headless.frame");
-    if (!RecordAndExecuteRenderFrame(device, commandList, gpuScene, renderer, aovs, renderTarget,
-                                     openPbrFeatureMask, config.render.autoExposure,
-                                     config.render.autoExposureKey))
-    {
-      return EXIT_RUNTIME_FAIL;
-    }
-  }
+    profiler.BeginFrame();
+    deviceManager->BeginFrame();
 
-  deviceManager->EndFrame();
-  profiler.EndFrame();
+    {
+      const Profiler::CpuScope frameScope(profiler, "headless.frame");
+      if (!RecordAndExecuteRenderFrame(device, commandList, gpuScene, renderer, aovs, renderTarget,
+                                       openPbrFeatureMask, config.render.autoExposure,
+                                       config.render.autoExposureKey,
+                                       config.render.autoExposureHistogram,
+                                       config.render.exposureMode,
+                                       config.render.exposureResponsivity,
+                                       config.render.realTimeQuality, config.render.seed))
+      {
+        return EXIT_RUNTIME_FAIL;
+      }
+    }
+
+    deviceManager->EndFrame();
+    profiler.EndFrame();
+  }
   device->runGarbageCollection();
 
   // Post-commit GpuScene snapshot — surfaces what actually landed on
@@ -740,7 +851,7 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
   if (!saveAovList.empty())
   {
     const std::string aovPrefix = DeriveAovPrefix(config.output.image);
-    SaveAovsFromList(saveAovList, aovPrefix, aovs, device, commandList);
+    SaveAovsFromList(saveAovList, aovPrefix, aovs, renderer, device, commandList);
   }
 
   // ---- M8b benchmark loop --------------------------------------------
@@ -750,8 +861,8 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
   // costs that the single-frame above already paid; the measurement
   // window captures steady-state numbers comparable to the §34.3 KPIs
   // (the RT passes' combined budget < 12 ms, frame.cpu.commitResources
-  // < 2 ms; pass.PathTrace split into pass.RaytracedGBuffer +
-  // pass.RaytracedLighting at P4).
+  // < 2 ms; pass.PathTrace split into pass.RaytracedGBuffer + five signal
+  // passes + pass.Composite — see rtx-realtime-alignment-design.md WP2).
   if (benchFrames > 0)
   {
     // Per-pass min / sorted percentile aggregator. Vectors keep sorted
@@ -794,7 +905,12 @@ int RunHeadless(const Configuration& config, const ResolvedScene& resolvedScene,
         frameOk = RecordAndExecuteRenderFrame(device, commandList, gpuScene, renderer,
                                               aovs, renderTarget, openPbrFeatureMask,
                                               config.render.autoExposure,
-                                              config.render.autoExposureKey);
+                                              config.render.autoExposureKey,
+                                              config.render.autoExposureHistogram,
+                                              config.render.exposureMode,
+                                              config.render.exposureResponsivity,
+                                              config.render.realTimeQuality,
+                                              config.render.seed);
       }
       deviceManager->EndFrame();
       profiler.EndFrame();

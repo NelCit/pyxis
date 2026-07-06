@@ -50,11 +50,13 @@ from typing import Optional
 # the report. (column_name, human_label, lower_is_better).
 _TRACKED_KPIS: list[tuple[str, str, bool]] = [
     # Pass-split successors of pass.PathTrace (passes-split-design.md P6);
-    # the rolling history restarts at the split.
-    ('rt_total_gpu_p50_ms',          'RT total (GBuffer+Lighting) p50', True),
-    ('rt_total_gpu_p99_ms',          'RT total (GBuffer+Lighting) p99', True),
+    # the rolling history restarts at the split. RTX-alignment design
+    # (rtx-realtime-alignment-design.md), WP2-final — pass.RaytracedLighting
+    # is retired; rt_total now sums GBuffer + every signal pass + Composite.
+    ('rt_total_gpu_p50_ms',          'RT total (GBuffer+signals+Composite) p50', True),
+    ('rt_total_gpu_p99_ms',          'RT total (GBuffer+signals+Composite) p99', True),
     ('gbuffer_gpu_p50_ms',           'pass.RaytracedGBuffer p50',    True),
-    ('lighting_gpu_p50_ms',          'pass.RaytracedLighting p50',   True),
+    ('composite_gpu_p50_ms',        'pass.Composite p50',           True),
     ('tonemap_gpu_p50_ms',           'pass.Tonemap p50',             True),
     ('commit_resources_cpu_p50_ms',  'commitResources p50',          True),
     ('commit_resources_cpu_p99_ms',  'commitResources p99',          True),

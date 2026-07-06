@@ -61,6 +61,8 @@ float HalfToFloat(uint16_t halfBits) noexcept {
 //   RGBA32_FLOAT     : memcpy fast path
 //   R32_FLOAT        : grayscale RGB(d, d, d, 1)
 //   R32_UINT         : float-cast RGB(id, id, id, 1)
+//   RG16_FLOAT       : half-to-float into R/G (motionVector, RTX-
+//                      alignment WP1); B=0, A=1
 // Unrecognised formats fill zeros and the caller's WriteExr will
 // still produce a valid (if useless) EXR — the SaveAovAsExr return
 // value flags the bad format.
@@ -108,6 +110,21 @@ bool ConvertAovRowToRgba32f(nvrhi::Format format, const void* srcRow, uint32_t w
         dstRgbaRow[col * 4 + 0] = idAsFloat;
         dstRgbaRow[col * 4 + 1] = idAsFloat;
         dstRgbaRow[col * 4 + 2] = idAsFloat;
+        dstRgbaRow[col * 4 + 3] = 1.0f;
+      }
+      return true;
+    }
+    case nvrhi::Format::RG16_FLOAT:
+    {
+      // motionVector (RTX-alignment WP1) — 2-channel half float; pack
+      // into R/G with B=0, A=1 (same "unused channels get a sane
+      // constant" convention R32_FLOAT/R32_UINT use above).
+      const auto* src = static_cast<const uint16_t*>(srcRow);
+      for (uint32_t col = 0; col < width; ++col)
+      {
+        dstRgbaRow[col * 4 + 0] = HalfToFloat(src[col * 2 + 0]);
+        dstRgbaRow[col * 4 + 1] = HalfToFloat(src[col * 2 + 1]);
+        dstRgbaRow[col * 4 + 2] = 0.0f;
         dstRgbaRow[col * 4 + 3] = 1.0f;
       }
       return true;
@@ -174,7 +191,7 @@ std::expected<void, std::string> SaveAovAsExr(nvrhi::IDevice* device,
   {
     return std::unexpected{
         "SaveAovAsExr: unsupported source format (only RGBA16F / RGBA32F / R32F / "
-        "R32_UINT are recognised)"};
+        "R32_UINT / RG16F are recognised)"};
   }
 
   const std::size_t dstRowPitch =

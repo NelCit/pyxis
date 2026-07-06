@@ -69,6 +69,11 @@ class VkDeviceManagerHeadless final : public IDeviceManager {
   VkQueue _graphicsQueue = VK_NULL_HANDLE;
   uint32_t _graphicsFamily = 0;
   bool _externalInteropSupported = false;  // RFC 0004 — see IsExternalInteropSupported().
+  // DLSS Stage 2a — mirrors VkDeviceManager::_dlssStreamlineActive (see
+  // that class for the full rationale): true iff the pre-device
+  // Streamline bootstrap succeeded, so Teardown() knows whether to call
+  // slShutdown.
+  bool _dlssStreamlineActive = false;
 
   AdapterInfo _adapter{};
   // M1 pins both viewer and headless to 1 frame in flight; M2's EXR

@@ -2,6 +2,7 @@
 
 #include "Device/VkDeviceManagerHeadless.h"
 
+#include "Device/DlssDeviceExtensions.h"
 #include "Device/ExternalInterop.h"
 #include "Device/NvrhiCallback.h"
 #include "Device/VulkanFeatureCheck.h"
@@ -36,8 +37,8 @@ constexpr uint32_t VULKAN_API_VERSION = VK_API_VERSION_1_3;
 // External-memory enablement moved to the shared Device/ExternalInterop.h so
 // the viewer + headless managers cannot drift (RFC 0004).
 
-VkInstance CreateInstance(bool enableValidation, std::string_view appName,
-                          uint32_t appVersion) noexcept {
+VkInstance CreateInstance(bool enableValidation, std::string_view appName, uint32_t appVersion,
+                          const std::vector<std::string>& extraInstanceExtensions) noexcept {
   VkApplicationInfo appInfo{};
   appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
   const std::string namebuf{appName};
@@ -46,6 +47,12 @@ VkInstance CreateInstance(bool enableValidation, std::string_view appName,
   appInfo.pEngineName = "Pyxis";
   appInfo.engineVersion = 0;
   appInfo.apiVersion = VULKAN_API_VERSION;
+
+  // DLSS Stage 2a — extra instance extensions Streamline requested (empty
+  // when the SDK isn't staged); see DlssDeviceExtensions.h.
+  std::vector<const char*> extensions;
+  for (const std::string& extra : extraInstanceExtensions)
+    extensions.push_back(extra.c_str());
 
   std::vector<const char*> layers;
   if (enableValidation)
@@ -58,6 +65,8 @@ VkInstance CreateInstance(bool enableValidation, std::string_view appName,
   info.pApplicationInfo = &appInfo;
   info.enabledLayerCount = static_cast<uint32_t>(layers.size());
   info.ppEnabledLayerNames = layers.data();
+  info.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
+  info.ppEnabledExtensionNames = extensions.data();
 
   VkInstance instance = VK_NULL_HANDLE;
   if (vkCreateInstance(&info, nullptr, &instance) != VK_SUCCESS)
@@ -106,8 +115,16 @@ DeviceManagerCreateStatus VkDeviceManagerHeadless::Bringup(
 
   VulkanHppInitFromLoader(&vkGetInstanceProcAddr);
 
-  _instance =
-      CreateInstance(params.enableValidation, params.applicationName, params.applicationVersion);
+  // DLSS Stage 2a — same pre-device Streamline bootstrap as the windowed
+  // manager (VkDeviceManager.cpp); see DlssDeviceExtensions.h. The task's
+  // own verification step renders headless with
+  // render.realTimeQuality.denoiser="dlss", so headless must bootstrap
+  // Streamline exactly like the viewer, not skip it.
+  const DlssDeviceRequirements dlssRequirements = TryBootstrapStreamlineForVulkan();
+  _dlssStreamlineActive = dlssRequirements.streamlineActive;
+
+  _instance = CreateInstance(params.enableValidation, params.applicationName,
+                             params.applicationVersion, dlssRequirements.instanceExtensions);
   if (_instance == VK_NULL_HANDLE)
   {
     log.Error(log::PLATFORM, "VkDeviceManagerHeadless: VkInstance creation failed");
@@ -241,6 +258,11 @@ DeviceManagerCreateStatus VkDeviceManagerHeadless::Bringup(
                               ? "VkDeviceManagerHeadless: external-memory interop enabled (RFC 0004)"
                               : "VkDeviceManagerHeadless: external-memory interop NOT available "
                                 "(adapter lacks VK_KHR_external_memory_win32); Kit handoff disabled");
+
+  // DLSS Stage 2a — device extensions Streamline's slGetFeatureRequirements
+  // requested (empty when the bootstrap above didn't run or found none).
+  for (const std::string& extra : dlssRequirements.deviceExtensions)
+    deviceExtensions.push_back(extra.c_str());
 
   // Same Vulkan 1.3 feature chain as VkDeviceManager (§5.b mandatory):
   // sync2 + dynamicRendering + timelineSemaphore + bufferDeviceAddress
@@ -378,6 +400,10 @@ void VkDeviceManagerHeadless::Teardown() noexcept {
     _nvrhiDevice->runGarbageCollection();
   }
   _nvrhiDevice = nullptr;
+  // DLSS Stage 2a — ProgrammingGuideDLSS.md 1.0: slShutdown before
+  // destroying the device/instance. No-op when Streamline never activated.
+  ShutdownStreamlineIfActive(_dlssStreamlineActive);
+  _dlssStreamlineActive = false;
   if (_device != VK_NULL_HANDLE)
   {
     vkDestroyDevice(_device, nullptr);

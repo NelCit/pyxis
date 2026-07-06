@@ -80,6 +80,14 @@ struct AovTextures {
   nvrhi::TextureHandle elementId;
   nvrhi::TextureHandle normalEye;
   nvrhi::TextureHandle worldPosEye;
+  // RTX-alignment design (rtx-realtime-alignment-design.md), Phase A /
+  // WP1 — denoiser-guide AOVs RaytracedLightingPass's raygen writes
+  // alongside the raw AOVs above.
+  //   viewZ        R32_FLOAT  view-space Z of the primary hit (0 on miss)
+  //   motionVector RG16_FLOAT screen-space motion vector, in pixels
+  //                           ((0,0) on miss and on the first frame)
+  nvrhi::TextureHandle viewZ;
+  nvrhi::TextureHandle motionVector;
 
   // 1-element RWStructuredBuffer<PickResult> + a host-readable
   // staging buffer for one-frame-stale CPU readback. RaytracedLightingPass

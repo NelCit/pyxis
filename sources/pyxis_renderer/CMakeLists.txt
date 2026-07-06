@@ -52,6 +52,10 @@ target_sources(pyxis_renderer PUBLIC
         # Private/GpuScene/GpuScene.cpp; real bodies land in subsequent
         # M3 commits.
         Public/Pyxis/Renderer/GpuScene.h
+
+        # DLSS Stage 1 (rtx-realtime-alignment-design.md) — status POD
+        # returned by PyxisRenderer::GetDlssStatus().
+        Public/Pyxis/Renderer/Descs/DlssStatus.h
 )
 
 # ----------------------------------------------------------------------------
@@ -102,20 +106,84 @@ target_sources(pyxis_renderer PRIVATE
     Private/RenderGraph/RenderGraph.h
     Private/RenderGraph/RenderGraph.cpp
 
+    Private/Passes/SceneBindings.h
+    Private/Passes/SceneBindings.cpp
+    # DLSS Stage 2a — the Halton jitter sequence shared by SceneBindings
+    # (uploads it for the raygen) and DlssPass (feeds it to Streamline).
+    Private/Passes/CameraJitter.h
+    # RTX-alignment design (rtx-realtime-alignment-design.md), "unexposed
+    # intensity" clamp fix — the shared exposure-scale formula
+    # TonemapPass::Execute and SceneBindings::Update both consume (header-
+    # only, no .cpp: two small pure inline functions).
+    Private/Passes/ExposureMath.h
     Private/Passes/RaytracedGBufferPass.h
     Private/Passes/RaytracedGBufferPass.cpp
-    Private/Passes/RaytracedLightingPass.h
-    Private/Passes/RaytracedLightingPass.cpp
+    # RTX-alignment design (rtx-realtime-alignment-design.md), WP2-signals —
+    # the five Phase A signal passes, registered between RaytracedGBuffer
+    # and CompositePass (PyxisRenderer.cpp).
+    Private/Passes/DirectLightingPass.h
+    Private/Passes/DirectLightingPass.cpp
+    Private/Passes/IndirectDiffusePass.h
+    Private/Passes/IndirectDiffusePass.cpp
+    Private/Passes/AmbientOcclusionPass.h
+    Private/Passes/AmbientOcclusionPass.cpp
+    Private/Passes/ReflectionsPass.h
+    Private/Passes/ReflectionsPass.cpp
+    Private/Passes/TranslucencyPass.h
+    Private/Passes/TranslucencyPass.cpp
+    # RTX-alignment design (rtx-realtime-alignment-design.md), Phase B —
+    # the 4-pass denoiser chain, registered between TranslucencyPass and
+    # CompositePass (PyxisRenderer.cpp). DenoiserResources is the small
+    # cross-frame ping-pong history helper DenoiseTemporalPass owns.
+    Private/Passes/DenoiserResources.h
+    Private/Passes/DenoiserResources.cpp
+    Private/Passes/DenoiseShadowPass.h
+    Private/Passes/DenoiseShadowPass.cpp
+    Private/Passes/DenoiseTemporalPass.h
+    Private/Passes/DenoiseTemporalPass.cpp
+    Private/Passes/DenoiseHistoryFixPass.h
+    Private/Passes/DenoiseHistoryFixPass.cpp
+    Private/Passes/DenoiseAtrousPass.h
+    Private/Passes/DenoiseAtrousPass.cpp
+    # RTX-alignment design (rtx-realtime-alignment-design.md), WP2-final —
+    # CompositePass replaces the retired RaytracedLightingPass megakernel,
+    # recombining the five signal passes' outputs into the final radiance.
+    Private/Passes/CompositePass.h
+    Private/Passes/CompositePass.cpp
     Private/Passes/TonemapPass.h
     Private/Passes/TonemapPass.cpp
     Private/Passes/AutoExposurePass.h
     Private/Passes/AutoExposurePass.cpp
+    # RTX-alignment design (rtx-realtime-alignment-design.md), Phase B —
+    # TaaPass, registered between AutoExposurePass and TonemapPass
+    # (PyxisRenderer.cpp).
+    Private/Passes/TaaPass.h
+    Private/Passes/TaaPass.cpp
     Private/Passes/SsaaResolvePass.h
     Private/Passes/SsaaResolvePass.cpp
     Private/Passes/BlitToSrgbPass.h
     Private/Passes/BlitToSrgbPass.cpp
 
     Private/Profiler/Profiler.cpp
+
+    # DLSS Stage 1 (rtx-realtime-alignment-design.md, "DLSS — corrected
+    # stance" + "DLSS scope includes upscaling") — capability-probe
+    # scaffold (DLL discovery + Streamline symbol resolution). Stage 2a
+    # adds real device interop (Initialize/slSetVulkanInfo/
+    # slIsFeatureSupported, DlssProvider.cpp) and the per-frame evaluate
+    # path (GetOptimalRenderResolution/Evaluate/ReleaseResources,
+    # DlssProviderFrame.cpp — split out per the "long methods split
+    # per-phase" convention once Stage 2a grew the class past one file).
+    # Owned by PyxisRenderer.
+    Private/Dlss/DlssProvider.h
+    Private/Dlss/DlssProviderImpl.h
+    Private/Dlss/DlssProvider.cpp
+    Private/Dlss/DlssProviderFrame.cpp
+    # DLSS Stage 2a — the render-graph pass evaluating DLSS Super
+    # Resolution (renderRes composite -> displayRes upscale), registered
+    # between CompositePass and AutoExposurePass (PyxisRenderer.cpp).
+    Private/Passes/DlssPass.h
+    Private/Passes/DlssPass.cpp
 
     Private/Renderers/PyxisRenderer.cpp
 
@@ -162,6 +230,17 @@ pyxis_thirdparty_require_hlslpp()
 target_include_directories(pyxis_renderer
     PRIVATE
         ${CMAKE_SOURCE_DIR}/resources/shaders
+)
+
+# DLSS Stage 2a (rtx-realtime-alignment-design.md) — vendored Streamline
+# MIT headers (thirdparty/streamline/, LICENSE.txt alongside). Header-only
+# / GetProcAddress-based (Private/Dlss/DlssProvider.cpp) — no import lib,
+# no link dependency; builds identically whether or not the proprietary
+# DLLs (_local/dlss/, never committed) are staged. Mirrors the identical
+# include added to pyxis_platform's CMakeLists.txt (Device/
+# DlssDeviceExtensions.cpp, the pre-device-creation half of this hookup).
+target_include_directories(pyxis_renderer PRIVATE
+    ${CMAKE_SOURCE_DIR}/thirdparty/streamline/include
 )
 
 # stb_image is header-only; vcpkg's `Stb` config exports the include
@@ -240,6 +319,18 @@ set_source_files_properties(Private/Materials/StbImageRead.cpp PROPERTIES
 set_source_files_properties(Private/GpuScene/StbDxt.cpp PROPERTIES
     SKIP_LINTING ON)
 
+# DLSS Stage 2a — the vendored sl_helpers_vk.h (thirdparty/streamline/,
+# NVIDIA's own MIT header) initializes VkPhysicalDeviceVulkan12/13Features
+# with a single-field braced-init (`{ VK_STRUCTURE_TYPE_... }`), which
+# trips -Wmissing-field-initializers under /W4. Scoped to the two TUs that
+# pull it in via DlssProviderImpl.h (not project-wide) — same "third-party
+# code, not ours to fix" precedent as StbImageRead.cpp above.
+set_source_files_properties(
+    Private/Dlss/DlssProvider.cpp
+    Private/Dlss/DlssProviderFrame.cpp
+    PROPERTIES COMPILE_OPTIONS "-Wno-missing-field-initializers"
+)
+
 target_link_libraries(pyxis_renderer
     PUBLIC
         Pyxis::Platform
@@ -283,54 +374,283 @@ set(PYXIS_SHADER_SHADING    ${CMAKE_SOURCE_DIR}/resources/shaders/shading.slang)
 # closure edit recompiles the lighting raygen + closesthit.
 set(PYXIS_SHADER_OPENPBR    ${CMAKE_SOURCE_DIR}/resources/shaders/openpbr_material.slang)
 set(PYXIS_SHADER_ANYHIT     ${CMAKE_SOURCE_DIR}/resources/shaders/raytraced_anyhit.slang)
+# RTX-alignment design (rtx-realtime-alignment-design.md), Phase B — the
+# shared PCG32 RNG + cosine-hemisphere sampling module. Listed under
+# INCLUDES on every entry whose source #includes it (direct_lighting /
+# indirect_diffuse / ambient_occlusion / reflections — every pass with a
+# stochastic estimator); NOT compiled standalone, same convention as the
+# other shared modules above.
+set(PYXIS_SHADER_RNG        ${CMAKE_SOURCE_DIR}/resources/shaders/rng.slang)
 
-# --- RT pipeline A: RaytracedGBufferPass (visibility buffer) ---------
+# --- RT pipeline A: RaytracedGBufferPass (extended G-buffer, RTX-alignment
+# WP2-core rewrite) — ONE shader file carrying all four entry points
+# (rtx-realtime-alignment-design.md "Full shader-rewrite mandate": one
+# pass = one shader file, all entries inside). slangc is invoked once per
+# entry point (`-entry <name>`) against the SAME source; each invocation
+# only emits the SPIR-V reachable from that entry, so the four .spv stay
+# as small/thin as the pre-WP2 per-stage files. The raygen also reuses
+# EvaluateSurfaceMaterial (shading.slang) for its primary-hit material
+# eval, so this pass pulls the full scene-table include chain (camera_ray
+# + dome_sample + raytraced_anyhit + openpbr_material via shading.slang)
+# exactly like RaytracedLightingPass's raygen does below.
 pyxis_compile_slang_shader(
     TARGET      pyxis_renderer
-    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/raytraced_gbuffer_raygen.slang
-    ENTRY_POINT main
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/raytraced_gbuffer.slang
+    ENTRY_POINT RayGenMain
     STAGE       raygen
     OUTPUT      raytraced_gbuffer_raygen.spv
-    INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY}
+    INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
+                ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR} ${PYXIS_SHADER_ANYHIT}
 )
 pyxis_compile_slang_shader(
     TARGET      pyxis_renderer
-    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/raytraced_gbuffer_closesthit.slang
-    ENTRY_POINT main
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/raytraced_gbuffer.slang
+    ENTRY_POINT ClosestHitMain
     STAGE       closesthit
     OUTPUT      raytraced_gbuffer_closesthit.spv
-    INCLUDES    ${PYXIS_SHADER_INTEROP}
+    INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
+                ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR} ${PYXIS_SHADER_ANYHIT}
 )
 pyxis_compile_slang_shader(
     TARGET      pyxis_renderer
-    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/raytraced_gbuffer_miss.slang
-    ENTRY_POINT main
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/raytraced_gbuffer.slang
+    ENTRY_POINT MissMain
     STAGE       miss
     OUTPUT      raytraced_gbuffer_miss.spv
-    INCLUDES    ${PYXIS_SHADER_INTEROP}
+    INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
+                ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR} ${PYXIS_SHADER_ANYHIT}
 )
 pyxis_compile_slang_shader(
     TARGET      pyxis_renderer
-    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/raytraced_gbuffer_anyhit.slang
-    ENTRY_POINT main
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/raytraced_gbuffer.slang
+    ENTRY_POINT AnyHitMain
     STAGE       anyhit
     OUTPUT      raytraced_gbuffer_anyhit.spv
-    INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_ANYHIT}
+    INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
+                ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR} ${PYXIS_SHADER_ANYHIT}
 )
 
-# --- RT pipeline B: RaytracedLightingPass (deferred first hit + all
-# secondary rays). The raygen pulls camera_ray + shading (which itself
-# includes camera_ray + dome_sample) — all listed so any module edit
-# recompiles it.
+# --- RTX-alignment design (rtx-realtime-alignment-design.md), WP2-signals
+# — the five Phase A signal passes, ONE shader file each carrying every
+# entry point (the "Full shader-rewrite mandate"). Registered between the
+# RaytracedGBuffer and RaytracedLighting pipelines below.
+
+# DirectLightingPass — RayGenMain, ShadowMissMain, AnyHitMain. Pulls the
+# full scene-table chain (shading.slang) for EvaluateSurfaceMaterial +
+# EvaluateOpenPBRDirectSplit, plus rng.slang (Phase B RIS estimator).
 pyxis_compile_slang_shader(
     TARGET      pyxis_renderer
-    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/raytraced_lighting_raygen.slang
-    ENTRY_POINT main
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/direct_lighting.slang
+    ENTRY_POINT RayGenMain
     STAGE       raygen
-    OUTPUT      raytraced_lighting_raygen.spv
+    OUTPUT      direct_lighting_raygen.spv
     INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
-                ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR}
+                ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR} ${PYXIS_SHADER_ANYHIT}
+                ${PYXIS_SHADER_RNG}
 )
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/direct_lighting.slang
+    ENTRY_POINT ShadowMissMain
+    STAGE       miss
+    OUTPUT      direct_lighting_shadow_miss.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
+                ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR} ${PYXIS_SHADER_ANYHIT}
+                ${PYXIS_SHADER_RNG}
+)
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/direct_lighting.slang
+    ENTRY_POINT AnyHitMain
+    STAGE       anyhit
+    OUTPUT      direct_lighting_anyhit.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
+                ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR} ${PYXIS_SHADER_ANYHIT}
+                ${PYXIS_SHADER_RNG}
+)
+
+# IndirectDiffusePass — RayGenMain, ClosestHitMain, MissMain,
+# ShadowMissMain, AnyHitMain (Phase B: real path-traced bounce — grew from
+# the Phase A RayGen-only pipeline).
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/indirect_diffuse.slang
+    ENTRY_POINT RayGenMain
+    STAGE       raygen
+    OUTPUT      indirect_diffuse_raygen.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
+                ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR} ${PYXIS_SHADER_ANYHIT}
+                ${PYXIS_SHADER_RNG}
+)
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/indirect_diffuse.slang
+    ENTRY_POINT ClosestHitMain
+    STAGE       closesthit
+    OUTPUT      indirect_diffuse_closesthit.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
+                ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR} ${PYXIS_SHADER_ANYHIT}
+                ${PYXIS_SHADER_RNG}
+)
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/indirect_diffuse.slang
+    ENTRY_POINT MissMain
+    STAGE       miss
+    OUTPUT      indirect_diffuse_miss.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
+                ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR} ${PYXIS_SHADER_ANYHIT}
+                ${PYXIS_SHADER_RNG}
+)
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/indirect_diffuse.slang
+    ENTRY_POINT ShadowMissMain
+    STAGE       miss
+    OUTPUT      indirect_diffuse_shadow_miss.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
+                ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR} ${PYXIS_SHADER_ANYHIT}
+                ${PYXIS_SHADER_RNG}
+)
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/indirect_diffuse.slang
+    ENTRY_POINT AnyHitMain
+    STAGE       anyhit
+    OUTPUT      indirect_diffuse_anyhit.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
+                ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR} ${PYXIS_SHADER_ANYHIT}
+                ${PYXIS_SHADER_RNG}
+)
+
+# AmbientOcclusionPass — RayGenMain, MissMain, AnyHitMain. Deliberately
+# independent of shading.slang / openpbr_material.slang (RTAO needs only
+# geometry) — camera_ray + the shared alpha-test anyhit module + rng.slang
+# (Phase B stochastic cosine-hemisphere occlusion).
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/ambient_occlusion.slang
+    ENTRY_POINT RayGenMain
+    STAGE       raygen
+    OUTPUT      ambient_occlusion_raygen.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_ANYHIT}
+                ${PYXIS_SHADER_RNG}
+)
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/ambient_occlusion.slang
+    ENTRY_POINT MissMain
+    STAGE       miss
+    OUTPUT      ambient_occlusion_miss.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_ANYHIT}
+                ${PYXIS_SHADER_RNG}
+)
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/ambient_occlusion.slang
+    ENTRY_POINT AnyHitMain
+    STAGE       anyhit
+    OUTPUT      ambient_occlusion_anyhit.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_ANYHIT}
+                ${PYXIS_SHADER_RNG}
+)
+
+# ReflectionsPass — RayGenMain, ClosestHitMain, MissMain. rng.slang added
+# (Phase B GGX VNDF importance-sampled reflection direction).
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/reflections.slang
+    ENTRY_POINT RayGenMain
+    STAGE       raygen
+    OUTPUT      reflections_raygen.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
+                ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR} ${PYXIS_SHADER_ANYHIT}
+                ${PYXIS_SHADER_RNG}
+)
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/reflections.slang
+    ENTRY_POINT ClosestHitMain
+    STAGE       closesthit
+    OUTPUT      reflections_closesthit.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
+                ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR} ${PYXIS_SHADER_ANYHIT}
+                ${PYXIS_SHADER_RNG}
+)
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/reflections.slang
+    ENTRY_POINT MissMain
+    STAGE       miss
+    OUTPUT      reflections_miss.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
+                ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR} ${PYXIS_SHADER_ANYHIT}
+                ${PYXIS_SHADER_RNG}
+)
+
+# TranslucencyPass — RayGenMain, ClosestHitMain, MissMain, AnyHitMain
+# (reuses the existing megakernel machinery verbatim — see the pass's own
+# file headers).
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/translucency.slang
+    ENTRY_POINT RayGenMain
+    STAGE       raygen
+    OUTPUT      translucency_raygen.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
+                ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR} ${PYXIS_SHADER_ANYHIT}
+)
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/translucency.slang
+    ENTRY_POINT ClosestHitMain
+    STAGE       closesthit
+    OUTPUT      translucency_closesthit.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
+                ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR} ${PYXIS_SHADER_ANYHIT}
+)
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/translucency.slang
+    ENTRY_POINT MissMain
+    STAGE       miss
+    OUTPUT      translucency_miss.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
+                ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR} ${PYXIS_SHADER_ANYHIT}
+)
+# ShadowMissMain — required by the reused ShadeSurfaceHit's internal
+# shadow/AO rays (hardcoded MissShaderIndex = 1); see the entry's own
+# doc comment in translucency.slang for how this was discovered
+# (an OOB shader-table read crashed the GPU without it).
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/translucency.slang
+    ENTRY_POINT ShadowMissMain
+    STAGE       miss
+    OUTPUT      translucency_shadow_miss.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
+                ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR} ${PYXIS_SHADER_ANYHIT}
+)
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/translucency.slang
+    ENTRY_POINT AnyHitMain
+    STAGE       anyhit
+    OUTPUT      translucency_anyhit.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
+                ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR} ${PYXIS_SHADER_ANYHIT}
+)
+
+# --- RTX-alignment design (rtx-realtime-alignment-design.md), WP2-final —
+# the RaytracedLightingPass megakernel is RETIRED (its raygen + miss are
+# deleted); CompositePass (below, a compute pass) replaces it as the
+# linearColor / colorHdr / alpha writer. raytraced_lighting_closesthit.slang
+# + raytraced_lighting_shadow_miss.slang + raytraced_lighting_anyhit.slang
+# are KEPT (compiled here, unchanged) per the owner's WP2-final directive —
+# they are the reference megakernel machinery TranslucencyPass's own
+# ClosestHitMain/ShadowMissMain/AnyHitMain (translucency.slang) were ported
+# from; nothing in the current graph loads their .spv at runtime, so this
+# block is intentionally orphaned build output, not dead source.
 pyxis_compile_slang_shader(
     TARGET      pyxis_renderer
     SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/raytraced_lighting_closesthit.slang
@@ -338,15 +658,7 @@ pyxis_compile_slang_shader(
     STAGE       closesthit
     OUTPUT      raytraced_lighting_closesthit.spv
     INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
-                ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR}
-)
-pyxis_compile_slang_shader(
-    TARGET      pyxis_renderer
-    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/raytraced_lighting_miss.slang
-    ENTRY_POINT main
-    STAGE       miss
-    OUTPUT      raytraced_lighting_miss.spv
-    INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_DOME}
+                ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR} ${PYXIS_SHADER_ANYHIT}
 )
 # M9-fidelity shadow rays — second miss shader stitched into the
 # shader binding table at miss-index 1. The shared shading traces a
@@ -369,6 +681,19 @@ pyxis_compile_slang_shader(
     OUTPUT      raytraced_lighting_anyhit.spv
     INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_ANYHIT}
 )
+# CompositePass — ONE compute entry, recombines the five signal passes'
+# outputs into the final linear radiance (WP2-final). Needs camera_ray
+# (BuildCameraRay for the miss-pixel dome background) + dome_sample
+# (SampleDomeBackground) but NOT shading/openpbr/anyhit — it does no
+# material re-evaluation or TraceRay of its own.
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/composite.slang
+    ENTRY_POINT main
+    STAGE       compute
+    OUTPUT      composite.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
+)
 # Display transform (compute) — P3 pass split. The 11-way debug-view
 # branch (exposure + Narkowicz ACES on COLOR) extracted from raygen;
 # reads the fp32 linearColor scratch + the raw AOVs, writes the BGRA8
@@ -383,8 +708,10 @@ pyxis_compile_slang_shader(
 )
 # Auto-exposure log-luminance reduction (compute). Optional pass between
 # lighting and tonemap: reduces the fp32 linearColor to a geometric-mean
-# luminance (deterministic fixed-point integer atomics) into an 8-byte stats
-# buffer the tonemap reads. No-op when RenderSettings::autoExposure is off.
+# luminance (legacy mode, deterministic fixed-point integer atomics) or a
+# 64-bucket log-luminance histogram (histogram mode, RTX-alignment design
+# Phase C) into a stats buffer the tonemap reads. No-op when
+# RenderSettings::autoExposure is off.
 pyxis_compile_slang_shader(
     TARGET      pyxis_renderer
     SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/auto_exposure.slang
@@ -393,6 +720,91 @@ pyxis_compile_slang_shader(
     OUTPUT      auto_exposure.spv
     INCLUDES    ${PYXIS_SHADER_INTEROP}
 )
+# RTX-alignment design (rtx-realtime-alignment-design.md), Phase C —
+# histogram auto-exposure's second dispatch: single-thread reduction of the
+# 64-bucket histogram `main` (above) built, to one median log2(luminance).
+# Same source file (one pass = one shader file, per the WP2 "Full
+# shader-rewrite mandate"), a second entry point / .spv.
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/auto_exposure.slang
+    ENTRY_POINT ResolveHistogram
+    STAGE       compute
+    OUTPUT      auto_exposure_resolve.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP}
+)
+
+# --- RTX-alignment design (rtx-realtime-alignment-design.md), Phase B —
+# the 4-pass denoiser chain (SIGMA-class shadow filter + ReLAX-class
+# temporal/history-fix/à-trous) and TaaPass. All screen-space COMPUTE
+# passes (ONE shader file / ONE compute entry each, dispatched multiple
+# times per frame by their owning C++ pass where the frozen spec calls for
+# it) — no SceneBindings, so only ShaderInterop.slang is needed.
+
+# DenoiseShadowPass — dispatched twice per frame (narrow then wide radius)
+# against the SAME compiled shader; see DenoiseShadowPass::Execute.
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/denoise_shadow.slang
+    ENTRY_POINT main
+    STAGE       compute
+    OUTPUT      denoise_shadow.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP}
+)
+# DenoiseTemporalPass — ReLAX-class reprojection + accumulation.
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/denoise_temporal.slang
+    ENTRY_POINT main
+    STAGE       compute
+    OUTPUT      denoise_temporal.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP}
+)
+# DenoiseHistoryFixPass — widens spatial support for low-history pixels.
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/denoise_history_fix.slang
+    ENTRY_POINT main
+    STAGE       compute
+    OUTPUT      denoise_history_fix.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP}
+)
+# DenoiseAtrousPass — dispatched 5 times per frame (ping-pong, dilating
+# step size) against the SAME compiled shader; see
+# DenoiseAtrousPass::Execute.
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/denoise_atrous.slang
+    ENTRY_POINT main
+    STAGE       compute
+    OUTPUT      denoise_atrous.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP}
+)
+# TaaPass — jittered-history reprojection + neighborhood clamp, runs
+# before TonemapPass on the linear pre-tonemap color.
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/taa.slang
+    ENTRY_POINT main
+    STAGE       compute
+    OUTPUT      taa.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP}
+)
+
+# DLSS Stage 2a (rtx-realtime-alignment-design.md) — DlssPass's own tiny
+# depth-conversion dispatch: linear view-space gViewZ -> the standard
+# normalized-device depth Streamline's DLSS-SR plugin actually requires
+# (kBufferTypeDepth). See that shader's own file comment for the full
+# citation/formula.
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/dlss_depth_convert.slang
+    ENTRY_POINT main
+    STAGE       compute
+    OUTPUT      dlss_depth_convert.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP}
+)
+
 # Viewer SSAA box-downsample resolve (compute). Reads the super-res
 # color AOV, writes the backbuffer-resolution resolve. Used by
 # ViewerMode when SSAA > 1 (ImGui toggle / factor). Renamed from

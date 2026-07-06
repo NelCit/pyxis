@@ -107,6 +107,25 @@ struct VisibilityPayload {
     uint   instanceId;      // InstanceID(); ~0u on miss
     uint   primitiveIndex;  // PrimitiveIndex(); ~0u on miss
 };
+
+// OcclusionPayload — RTX-alignment design (rtx-realtime-alignment-design.md),
+// WP2-signals. A single-float "am I occluded" payload shared by DirectLightingPass's
+// per-light shadow ray and AmbientOcclusionPass's hemispherical visibility ray — both
+// use the SAME pre-trace-occluded / miss-writes-1.0 convention shading.slang's own
+// shadow/AO rays use (see ShadeSurfaceHit): the caller sets `visible = 0.0` before
+// TraceRay, the pass's MissMain writes `visible = 1.0` on an unoccluded path, and any
+// opaque anyhit-accepted hit leaves the pre-trace 0.0 untouched (RAY_FLAG_
+// ACCEPT_FIRST_HIT_AND_END_SEARCH + RAY_FLAG_SKIP_CLOSEST_HIT_SHADER — the closesthit
+// never runs). Shader-only: never crosses the C++/SPIR-V boundary as a memory blob.
+struct OcclusionPayload {
+    float visible;  // 0.0 = occluded (pre-trace default) / 1.0 = clear (written by MissMain)
+    // DirectLightingPass's dominant-light occluder distance (§"future SIGMA
+    // guide" in rtx-realtime-alignment-design.md's WP2 contract table).
+    // Pre-trace default 0.0 = "unshadowed" sentinel; the shadow ray's own
+    // AnyHitMain writes RayTCurrent() here when it accepts (does not
+    // IgnoreHit()) an occluder. AmbientOcclusionPass ignores this field.
+    float hitT;
+};
 #endif
 
 // CameraUniforms — uploaded per-frame to a constant buffer the raygen
@@ -158,6 +177,42 @@ struct CameraUniforms {
     // pattern reads a float slot as a uint without packing trouble.
     uint  projectionMode;
     float _camPad1;
+};
+
+// MotionVectorCameraUniforms — RTX-alignment design (rtx-realtime-
+// alignment-design.md), Phase A / WP1 denoiser guides. Carries the
+// PREVIOUS frame's `clipFromWorld` (= projFromView · viewFromWorld, the
+// forward world→clip transform) plus a `cameraStatic` gate so the
+// lighting raygen can derive the motionVector AOV. Lives in its OWN
+// cbuffer (bound at binding 8 — a P2-buffer-packing-retired slot in
+// RaytracedLightingPass's layout, see the BindingLayoutDesc comment
+// there) rather than growing CameraUniforms, which keeps
+// CameraUniforms' frozen 208-byte layout untouched.
+//
+// `cameraStatic` is a CPU-computed, bit-exact equality check (memcmp of
+// this frame's clipFromWorld against `prevClipFromWorld`, or "no history
+// yet" on frame 0) — NOT something the shader infers from floating-point
+// comparisons. When set, the raygen skips the reprojection arithmetic
+// entirely and writes motionVector = (0, 0) directly. This is
+// deliberately more conservative than "reproject through both matrices
+// and diff": two textually-identical `mul(float4x4, float4)` expressions
+// compiled at different call sites are NOT guaranteed bit-identical
+// results by IHV compilers (independent instruction selection / FMA
+// contraction per call site) even when fed bit-identical operands —
+// verified empirically during WP1 development, where that approach left
+// a sub-ULP-scale residual (~1e-6 pixels) instead of an exact zero. The
+// boolean gate sidesteps the GPU floating-point question altogether:
+// the CPU already knows losslessly whether the camera moved.
+//
+// C++ side treats "no history yet" (the very first Execute()) as static
+// too, so motionVector reads exactly (0,0) on frame 0 — the §18.6
+// first-frame contract referenced by plan §43.2.
+struct MotionVectorCameraUniforms {
+    float4x4 prevClipFromWorld;  // previous frame's projFromView · viewFromWorld
+    uint  cameraStatic;          // 1 = skip reprojection, motionVector = (0,0) exactly
+    uint  _mvPad0;
+    uint  _mvPad1;
+    uint  _mvPad2;
 };
 
 // FrameUiUniforms — per-frame viewer-only state the lighting raygen
@@ -226,34 +281,122 @@ struct SsaaDownsampleUniforms {
 // when the scene has no outliers.
 #define AUTO_EXPOSURE_MAX_HEADROOM 2.5
 
-// AutoExposurePass compute uniforms — source (HDR radiance) dimensions. The
-// stats buffer (uint2: [0]=fixed-point log-lum sum, [1]=lit-pixel count) is a
-// separate UAV the pass clears + accumulates and the tonemap reads.
+// RTX-alignment design (rtx-realtime-alignment-design.md), Phase C — auto-
+// exposure mode selector. `legacy` is the pre-Phase-C sum/count/max geometric-
+// mean-of-highlights reduction (unchanged, still the default when auto-
+// exposure is enabled); `histogram` is the ovrtx-parity 64-bucket log-
+// luminance histogram (see AUTO_EXPOSURE_HISTOGRAM_* below). Shared both
+// sides so AutoExposurePass and TonemapPass agree on which stats layout the
+// buffer holds this frame.
+#define AUTO_EXPOSURE_MODE_LEGACY    0u
+#define AUTO_EXPOSURE_MODE_HISTOGRAM 1u
+
+// Histogram auto-exposure (ovrtx-parity) — OmniRtxCameraAutoExposureAPI
+// schema defaults (generatedSchema.usda): 64-bucket log-luminance histogram,
+// filter=median, histogram luminance clamp [50, 100000], white point scale
+// 10, adaptation tau 3.5. NOTE ON UNITS: these clamp values are ovrtx's own
+// photometric-luminance (nits) range; Pyxis's scene-linear radiance is NOT
+// calibrated to physical nits (see rtx-realtime-alignment-design.md's
+// "Measured gap" — m7's distant intensity 3 renders HDR max ~0.003 before
+// any exposure model is applied), so taking [50, 100000] verbatim will clamp
+// most/all Pyxis content to the histogram's bottom bucket until a scene is
+// authored (or exposed via the physical-camera model below) into that range.
+// Implemented verbatim per the schema anyway (matches the task's "implement
+// the schema, then calibrate" order); the Phase C calibration sweep reports
+// how it actually behaves. Tracked as debt: a properly unit-correct histogram
+// would clamp in the SAME linear space the physical-camera exposureScale
+// (below) produces, not raw scene-linear radiance.
+#define AUTO_EXPOSURE_HISTOGRAM_BUCKETS 64u
+#define AUTO_EXPOSURE_HISTOGRAM_MIN_LUMINANCE 50.0
+#define AUTO_EXPOSURE_HISTOGRAM_MAX_LUMINANCE 100000.0
+#define AUTO_EXPOSURE_HISTOGRAM_WHITE_POINT_SCALE 10.0
+// Temporal adaptation (tau, seconds) — schema default 3.5, exponential.
+// NOT implemented: PassContext carries no frame-delta-time (and is Phase B-
+// owned for this design — see the Phase C task's file-ownership split), so
+// there is no per-frame dt to build an EMA from here. Both auto-exposure
+// modes therefore fully converge every frame (which is also the schema's
+// documented HEADLESS behaviour — "headless: full convergence per frame for
+// determinism" — so headless output is unaffected; only the viewer loses the
+// smooth ramp, which shows as instantaneous rather than eased exposure
+// changes on fast luminance swings). Tracked as debt.
+#define AUTO_EXPOSURE_ADAPTATION_TAU 3.5
+
+// AutoExposurePass's stats buffer layout: the pre-Phase-C legacy reduction
+// (sum, count, max — see AutoExposurePass's ctor comment) occupies bytes
+// [0, 12) UNCHANGED (byte-for-byte compatible with the original 12-byte
+// buffer); histogram mode's 64 uint32 buckets occupy [12, 268); a single
+// resolved-median float (bit-pattern via asuint/asfloat — AutoExposurePass's
+// second "ResolveHistogram" dispatch writes it once per frame from a single
+// thread, so no fixed-point encoding is needed for determinism) occupies
+// [268, 272). All three regions coexist in the SAME buffer (sized for the
+// worst case) so switching `mode` at runtime never requires a resource
+// resize.
+#define AUTO_EXPOSURE_STATS_HISTOGRAM_OFFSET 12u
+#define AUTO_EXPOSURE_STATS_RESOLVED_EV_OFFSET 268u  // 12 + 64*4
+#define AUTO_EXPOSURE_STATS_TOTAL_BYTES 272u         // 12 + 64*4 + 4
+
+// AutoExposurePass compute uniforms — source (HDR radiance) dimensions +
+// which reduction the shader runs this dispatch. The stats buffer (see
+// AUTO_EXPOSURE_STATS_* above) is a separate UAV the pass clears +
+// accumulates and the tonemap reads.
 struct AutoExposureUniforms {
     uint srcWidth;
     uint srcHeight;
-    uint _aePad0;
+    uint mode;       // AUTO_EXPOSURE_MODE_LEGACY / _HISTOGRAM (was _aePad0)
     uint _aePad1;
 };
 
+// RTX-alignment design (rtx-realtime-alignment-design.md), Phase C —
+// tonemap operator enum, mirroring ovrtx 0.3.0's own OmniRtxTonemapAPI
+// applied-schema enum 1:1 (generatedSchema.usda: "raw, none, reinhard,
+// modifiedReinhard, hejiHableAlu, hableUc2, acesApproximation, iray"), same
+// order/indices so the two never drift. acesApproximation (6) is both
+// ovrtx's AND Pyxis's pre-Phase-C default — selecting it reproduces the
+// existing Narkowicz ACES fit byte-for-byte (see tonemap.slang).
+#define TONEMAP_OPERATOR_RAW                0u  // identity — no exposure, no compression
+#define TONEMAP_OPERATOR_NONE                1u  // exposure only, linear passthrough
+#define TONEMAP_OPERATOR_REINHARD            2u  // x / (1 + x), per channel
+#define TONEMAP_OPERATOR_MODIFIED_REINHARD   3u  // x*(1+x/w^2) / (1+x), white point w
+#define TONEMAP_OPERATOR_HEJI_HABLE_ALU      4u  // Hejl/Burgess-Dawson filmic (baked gamma)
+#define TONEMAP_OPERATOR_HABLE_UC2           5u  // Uncharted 2 filmic
+#define TONEMAP_OPERATOR_ACES_APPROXIMATION  6u  // Narkowicz fit (existing / default)
+#define TONEMAP_OPERATOR_IRAY                7u  // Reinhard-family burn/crush/saturation
+
+// Fixed schema-default sub-parameters for the operators above. Not exposed
+// as RenderSettings-configurable knobs (the public RenderSettings §22.3
+// reserved-slot budget for this design went to the operator selector itself
+// + the physical-camera exposure block below); hardcoded here at ovrtx's own
+// schema defaults, matching every other "authoritative default" constant in
+// this file (AO_RAY_LENGTH, REFLECTION_MAX_ROUGHNESS, ...). Tracked as debt
+// if per-instance tuning is ever needed.
+#define MODIFIED_REINHARD_WHITE_POINT 4.0
+#define HABLE_UC2_WHITE_POINT 11.2
+#define IRAY_BURN_HIGHLIGHTS 0.7   // per component (OmniRtxTonemapAPI default)
+#define IRAY_CRUSH_BLACKS    0.5
+#define IRAY_SATURATION      1.0
+
 // Tonemap compute-pass uniforms (P3 pass split — the display transform
-// extracted from raygen's inline branch). exposure mirrors
-// CameraUniforms.exposure (photographic stops, applied as 2^exposure
-// before the ACES tonemap); debugViewMode / worldPosPeriod mirror the
-// FrameUiUniforms fields the raygen display branch used to read.
-// 32 bytes (two cbuffer rows).
+// extracted from raygen's inline branch; Phase C — operator select +
+// physical-camera exposure scale). exposure mirrors CameraUniforms.exposure
+// (photographic stops, applied as 2^exposure before the tonemap operator);
+// debugViewMode / worldPosPeriod mirror the FrameUiUniforms fields the
+// raygen display branch used to read. 48 bytes (three cbuffer rows).
 struct TonemapUniforms {
     // Row 0 — display transform inputs.
     float exposure;        // photographic stops; gain = 2^exposure
     uint  debugViewMode;   // DEBUG_VIEW_COLOR / NORMAL / DEPTH / ...
     float worldPosPeriod;  // WorldPos sin-encode period (scene units)
     uint  destWidth;       // output (display target) dimensions in texels
-    // Row 1 — dims tail + auto-exposure (reuses the former reserved pads, so
-    // the 32-byte layout is unchanged).
+    // Row 1 — dims tail + auto-exposure.
     uint  destHeight;
     uint  autoExposureEnabled;  // 0 = use `exposure` as-is; 1 = add the auto EV
     float autoExposureKey;      // target middle-grey (0.18 default)
-    uint  _pad2;
+    uint  autoExposureMode;     // AUTO_EXPOSURE_MODE_LEGACY / _HISTOGRAM (was _pad2)
+    // Row 2 — Phase C: tonemap operator + physical-camera exposure.
+    uint  tonemapOperator;  // TONEMAP_OPERATOR_* — see enum above
+    float exposureScale;    // physical-camera linear multiplier; 1.0 = legacy no-op
+    uint  _tmPad0;
+    uint  _tmPad1;
 };
 
 // Debug-view selector mirrored on both sides. The combo in ImGuiHost's
@@ -461,13 +604,13 @@ struct OpenPBRMaterialGPU {
     float _reserved4;
 
     // ------------------------------------------------------------------
-    // Rows 8-14 — OpenPBR-complete parameter block (Q1,
-    // openpbr-complete-design.md). Grows the struct 128 B -> 240 B
-    // (15 rows of 16 — the tightest multiple-of-16 that fits the full
-    // v1.1.1 parameter set; rows 0-7 above are byte-identical to the
-    // 128-B layout so the Q1 packing change is image-safe). Packed by
-    // PackMaterialGpu (Private/GpuScene/Detail.h) and, since Q2, READ
-    // by the openpbr_material.slang closure stack (these rows feed the
+    // Rows 8-15 — OpenPBR-complete parameter block (Q1,
+    // openpbr-complete-design.md) + the RTX-alignment round-2 blend-
+    // weight row. Grows the struct 128 B -> 256 B (16 rows of 16 —
+    // rows 0-7 above are byte-identical to the 128-B layout so the Q1
+    // packing change is image-safe). Packed by PackMaterialGpu
+    // (Private/GpuScene/Detail.h) and, since Q2, READ by the
+    // openpbr_material.slang closure stack (these rows feed the
     // specular/coat/fuzz/transmission/subsurface lobes). Row map:
     //   Row  8 — specularColor RGB + specularWeight
     //   Row  9 — coatColor RGB + coatIor
@@ -476,7 +619,10 @@ struct OpenPBRMaterialGPU {
     //   Row 11 — fuzzColor RGB + specularRoughnessAnisotropy
     //   Row 12 — transmissionColor RGB + subsurfaceWeight
     //   Row 13 — subsurfaceColor RGB + baseWeight
-    //   Row 14 — transmissionWeight + 3 reserved slots
+    //   Row 14 — transmissionWeight + albedoBrightness/Desaturation/Add
+    //            (2026-07-05 RTX-alignment; were 3 reserved slots)
+    //   Row 15 — metallicTextureInfluence + reflectionRoughnessTextureInfluence
+    //            + aoToDiffuse + _reserved5 (2026-07-06 RTX-alignment round 2)
     // (geometry_thin_walled travels as MATERIAL_FLAG_THIN_WALLED, not
     // as a struct field. _reserved1-4 on rows 5/7 above stay zero.)
     // ------------------------------------------------------------------
@@ -521,11 +667,32 @@ struct OpenPBRMaterialGPU {
     float subsurfaceColorB;
     float baseWeight;
 
-    // Row 14 — translucent-base selector weight + reserved tail.
+    // Row 14 — translucent-base selector weight + MDL OmniPBR "Albedo
+    // Adjustments" (2026-07-05 RTX-alignment; were _reserved5/6/7).
+    // Applied to the SAMPLED base-color texture before the diffuse_tint
+    // multiply — see shading.slang's baseColor block for the formula.
+    // Defaults (1, 0, 0) are the MDL function defaults (no-op).
     float transmissionWeight;
+    float albedoBrightness;
+    float albedoDesaturation;
+    float albedoAdd;
+
+    // Row 15 — 2026-07-06 RTX-alignment round 2 (materials chapter).
+    // OmniPBR constant/texture blend weights: OmniPBR lerps a per-lobe
+    // constant against its sampled texture by these weights rather
+    // than the texture unconditionally winning once bound.
+    // `metallicTextureInfluence` / `reflectionRoughnessTextureInfluence`
+    // gate the ORM metal/rough channels (see shading.slang's
+    // roughness/metalness block); `aoToDiffuse` blends the ORM AO
+    // channel into baseColor (see shading.slang's baseColor block).
+    // Defaults (1, 1, 0) are the MDL OmniPBR function defaults — a
+    // material that never authors them (every material measured in
+    // World Lobby except `rh_table_short`'s "Paint_Satin") is an exact
+    // no-op. `_reserved5` keeps the row 16-byte aligned.
+    float metallicTextureInfluence;
+    float reflectionRoughnessTextureInfluence;
+    float aoToDiffuse;
     float _reserved5;
-    float _reserved6;
-    float _reserved7;
 };
 
 // LightGpu — packed light entry the closesthit reads via the
@@ -707,24 +874,28 @@ struct VertexAttribGpu {
     float4 tangent;   // xyz tangent; w = bitangent handedness (±1), MikkTSpace
 };
 
-// VisibilityGpu — one per-pixel record of the P4 visibility buffer
-// (design D1): RWStructuredBuffer written by the RaytracedGBufferPass
-// raygen at binding 2 of ITS layout, read by the RaytracedLightingPass
-// raygen at binding 34. fp32-exact — NEVER quantized: the lighting
-// raygen reconstructs worldHit = origin + hitT·dir and the barycentric
-// attribute interpolation from these floats, and any rounding here
-// would break the §33.7 byte-identical contract. Indexed row-major:
-// `vis[y * width + x]`. Layout is 32 bytes (2 rows of 16); scalar-only
-// per the float3-trap rule above.
+// VisibilityGpu — one per-pixel record of the visibility buffer
+// (design D1, packed per the RTX-alignment design WP2 rewrite mandate):
+// RWStructuredBuffer written by the RaytracedGBufferPass raygen (Set 1
+// of its own layout), read by the RaytracedLightingPass raygen (Set 1
+// of ITS layout). Indexed row-major: `vis[y * width + x]`. Layout is
+// 16 bytes (1 row) — halved from the pre-WP2 32-byte fp32-exact record
+// by packing the two barycentric floats to f16 (`baryPacked`):
+//   baryPacked = f32tof16(baryX) | (f32tof16(baryY) << 16)
+// hitT / instanceId / primitiveIndex stay full fp32 / uint32 — only the
+// barycentrics are quantized. This is a documented, intentional
+// precision drop (rtx-realtime-alignment-design.md "Full shader-rewrite
+// mandate"): f16 barycentrics introduce a sub-golden-tolerance drift in
+// the reconstructed UV / normal interpolation, absorbed by the Phase A
+// golden rebake. hitT retains its -1.0 = miss sentinel (bit pattern
+// 0xBF800000); a `clearBufferUInt(vis, 0xBF800000u)` still produces a
+// valid all-fields-negative-ish miss record because hitT sits at word 0
+// of every 4-word record, exactly as it did in the 8-word layout.
 struct VisibilityGpu {
     float hitT;            // RayTCurrent() of the primary hit; -1.0 = miss
-    float baryX;           // triangle barycentrics (attribs.barycentrics)
-    float baryY;
+    uint  baryPacked;       // f32tof16(baryX) | (f32tof16(baryY) << 16)
     uint  instanceId;      // InstanceID(); ~0u on miss
     uint  primitiveIndex;  // PrimitiveIndex(); ~0u on miss
-    uint  _pad0;
-    uint  _pad1;
-    uint  _pad2;
 };
 
 // Bindless texture array capacity at RaytracedLightingPass binding 28.
@@ -733,6 +904,185 @@ struct VisibilityGpu {
 // true createBindlessLayout). The closesthit indexes via
 // `mat.baseColorTex`, gated on MATERIAL_FLAG_HAS_BASE_COLOR_MAP.
 static const uint BINDLESS_TEXTURES_CAP = 4096u;
+
+// RTX-alignment design (rtx-realtime-alignment-design.md), WP2-signals —
+// Phase A signal-pass constants (§"Authoritative defaults" / §"Technique
+// specs and stock-look defaults"). Shared both sides (like
+// BINDLESS_TEXTURES_CAP above) for documentation; superseded as the LIVE
+// per-frame values by RealTimeQualityUniforms (WP2-final, below) — these
+// two literals now only document ovrtx's authored defaults and back
+// RenderSettings::RealTimeQuality's own field initializers on the C++ side.
+//
+// AmbientOcclusionPass's hemispherical visibility-ray length. ovrtx's own
+// OmniRtxSettingsRtAPI:rayLength default is 35, authored in CENTIMETERS in
+// the Kit UI; Pyxis has no unit-conversion knob for this yet (elsewhere —
+// e.g. shading.slang's dome-ambient AO ray — TMax is authored directly in
+// Pyxis's own meters convention, currently 2.0). Taken as-authored per the
+// WP2-signals task spec (35.0); revisit once a scene-unit-scale knob lands.
+static const float AO_RAY_LENGTH = 35.0;
+
+// ReflectionsPass's RTX-RT "roughnessCacheThreshold" — surfaces with
+// gNormalRoughness.a (linear roughness) BELOW this value get a single
+// sharp mirror-direction TraceRay; at or above it, the pass falls back to
+// a roughness-proportional dome-mip sample (the "rough fallback" the RTX
+// docs describe as an approximated/cached term).
+static const float REFLECTION_MAX_ROUGHNESS = 0.3;
+
+// RealTimeQualityUniforms — RTX-alignment design, WP2-final. The shared
+// Set-0 cbuffer (SceneBindings binding 15) mirroring
+// RenderSettings::RealTimeQuality 1:1, uploaded once per frame by
+// SceneBindings::Update and consumed by every RT/compute pass that
+// includes camera_ray.slang (declared there as `gQuality`, alongside
+// gCamera). `passMask` is CPU-only (PyxisRenderer::RenderFrame gates each
+// signal pass's Execute() on it — a disabled pass's Execute() is simply
+// never called, so it is intentionally NOT a shader-visible field here).
+//
+// LIVE today: aoRayLength (AmbientOcclusionPass's hemispherical ray TMax,
+// ambient_occlusion.slang), reflectionMaxRoughness (ReflectionsPass's
+// mirror/rough-fallback cutoff, reflections.slang). Everything else
+// (sample counts, bounce caps, firefly clamps) is plumbed through this
+// cbuffer for Phase B's stochastic estimators but read by NO shader body
+// yet — a documented no-op, not a bug; see each signal pass's own file
+// header for its specific Phase B TODO.
+struct RealTimeQualityUniforms {
+    // Row 0.
+    float aoRayLength;              // LIVE — AmbientOcclusionPass ray TMax (scene units).
+    float reflectionMaxRoughness;   // LIVE — ReflectionsPass mirror/rough-fallback cutoff.
+    uint  directSamples;            // Phase B — RIS candidate count. No-op today.
+    uint  indirectSamples;          // Phase B — cosine-bounce spp. No-op today.
+    // Row 1.
+    uint  indirectMaxBounces;       // Phase B — indirect bounce depth. No-op today.
+    uint  reflectionSamples;        // Phase B — GGX spp. No-op today.
+    uint  refractionMaxBounces;     // Phase B — TranslucencyPass segment cap. No-op today
+                                     // (MAX_TRANSPARENT_SEGMENTS stays the compile-time
+                                     // spec constant of 16 until Phase B).
+    float maxRayIntensityDirect;    // Phase B — DirectLightingPass firefly clamp. No-op today.
+    // Row 2.
+    float maxRayIntensityIndirect;      // Phase B — IndirectDiffusePass firefly clamp. No-op today.
+    float maxRayIntensityReflections;   // Phase B — ReflectionsPass firefly clamp. No-op today.
+    uint  _rtqPad0;
+    uint  _rtqPad1;
+};
+
+// RtxSamplingUniforms — RTX-alignment design (rtx-realtime-alignment-
+// design.md), Phase B. The shared Set-0 cbuffer (SceneBindings binding 16)
+// carrying the two small per-frame scalars every stochastic estimator
+// needs that don't belong on CameraUniforms (frozen 208-byte layout) or
+// RealTimeQualityUniforms (a 1:1 mirror of RenderSettings::RealTimeQuality,
+// which has no seed/frame-index/jitter fields to mirror). Uploaded once per
+// frame by SceneBindings::Update, read via camera_ray.slang's `gSampling`
+// alongside `gCamera` / `gQuality`.
+//
+//   frameIndex — PassContext::frameIndex truncated to 32 bits; the plan
+//     §12.1 PCG32 seed's `frameIndex` term (rng.slang's SeedPcg32).
+//   rngSeed — the PCG32 seed's `seed` term. LIVE but currently a fixed
+//     default (SceneBindings.cpp) — NOT yet wired to
+//     Configuration::render.seed, because RenderSettings.h (the public
+//     RenderSettings POD) is frozen during this phase for concurrent work
+//     on its RealTimeQuality block; wiring the real seed through is
+//     tracked as follow-up debt. Frame-to-frame variation still comes from
+//     `frameIndex`, so headless determinism (same seed+frame => same
+//     image) holds for the fixed default exactly as it would for a
+//     configured one.
+//   jitterX / jitterY — TAA sub-pixel camera jitter, in PIXELS, added to
+//     camera_ray.slang's BuildCameraRay pixel-center before the NDC
+//     conversion (so every pass that reconstructs the primary ray from the
+//     visibility buffer agrees on the SAME jittered ray). Zero when
+//     PASS_MASK_TAA is clear — the byte-equal default path is untouched.
+struct RtxSamplingUniforms {
+    uint  frameIndex;
+    uint  rngSeed;
+    float jitterX;
+    float jitterY;
+};
+
+// RTX-alignment design, Phase B — per-pass compute-uniform structs for the
+// new denoiser chain (DenoiseShadowPass / DenoiseTemporalPass /
+// DenoiseHistoryFixPass / DenoiseAtrousPass) and TaaPass. Each is PRIVATE
+// to its one owning pass (VolatileConstantBuffer, rewritten between the
+// multiple dispatches a single Execute() issues — same pattern
+// AutoExposurePass/TonemapPass use) — no other shader body reads these.
+
+// DenoiseShadowPass — SIGMA-class 2-dispatch spatial filter on the direct
+// diffuse/specular signal, guided by the occluder hitT carried in
+// gDirectDiffuse.a. `radiusPixels` grows between the two dispatches
+// (dispatch 0 narrow, dispatch 1 wide) — the "2-dispatch" shape the frozen
+// spec calls for.
+struct DenoiseShadowUniforms {
+    uint  destWidth;
+    uint  destHeight;
+    float radiusPixels;
+    uint  _pad0;
+};
+
+// DenoiseTemporalPass — ReLAX-class reprojection + accumulation of the
+// indirect-diffuse and reflections signals (NRD calls these "diffuse" /
+// "specular" GI). `hasHistory` is the CPU-tracked "do the ping-pong
+// buffers hold a previous frame yet" gate (DenoiserResources); 0 on the
+// first frame after (re)creation, 1 forever after.
+struct DenoiseTemporalUniforms {
+    uint destWidth;
+    uint destHeight;
+    uint hasHistory;
+    uint maxAccumFrames;      // NRD default target: 30
+    uint fastHistoryFrames;   // NRD default target: 6
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;
+};
+
+// DenoiseHistoryFixPass — widens spatial support for pixels whose
+// accumulated history length (DenoiseTemporalPass's output alpha channel)
+// is below HISTORY_FIX_THRESHOLD (3, hardcoded in denoise_history_fix.slang
+// per the NRD historyFixFrameNum default) to fill disocclusions with
+// spatial information before the à-trous pass runs.
+struct DenoiseHistoryFixUniforms {
+    uint destWidth;
+    uint destHeight;
+    uint _pad0;
+    uint _pad1;
+};
+
+// DenoiseAtrousPass — 5 ping-pong edge-stopping iterations.
+// `stepSize` dilates per iteration (1, 2, 4, 8, 16 — the classic à-trous
+// "hole" pattern); `diffPhiLuminance`/`specPhiLuminance` are the NRD
+// default target edge-stopping strengths (2.0 / 1.0).
+struct DenoiseAtrousUniforms {
+    uint  destWidth;
+    uint  destHeight;
+    uint  stepSize;
+    float diffPhiLuminance;
+    float specPhiLuminance;
+    uint  _pad0;
+    uint  _pad1;
+    uint  _pad2;
+};
+
+// TaaPass — jittered-history reprojection + 3x3 neighborhood clamp.
+// `hasHistory` mirrors DenoiseTemporalUniforms' gate (TaaPass owns its own
+// single history texture, no ping-pong needed — see TaaPass's doc
+// comment for why a single buffer + a scratch-then-copy-back shape is
+// sufficient here).
+struct TaaUniforms {
+    uint  destWidth;
+    uint  destHeight;
+    uint  hasHistory;
+    float blendAlpha;   // frozen spec default: 0.1
+};
+
+// DLSS Stage 2a (rtx-realtime-alignment-design.md) — DlssPass's own tiny
+// depth-conversion dispatch (resources/shaders/dlss_depth_convert.slang):
+// linear view-space gViewZ -> standard normalized-device depth, the
+// buffer type Streamline's DLSS-SR plugin actually requires
+// (kBufferTypeDepth; see that shader's own file comment for the full
+// citation + formula). `width`/`height` gate the dispatch's edge threads
+// (render resolution, not a multiple of the 8x8 thread group in general).
+struct DlssDepthUniforms {
+    uint  width;
+    uint  height;
+    float nearClip;
+    float farClip;
+};
 
 #ifdef __cplusplus
     // HitInfo is shader-only (see the `#ifndef __cplusplus` guard
@@ -747,14 +1097,24 @@ static const uint BINDLESS_TEXTURES_CAP = 4096u;
                   "alignment). See resources/shaders/ShaderInterop.slang.");
     static_assert(sizeof(CameraUniforms) % 16 == 0,
                   "CameraUniforms must be 16-byte aligned (cbuffer std140 rule).");
+    static_assert(sizeof(MotionVectorCameraUniforms) == 80,
+                  "MotionVectorCameraUniforms must be 80 bytes (one float4x4 row "
+                  "block + one 16-byte row: cameraStatic + 3 reserved) — the "
+                  "previous frame's clipFromWorld plus the CPU-computed "
+                  "bit-exact 'did the camera move' gate the lighting raygen uses "
+                  "for the motionVector denoiser-guide AOV. See the struct doc "
+                  "comment in resources/shaders/ShaderInterop.slang.");
+    static_assert(sizeof(MotionVectorCameraUniforms) % 16 == 0,
+                  "MotionVectorCameraUniforms must be 16-byte aligned (cbuffer std140 rule).");
     static_assert(sizeof(FrameUiUniforms) == 32,
                   "FrameUiUniforms must be 32 bytes (2 cbuffer rows: picker / "
                   "display selector + per-AOV knobs).");
     static_assert(sizeof(FrameUiUniforms) % 16 == 0,
                   "FrameUiUniforms must be 16-byte aligned (cbuffer std140 rule).");
-    static_assert(sizeof(TonemapUniforms) == 32,
-                  "TonemapUniforms must be 32 bytes (2 cbuffer rows: exposure / "
-                  "debug-view selector / WorldPos period / dest dims + pads).");
+    static_assert(sizeof(TonemapUniforms) == 48,
+                  "TonemapUniforms must be 48 bytes (3 cbuffer rows: exposure / "
+                  "debug-view selector / WorldPos period / dest dims / auto-exposure "
+                  "mode / Phase C tonemap operator + physical-camera exposure scale).");
     static_assert(sizeof(TonemapUniforms) % 16 == 0,
                   "TonemapUniforms must be 16-byte aligned (cbuffer std140 rule).");
     static_assert(sizeof(PickResult) == 112,
@@ -763,12 +1123,14 @@ static const uint BINDLESS_TEXTURES_CAP = 4096u;
                   "See resources/shaders/ShaderInterop.slang.");
     static_assert(sizeof(PickResult) % 16 == 0,
                   "PickResult must be 16-byte aligned (structured-buffer rule).");
-    static_assert(sizeof(OpenPBRMaterialGPU) == 240,
-                  "OpenPBRMaterialGPU must be 240 bytes (15 rows of 16) — rows 0-7 "
+    static_assert(sizeof(OpenPBRMaterialGPU) == 256,
+                  "OpenPBRMaterialGPU must be 256 bytes (16 rows of 16) — rows 0-7 "
                   "are the frozen 128-B M9/V2.A.24 layout (base + textures + UV "
                   "transform); rows 8-14 carry the Q1 OpenPBR-complete parameter "
                   "block (specular/coat/fuzz/transmission/subsurface tints + "
-                  "weights). See the row map on the struct.");
+                  "weights); row 15 carries the 2026-07-06 RTX-alignment round-2 "
+                  "OmniPBR constant/texture blend weights. See the row map on "
+                  "the struct.");
     static_assert(sizeof(OpenPBRMaterialGPU) % 16 == 0,
                   "OpenPBRMaterialGPU must be 16-byte aligned (§23 cbuffer / "
                   "structured-buffer alignment rule).");
@@ -799,18 +1161,64 @@ static const uint BINDLESS_TEXTURES_CAP = 4096u;
                   "Private/GpuScene/Commit.cpp.");
     static_assert(sizeof(VertexAttribGpu) % 16 == 0,
                   "VertexAttribGpu must be 16-byte aligned (§23 structured-buffer rule).");
-    static_assert(sizeof(VisibilityGpu) == 32,
-                  "VisibilityGpu must be 32 bytes (2 rows of 16) — the P4 visibility "
-                  "buffer is allocated at width*height*32 with this exact stride; see "
-                  "RaytracedGBufferPass::EnsureVisibilityBuffer.");
+    static_assert(sizeof(VisibilityGpu) == 16,
+                  "VisibilityGpu must be 16 bytes (1 row of 16, RTX-alignment WP2 pack) — "
+                  "the visibility buffer is allocated at width*height*16 with this exact "
+                  "stride; see RaytracedGBufferPass::EnsureVisibilityBuffer.");
     static_assert(sizeof(VisibilityGpu) % 16 == 0,
                   "VisibilityGpu must be 16-byte aligned (§23 structured-buffer rule).");
+    static_assert(sizeof(RealTimeQualityUniforms) == 48,
+                  "RealTimeQualityUniforms must be 48 bytes (3 rows of 16) — mirrors "
+                  "RenderSettings::RealTimeQuality's live + Phase-B-reserved fields; "
+                  "see SceneBindings binding 15 / camera_ray.slang's gQuality.");
+    static_assert(sizeof(RealTimeQualityUniforms) % 16 == 0,
+                  "RealTimeQualityUniforms must be 16-byte aligned (cbuffer std140 rule).");
+    static_assert(sizeof(RtxSamplingUniforms) == 16,
+                  "RtxSamplingUniforms must be 16 bytes (1 cbuffer row) — frameIndex/rngSeed "
+                  "(plan §12.1 PCG32 seed terms) + jitterX/jitterY (TAA); see SceneBindings "
+                  "binding 16 / camera_ray.slang's gSampling.");
+    static_assert(sizeof(RtxSamplingUniforms) % 16 == 0,
+                  "RtxSamplingUniforms must be 16-byte aligned (cbuffer std140 rule).");
+    static_assert(sizeof(DenoiseShadowUniforms) == 16,
+                  "DenoiseShadowUniforms must be 16 bytes (1 cbuffer row).");
+    static_assert(sizeof(DenoiseShadowUniforms) % 16 == 0,
+                  "DenoiseShadowUniforms must be 16-byte aligned (cbuffer std140 rule).");
+    static_assert(sizeof(DenoiseTemporalUniforms) == 32,
+                  "DenoiseTemporalUniforms must be 32 bytes (2 cbuffer rows).");
+    static_assert(sizeof(DenoiseTemporalUniforms) % 16 == 0,
+                  "DenoiseTemporalUniforms must be 16-byte aligned (cbuffer std140 rule).");
+    static_assert(sizeof(DenoiseHistoryFixUniforms) == 16,
+                  "DenoiseHistoryFixUniforms must be 16 bytes (1 cbuffer row).");
+    static_assert(sizeof(DenoiseHistoryFixUniforms) % 16 == 0,
+                  "DenoiseHistoryFixUniforms must be 16-byte aligned (cbuffer std140 rule).");
+    static_assert(sizeof(DenoiseAtrousUniforms) == 32,
+                  "DenoiseAtrousUniforms must be 32 bytes (2 cbuffer rows).");
+    static_assert(sizeof(DenoiseAtrousUniforms) % 16 == 0,
+                  "DenoiseAtrousUniforms must be 16-byte aligned (cbuffer std140 rule).");
+    static_assert(sizeof(TaaUniforms) == 16,
+                  "TaaUniforms must be 16 bytes (1 cbuffer row).");
+    static_assert(sizeof(TaaUniforms) % 16 == 0,
+                  "TaaUniforms must be 16-byte aligned (cbuffer std140 rule).");
 
     // Sentinel bindless slot meaning "no texture bound for this lobe".
     // The closesthit checks the matching MaterialFlag bit before
     // sampling, so this value is only a fallback — it should never be
     // dereferenced through the bindless table.
     constexpr uint INVALID_BINDLESS_TEXTURE = ~0u;
+
+    // RTX-alignment design (rtx-realtime-alignment-design.md), Phase B —
+    // CPU-only RenderSettings::RealTimeQuality::passMask bits for the new
+    // Phase B passes. Documented here for symmetry with the existing bit
+    // assignments (direct=0x01, indirect=0x02, ao=0x04, reflections=0x08,
+    // translucency=0x10 — each inlined as a bare literal at its own
+    // pass's Execute() gate; see e.g. DirectLightingPass::Execute). No
+    // shader body reads these — the denoiser passes and TaaPass gate on
+    // them in C++ only (DenoiseShadowPass / DenoiseTemporalPass /
+    // DenoiseHistoryFixPass / DenoiseAtrousPass / TaaPass ::Execute, plus
+    // PyxisRenderer::RenderFrame's denoised-signal redirect). No
+    // RenderSettings POD change — passMask is already a uint32_t bitmask.
+    constexpr uint32_t PASS_MASK_DENOISE = 1u << 5;  // 0x20 — SIGMA-shadow + ReLAX diffuse/specular chain
+    constexpr uint32_t PASS_MASK_TAA     = 1u << 6;  // 0x40 — TaaPass (camera jitter + reprojection)
 
     }  // namespace pyxis::shaderinterop
 #endif

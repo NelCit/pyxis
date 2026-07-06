@@ -17,12 +17,14 @@
 //   RayTCurrent() / WorldRayDirection() / ObjectToWorld3x4() /
 //   WorldToObject3x4() / payload.recursionDepth.
 //
-// Bindings — match pyxis::RaytracedLightingPass's NVRHI BindingLayout;
-// declared by the shared modules (camera_ray.slang: gCamera at 0;
-// dome_sample.slang: gLights 5 / gDomeEnvMap 9 / gDomeSampler 33;
-// shading.slang: gTlas 1, gMaterials 3, gInstanceInfo 4, gMeshInfo 6,
-// gMeshFaceNormals 7, gBindlessSampler 10, gMeshUvs 24, gMeshIndices 26,
-// gBindlessTextures 28, gMeshVertexAttribs 29).
+// Bindings — Set 0 (SceneBindings, shared verbatim with
+// RaytracedGBufferPass), declared by the shared modules (camera_ray.slang:
+// gCamera at 0; dome_sample.slang: gLights 5 / gDomeEnvMap 10 /
+// gDomeSampler 11; raytraced_anyhit.slang: gMaterials 2 / gInstanceInfo 3;
+// shading.slang: gTlas 1, gMeshInfo 4, gMeshIndices 6, gMeshUvs 7,
+// gMeshVertexAttribs 8, gMeshFaceNormals 9, gBindlessSampler 12,
+// gBindlessTextures 13). See Private/Passes/SceneBindings.h for the full
+// canonical slot map (RTX-alignment design WP2 rewrite).
 
 #include "ShaderInterop.slang"
 #include "shading.slang"

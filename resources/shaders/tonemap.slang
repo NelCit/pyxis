@@ -19,6 +19,15 @@
 //
 // Deterministic by construction: pure per-texel function of the inputs, no
 // RNG, no neighbourhood reads. Thread per output texel.
+//
+// RTX-alignment design (rtx-realtime-alignment-design.md), Phase C — the
+// COLOR path now dispatches on `gParams.tonemapOperator` (TONEMAP_OPERATOR_*,
+// mirroring ovrtx's OmniRtxTonemapAPI enum 1:1) instead of hardcoding ACES,
+// and the exposure gain is `exposureScale * 2^effectiveExposure` where
+// `exposureScale` is 1.0 (no-op) unless RenderSettings::RealTimeQuality's
+// physical-camera exposure model is active (see TonemapPass::Execute).
+// Default operator (AcesApproximation) + default exposureScale (1.0)
+// reproduce the pre-Phase-C image byte-for-byte.
 
 #include "ShaderInterop.slang"
 
@@ -36,11 +45,12 @@
 [[vk::binding(10, 0)]] Texture2D<float4> gAovWorldPosEye;  // RGBA32F eye-space hit pos
 [[vk::binding(11, 0)]] ConstantBuffer<TonemapUniforms> gParams;
 [[vk::binding(12, 0)]] RWTexture2D<float4> gOutput;        // BGRA8 display output
-[[vk::binding(13, 0)]] ByteAddressBuffer   gAutoExposureStats;  // uint2: [0]=log-lum sum, [4]=lit count
+[[vk::binding(13, 0)]] ByteAddressBuffer   gAutoExposureStats;  // see AUTO_EXPOSURE_STATS_* layout
 
 // Narkowicz ACES Filmic -- moved verbatim from raygen.slang (P3 pass
 // split). Same constants; the display branch for DEBUG_VIEW_COLOR
-// calls it on the exposure-scaled radiance.
+// calls it on the exposure-scaled radiance. KEPT BYTE-IDENTICAL for
+// TONEMAP_OPERATOR_ACES_APPROXIMATION (Phase C default).
 float3 acesFilmic(float3 x) {
     const float a = 2.51;
     const float b = 0.03;
@@ -48,6 +58,109 @@ float3 acesFilmic(float3 x) {
     const float d = 0.59;
     const float e = 0.14;
     return saturate((x * (a * x + b)) / (x * (c * x + d) + e));
+}
+
+// ---- RTX-alignment design (rtx-realtime-alignment-design.md), Phase C ----
+// Tonemap operator set (ovrtx OmniRtxTonemapAPI parity). See
+// ShaderInterop.slang's TONEMAP_OPERATOR_* doc comment for the schema
+// citation and which sub-parameters are hardcoded vs. runtime-configurable.
+
+// `reinhard` -- simple per-channel Reinhard: x / (1+x). Unbounded input,
+// compresses smoothly, asymptotic to 1 as x -> infinity.
+float3 reinhardTonemap(float3 x) {
+    return x / (1.0 + x);
+}
+
+// `modifiedReinhard` -- Reinhard with a white point: values at/above
+// `whitePoint` map to (approximately) 1, unlike plain Reinhard's
+// asymptotic-only-at-infinity curve. w = MODIFIED_REINHARD_WHITE_POINT
+// (ovrtx schema default 4.0).
+float3 modifiedReinhardTonemap(float3 x, float whitePoint) {
+    const float3 numerator = x * (1.0 + x / (whitePoint * whitePoint));
+    return numerator / (1.0 + x);
+}
+
+// sRGB EOTF (decode gamma -> linear). Accurate piecewise curve, the exact
+// inverse of BlitToSrgbPass's LinearToSrgb -- needed to undo hejiHableAlu's
+// baked gamma (see below) before this pass's LINEAR output is re-encoded
+// downstream.
+float srgbToLinear(float val) {
+    return (val <= 0.04045) ? (val / 12.92) : pow((val + 0.055) / 1.055, 2.4);
+}
+float3 srgbToLinear(float3 val) {
+    return float3(srgbToLinear(val.x), srgbToLinear(val.y), srgbToLinear(val.z));
+}
+
+// `hejiHableAlu` -- Hejl/Burgess-Dawson filmic ALU curve (Jim Hejl & Richard
+// Burgess-Dawson, popularised via John Hable's "Filmic Tonemapping
+// Operators"). This curve BAKES an approximate ~2.2 gamma into itself -- it
+// was designed to be written straight to an 8-bit sRGB backbuffer with NO
+// further gamma correction applied. Pyxis's pipeline always applies its own
+// accurate sRGB OETF downstream regardless of which operator ran (see
+// BlitToSrgbPass / the headless PNG writer / Kit's HdxColorCorrectionTask),
+// so writing this operator's raw output straight through would
+// DOUBLE-ENCODE the gamma (crushed shadows, blown highlights, roughly
+// gamma-squared instead of gamma-1). Compensated by decoding the baked
+// gamma back to linear (srgbToLinear) before returning, so the later
+// downstream sRGB re-encode reproduces exactly the gamma-space curve this
+// operator intends -- net effect: the pixel that leaves this function, once
+// sRGB-re-encoded downstream, equals what a naive (uncompensated) blit of
+// this curve's raw output would have shown on a display with NO further
+// correction.
+float3 hejiHableAluTonemap(float3 x) {
+    const float3 xClamped = max(float3(0.0, 0.0, 0.0), x - 0.004);
+    const float3 encoded = (xClamped * (6.2 * xClamped + 0.5))
+                          / (xClamped * (6.2 * xClamped + 1.7) + 0.06);
+    return srgbToLinear(saturate(encoded));
+}
+
+// `hableUc2` -- Uncharted 2 filmic curve (John Hable, GDC 2010 "Uncharted 2:
+// HDR Lighting"). ovrtx schema constants A=.15 B=.5 C=.1 D=.2 E=.02 F=.3,
+// white point 11.2.
+float3 uncharted2Partial(float3 x) {
+    const float A = 0.15;
+    const float B = 0.50;
+    const float C = 0.10;
+    const float D = 0.20;
+    const float E = 0.02;
+    const float F = 0.30;
+    return ((x * (A * x + C * B) + D * E) / (x * (A * x + B) + D * F)) - E / F;
+}
+float3 hableUc2Tonemap(float3 x) {
+    const float3 curved = uncharted2Partial(x);
+    const float3 whiteScale = 1.0 / uncharted2Partial(float3(HABLE_UC2_WHITE_POINT,
+                                                              HABLE_UC2_WHITE_POINT,
+                                                              HABLE_UC2_WHITE_POINT));
+    return curved * whiteScale;
+}
+
+// `iray` -- Reinhard-family tonemap with NVIDIA Iray's documented
+// burn-highlights / crush-blacks / saturation controls. NO PUBLIC FORMULA
+// FOUND for Iray's actual mia_exposure_photographic implementation (checked
+// migenius's Iray Programmer's Manual, irayplugins.com's Maya doc, and the
+// Daz3D reference guide, 2026-07-05 -- all three describe the three
+// parameters QUALITATIVELY, none publish the underlying equation). This is
+// our own reconstruction, matching the documented behaviour exactly:
+//   burnHighlights (IRAY_BURN_HIGHLIGHTS, schema default 0.7, "per
+//     component"): 1.0 = linear transfer (no compression, can clip);
+//     0.0 = full per-channel Reinhard (x/(1+x), asymptotic -- "infinite
+//     input maps to white"). Interpolated between the two.
+//   crushBlacks (IRAY_CRUSH_BLACKS, schema default 0.5): 0.0 = no change
+//     (linear lower range); raised toward 1.0 adds a gentle TOE (power
+//     curve) that pushes low intensities toward black -- doesn't touch the
+//     already-<=1 top end much, matching "regain some punch in the lower
+//     range" without re-introducing highlight clipping.
+//   saturation (IRAY_SATURATION, schema default 1.0): blend toward
+//     luminance; 1.0 = unmodified.
+float3 irayTonemap(float3 x) {
+    const float3 reinhard = x / (1.0 + x);
+    float3 y = lerp(reinhard, x, IRAY_BURN_HIGHLIGHTS);
+    y = saturate(y);
+    const float toeExponent = 1.0 + IRAY_CRUSH_BLACKS;
+    y = pow(y, float3(toeExponent, toeExponent, toeExponent));
+    const float lum = dot(y, float3(0.2126, 0.7152, 0.0722));
+    y = lerp(float3(lum, lum, lum), y, IRAY_SATURATION);
+    return y;
 }
 
 // Cheap integer hash → unit-interval float, used to recolor instance
@@ -83,56 +196,105 @@ void main(uint3 tid : SV_DispatchThreadID) {
     const bool  didHit = depth > 0.0f;
 
     // ----- Display output (BGRA8 backbuffer) ----------------------
-    // ACES tonemap on the Color path; (n*0.5+0.5) on Normal; 1/depth
-    // grayscale on Depth; hash-coloured palette on InstanceID. Moved
-    // verbatim from raygen.slang's inline branch (the M9 "ToneMapPass
-    // takeover" TODO, discharged by the P3 pass split).
+    // Operator dispatch on the Color path; (n*0.5+0.5) on Normal; 1/depth
+    // grayscale on Depth; hash-coloured palette on InstanceID.
     float3 displayColor = float3(0.0, 0.0, 0.0);
     if (gParams.debugViewMode == DEBUG_VIEW_COLOR)
     {
+        // `raw` is a hard exception to everything below: true unprocessed
+        // radiance, no exposure of any kind (manual, auto, or physical-
+        // camera), no tonemap curve -- a debugging window straight onto the
+        // HDR values (matches ovrtx's own "raw" semantics: a linear/no-op
+        // passthrough distinct from `none`, which still applies exposure).
+        if (gParams.tonemapOperator == TONEMAP_OPERATOR_RAW)
+        {
+            gOutput[launchIndex] = float4(gLinearColor.Load(texel).xyz, 1.0f);
+            return;
+        }
+
         // Photographic exposure: scale scene radiance by 2^exposure
         // before tonemapping. Mirrors UsdGeomCamera.exposure semantics
         // (negative darkens, positive brightens). World Lobby et al.
         // calibrate light intensities for a strongly-negative camera
         // exposure (~-10 stops); without this scale the dome blows out.
         //
-        // Auto-exposure: when enabled, expose for the HIGHLIGHTS — drive the
-        // exposure from the scene's bright end (AutoExposurePass tracked the max
-        // AND the geometric-mean log2(lum) over lit pixels) so the brightest
-        // content lands on the target and nothing clips to white:
-        //   brightLog2 = min(maxLog2Lum, avgLog2Lum + MAX_HEADROOM)
-        //   autoEV     = log2(target) − brightLog2
-        // The MAX is clamped to a few stops above the average so a single
-        // firefly / a sliver of a visible light can't crush the image to black
-        // (pure-max fragility); when the scene has no such outlier the true max
-        // drives the exposure. `target` is the linear level the bright end maps
-        // to before ACES (default 1.0; ACES rolls the very top off). Auto FULLY
-        // REPLACES the manual exposure — mutually exclusive (the editor disables
-        // the manual slider when auto is on), so a scene with hot UsdLux lights
-        // and no authored camera exposure (the OpenPBR Playground) displays
-        // correctly with zero manual tuning.
+        // Auto-exposure: when enabled, expose for the HIGHLIGHTS (legacy
+        // mode) or the histogram median (histogram mode) — see
+        // AUTO_EXPOSURE_MODE_* below and each branch's own comment.
+        // Auto FULLY REPLACES the manual exposure — mutually exclusive
+        // (the editor disables the manual slider when auto is on), so a
+        // scene with hot UsdLux lights and no authored camera exposure
+        // (the OpenPBR Playground) displays correctly with zero manual
+        // tuning.
         float effectiveExposure = gParams.exposure;
         if (gParams.autoExposureEnabled != 0u)
         {
-            const uint count = gAutoExposureStats.Load(4u);
-            if (count > 0u)
+            if (gParams.autoExposureMode == AUTO_EXPOSURE_MODE_HISTOGRAM)
             {
-                const uint  sum        = gAutoExposureStats.Load(0u);
-                const uint  maxFixed   = gAutoExposureStats.Load(8u);
-                const float avgLog2Lum = (float(sum) / AUTO_EXPOSURE_LOG_SCALE) / float(count)
-                                       - AUTO_EXPOSURE_LOG_OFFSET;
-                const float maxLog2Lum = (float(maxFixed) / AUTO_EXPOSURE_LOG_SCALE)
-                                       - AUTO_EXPOSURE_LOG_OFFSET;
-                const float brightLog2 = min(maxLog2Lum,
-                                             avgLog2Lum + AUTO_EXPOSURE_MAX_HEADROOM);
-                const float target = (gParams.autoExposureKey > 0.0)
-                                       ? gParams.autoExposureKey : 1.0;
-                effectiveExposure = clamp(log2(target) - brightLog2, -24.0, 8.0);
+                // RTX-alignment design Phase C (ovrtx-parity) — AutoExposurePass's
+                // ResolveHistogram dispatch already reduced the 64-bucket
+                // histogram to a single median log2(luminance), stored as a
+                // raw float bit-pattern. Map it to an EV via the schema's
+                // white-point scale (10) — same "target / measured" shape
+                // as the legacy path's `log2(target) - brightLog2`.
+                const float filteredLog2Lum =
+                    asfloat(gAutoExposureStats.Load(AUTO_EXPOSURE_STATS_RESOLVED_EV_OFFSET));
+                effectiveExposure = clamp(
+                    log2(AUTO_EXPOSURE_HISTOGRAM_WHITE_POINT_SCALE) - filteredLog2Lum,
+                    -24.0, 8.0);
+            }
+            else
+            {
+                // Legacy (AUTO_EXPOSURE_MODE_LEGACY) — unchanged: expose for
+                // the highlights (AutoExposurePass tracked the max AND the
+                // geometric-mean log2(lum) over lit pixels) so the brightest
+                // content lands on the target and nothing clips to white:
+                //   brightLog2 = min(maxLog2Lum, avgLog2Lum + MAX_HEADROOM)
+                //   autoEV     = log2(target) − brightLog2
+                // The MAX is clamped to a few stops above the average so a
+                // single firefly / a sliver of a visible light can't crush
+                // the image to black (pure-max fragility); when the scene
+                // has no such outlier the true max drives the exposure.
+                const uint count = gAutoExposureStats.Load(4u);
+                if (count > 0u)
+                {
+                    const uint  sum        = gAutoExposureStats.Load(0u);
+                    const uint  maxFixed   = gAutoExposureStats.Load(8u);
+                    const float avgLog2Lum = (float(sum) / AUTO_EXPOSURE_LOG_SCALE) / float(count)
+                                           - AUTO_EXPOSURE_LOG_OFFSET;
+                    const float maxLog2Lum = (float(maxFixed) / AUTO_EXPOSURE_LOG_SCALE)
+                                           - AUTO_EXPOSURE_LOG_OFFSET;
+                    const float brightLog2 = min(maxLog2Lum,
+                                                 avgLog2Lum + AUTO_EXPOSURE_MAX_HEADROOM);
+                    const float target = (gParams.autoExposureKey > 0.0)
+                                           ? gParams.autoExposureKey : 1.0;
+                    effectiveExposure = clamp(log2(target) - brightLog2, -24.0, 8.0);
+                }
             }
         }
-        const float exposureGain = exp2(effectiveExposure);
+        // RTX-alignment design Phase C — physical-camera exposureScale (a
+        // linear multiplier; 1.0 = legacy no-op) rides UNDER the stops-based
+        // gain above ("legacy exposure stops ride on top" — see
+        // TonemapPass::Execute for where exposureScale is computed).
+        const float exposureGain = gParams.exposureScale * exp2(effectiveExposure);
         const float3 radiance = gLinearColor.Load(texel).xyz;
-        displayColor = acesFilmic(radiance * exposureGain);
+        const float3 exposed = radiance * exposureGain;
+
+        if (gParams.tonemapOperator == TONEMAP_OPERATOR_NONE)
+            displayColor = exposed;
+        else if (gParams.tonemapOperator == TONEMAP_OPERATOR_REINHARD)
+            displayColor = reinhardTonemap(exposed);
+        else if (gParams.tonemapOperator == TONEMAP_OPERATOR_MODIFIED_REINHARD)
+            displayColor = modifiedReinhardTonemap(exposed, MODIFIED_REINHARD_WHITE_POINT);
+        else if (gParams.tonemapOperator == TONEMAP_OPERATOR_HEJI_HABLE_ALU)
+            displayColor = hejiHableAluTonemap(exposed);
+        else if (gParams.tonemapOperator == TONEMAP_OPERATOR_HABLE_UC2)
+            displayColor = hableUc2Tonemap(exposed);
+        else if (gParams.tonemapOperator == TONEMAP_OPERATOR_IRAY)
+            displayColor = irayTonemap(exposed);
+        else  // TONEMAP_OPERATOR_ACES_APPROXIMATION — default; byte-identical
+              // to the pre-Phase-C behaviour when selected.
+            displayColor = acesFilmic(exposed);
     }
     else if (gParams.debugViewMode == DEBUG_VIEW_NORMAL)
     {

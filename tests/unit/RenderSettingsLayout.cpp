@@ -100,10 +100,74 @@ TEST(RenderSettingsLayout, OpenPbrFeatureMaskDefaultsToAllOn) {
   EXPECT_EQ(settings.openPbrFeatureMask, 0x3Fu);
 }
 
-// §22.3 reserved tail — must stay zeroed until a future MINOR turns a
-// slot into a typed member.
-TEST(RenderSettingsLayout, ReservedTailIsZeroed) {
+// RTX-alignment design (rtx-realtime-alignment-design.md), Phase C —
+// RenderSettings' §22.3 reserved tail (`_reserved[2]`) was fully consumed
+// by exposureMode + exposureResponsivity (see RenderSettings.h); the old
+// "stays zeroed" assertion no longer applies — pin the new fields'
+// defaults instead (Legacy exposure mode, ovrtx's own responsivity
+// calibration constant).
+TEST(RenderSettingsLayout, PhysicalCameraExposureDefaultsToLegacy) {
   const RenderSettings settings;
-  for (const uint32_t slot : settings._reserved)
-    EXPECT_EQ(slot, 0u);
+  EXPECT_EQ(settings.exposureMode, 0u);  // 0 = Legacy
+  EXPECT_FLOAT_EQ(settings.exposureResponsivity, 0.8821367311933349f);
+}
+
+// RTX-alignment design (rtx-realtime-alignment-design.md), WP2-final —
+// RealTimeQuality mirrors ovrtx 0.3.0's own omni:rtx:rt:* applied-API-
+// schema defaults 1:1; a default flip here silently diverges Pyxis's
+// stock look from Omniverse RTX Real-Time's.
+static_assert(std::is_standard_layout_v<RenderSettings::RealTimeQuality>,
+              "RenderSettings::RealTimeQuality must be standard layout for the public ABI.");
+TEST(RenderSettingsLayout, RealTimeQualityDefaultsMirrorOvrtx) {
+  const RenderSettings settings;
+  EXPECT_EQ(settings.realTimeQuality.passMask, 0x1Fu);  // all five signal passes on
+  EXPECT_EQ(settings.realTimeQuality.directSamples, 2u);
+  EXPECT_EQ(settings.realTimeQuality.indirectSamples, 1u);
+  EXPECT_EQ(settings.realTimeQuality.indirectMaxBounces, 2u);
+  EXPECT_EQ(settings.realTimeQuality.reflectionSamples, 1u);
+  EXPECT_FLOAT_EQ(settings.realTimeQuality.reflectionMaxRoughness, 0.3f);
+  EXPECT_EQ(settings.realTimeQuality.refractionMaxBounces, 6u);
+  // RTX-alignment design, Phase C — 0.35 m (35 ovrtx stage units == 35 cm
+  // for World Lobby's metersPerUnit=0.01), not the pre-Phase-C 35.0 m
+  // (100x too long — see the field's own doc comment).
+  EXPECT_FLOAT_EQ(settings.realTimeQuality.aoRayLength, 0.35f);
+  EXPECT_FLOAT_EQ(settings.realTimeQuality.maxRayIntensityDirect, 6400.0f);
+  EXPECT_FLOAT_EQ(settings.realTimeQuality.maxRayIntensityIndirect, 6400.0f);
+  EXPECT_FLOAT_EQ(settings.realTimeQuality.maxRayIntensityReflections, 19200.0f);
+}
+
+// RTX-alignment design (rtx-realtime-alignment-design.md), Phase C —
+// RealTimeQuality's own §22.3 reserved tail (`_reserved[4]`) was fully
+// consumed by the tonemap operator selector + the physical-camera exposure
+// core fields (see RenderSettings.h); pin their defaults here instead of
+// the old "stays zeroed" assertion.
+TEST(RenderSettingsLayout, TonemapAndPhysicalCameraDefaultsMirrorOvrtx) {
+  const RenderSettings settings;
+  EXPECT_EQ(settings.realTimeQuality.tonemapOperator, 6u);  // AcesApproximation
+  EXPECT_FLOAT_EQ(settings.realTimeQuality.physicalCameraFStop, 5.0f);
+  EXPECT_FLOAT_EQ(settings.realTimeQuality.physicalCameraIso, 100.0f);
+  // 0.02 s = ovrtx's effective (legacy carb) default, empirically matched
+  // against World Lobby captures — see RenderSettings.h's field comment.
+  EXPECT_FLOAT_EQ(settings.realTimeQuality.physicalCameraExposureTimeSeconds, 0.02f);
+}
+
+// DLSS Stage 1 (rtx-realtime-alignment-design.md, "DLSS — corrected
+// stance" + "DLSS scope includes upscaling") — denoiser DEFAULTS to
+// DENOISER_DLSS per the owner's directive; PyxisRenderer's capability
+// probe (Private/Dlss/DlssProvider.h) downgrades to Builtin whenever the
+// Streamline SDK isn't staged (always true in CI today), so headless
+// goldens stay byte-equal regardless of this default (§33.7 — passMask's
+// own denoise/TAA bits already default OFF, see the test above).
+TEST(RenderSettingsLayout, DlssDefaultsToDlssRequestedAutoExecMode) {
+  const RenderSettings settings;
+  EXPECT_EQ(settings.realTimeQuality.denoiser, pyxis::DENOISER_DLSS);
+  EXPECT_EQ(settings.realTimeQuality.dlssExecMode, pyxis::DLSS_EXEC_MODE_AUTO);
+  EXPECT_EQ(pyxis::DENOISER_DLSS, 0u);
+  EXPECT_EQ(pyxis::DENOISER_BUILTIN, 1u);
+  EXPECT_EQ(pyxis::DENOISER_OFF, 2u);
+  EXPECT_EQ(pyxis::DLSS_EXEC_MODE_AUTO, 0u);
+  EXPECT_EQ(pyxis::DLSS_EXEC_MODE_QUALITY, 1u);
+  EXPECT_EQ(pyxis::DLSS_EXEC_MODE_BALANCED, 2u);
+  EXPECT_EQ(pyxis::DLSS_EXEC_MODE_PERFORMANCE, 3u);
+  EXPECT_EQ(pyxis::DLSS_EXEC_MODE_DLAA, 4u);
 }

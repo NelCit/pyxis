@@ -124,8 +124,8 @@ TEST(PackMaterialGpuRows, ExtensionFieldsRoundTrip)
 // change, this catches a field-order/offset change within the block.
 TEST(PackMaterialGpuRows, ExtensionFieldOffsetsMatchRowMap)
 {
-  static_assert(sizeof(OpenPBRMaterialGPU) == 240,
-                "OpenPBRMaterialGPU must be 240 bytes (15 rows of 16).");
+  static_assert(sizeof(OpenPBRMaterialGPU) == 256,
+                "OpenPBRMaterialGPU must be 256 bytes (16 rows of 16).");
 
   // Row 8 @ 128.
   EXPECT_EQ(offsetof(OpenPBRMaterialGPU, specularColorR), 128u);
@@ -157,6 +157,10 @@ TEST(PackMaterialGpuRows, ExtensionFieldOffsetsMatchRowMap)
   EXPECT_EQ(offsetof(OpenPBRMaterialGPU, subsurfaceColorG), 212u);
   EXPECT_EQ(offsetof(OpenPBRMaterialGPU, subsurfaceColorB), 216u);
   EXPECT_EQ(offsetof(OpenPBRMaterialGPU, baseWeight), 220u);
-  // Row 14 @ 224 (+ 3 reserved floats to 240).
+  // Row 14 @ 224 (transmissionWeight + albedoBrightness/Desaturation/Add).
   EXPECT_EQ(offsetof(OpenPBRMaterialGPU, transmissionWeight), 224u);
+  // Row 15 @ 240 — 2026-07-06 RTX-alignment round 2 (materials chapter).
+  EXPECT_EQ(offsetof(OpenPBRMaterialGPU, metallicTextureInfluence), 240u);
+  EXPECT_EQ(offsetof(OpenPBRMaterialGPU, reflectionRoughnessTextureInfluence), 244u);
+  EXPECT_EQ(offsetof(OpenPBRMaterialGPU, aoToDiffuse), 248u);
 }

@@ -52,7 +52,7 @@ struct CliArgs {
   // M8b — headless benchmark mode. When non-zero, after the normal
   // single-frame render + EXR write, the headless harness records N
   // additional warm-up frames and N measurement frames, then prints a
-  // KPI table to stdout (pass.RaytracedGBuffer / pass.RaytracedLighting
+  // KPI table to stdout (pass.RaytracedGBuffer / pass.Composite
   // ms, frame.cpu.commitResources ms, p50 / p99 / max). Used to gate
   // §34 KPI compliance for the §41 perf milestones.
   uint32_t benchFrames = 0;      // --bench-frames <int>  (0 = disabled)
