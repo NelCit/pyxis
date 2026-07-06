@@ -437,6 +437,19 @@ static const uint SPEC_ID_MAX_RAY_RECURSION        = 1;  // shading.slang (light
 static const uint SPEC_ID_MAX_TRANSPARENT_SEGMENTS = 2;  // raytraced_lighting_raygen.slang
 static const uint SPEC_ID_REFL_MAX_SEGMENTS        = 3;  // shading.slang (lighting raygen + closesthit)
 static const uint SPEC_ID_OPENPBR_FEATURES         = 4;  // openpbr_material.slang (lighting raygen + closesthit)
+// RTX-alignment design (rtx-realtime-alignment-design.md), specular MODEL
+// GAP fix (2026-07-07) — ReflectionsPass's stochastic-GGX estimator toggle
+// (reflections.slang's RayGenMain). Driven from RealTimeQuality::passMask
+// bit 8 (PASS_MASK_STOCHASTIC_REFLECTIONS, below) at pipeline-selection
+// time, same "C++ decides, spec constant folds the shader variant" shape
+// SPEC_ID_PROJECTION_MODE uses. 0 (default) = the existing GGX-VNDF trace +
+// OpenPBRReflectionWeight specWeight (byte-identical to pre-existing
+// behavior); 1 = specWeight for traced pixels drops OpenPBRReflectionWeight's
+// (1-r')^2 glossy fade (see reflections.slang's file header for why the
+// multi-sample VNDF average no longer needs that single-sample compensation
+// term, and why an earlier per-sample Heitz-2018 F(H)*G2/G1 throughput
+// attempt was reverted as a double-count of composite.slang's own Fresnel).
+static const uint SPEC_ID_STOCHASTIC_REFLECTIONS   = 5;  // reflections.slang (RayGenMain)
 //   Compute modules:
 static const uint SPEC_ID_SSAA_FACTOR              = 0;  // ssaa_resolve.slang
 
@@ -1298,6 +1311,32 @@ struct AccumulationUniforms {
     // work); a config author sets bit 0x80 alongside `render.
     // accumulationFrames > 1` to opt into progressive-accumulation mode.
     constexpr uint32_t PASS_MASK_ACCUMULATE = 1u << 7;  // 0x80 — AccumulationPass (progressive running mean)
+
+    // RTX-alignment design (rtx-realtime-alignment-design.md), specular
+    // MODEL GAP fix (2026-07-07) — optional stochastic-GGX reflection
+    // specWeight, default OFF (byte-identical to the pre-existing trace
+    // when clear). ReflectionsPass reads this bit (NOT any shader body —
+    // same "CPU-only gate" convention as the bits above) to pick which
+    // pipeline VARIANT to dispatch, via SPEC_ID_STOCHASTIC_REFLECTIONS (see
+    // that constant's own doc comment above). Root cause: the pre-existing
+    // GGX-VNDF trace already averages multiple lobe-distributed samples,
+    // but OpenPBRReflectionWeight's (1-roughness)^2 "glossy" fade — tuned
+    // for a SINGLE deterministic mirror sample that needed compensating for
+    // the lobe spread it didn't simulate — still darkens the now-properly-
+    // averaged multi-sample estimate a second time, so it can't reproduce
+    // the true GGX lobe's integration of a bright environment (measured
+    // against ovrtx on the World Lobby's rough dielectrics — id40
+    // Paint_Satin, id30 glass floor). This mode drops that fade for TRACED
+    // pixels only (reflections.slang's specWeight block; rough-fallback
+    // pixels, which never run the multi-sample trace, keep it unchanged)
+    // and relies on RtxSamplingUniforms' already-per-frame-varying RNG seed
+    // + AccumulationPass's N-frame running mean (PASS_MASK_ACCUMULATE) or
+    // an equal-length `render.accumulationFrames` re-run to converge the
+    // Monte-Carlo estimate. A config author sets bit 0x100 alongside
+    // `render.accumulationFrames` (builtin denoiser measured better than
+    // DLSS Ray Reconstruction for this signal — see reflections.slang's
+    // file header) to opt in.
+    constexpr uint32_t PASS_MASK_STOCHASTIC_REFLECTIONS = 1u << 8;  // 0x100 — ReflectionsPass specWeight fix
 
     }  // namespace pyxis::shaderinterop
 #endif

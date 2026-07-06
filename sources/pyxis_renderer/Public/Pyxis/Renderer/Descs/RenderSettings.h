@@ -157,10 +157,12 @@ struct RenderSettings {
   // documented no-op, not a bug.
   struct RealTimeQuality {
     // Bit 0 direct, bit 1 indirect, bit 2 ao, bit 3 reflections, bit 4
-    // translucency. All-on (0x1F) is image-identical to "always run
-    // every signal pass" — the v1 default and the only combination the
-    // headless goldens / §25.O.3 adapter parity exercise.
-    uint32_t passMask = 0x1Fu;
+    // translucency, bit 8 stochastic-GGX reflections (RTX-alignment:
+    // physically-correct GGX-VNDF reflection estimator, the DEFAULT
+    // reflection model — the deterministic mirror+glossy-fade path
+    // remains available by clearing bit 8). Bits 5/6 (denoise/TAA) and
+    // bit 7 (accumulate) are opt-in via config, added on top of this.
+    uint32_t passMask = 0x11Fu;  // 0x1F signals | 0x100 stochastic GGX
 
     // Phase B (RIS sampled direct lighting) — no-op until the
     // DirectLightingPass estimator goes stochastic.

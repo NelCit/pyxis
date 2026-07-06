@@ -57,12 +57,27 @@ class ReflectionsPass final : public IRenderPass {
   [[nodiscard]] std::string_view Name() const override { return "pass.Reflections"; }
 
   [[nodiscard]] nvrhi::ITexture* EnsureOutput(uint32_t width, uint32_t height);
-  void EnsureProjectionPipeline();
+  // Specular MODEL GAP fix (rtx-realtime-alignment-design.md, 2026-07-07) —
+  // `stochasticReflections` selects the SAME axis Execute() reads from
+  // RealTimeQuality::passMask bit 8 (PASS_MASK_STOCHASTIC_REFLECTIONS) each
+  // frame; lazily builds that (projectionMode, stochasticReflections)
+  // variant the first time it's requested, same shape the projection-only
+  // axis already used before this fix (orthographic was the only lazy
+  // variant; now toggling the stochastic bit at runtime can ALSO trigger a
+  // lazy build, e.g. a viewer hotkey — see Execute()'s own fallback).
+  void EnsureProjectionPipeline(bool stochasticReflections = false);
 
+  // NOTE: does not account for the stochastic axis (checks the
+  // stochastic-OFF variant only) — nothing outside this pass currently
+  // queries ReflectionsPass::IsOperational (unlike RaytracedGBufferPass /
+  // CompositePass's own IsOperational, which gate PyxisRenderer's frame-
+  // health fallback), so the extra axis was not worth this accessor's API
+  // churn. Execute() itself independently no-ops on a missing/failed
+  // variant regardless of which axis caused it.
   [[nodiscard]] bool IsOperational(uint32_t projectionMode) const noexcept {
     if (!_shadersOk)
       return false;
-    const std::size_t variant = (projectionMode == 1u) ? 1u : 0u;
+    const std::size_t variant = VariantIndex(projectionMode, /*stochasticReflections=*/false);
     if (_pipelines[variant] && _shaderTables[variant])
       return true;
     return !_variantBuildFailed[variant];
@@ -78,6 +93,17 @@ class ReflectionsPass final : public IRenderPass {
  private:
   [[nodiscard]] nvrhi::BindingSetHandle GetOrCreateBindingSet(nvrhi::IBuffer* visibility,
                                                               nvrhi::ITexture* normalRoughness);
+
+  // Specular MODEL GAP fix (2026-07-07) — the pipeline-variant space grew
+  // from a single projectionMode axis (2 variants) to projectionMode x
+  // stochasticReflections (4 variants), same "spec constant folded at
+  // pipeline-creation time" shape as SPEC_ID_PROJECTION_MODE. Kept as a
+  // free function (not a member) so PROJECTION_VARIANT_COUNT below stays a
+  // simple compile-time array size.
+  [[nodiscard]] static constexpr std::size_t VariantIndex(uint32_t projectionMode,
+                                                           bool stochasticReflections) noexcept {
+    return (projectionMode == 1u ? 1u : 0u) * 2u + (stochasticReflections ? 1u : 0u);
+  }
 
   nvrhi::IDevice* _device = nullptr;
   GpuScene* _scene = nullptr;
@@ -95,7 +121,8 @@ class ReflectionsPass final : public IRenderPass {
   nvrhi::ShaderHandle _aoMissShader;
   nvrhi::BindingLayoutHandle _passLayout;
 
-  static constexpr std::size_t PROJECTION_VARIANT_COUNT = 2;
+  // 2 (projectionMode) x 2 (stochasticReflections) — see VariantIndex above.
+  static constexpr std::size_t PROJECTION_VARIANT_COUNT = 4;
   std::array<nvrhi::rt::PipelineHandle, PROJECTION_VARIANT_COUNT> _pipelines;
   std::array<nvrhi::rt::ShaderTableHandle, PROJECTION_VARIANT_COUNT> _shaderTables;
   std::array<bool, PROJECTION_VARIANT_COUNT> _variantBuildFailed{};

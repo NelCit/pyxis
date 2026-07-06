@@ -37,17 +37,24 @@ PipelineVariant BuildPipelineVariant(nvrhi::IDevice* device, nvrhi::IBindingLayo
                                      nvrhi::IBindingLayout* passLayout, nvrhi::IShader* raygen,
                                      nvrhi::IShader* closestHit, nvrhi::IShader* miss,
                                      nvrhi::IShader* aoAnyHit, nvrhi::IShader* aoMiss,
-                                     uint32_t projectionMode) noexcept {
+                                     uint32_t projectionMode,
+                                     uint32_t stochasticReflections) noexcept {
   auto& log = Logging::Get();
   const nvrhi::ShaderSpecialization raygenConstants[] = {
       nvrhi::ShaderSpecialization::UInt32(shaderinterop::SPEC_ID_PROJECTION_MODE, projectionMode),
+      // Specular MODEL GAP fix (2026-07-07) — folds reflections.slang's
+      // STOCHASTIC_REFLECTIONS_ENABLED spec constant; 0 reproduces the
+      // pre-existing trace bit-for-bit (see that file's header).
+      nvrhi::ShaderSpecialization::UInt32(shaderinterop::SPEC_ID_STOCHASTIC_REFLECTIONS,
+                                         stochasticReflections),
   };
   const nvrhi::ShaderHandle specRaygen = device->createShaderSpecialization(
       raygen, raygenConstants, static_cast<uint32_t>(std::size(raygenConstants)));
   if (!specRaygen)
   {
     log.Error(log::RENDER, "ReflectionsPass: createShaderSpecialization failed (projectionMode="
-                              + std::to_string(projectionMode) + ")");
+                              + std::to_string(projectionMode) + ", stochasticReflections="
+                              + std::to_string(stochasticReflections) + ")");
     return {};
   }
 
@@ -88,14 +95,16 @@ PipelineVariant BuildPipelineVariant(nvrhi::IDevice* device, nvrhi::IBindingLayo
   if (!variant.pipeline)
   {
     log.Error(log::RENDER, "ReflectionsPass: createRayTracingPipeline failed (projectionMode="
-                              + std::to_string(projectionMode) + ")");
+                              + std::to_string(projectionMode) + ", stochasticReflections="
+                              + std::to_string(stochasticReflections) + ")");
     return {};
   }
   variant.shaderTable = variant.pipeline->createShaderTable();
   if (!variant.shaderTable)
   {
     log.Error(log::RENDER, "ReflectionsPass: createShaderTable failed (projectionMode="
-                              + std::to_string(projectionMode) + ")");
+                              + std::to_string(projectionMode) + ", stochasticReflections="
+                              + std::to_string(stochasticReflections) + ")");
     return {};
   }
   variant.shaderTable->setRayGenerationShader("RayGenMain");
@@ -159,14 +168,21 @@ ReflectionsPass::ReflectionsPass(nvrhi::IDevice* device, GpuScene& scene,
     return;
   }
 
-  PipelineVariant perspective =
-      BuildPipelineVariant(_device, _sceneBindings->Layout(), _passLayout, _raygenShader,
-                           _closestHitShader, _missShader, _aoAnyHitShader, _aoMissShader,
-                           /*projectionMode=*/0u);
+  // Eagerly build ONLY (perspective, stochastic OFF) — VariantIndex(0,
+  // false) == 0 — the default/byte-identical path every existing config
+  // exercises. Orthographic and/or the stochastic bit are lazy-built on
+  // first request (EnsureProjectionPipeline), same precedent the
+  // projection-only axis already used before this fix.
+  PipelineVariant perspective = BuildPipelineVariant(
+      _device, _sceneBindings->Layout(), _passLayout, _raygenShader, _closestHitShader,
+      _missShader, _aoAnyHitShader, _aoMissShader,
+      /*projectionMode=*/0u, /*stochasticReflections=*/0u);
   if (!perspective.pipeline || !perspective.shaderTable)
     return;
-  _pipelines[0] = std::move(perspective.pipeline);
-  _shaderTables[0] = std::move(perspective.shaderTable);
+  const std::size_t defaultVariant = VariantIndex(/*projectionMode=*/0u,
+                                                  /*stochasticReflections=*/false);
+  _pipelines[defaultVariant] = std::move(perspective.pipeline);
+  _shaderTables[defaultVariant] = std::move(perspective.shaderTable);
 
   _shadersOk = true;
   Logging::Get().Info(log::RENDER, "ReflectionsPass: initialised (RT pipeline + SBT ready)");
@@ -211,16 +227,17 @@ nvrhi::ITexture* ReflectionsPass::EnsureOutput(uint32_t width, uint32_t height) 
   return _output;
 }
 
-void ReflectionsPass::EnsureProjectionPipeline() {
+void ReflectionsPass::EnsureProjectionPipeline(bool stochasticReflections) {
   if (!_shadersOk || _scene == nullptr || !_scene->HasCamera())
     return;
-  const std::size_t variant = (_scene->GetCamera().projectionMode == 1u) ? 1u : 0u;
+  const uint32_t projectionMode = _scene->GetCamera().projectionMode;
+  const std::size_t variant = VariantIndex(projectionMode, stochasticReflections);
   if (_pipelines[variant] || _variantBuildFailed[variant])
     return;
-  PipelineVariant built =
-      BuildPipelineVariant(_device, _sceneBindings->Layout(), _passLayout, _raygenShader,
-                           _closestHitShader, _missShader, _aoAnyHitShader, _aoMissShader,
-                           static_cast<uint32_t>(variant));
+  PipelineVariant built = BuildPipelineVariant(
+      _device, _sceneBindings->Layout(), _passLayout, _raygenShader, _closestHitShader,
+      _missShader, _aoAnyHitShader, _aoMissShader, projectionMode,
+      stochasticReflections ? 1u : 0u);
   if (!built.pipeline || !built.shaderTable)
   {
     _variantBuildFailed[variant] = true;
@@ -283,8 +300,15 @@ void ReflectionsPass::Execute(nvrhi::ICommandList* commandList, const PassContex
     return;
 
   const CameraDesc& camera = _scene->GetCamera();
-  const std::size_t projectionVariant = (camera.projectionMode == 1u) ? 1u : 0u;
-  if (!_pipelines[projectionVariant] || !_shaderTables[projectionVariant])
+  // Specular MODEL GAP fix (2026-07-07) — passMask bit 8 selects the SAME
+  // (projectionMode, stochasticReflections) variant EnsureProjectionPipeline
+  // lazily builds each frame before the graph walks; bit clear (the
+  // default) always resolves to the eagerly-built, byte-identical variant.
+  const bool stochasticReflections =
+      (context.settings->realTimeQuality.passMask
+       & shaderinterop::PASS_MASK_STOCHASTIC_REFLECTIONS) != 0u;
+  const std::size_t variant = VariantIndex(camera.projectionMode, stochasticReflections);
+  if (!_pipelines[variant] || !_shaderTables[variant])
     return;
 
   const nvrhi::BindingSetHandle bindingSet = GetOrCreateBindingSet(visibility, normalRoughness);
@@ -300,7 +324,7 @@ void ReflectionsPass::Execute(nvrhi::ICommandList* commandList, const PassContex
   commandList->commitBarriers();
 
   nvrhi::rt::State state;
-  state.shaderTable = _shaderTables[projectionVariant];
+  state.shaderTable = _shaderTables[variant];
   state.bindings = {context.sceneBindingSet, bindingSet};
   commandList->setRayTracingState(state);
 

@@ -21,6 +21,54 @@
 // misses sample the shared dome background (SampleDomeBackground). Phase B
 // also clamps the averaged result to gQuality.maxRayIntensityReflections.
 //
+// Specular MODEL GAP fix (rtx-realtime-alignment-design.md, 2026-07-07) —
+// OPTIONAL stochastic-GGX estimator, gated by RealTimeQuality::passMask
+// bit 8 (PASS_MASK_STOCHASTIC_REFLECTIONS, ShaderInterop.slang) via the
+// SPEC_ID_STOCHASTIC_REFLECTIONS spec constant (STOCHASTIC_REFLECTIONS_
+// ENABLED below) ReflectionsPass.cpp folds at pipeline-creation time —
+// default OFF, byte-identical to the pre-existing trace. Root cause: the
+// default path's GGX-VNDF-sampled DIRECTION already exists (Phase B, see
+// SampleGGXVNDF's own doc comment) but the traced radiance is averaged
+// UNWEIGHTED and then multiplied by OpenPBRReflectionWeight's deterministic
+// Fresnel(NdotV) x (1-r')^2 "glossy" fade downstream (CompositePass) — a
+// fade that exists ONLY to compensate a single deterministic mirror sample
+// for the lobe spread it doesn't simulate. That fade cannot reproduce a
+// real GGX lobe integrating a bright environment (measured against ovrtx:
+// id40 Paint_Satin 0.147 vs 0.324, id30 glass floor 0.225 vs 0.283) and
+// darkens an already roughness-spread stochastic sample a SECOND time —
+// Heitz 2018 VNDF sampling already draws directions proportional to the
+// visible-normal density (D(h)*G1(v)*max(0,VdotH)/NdotV), so the plain
+// multi-sample average IS the properly lobe-weighted mean incoming
+// radiance; no additional per-sample BRDF term is needed on top (an
+// earlier version of this fix DID fold a per-sample F(V,H)*G2(V,L)/G1(V)
+// throughput in, reasoning that the VNDF pdf cancels the BRDF down to
+// exactly that estimator — empirically WORSE, because CompositePass's
+// `specWeight*reflections + (1-specWeight)*diffuseSpec` blend ALREADY
+// applies its own Fresnel(NdotV) via specWeight, so the per-sample F(V,H)
+// double-counted it; whole-frame RMSE regressed 0.176 -> 0.189 with id40/
+// id30 getting DARKER. Reverted — see RayGenMain's trace-loop comment).
+// When the bit is SET, RayGenMain instead ONLY changes the specWeight
+// (gReflectionWeight) written for traced pixels: the SAME base dielectric/
+// metal F82 Fresnel blend OpenPBRReflectionWeight uses, WITHOUT its
+// (1-r')^2 term (see the specWeight block in RayGenMain) — that term
+// existed purely to compensate the single-deterministic-sample path for
+// the lobe spread it didn't simulate; the multi-sample VNDF average
+// already supplies that spread. Convergence relies on TWO already-
+// existing mechanisms, unchanged by this fix: RtxSamplingUniforms' per-
+// FRAME-varying RNG seed (gSampling.frameIndex folds into SeedPcg32 below
+// — every frame draws a fresh VNDF sample) and either AccumulationPass's
+// N-frame running mean (PASS_MASK_ACCUMULATE) or an equal-length `render.
+// accumulationFrames` re-run (both let the builtin denoiser's own EMA
+// settle across the growing sample count). Measured BOTH candidate
+// denoisers on the World Lobby guard_acc96 fixture (passMask 383 = 127 |
+// 256, 96 frames): builtin -> whole-frame RMSE 0.17621 (baseline 0.17626,
+// essentially at parity, with id40/id30 measurably closer to ovrtx); DLSS
+// Ray Reconstruction -> 0.17842 (WORSE than both) — RR's own reconstruction
+// over-brightened several unrelated materials (id3 Concrete, id6 Iron
+// mullion) enough to erase the id40/id30 gains, the opposite of the
+// original "RR should clean up stochastic noise better" hypothesis.
+// Builtin is the recommended denoiser for this mode.
+//
 // Bindings — Set 0 (SceneBindings, shared verbatim with every other RT
 // pass). Set 1 (this pass's own I/O):
 //   set=1, binding=0 : StructuredBuffer<VisibilityGpu> (GBuffer pass output)
@@ -59,6 +107,13 @@
 [[vk::binding(1, 1)]] Texture2D<float4>                gNormalRoughness;
 [[vk::binding(2, 1)]] RWTexture2D<float4>              gReflections;
 [[vk::binding(3, 1)]] RWTexture2D<float4>              gReflectionWeight;
+
+// Specular MODEL GAP fix — folded at pipeline-creation time by
+// ReflectionsPass.cpp from RealTimeQuality::passMask bit 8 (see this
+// file's header). 0 (default) reproduces the pre-existing trace bit-for-
+// bit; 1 selects the specWeight-without-glossy-fade branch below (traced
+// pixels only — see the specWeight block's `willTrace` gate).
+[[vk::constant_id(SPEC_ID_STOCHASTIC_REFLECTIONS)]] const uint STOCHASTIC_REFLECTIONS_ENABLED = 0u;
 
 // RTX-alignment materials round 4 (floor/tables reflection-signal
 // forensics, rtx-realtime-alignment-design.md, 2026-07-06) — floor/tables
@@ -121,7 +176,11 @@ float ReflectionsLuminance(float3 c) {
 // gReflectionWeight (OpenPBRReflectionWeight, computed once at the
 // primary surface) in CompositePass, exactly as the Phase A deterministic
 // mirror direction was; no additional VNDF/BSDF weighting term is needed
-// here (single-sample-per-pixel, no accumulation).
+// here — VNDF sampling already draws directions proportional to the
+// visible-normal density, so a plain average over samples is the properly
+// lobe-weighted mean (see this file's header point 2 for why an explicit
+// per-sample F(V,H)*G2/G1 term was tried and reverted: it double-counts
+// the Fresnel term composite.slang's specWeight blend already applies).
 float3 SampleGGXVNDF(float3 viewLocal, float alpha, float2 u) {
     const float3 vh = normalize(float3(alpha * viewLocal.x, alpha * viewLocal.y, viewLocal.z));
     const float lensq = vh.x * vh.x + vh.y * vh.y;
@@ -254,7 +313,71 @@ void RayGenMain() {
         worldHit, worldDirXyz, vis.hitT,
         inst.objectToWorld, worldToObject);
     const float3 viewDir = normalize(-worldDirXyz);
-    float3 specWeight = OpenPBRReflectionWeight(surf.pbr, surf.normalWorld, viewDir);
+
+    // WP2-final — runtime RealTimeQuality.reflectionMaxRoughness (SceneBindings
+    // gQuality) replaces the REFLECTION_MAX_ROUGHNESS compile-time constant;
+    // ShaderInterop.slang's literal now only backs the C++-side
+    // RenderSettings::RealTimeQuality::reflectionMaxRoughness default.
+    //
+    // Materials round 4 — max'd against REFLECTION_TRACE_ROUGHNESS_CEILING
+    // (this file's own doc comment, above the binding declarations) so the
+    // default 0.3 knob no longer sends World Lobby's indoor glossy floor/
+    // table surfaces to the sky-dome fallback below. Specular MODEL GAP fix
+    // (2026-07-07) — hoisted ABOVE the specWeight block (was computed just
+    // before the rough-fallback branch) so that block can gate the
+    // stochastic specWeight override on `willTrace`: a pixel taking the
+    // rough-fallback path below NEVER runs the multi-sample GGX-VNDF trace
+    // (its gReflections sample is the SAME deterministic dome-mip fallback
+    // either way), so it must keep OpenPBRReflectionWeight's (1-r')^2
+    // glossy fade regardless of the stochastic bit — dropping it there
+    // would over-brighten every ROUGH material (concrete, stucco, fabric)
+    // with no corresponding fix to the signal it's weighting.
+    const float traceRoughnessCeiling =
+        max(gQuality.reflectionMaxRoughness, REFLECTION_TRACE_ROUGHNESS_CEILING);
+    const bool willTrace = roughness < traceRoughnessCeiling;
+
+    // Specular MODEL GAP fix (2026-07-07, this file's header) — the SAME
+    // modulated IOR OpenPBRReflectionWeight derives internally
+    // (openpbr_material.slang's own etaPrime), computed once here so the
+    // stochastic branch below (this specWeight override AND the per-sample
+    // trace-loop throughput) doesn't re-derive it twice. Only the
+    // stochastic branch consumes it; `xiFsUnused` is discarded exactly as
+    // OpenPBRReflectionWeight's own local does.
+    float xiFsUnused;
+    const float etaPrimeStochastic = OpenPBRModulatedIor(
+        surf.pbr.specularIor, surf.pbr.specularWeight, surf.pbr.coatIor,
+        OpenPBRFeature(OPENPBR_FEATURE_COAT) ? saturate(surf.pbr.coatWeight) : 0.0, xiFsUnused);
+
+    float3 specWeight;
+    if (STOCHASTIC_REFLECTIONS_ENABLED != 0u && willTrace) {
+        // Stochastic specWeight — the composite blend factor
+        // (composite.slang: `lit = specWeight*reflections +
+        // (1-specWeight)*diffuseSpec`) still needs a Fresnel-based split
+        // between "energy that left via the specular lobe" and "energy
+        // that left via diffuse", but must NOT ALSO layer
+        // OpenPBRReflectionWeight's (1-r')^2 glossy fade on top — that fade
+        // exists ONLY to compensate the DETERMINISTIC single-mirror-sample
+        // path for the lobe spread it doesn't simulate; the trace loop's
+        // multi-sample GGX-VNDF average (unchanged below — see this file's
+        // header for why an explicit per-sample BRDF re-weighting was tried
+        // and reverted) already supplies that spread, so re-applying the
+        // fade here would darken the now-correctly-averaged signal a second
+        // time (the exact failure mode three prior scalar-reflection-weight
+        // tuning attempts hit — see this file's header). Uses the SAME base
+        // dielectric/metal F82 Fresnel blend OpenPBRReflectionWeight itself
+        // starts from (NdotV, no coat/fuzz layering — a documented
+        // simplification for this mode; coat/fuzz materials keep the
+        // deterministic path's full closure when this bit is clear).
+        const float ndotVPrimary = max(1e-4, dot(surf.normalWorld, viewDir));
+        const float3 fDielectricPrimary = saturate(surf.pbr.specularColor)
+                                        * FresnelDielectricExact(ndotVPrimary, etaPrimeStochastic);
+        const float3 fMetalPrimary = OpenPBRConductorFresnel(
+            ndotVPrimary, surf.pbr.baseColor, surf.pbr.baseWeight,
+            surf.pbr.specularColor, surf.pbr.specularWeight);
+        specWeight = saturate(lerp(fDielectricPrimary, fMetalPrimary, saturate(surf.pbr.baseMetalness)));
+    } else {
+        specWeight = OpenPBRReflectionWeight(surf.pbr, surf.normalWorld, viewDir);
+    }
 
     // RTX-alignment window forensics (rtx-realtime-alignment-design.md,
     // 2026-07-06) — two corrections to the PRIMARY surface's specWeight,
@@ -378,18 +501,9 @@ void RayGenMain() {
 
     gReflectionWeight[launchIndex] = float4(specWeight, 1.0f);
 
-    // WP2-final — runtime RealTimeQuality.reflectionMaxRoughness (SceneBindings
-    // gQuality) replaces the REFLECTION_MAX_ROUGHNESS compile-time constant;
-    // ShaderInterop.slang's literal now only backs the C++-side
-    // RenderSettings::RealTimeQuality::reflectionMaxRoughness default.
-    //
-    // Materials round 4 — max'd against REFLECTION_TRACE_ROUGHNESS_CEILING
-    // (this file's own doc comment, above the binding declarations) so the
-    // default 0.3 knob no longer sends World Lobby's indoor glossy floor/
-    // table surfaces to the sky-dome fallback below.
-    const float traceRoughnessCeiling =
-        max(gQuality.reflectionMaxRoughness, REFLECTION_TRACE_ROUGHNESS_CEILING);
-    if (roughness >= traceRoughnessCeiling)
+    // traceRoughnessCeiling / willTrace computed above (before the
+    // specWeight block) — see that computation's own doc comment.
+    if (!willTrace)
     {
         // Rough fallback — no trace. Phase B firefly clamp applies HERE
         // too: an un-mip-biased-enough dome/HDRI sample (bright sun disk,
@@ -447,6 +561,29 @@ void RayGenMain() {
         payload.hitT  = -1.0f;
         TraceRay(gTlas, RAY_FLAG_NONE, 0xFFu, 0, 0, 0, reflRay, payload);
 
+        // Heitz 2018 "Sampling the GGX Distribution of Visible Normals" —
+        // sampling H from the VNDF (SampleGGXVNDF above, unconditional,
+        // both modes) already draws directions distributed proportional to
+        // D(h)*G1(v)*max(0,VdotH)/NdotV — the visible-normal density — so a
+        // PLAIN average of the traced samples is already the properly
+        // lobe-weighted mean incoming radiance the GGX lobe integrates
+        // over, no additional per-sample F(V,H)*G2/G1 term needed here.
+        // (An earlier version of this fix DID fold F(V,H)*G2/G1 into the
+        // per-sample throughput AND relied on it in the specWeight block
+        // above — empirically WORSE: whole-frame RMSE regressed 0.176 ->
+        // 0.189 because composite.slang's `specWeight*reflections +
+        // (1-specWeight)*diffuseSpec` LERP already applies its own
+        // Fresnel(NdotV) via specWeight, so folding F(V,H) in here double-
+        // counted it. G2/G1 alone, without F, was a smaller version of the
+        // same over-correction: 0.176 -> 0.176 [wash] but left id40/id30
+        // under-corrected. The fix that actually reproduces the target
+        // lobe-integration behavior is REMOVING OpenPBRReflectionWeight's
+        // (1-r')^2 glossy fade in the specWeight block above — see that
+        // block's doc comment — and leaving this trace loop exactly as the
+        // pre-existing unweighted average; the multi-sample/multi-frame
+        // VNDF average alone (no ad hoc single-sample compensation term)
+        // supplies the lobe integration ovrtx's real GGX-Smith BRDF
+        // produces.)
         colorSum += payload.color;
         if (payload.hitT >= 0.0f) {
             hitTSum += payload.hitT;

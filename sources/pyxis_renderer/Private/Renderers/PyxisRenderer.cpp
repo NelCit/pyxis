@@ -664,7 +664,16 @@ void PyxisRenderer::RenderFrame(nvrhi::ICommandList* commandList, const RenderSe
     static_cast<AmbientOcclusionPass*>(_ambientOcclusionPass)->EnsureProjectionPipeline();
   }
   if (_reflectionsPass != nullptr) {
-    static_cast<ReflectionsPass*>(_reflectionsPass)->EnsureProjectionPipeline();
+    // Specular MODEL GAP fix (rtx-realtime-alignment-design.md, 2026-07-07)
+    // — lazily build the (projectionMode, stochasticReflections) variant
+    // PASS_MASK_STOCHASTIC_REFLECTIONS selects this frame, same CPU-path-
+    // only / never-inside-Execute discipline every other EnsureProjection-
+    // Pipeline call here follows.
+    const bool stochasticReflections =
+        (effectiveSettings.realTimeQuality.passMask
+         & shaderinterop::PASS_MASK_STOCHASTIC_REFLECTIONS) != 0u;
+    static_cast<ReflectionsPass*>(_reflectionsPass)
+        ->EnsureProjectionPipeline(stochasticReflections);
   }
   if (_translucencyPass != nullptr) {
     static_cast<TranslucencyPass*>(_translucencyPass)->EnsureProjectionPipeline();
