@@ -36,6 +36,7 @@ struct PipelineVariant {
 PipelineVariant BuildPipelineVariant(nvrhi::IDevice* device, nvrhi::IBindingLayout* sceneLayout,
                                      nvrhi::IBindingLayout* passLayout, nvrhi::IShader* raygen,
                                      nvrhi::IShader* closestHit, nvrhi::IShader* miss,
+                                     nvrhi::IShader* aoAnyHit, nvrhi::IShader* aoMiss,
                                      uint32_t projectionMode) noexcept {
   auto& log = Logging::Get();
   const nvrhi::ShaderSpecialization raygenConstants[] = {
@@ -54,17 +55,34 @@ PipelineVariant BuildPipelineVariant(nvrhi::IDevice* device, nvrhi::IBindingLayo
   pipelineDesc.shaders = {
       nvrhi::rt::PipelineShaderDesc{}.setExportName("RayGenMain").setShader(specRaygen),
       nvrhi::rt::PipelineShaderDesc{}.setExportName("MissMain").setShader(miss),
+      // Occlusion-aware-ambient follow-up — the AO ray ClosestHitMain
+      // fires at the reflection hit (reflections.slang) uses this as its
+      // MissShaderIndex 1.
+      nvrhi::rt::PipelineShaderDesc{}.setExportName("AoMissMain").setShader(aoMiss),
   };
-  // No any-hit: alpha-tested cutout geometry reads as solid in Phase A
-  // reflections (documented approximation — the WP2 contract table lists
-  // only RayGen/ClosestHit/Miss for this pass).
+  // HitGroupDefault: no any-hit — alpha-tested cutout geometry reads as
+  // solid in Phase A reflections (documented approximation — the WP2
+  // contract table lists only RayGen/ClosestHit/Miss for this pass).
+  // HitGroupAo: any-hit only (no closest-hit — the AO ray always carries
+  // RAY_FLAG_SKIP_CLOSEST_HIT_SHADER, same "never invoked" legality
+  // AmbientOcclusionPass's own any-hit-only hit group relies on),
+  // SEPARATE from HitGroupDefault above so the primary reflection ray's
+  // "reads as solid" behavior is unaffected by this any-hit gate.
   pipelineDesc.hitGroups = {
       nvrhi::rt::PipelineHitGroupDesc{}
           .setExportName("HitGroupDefault")
           .setClosestHitShader(closestHit),
+      nvrhi::rt::PipelineHitGroupDesc{}
+          .setExportName("HitGroupAo")
+          .setAnyHitShader(aoAnyHit),
   };
   pipelineDesc.globalBindingLayouts = {sceneLayout, passLayout};
-  pipelineDesc.maxRecursionDepth = 1;  // one mirror-direction bounce, no further recursion.
+  // Occlusion-aware-ambient follow-up — was 1 (one mirror-direction
+  // bounce, no further recursion). Now 2: RayGen's reflection TraceRay is
+  // level 1; ClosestHitMain's own AO TraceRay (the occlusion-aware-ambient
+  // gate, reflections.slang) is level 2. No further recursion from there
+  // (the AO ray's any-hit never calls TraceRay).
+  pipelineDesc.maxRecursionDepth = 2;
   PipelineVariant variant;
   variant.pipeline = device->createRayTracingPipeline(pipelineDesc);
   if (!variant.pipeline)
@@ -81,8 +99,10 @@ PipelineVariant BuildPipelineVariant(nvrhi::IDevice* device, nvrhi::IBindingLayo
     return {};
   }
   variant.shaderTable->setRayGenerationShader("RayGenMain");
-  variant.shaderTable->addMissShader("MissMain");
-  variant.shaderTable->addHitGroup("HitGroupDefault");
+  variant.shaderTable->addMissShader("MissMain");    // index 0: primary reflection ray.
+  variant.shaderTable->addMissShader("AoMissMain");  // index 1: occlusion-aware-ambient AO ray.
+  variant.shaderTable->addHitGroup("HitGroupDefault");  // index 0: primary reflection ray.
+  variant.shaderTable->addHitGroup("HitGroupAo");       // index 1: occlusion-aware-ambient AO ray.
   return variant;
 }
 
@@ -102,12 +122,19 @@ ReflectionsPass::ReflectionsPass(nvrhi::IDevice* device, GpuScene& scene,
   const Path raygenPath = locator.LocateResource("shaders/reflections_raygen.spv");
   const Path closestHitPath = locator.LocateResource("shaders/reflections_closesthit.spv");
   const Path missPath = locator.LocateResource("shaders/reflections_miss.spv");
+  // Occlusion-aware-ambient follow-up (rtx-realtime-alignment-design.md,
+  // 2026-07-06) — the short AO ray ClosestHitMain fires at the reflection
+  // hit; see this pass's own header / reflections.slang's file header.
+  const Path aoAnyHitPath = locator.LocateResource("shaders/reflections_ao_anyhit.spv");
+  const Path aoMissPath = locator.LocateResource("shaders/reflections_ao_miss.spv");
 
   _raygenShader = LoadSpirv(_device, raygenPath.View(), nvrhi::ShaderType::RayGeneration, "main");
   _closestHitShader =
       LoadSpirv(_device, closestHitPath.View(), nvrhi::ShaderType::ClosestHit, "main");
   _missShader = LoadSpirv(_device, missPath.View(), nvrhi::ShaderType::Miss, "main");
-  if (!_raygenShader || !_closestHitShader || !_missShader)
+  _aoAnyHitShader = LoadSpirv(_device, aoAnyHitPath.View(), nvrhi::ShaderType::AnyHit, "main");
+  _aoMissShader = LoadSpirv(_device, aoMissPath.View(), nvrhi::ShaderType::Miss, "main");
+  if (!_raygenShader || !_closestHitShader || !_missShader || !_aoAnyHitShader || !_aoMissShader)
   {
     Logging::Get().Error(log::RENDER, "ReflectionsPass: shader load failed; pass will skip");
     return;
@@ -134,7 +161,8 @@ ReflectionsPass::ReflectionsPass(nvrhi::IDevice* device, GpuScene& scene,
 
   PipelineVariant perspective =
       BuildPipelineVariant(_device, _sceneBindings->Layout(), _passLayout, _raygenShader,
-                           _closestHitShader, _missShader, /*projectionMode=*/0u);
+                           _closestHitShader, _missShader, _aoAnyHitShader, _aoMissShader,
+                           /*projectionMode=*/0u);
   if (!perspective.pipeline || !perspective.shaderTable)
     return;
   _pipelines[0] = std::move(perspective.pipeline);
@@ -191,7 +219,8 @@ void ReflectionsPass::EnsureProjectionPipeline() {
     return;
   PipelineVariant built =
       BuildPipelineVariant(_device, _sceneBindings->Layout(), _passLayout, _raygenShader,
-                           _closestHitShader, _missShader, static_cast<uint32_t>(variant));
+                           _closestHitShader, _missShader, _aoAnyHitShader, _aoMissShader,
+                           static_cast<uint32_t>(variant));
   if (!built.pipeline || !built.shaderTable)
   {
     _variantBuildFailed[variant] = true;

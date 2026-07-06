@@ -561,8 +561,13 @@ pyxis_compile_slang_shader(
                 ${PYXIS_SHADER_RNG}
 )
 
-# ReflectionsPass — RayGenMain, ClosestHitMain, MissMain. rng.slang added
-# (Phase B GGX VNDF importance-sampled reflection direction).
+# ReflectionsPass — RayGenMain, ClosestHitMain, MissMain (primary
+# reflection ray) + AoAnyHitMain, AoMissMain (occlusion-aware-ambient
+# follow-up: the short AO ray ClosestHitMain fires at the reflection hit,
+# rtx-realtime-alignment-design.md 2026-07-06 — see reflections.slang's
+# file header for the two-hit-group / two-miss-shader SBT layout).
+# rng.slang added (Phase B GGX VNDF importance-sampled reflection
+# direction, and now the AO ray's cosine-hemisphere sample).
 pyxis_compile_slang_shader(
     TARGET      pyxis_renderer
     SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/reflections.slang
@@ -589,6 +594,26 @@ pyxis_compile_slang_shader(
     ENTRY_POINT MissMain
     STAGE       miss
     OUTPUT      reflections_miss.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
+                ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR} ${PYXIS_SHADER_ANYHIT}
+                ${PYXIS_SHADER_RNG}
+)
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/reflections.slang
+    ENTRY_POINT AoAnyHitMain
+    STAGE       anyhit
+    OUTPUT      reflections_ao_anyhit.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
+                ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR} ${PYXIS_SHADER_ANYHIT}
+                ${PYXIS_SHADER_RNG}
+)
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/reflections.slang
+    ENTRY_POINT AoMissMain
+    STAGE       miss
+    OUTPUT      reflections_ao_miss.spv
     INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
                 ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR} ${PYXIS_SHADER_ANYHIT}
                 ${PYXIS_SHADER_RNG}

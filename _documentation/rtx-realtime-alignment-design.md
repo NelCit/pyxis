@@ -350,6 +350,32 @@ leaving speckle (the known 40%-vs-25% floor). Work items, builtin chain:
 Measure: planter crops (raw signal vs denoised vs NVIDIA), converged RMSE
 (baseline 0.2150), and the noise proxy (single-frame ratio target ≤25%).
 
+## KEY FINDING (2026-07-06): no true accumulation buffer — top lever for <0.05
+
+Denoiser diagnostic proved: `accumulationFrames` does NOT accumulate the
+path trace — denoise-OFF is flat (0% noise reduction) across N=1..64. The
+ONLY temporal averaging is the denoiser's EMA history, capped at
+maxAccumFrames=30(slow)/6(fast)/32(AO). So the "converged 96f" render
+plateaus at the denoiser EMA floor (~frame 30); our 0.0303 noise proxy is
+that CAP, not a real convergence (ovrtx neural floor 0.0153). Failure mode
+is pure high-freq SPECKLE (under-denoise, 1-spp NEE fireflies), NOT
+over-blur — detail intact, NRD constants already match published defaults.
+
+**Fix = add a true progressive-accumulation buffer** (plan §9 AccumulationPass,
+deferred in the rewrite): headless/quality mode averages the RAW (pre-denoise)
+composite radiance across accumulationFrames → unbiased MC estimate converging
+to the true path-traced image. Effects: (1) removes the noise component of
+RMSE (currently conflated with structural error); (2) de-confounds all other
+fix measurements (noise currently pollutes every material/GI number); (3)
+enables "closer than them" — unbounded convergence goes below ovrtx's
+real-time neural-denoiser floor. Sits after Composite (raw path), before
+AutoExposure; reset on camera/settings change; static-camera+fixed-seed
+headless is deterministic. Touches a new AccumulationPass + PyxisRenderer
+registration (sequence to avoid the in-flight reflection/floor agents on
+PyxisRenderer.cpp). Denoiser real-time sub-levers (SIGMA temporal state,
+foliage coherence, adaptive à-trous phi, firefly clamp) are SECONDARY —
+they help the real-time few-frame viewer, not the converged 0.05 metric.
+
 ## Determinism & regression strategy (the hard constraint)
 
 Stochastic sampling + temporal passes change every golden image. Strategy:
@@ -447,6 +473,7 @@ metals/glass rows in the forensics table are a methodology artifact
 | + Plaster/UsdPreviewSurface-fallback fix (texture × disconnected 0.18 placeholder tint — general bug) | **0.2145** | — |
 | + noise-floor + veg (AO denoise, dual-history, adaptive TAA) | 0.2135 | 0.502 |
 | + **traced rough reflections** (ceiling 0.3→0.6: indoor glossy surfaces trace the real dark interior via GGX-VNDF instead of reflecting the bright sky-dome) | **0.1826** | — |
+| + **occlusion-aware ambient at reflection ClosestHit** (re-enable EvaluateDomeAmbient in reflections.slang, gated by a short per-hit cosine-hemisphere AO ray; tables id40 mean 0.099→0.144 vs ovrtx 0.322, panel id7 mean 0.276→0.299 vs 0.561) | **0.1771** | 0.474 |
 
 Traced-reflections notes (measured 2026-07-06): tables 2.1× too bright →
 FIXED (now slightly too dark — reflected interior lacks ambient fill;
@@ -457,6 +484,30 @@ materialId 7 door panel minor regress (same too-dark cause). GPU flat
 0.6 ships. The dome-ambient-in-reflection experiment that regressed earlier
 is DIFFERENT from the wanted occlusion-aware term — blanket unoccluded
 ambient over-brightens; the follow-up must gate on an AO ray.
+
+Occlusion-aware-ambient notes (measured 2026-07-06, follow-up to the above):
+reflections.slang ClosestHitMain now fires ONE short cosine-hemisphere AO
+ray (TMax = gQuality.aoRayLength, transmissive-passthrough gate) from the
+reflection hit and passes its visibility into EvaluateDomeAmbient — so
+enclosed reflected surfaces get little fill and open ones get full, exactly
+the term the earlier BLANKET (aoVisibility=1.0) version lacked (that one
+regressed 0.2135→0.2167). Whole-frame 0.1826→0.1771 (−0.0055, no trade).
+Per-material sweep: tables id40 local RMSE 0.314→0.282, door id7 0.311→0.291,
+plus 8+ other reflective interior surfaces improved (id2 −0.026, id27 −0.015,
+id24 −0.014). Three surfaces regressed slightly (id29 dark table + reflective
+floor +0.028, id5 curtain-wall glass +0.022, id6 window frame +0.010) — all
+reflect the now-brighter interior and are separately too-bright-vs-ovrtx
+already (material-translation gaps, not this term); net frame still improves.
+Only reflected surfaces changed (59% of pixels carry a reflection signal;
+non-reflected materials byte-unchanged — this only touches the reflection
+CH). GPU: pass.Reflections p50 6.32→6.6 ms (1080p, 1 reflection spp; one
+extra AO ray per reflection hit; the earlier "~3 ms" figure predates the
+GGX-VNDF spp path). Pipeline maxRecursionDepth 1→2 (RayGen reflection ray =
+level 1, ClosestHit AO ray = level 2); new HitGroupAo/AoMissMain SBT records.
+Noise clean at 96f (AO-gated ambient is low-variance — the dome term is a
+smooth multiplier, not a high-freq NEE draw). DEBT: one-bounce GI at the
+reflected hit not implemented (needs recursion level 3-4 for a second-order
+effect on an already-dome-lit signal); dome-ambient×AO is the pragmatic term.
 
 DLSS Stage 2b status (2026-07-06): Ray Reconstruction implemented
 end-to-end (gSpecularAlbedo via EnvBRDFApprox2, EvaluateRR, graceful

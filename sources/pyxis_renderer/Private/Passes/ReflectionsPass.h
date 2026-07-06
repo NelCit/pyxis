@@ -86,6 +86,13 @@ class ReflectionsPass final : public IRenderPass {
   nvrhi::ShaderHandle _raygenShader;
   nvrhi::ShaderHandle _closestHitShader;
   nvrhi::ShaderHandle _missShader;
+  // Occlusion-aware-ambient follow-up (rtx-realtime-alignment-design.md,
+  // 2026-07-06) — the short AO ray ClosestHitMain fires at the reflection
+  // hit gets its OWN hit group (any-hit only) + miss shader; see
+  // reflections.slang's file header for why this can't share the primary
+  // reflection ray's HitGroupDefault/MissMain.
+  nvrhi::ShaderHandle _aoAnyHitShader;
+  nvrhi::ShaderHandle _aoMissShader;
   nvrhi::BindingLayoutHandle _passLayout;
 
   static constexpr std::size_t PROJECTION_VARIANT_COUNT = 2;

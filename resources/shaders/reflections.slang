@@ -15,9 +15,11 @@
 // analog of a roughness-cache term). At each reflection hit:
 // EvaluateSurfaceMaterial (shared) + the shared direct-light loop WITHOUT
 // shadow rays (EvaluateDirectLightSample, traceShadow = false —
-// deliberately cheap) + emissive; misses sample the shared dome background
-// (SampleDomeBackground). Phase B also clamps the averaged result to
-// gQuality.maxRayIntensityReflections.
+// deliberately cheap) + an OCCLUSION-AWARE dome-ambient term (see
+// ClosestHitMain's own doc comment — the "occlusion-aware ambient"
+// follow-up, rtx-realtime-alignment-design.md, 2026-07-06) + emissive;
+// misses sample the shared dome background (SampleDomeBackground). Phase B
+// also clamps the averaged result to gQuality.maxRayIntensityReflections.
 //
 // Bindings — Set 0 (SceneBindings, shared verbatim with every other RT
 // pass). Set 1 (this pass's own I/O):
@@ -31,6 +33,19 @@
 //                       re-eval at the primary hit (EvaluateSurfaceMaterial), unlike
 //                       the geometry-only guide-texture read this pass otherwise uses —
 //                       see RayGenMain.)
+//
+// Hit groups / miss shaders — TWO of each now (occlusion-aware ambient
+// follow-up): "HitGroupDefault" (ClosestHitMain) + "MissMain" (index 0) for
+// the PRIMARY reflection ray, unchanged; "HitGroupAo" (any-hit only,
+// AoAnyHitMain) + "AoMissMain" (index 1) for the SHORT ambient-occlusion
+// ray ClosestHitMain fires at the reflection hit (see below). The AO ray
+// is a distinct hit group/miss pair (not a shared one, unlike
+// indirect_diffuse.slang's single-payload trick) because it uses the
+// shared `OcclusionPayload` type while the primary ray uses this file's
+// own `ReflectionPayload` — DXR requires a shader's payload type to match
+// its TraceRay call site's. ReflectionsPass.cpp's `maxRecursionDepth` is 2
+// to cover this (RayGen's reflection TraceRay = level 1, ClosestHit's AO
+// TraceRay = level 2).
 
 #include "ShaderInterop.slang"
 #include "camera_ray.slang"  // gCamera (0) + gQuality (15) + gSampling (16) + BuildCameraRay
@@ -333,9 +348,10 @@ void RayGenMain() {
 
 // --------------------------------------------------------------------
 // ClosestHitMain — evaluates the reflection hit's material + an
-// UNSHADOWED direct-light loop + a dome-ambient term + emissive.
-// Deliberately cheap (no shadow rays, no AO ray here — Phase A cost
-// cap; see the file header).
+// UNSHADOWED direct-light loop + an OCCLUSION-AWARE dome-ambient term +
+// emissive. Still deliberately cheap (no per-light shadow rays — Phase A
+// cost cap; see the file header) but now fires ONE short AO ray to gate
+// the ambient term.
 //
 // RTX-alignment materials round 3 (materialId 30 forensics,
 // rtx-realtime-alignment-design.md) — the direct-light loop above
@@ -350,15 +366,45 @@ void RayGenMain() {
 // direct-light-lit one) reflected back at near-zero brightness
 // regardless of how reflective the PRIMARY surface actually is —
 // measured on the World Lobby's floor-level glossy glass inset
-// (materialId 30): a near-grazing view (NdotV ~0.025) gives that
-// primary surface a Fresnel reflectance of ~0.87 (dielectric ior
-// 1.52), so its shaded result is almost ENTIRELY this reflection
-// term, and the reflected content (a dome-lit wall/ceiling at
-// grazing incidence) was going out ~3x too dark against ovrtx (whose
-// reflections keep the ambient contribution) purely because this
-// term was missing. aoVisibility is left at 1.0 (no AO ray) — the
-// same "deliberately cheap, no shadow ray" tradeoff the direct loop
-// above already makes for this pass.
+// (materialId 30) and, after the traced-rough-reflections fix above
+// raised the trace ceiling to 0.6, on the indoor satin tables
+// (materialId 40, mean 0.099 vs ovrtx 0.322) and door panel
+// (materialId 7): these surfaces now trace the real dark interior
+// instead of the sky, but that interior geometry's own ambient fill
+// was missing at the reflection hit.
+//
+// Occlusion-aware gate (2026-07-06 follow-up to the "ISOLATION" note
+// this replaces) — a FIRST attempt added this term with `aoVisibility`
+// hardcoded to 1.0 (fully unoccluded): that over-brightened enclosed
+// interior surfaces seen in reflections (net regression 0.2135->0.2167,
+// mean 0.502->0.543) because most of an indoor scene's reflected
+// surfaces (walls, undersides, corners) ARE significantly
+// self-occluded from the sky and should receive little dome fill, not
+// the full unoccluded amount. The fix traces one SHORT cosine-hemisphere
+// AO ray from the reflection hit (same TMax = gQuality.aoRayLength,
+// transmissive-passthrough any-hit gate, and pre-trace-occluded /
+// miss-writes-1.0 `OcclusionPayload` convention AmbientOcclusionPass /
+// direct_lighting.slang's dome-NEE ray use — see this file's header for
+// the dedicated HitGroupAo/AoMissMain pair this needs) and passes its
+// result as `aoVisibility` into EvaluateDomeAmbient, so enclosed/occluded
+// reflected surfaces (most of this indoor scene) get little fill and
+// open ones get full — exactly the term the blanket 1.0 version lacked.
+// A per-hit ray (not a fixed scale) was feasible here because this
+// pass's own pipeline recursion budget only needed bumping 1->2 (no
+// other pass shares it), so the "acceptable cheaper alternative" (a
+// fixed ambient scale) documented as a fallback in the task spec was not
+// needed.
+//
+// One-bounce GI at the reflection hit (NOT implemented) — a reflected
+// diffuse surface would ideally also receive real single-bounce indirect
+// light (matching IndirectDiffusePass's own bounce estimator), but that
+// needs its own cosine-hemisphere TraceRay one level deeper still
+// (recursion level 3 minimum: RayGen's reflection ray = 1, this AO ray =
+// 2, a GI bounce = 3) plus a NEE shadow ray from THAT hit (level 4) —
+// meaningfully more recursion budget and cost than the AO-gated ambient
+// term for a second-order effect on an already-indirect (dome-lit)
+// signal. Dome-ambient×AO is the pragmatic term this fix stops at;
+// tracked as debt, not implemented here.
 // --------------------------------------------------------------------
 [shader("closesthit")]
 void ClosestHitMain(inout ReflectionPayload payload, in BuiltInTriangleIntersectionAttributes attribs) {
@@ -387,15 +433,80 @@ void ClosestHitMain(inout ReflectionPayload payload, in BuiltInTriangleIntersect
                 * attenuation;
     }
 
-    // ISOLATION (2026-07-06): the unoccluded dome-ambient term here
-    // (aoVisibility hardcoded 1.0) over-brightened enclosed interior
-    // surfaces seen in reflections — net regression 0.2135->0.2167,
-    // mean 0.502->0.543. Disabled while the sqrt-roughness mip change
-    // above is isolated; the floor's under-brightness needs a targeted
-    // (occlusion-aware) reflection-energy fix, not a blanket ambient add.
+    // Occlusion-aware ambient — see this function's doc comment above.
+    // ONE short cosine-hemisphere AO ray from the reflection hit, TMax =
+    // gQuality.aoRayLength (same knob AmbientOcclusionPass's own
+    // hemispherical ray uses), through the dedicated HitGroupAo/AoMissMain
+    // pair (RayContributionToHitGroupIndex 1 / MissShaderIndex 1 — this
+    // pipeline's OTHER hit group/miss (index 0) stay the primary
+    // reflection ray's HitGroupDefault/MissMain, untouched).
+    float3 aoTangent;
+    float3 aoBitangent;
+    BuildOrthonormalBasis(surf.normalWorld, aoTangent, aoBitangent);
+    Pcg32 aoRng = SeedPcg32(gSampling.rngSeed, gSampling.frameIndex, DispatchRaysIndex().xy,
+                            DispatchRaysDimensions().x,
+                            MakeStreamId(RNG_STREAM_REFLECTIONS, 0u, 1u));
+    const float2 uAo = Pcg32NextFloat2(aoRng);
+    const float3 aoDirLocal = CosineSampleHemisphere(uAo);
+    const float3 aoDirWorld = LocalToWorld(aoDirLocal, aoTangent, aoBitangent, surf.normalWorld);
+
+    RayDesc aoRay;
+    aoRay.Origin    = worldHit + surf.normalWorld * 1e-3f;
+    aoRay.Direction = aoDirWorld;
+    aoRay.TMin      = 1e-3f;
+    aoRay.TMax      = gQuality.aoRayLength;
+    OcclusionPayload aoPayload;
+    aoPayload.visible = 0.0f;  // pre-trace = occluded
+    aoPayload.hitT    = 0.0f;
+    TraceRay(gTlas,
+             RAY_FLAG_SKIP_CLOSEST_HIT_SHADER | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH,
+             0xFFu,
+             /*RayContributionToHitGroupIndex*/ 1,
+             /*MultiplierForGeometryContributionToHitGroupIndex*/ 0,
+             /*MissShaderIndex*/ 1,
+             aoRay,
+             aoPayload);
+
+    float3 ambient = float3(0.0f, 0.0f, 0.0f);
+    EvaluateDomeAmbient(surf.pbr, surf.normalWorld, viewDir, aoPayload.visible, ambient);
+
     const float3 emission = OpenPBREmission(surf.pbr);
-    payload.color = direct + emission * surf.opacity;
+    payload.color = direct + ambient + emission * surf.opacity;
     payload.hitT  = RayTCurrent();
+}
+
+// --------------------------------------------------------------------
+// AoAnyHitMain — the occlusion-aware-ambient AO ray's any-hit gate.
+// SEPARATE hit group from the primary reflection ray's HitGroupDefault
+// (which stays any-hit-free — "alpha-tested cutout geometry reads as
+// solid in Phase A reflections", this file's header) — this hit group
+// exists ONLY to serve the AO ray ClosestHitMain fires above (selected
+// via RayContributionToHitGroupIndex=1), so adding an any-hit here
+// cannot change the primary reflection ray's behavior. Same
+// alpha-tested / transmissive-passthrough gate every other shadow/AO
+// ray any-hit in this codebase uses (direct_lighting.slang's
+// AnyHitMain, ambient_occlusion.slang's AnyHitMain).
+// --------------------------------------------------------------------
+[shader("anyhit")]
+void AoAnyHitMain(inout OcclusionPayload payload, in BuiltInTriangleIntersectionAttributes attribs) {
+    if (AnyHitIsAlphaTested()) {
+        IgnoreHit();
+        return;
+    }
+    if (AnyHitIsTransmissive()) {
+        IgnoreHit();
+        return;
+    }
+    payload.hitT = RayTCurrent();
+}
+
+// --------------------------------------------------------------------
+// AoMissMain — the AO ray escaped the hemisphere within aoRayLength;
+// unoccluded (matches OcclusionPayload's "miss writes 1.0" convention).
+// --------------------------------------------------------------------
+[shader("miss")]
+void AoMissMain(inout OcclusionPayload payload) {
+    payload.visible = 1.0f;
 }
 
 // --------------------------------------------------------------------
