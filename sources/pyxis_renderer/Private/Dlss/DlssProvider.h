@@ -112,6 +112,18 @@ class DlssProvider final {
   [[nodiscard]] bool IsUsable() const noexcept { return _availability.usable; }
   [[nodiscard]] const Availability& LastResult() const noexcept { return _availability; }
 
+  // DLSS Stage 2b — Ray Reconstruction (DLSS-D). "An extension to DLSS"
+  // (ProgrammingGuideDLSS_RR.md 3.0): only ever probed from INSIDE
+  // Initialize() above, and only once SR itself (`_availability.usable`)
+  // is confirmed true — a machine with SR but no RR (older/missing
+  // nvngx_dlssd.dll, non-RTX-40-class adapter, etc.) keeps full SR, this
+  // just stays false. DlssPass checks this to pick the RR-vs-SR evaluate
+  // path; PyxisRenderer checks it to decide the passMask forcing (RR
+  // replaces the builtin denoiser chain entirely, so PASS_MASK_DENOISE is
+  // forced OFF instead of ON) and to log the active ladder rung.
+  [[nodiscard]] bool IsRRUsable() const noexcept { return _rrAvailability.usable; }
+  [[nodiscard]] const Availability& LastRRResult() const noexcept { return _rrAvailability; }
+
   struct RenderResolution {
     uint32_t width = 0;
     uint32_t height = 0;
@@ -124,6 +136,19 @@ class DlssProvider final {
   [[nodiscard]] RenderResolution GetOptimalRenderResolution(uint32_t displayWidth,
                                                              uint32_t displayHeight,
                                                              uint32_t dlssExecMode) noexcept;
+
+  // DLSS Stage 2b — slDLSSDGetOptimalSettings wrapper. ProgrammingGuideDLSS_RR.md
+  // 3.0: "DLSS-RR runs in the same Performance Quality Mode set for DLSS",
+  // but the RR plugin exposes its own optimal-settings entry point (over
+  // sl::DLSSDOptions, not plain sl::DLSSOptions — the guide's own code
+  // sample names the wrong struct; sl_dlss_d.h's PFun_slDLSSDGetOptimalSettings
+  // signature is authoritative), so this calls that directly rather than
+  // assuming byte-identical results from GetOptimalRenderResolution above.
+  // Returns {0,0} when RR isn't usable or the call fails; the caller falls
+  // back to GetOptimalRenderResolution (SR) on that.
+  [[nodiscard]] RenderResolution GetOptimalRenderResolutionRR(uint32_t displayWidth,
+                                                               uint32_t displayHeight,
+                                                               uint32_t dlssExecMode) noexcept;
 
   // One tagged Vulkan image, raw-handle-only (§18.9-style convention —
   // same shape as VulkanContext's own fields) so this header never needs
@@ -197,6 +222,65 @@ class DlssProvider final {
   // only, one call per frame, one viewport (v1 -- no multi-viewport).
   [[nodiscard]] bool Evaluate(const FrameInputs& inputs) noexcept;
 
+  // DLSS Stage 2b — every per-frame input EvaluateRR() needs. Mirrors
+  // FrameInputs' camera/jitter/color/depth/mvec fields exactly (kept as a
+  // SEPARATE struct rather than growing FrameInputs with optional RR-only
+  // fields — SR and RR are two different Streamline features with two
+  // different tag sets; sharing one struct would make it unclear which
+  // fields a given Evaluate*() call actually reads) plus the four
+  // additional RR guide buffers (ProgrammingGuideDLSS_RR.md §4.1) and the
+  // world<->view matrices DLSSDOptions needs for its specular-hit-distance
+  // reprojection.
+  struct FrameInputsRR {
+    uint64_t frameIndex = 0;
+    uint32_t renderWidth = 0;
+    uint32_t renderHeight = 0;
+    uint32_t displayWidth = 0;
+    uint32_t displayHeight = 0;
+    uint32_t dlssExecMode = 0;
+    bool orthographic = false;
+    float jitterX = 0.0f;
+    float jitterY = 0.0f;
+    const float* cameraViewToClip = nullptr;  // 16 floats, row-major
+    const float* clipToCameraView = nullptr;  // 16 floats, row-major
+    const float* clipToPrevClip = nullptr;    // 16 floats, row-major
+    const float* prevClipToClip = nullptr;    // 16 floats, row-major
+    // DLSSDOptions::worldToCameraView / cameraViewToWorld — §4.1.9's
+    // kBufferTypeSpecularHitDistance reprojection needs both, in addition
+    // to the clip-space matrices above. cameraViewToWorld is the SAME
+    // matrix FrameInputs' cameraPos/Up/Right/Fwd are already extracted
+    // from (SceneBindings::LastWorldFromView()); worldToCameraView is its
+    // inverse (DlssPass.cpp computes both from the one SceneBindings
+    // accessor via hlslpp::inverse, same pattern as its existing
+    // clipToPrevClip/prevClipToClip derivation).
+    const float* worldToCameraView = nullptr;  // 16 floats, row-major
+    const float* cameraViewToWorld = nullptr;  // 16 floats, row-major
+    float cameraPos[3] = {0.0f, 0.0f, 0.0f};
+    float cameraUp[3] = {0.0f, 1.0f, 0.0f};
+    float cameraRight[3] = {1.0f, 0.0f, 0.0f};
+    float cameraFwd[3] = {0.0f, 0.0f, -1.0f};
+    float cameraNear = 0.01f;
+    float cameraFar = 10000.0f;
+    TaggedImage colorIn;               // renderRes, kBufferTypeScalingInputColor (RAW/noisy composite).
+    TaggedImage colorOut;              // displayRes, kBufferTypeScalingOutputColor.
+    TaggedImage depth;                 // renderRes, kBufferTypeDepth (dlss_depth_convert.slang output).
+    TaggedImage mvec;                  // renderRes, kBufferTypeMotionVectors.
+    TaggedImage albedo;                // renderRes, kBufferTypeAlbedo (gAlbedo — diffuse).
+    TaggedImage specularAlbedo;        // renderRes, kBufferTypeSpecularAlbedo (gSpecularAlbedo, new Stage 2b guide).
+    TaggedImage normalRoughness;       // renderRes, kBufferTypeNormalRoughness (gNormalRoughness, ePacked).
+    TaggedImage specularHitDistance;   // renderRes, kBufferTypeSpecularHitDistance (gReflections, .a = hitT).
+    void* vkCommandBuffer = nullptr;   // VkCommandBuffer
+  };
+
+  // DLSS Stage 2b — Ray Reconstruction's per-frame evaluate. Same
+  // slGetNewFrameToken -> slSetConstants -> slDLSSDSetOptions ->
+  // slSetTagForFrame -> slEvaluateFeature(kFeatureDLSS_RR) sequence
+  // Evaluate() above runs for SR, against sl::kFeatureDLSS_RR instead of
+  // sl::kFeatureDLSS and with the larger RR tag set (§4.1). Only called by
+  // DlssPass when IsRRUsable() is true; returns false (and logs once) on
+  // any step's failure, same graceful-degradation contract as Evaluate().
+  [[nodiscard]] bool EvaluateRR(const FrameInputsRR& inputs) noexcept;
+
   // Releases the DLSS feature's Streamline-side resources
   // (slFreeResources) -- called from DlssPass's dtor before the device is
   // torn down. No-op if never usable.
@@ -205,6 +289,10 @@ class DlssProvider final {
  private:
   bool _probed = false;
   Availability _availability;
+  // DLSS Stage 2b — Ray Reconstruction's own Availability, set inside
+  // Initialize() (never independently probed — RR is only checked once SR
+  // itself succeeds). See IsRRUsable()'s doc comment above.
+  Availability _rrAvailability;
   // HMODULE, kept opaque here so this header doesn't need <windows.h>
   // (§30 — Private headers avoid it where easy, even though it's not the
   // hard Public/ ban). Non-null only after a successful LoadLibraryW;

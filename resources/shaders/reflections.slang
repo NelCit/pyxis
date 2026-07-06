@@ -5,17 +5,19 @@
 // RTX-RT single-bounce reflections. The PRIMARY surface's normal +
 // roughness come straight from RaytracedGBufferPass's gNormalRoughness
 // guide (Texture_SRV) — no material re-eval for the primary surface,
-// only geometry. Surfaces with roughness < gQuality.reflectionMaxRoughness
-// get `gQuality.reflectionSamples` GGX-VNDF-importance-sampled TraceRay(s)
-// (Phase B — Heitz 2018 "Sampling the GGX Distribution of Visible
-// Normals"; Phase A traced exactly the deterministic mirror direction);
-// rougher surfaces take a roughness-proportional dome-mip sample instead
-// (the "rough fallback" analog of a roughness-cache term, unchanged). At
-// each reflection hit: EvaluateSurfaceMaterial (shared) + the shared
-// direct-light loop WITHOUT shadow rays (EvaluateDirectLightSample,
-// traceShadow = false — deliberately cheap) + emissive; misses sample the
-// shared dome background (SampleDomeBackground). Phase B also clamps the
-// averaged result to gQuality.maxRayIntensityReflections.
+// only geometry. Surfaces with roughness < REFLECTION_TRACE_ROUGHNESS_CEILING
+// (max'd against the live gQuality.reflectionMaxRoughness knob — see that
+// constant's own doc comment below) get `gQuality.reflectionSamples`
+// GGX-VNDF-importance-sampled TraceRay(s) (Phase B — Heitz 2018 "Sampling
+// the GGX Distribution of Visible Normals"; Phase A traced exactly the
+// deterministic mirror direction); rougher surfaces take a
+// roughness-proportional dome-mip sample instead (the "rough fallback"
+// analog of a roughness-cache term). At each reflection hit:
+// EvaluateSurfaceMaterial (shared) + the shared direct-light loop WITHOUT
+// shadow rays (EvaluateDirectLightSample, traceShadow = false —
+// deliberately cheap) + emissive; misses sample the shared dome background
+// (SampleDomeBackground). Phase B also clamps the averaged result to
+// gQuality.maxRayIntensityReflections.
 //
 // Bindings — Set 0 (SceneBindings, shared verbatim with every other RT
 // pass). Set 1 (this pass's own I/O):
@@ -42,6 +44,42 @@
 [[vk::binding(1, 1)]] Texture2D<float4>                gNormalRoughness;
 [[vk::binding(2, 1)]] RWTexture2D<float4>              gReflections;
 [[vk::binding(3, 1)]] RWTexture2D<float4>              gReflectionWeight;
+
+// RTX-alignment materials round 4 (floor/tables reflection-signal
+// forensics, rtx-realtime-alignment-design.md, 2026-07-06) — floor/tables
+// root-cause fix. World Lobby's indoor glossy surfaces above the OLD 0.3
+// trace/fallback cutoff (floor materialId 30, table Paint_Satin materialId
+// 40, roughness ~0.4-0.5) took the dome-mip "rough fallback" below, which
+// reflects the scene's bright sky-dome (intensity 12000) instead of the
+// dark interior they physically see: killing the fallback outright (black
+// substitute) dropped the tables' brightness 73% (0.308 -> 0.083) and the
+// floor's 35%, i.e. these surfaces' shaded result was dome-reflection-
+// dominated, not interior-reflection-dominated — measured 2.1x too bright
+// on the tables vs ovrtx (0.70 vs 0.33).
+//
+// ovrtx's own roughnessCacheThreshold (also 0.3, rtx-realtime-alignment-
+// design.md's "Authoritative defaults") CACHES/approximates the
+// reflection above that roughness — it does not substitute a completely
+// different (sky) environment for it; ovrtx keeps reflecting real
+// geometry either way. Pyxis has no reflection-probe/cache
+// infrastructure to match that approximation (out of scope for this
+// fix), so instead this raises how far up the roughness range the
+// ALREADY-EXISTING traced path applies (SampleGGXVNDF below; alpha =
+// roughness^2 already spreads the reflection lobe with roughness — no
+// sampling-formula change needed, just more surfaces reach it) so these
+// surfaces trace the real (dark) interior instead of the sky.
+//
+// This is a compile-time constant, not a new RenderSettings field:
+// RenderSettings (the public POD, §18) is frozen during this phase for
+// concurrent work — see CLAUDE.md. RayGenMain below takes
+// `max(gQuality.reflectionMaxRoughness, REFLECTION_TRACE_ROUGHNESS_CEILING)`
+// as the effective cutoff, so the live runtime knob still works (raising
+// it even higher still takes effect) — only the plan-authored 0.3 default
+// stops silently reverting these indoor glossy surfaces to the
+// sky-fallback. Mirror-smooth surfaces (roughness well under the OLD 0.3
+// cutoff — real mirrors, glass) are unaffected either way; only the
+// 0.3-to-ceiling band changes behavior.
+static const float REFLECTION_TRACE_ROUGHNESS_CEILING = 0.6;
 
 // The reflection ray's payload — slimmer than HitInfo (this pass runs no
 // shadow/AO/continuation rays from the hit, so it needs only the
@@ -90,9 +128,31 @@ float3 SampleGGXVNDF(float3 viewLocal, float alpha, float2 u) {
 // dome-light-finding loop dome_sample.slang's SampleDomeBackground /
 // shading.slang's EvaluateDomeAmbient both already have their own copy
 // of (each tied to a different mip policy: 0 for the sharp background,
-// ~6 for the diffuse-IBL approximation) — this one's mip scales linearly
-// with roughness, approximating a prefiltered-mip environment convolution
+// ~6 for the diffuse-IBL approximation) — this one's mip scales with
+// roughness, approximating a prefiltered-mip environment convolution
 // without an actual mip chain built for that purpose.
+//
+// RTX-alignment materials round 3 (materialId 40 forensics,
+// rtx-realtime-alignment-design.md) — sqrt(roughness), not roughness
+// itself, drives the mip pick (the standard split-sum / Karis-2013
+// perceptual-roughness convention every prefiltered-IBL implementation
+// uses, because a GGX lobe's angular width grows much faster than
+// linearly with roughness). A pure LINEAR roughness->mip map left
+// "just above REFLECTION_MAX_ROUGHNESS" materials (satin/semi-gloss,
+// roughness ~0.3-0.5 — e.g. the World Lobby's rh_table_short
+// Paint_Satin, measured roughness ~0.40) sampling a nearly-unblurred
+// mip. The scene's default (untextured) dome is a procedural sky with
+// a bright horizon band / sun disk (max ~76000 vs a ~0.75 frame
+// average — resources/scenes/default_sky.exr); a low-height camera
+// viewing floor-level satin furniture at a near-grazing angle
+// reflects toward that SAME near-horizon band, and the barely-blurred
+// linear-mip sample was punching that hotspot straight through as a
+// bright, un-satin-like sheen (measured 2.1x too bright vs ovrtx on
+// materialId 40, whose own diffuse albedo already matches — this is a
+// reflections-signal magnitude gap, not a translation one). sqrt(0.40)
+// = 0.63, i.e. ~58% more mip levels of blur for exactly this
+// roughness band, which properly averages the hotspot into the
+// surrounding sky instead of resolving it.
 float3 SampleDomeRoughnessFallback(float3 dir, float roughness) {
     float3 domeTint = float3(0.55, 0.65, 0.85);
     float  domeScale = 1.0;
@@ -129,7 +189,7 @@ float3 SampleDomeRoughnessFallback(float3 dir, float roughness) {
     float domeMipLevels;
     gDomeEnvMap.GetDimensions(0, domeWidth, domeHeight, domeMipLevels);
     const float maxMip = max(0.0, domeMipLevels - 1.0);
-    const float targetMip = saturate(roughness) * maxMip;
+    const float targetMip = sqrt(saturate(roughness)) * maxMip;
     const float3 hdri = gDomeEnvMap.SampleLevel(gDomeSampler, uv, targetMip).rgb;
 
     return domeFound ? (hdri * domeTint * domeScale) : domeTint;
@@ -186,7 +246,14 @@ void RayGenMain() {
     // gQuality) replaces the REFLECTION_MAX_ROUGHNESS compile-time constant;
     // ShaderInterop.slang's literal now only backs the C++-side
     // RenderSettings::RealTimeQuality::reflectionMaxRoughness default.
-    if (roughness >= gQuality.reflectionMaxRoughness)
+    //
+    // Materials round 4 — max'd against REFLECTION_TRACE_ROUGHNESS_CEILING
+    // (this file's own doc comment, above the binding declarations) so the
+    // default 0.3 knob no longer sends World Lobby's indoor glossy floor/
+    // table surfaces to the sky-dome fallback below.
+    const float traceRoughnessCeiling =
+        max(gQuality.reflectionMaxRoughness, REFLECTION_TRACE_ROUGHNESS_CEILING);
+    if (roughness >= traceRoughnessCeiling)
     {
         // Rough fallback — no trace. Phase B firefly clamp applies HERE
         // too: an un-mip-biased-enough dome/HDRI sample (bright sun disk,
@@ -205,10 +272,12 @@ void RayGenMain() {
 
     // Phase B — GGX VNDF importance-sampled reflection direction(s)
     // instead of the pure deterministic mirror. Below
-    // gQuality.reflectionMaxRoughness the microfacet lobe is narrow
-    // enough that a handful of VNDF samples resolve a representative
-    // glossy-reflection direction rather than the single sharp mirror
-    // ray Phase A always traced.
+    // traceRoughnessCeiling the VNDF sample (alpha = roughness^2 below)
+    // spreads the reflected direction proportional to roughness — a
+    // representative glossy-reflection direction rather than the single
+    // sharp mirror ray Phase A always traced, and (materials round 4)
+    // wide enough to cover World Lobby's satin/semi-gloss furniture that
+    // used to fall to the sky-dome fallback below.
     float3 tangent;
     float3 bitangent;
     BuildOrthonormalBasis(nWorld, tangent, bitangent);
@@ -264,8 +333,32 @@ void RayGenMain() {
 
 // --------------------------------------------------------------------
 // ClosestHitMain — evaluates the reflection hit's material + an
-// UNSHADOWED direct-light loop + emissive. Deliberately cheap (no
-// shadow rays here — Phase A cost cap; see the file header).
+// UNSHADOWED direct-light loop + a dome-ambient term + emissive.
+// Deliberately cheap (no shadow rays, no AO ray here — Phase A cost
+// cap; see the file header).
+//
+// RTX-alignment materials round 3 (materialId 30 forensics,
+// rtx-realtime-alignment-design.md) — the direct-light loop above
+// skips LIGHT_KIND_DOME entries (EvaluateDirectLightSample is the
+// point/rect/distant NdotL path only; dome contribution is a SEPARATE
+// evaluation everywhere else in this codebase — see
+// EvaluateDomeAmbient's own doc comment). Every OTHER pass that
+// shades a surface (IndirectDiffusePass, the retired ShadeSurfaceHit
+// megakernel TranslucencyPass still reuses) adds that dome term; this
+// pass never did, so a reflected surface whose OWN lighting is
+// indirect-dominated (a dome/ambient-lit wall or ceiling, not a
+// direct-light-lit one) reflected back at near-zero brightness
+// regardless of how reflective the PRIMARY surface actually is —
+// measured on the World Lobby's floor-level glossy glass inset
+// (materialId 30): a near-grazing view (NdotV ~0.025) gives that
+// primary surface a Fresnel reflectance of ~0.87 (dielectric ior
+// 1.52), so its shaded result is almost ENTIRELY this reflection
+// term, and the reflected content (a dome-lit wall/ceiling at
+// grazing incidence) was going out ~3x too dark against ovrtx (whose
+// reflections keep the ambient contribution) purely because this
+// term was missing. aoVisibility is left at 1.0 (no AO ray) — the
+// same "deliberately cheap, no shadow ray" tradeoff the direct loop
+// above already makes for this pass.
 // --------------------------------------------------------------------
 [shader("closesthit")]
 void ClosestHitMain(inout ReflectionPayload payload, in BuiltInTriangleIntersectionAttributes attribs) {
@@ -294,6 +387,12 @@ void ClosestHitMain(inout ReflectionPayload payload, in BuiltInTriangleIntersect
                 * attenuation;
     }
 
+    // ISOLATION (2026-07-06): the unoccluded dome-ambient term here
+    // (aoVisibility hardcoded 1.0) over-brightened enclosed interior
+    // surfaces seen in reflections — net regression 0.2135->0.2167,
+    // mean 0.502->0.543. Disabled while the sqrt-roughness mip change
+    // above is isolated; the floor's under-brightness needs a targeted
+    // (occlusion-aware) reflection-energy fix, not a blanket ambient add.
     const float3 emission = OpenPBREmission(surf.pbr);
     payload.color = direct + emission * surf.opacity;
     payload.hitT  = RayTCurrent();

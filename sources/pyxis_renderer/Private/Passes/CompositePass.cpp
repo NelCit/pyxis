@@ -3,6 +3,7 @@
 
 #include "Passes/CompositePass.h"
 
+#include "Passes/DenoiseAoPass.h"
 #include "Passes/DenoiseAtrousPass.h"
 #include "Passes/DenoiseShadowPass.h"
 #include "Passes/SceneBindings.h"
@@ -75,12 +76,14 @@ nvrhi::ComputePipelineHandle BuildPipeline(nvrhi::IDevice* device,
 
 CompositePass::CompositePass(nvrhi::IDevice* device, GpuScene& scene, SceneBindings& sceneBindings,
                              DenoiseShadowPass* denoiseShadowPass,
-                             DenoiseAtrousPass* denoiseAtrousPass)
+                             DenoiseAtrousPass* denoiseAtrousPass,
+                             DenoiseAoPass* denoiseAoPass)
     : _device(device),
       _scene(&scene),
       _sceneBindings(&sceneBindings),
       _denoiseShadowPass(denoiseShadowPass),
-      _denoiseAtrousPass(denoiseAtrousPass) {
+      _denoiseAtrousPass(denoiseAtrousPass),
+      _denoiseAoPass(denoiseAoPass) {
   if (!_sceneBindings->IsOperational())
   {
     Logging::Get().Error(log::RENDER,
@@ -345,7 +348,7 @@ void CompositePass::Execute(nvrhi::ICommandList* commandList, const PassContext&
   nvrhi::ITexture* const emissive = context.gEmissive;
   if (albedo == nullptr || emissive == nullptr)
     return;
-  nvrhi::ITexture* const ambientOcclusion = context.gAo;
+  nvrhi::ITexture* ambientOcclusion = context.gAo;
   // RTX-alignment design (rtx-realtime-alignment-design.md), Phase B —
   // when the denoiser chain is enabled, read the DENOISED diffuse/
   // specular signals instead of the raw (noisy) signal-pass outputs
@@ -376,6 +379,12 @@ void CompositePass::Execute(nvrhi::ICommandList* commandList, const PassContext&
         indirectDiffuse = denoised;
       if (nvrhi::ITexture* const denoised = _denoiseAtrousPass->Specular())
         reflections = denoised;
+    }
+    // Noise-floor + vegetation spec (rtx-realtime-alignment-design.md,
+    // 2026-07-06), work item 1 — same raw-vs-denoised swap for AO.
+    if (_denoiseAoPass != nullptr) {
+      if (nvrhi::ITexture* const denoised = _denoiseAoPass->Output())
+        ambientOcclusion = denoised;
     }
   }
   nvrhi::ITexture* const reflectionWeight = context.gReflectionWeight;

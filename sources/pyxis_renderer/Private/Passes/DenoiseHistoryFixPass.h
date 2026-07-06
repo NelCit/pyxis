@@ -17,6 +17,14 @@
 //   5 : Texture2D<uint> gMaterialId (SRV, GBuffer guide — RTX-alignment
 //       halo fix, 2026-07-05; 1x1 zero-filled fallback when
 //       context.targets->materialIdAov is null)
+//   6 : Texture2D<float4> gFastDiffuse (SRV, DenoiseTemporalPass FAST output)
+//   7 : Texture2D<float4> gFastSpecular (SRV, DenoiseTemporalPass FAST output)
+//   8 : Texture2D<float4> gNormalRoughness (SRV, GBuffer guide)
+//   9 : Texture2D<float>  gViewZ (SRV, GBuffer guide)
+//
+// Noise-floor + vegetation spec (rtx-realtime-alignment-design.md,
+// 2026-07-06), work item 4 — thin-geometry flattening fix; see
+// denoise_history_fix.slang's file header for the full estimator.
 
 #pragma once
 
@@ -50,9 +58,10 @@ class DenoiseHistoryFixPass final : public IRenderPass {
   [[nodiscard]] nvrhi::ITexture* Specular() const noexcept { return _outputSpecular.Get(); }
 
  private:
-  [[nodiscard]] nvrhi::BindingSetHandle GetOrCreateBindingSet(nvrhi::ITexture* inDiffuse,
-                                                              nvrhi::ITexture* inSpecular,
-                                                              nvrhi::ITexture* materialId);
+  [[nodiscard]] nvrhi::BindingSetHandle GetOrCreateBindingSet(
+      nvrhi::ITexture* inDiffuse, nvrhi::ITexture* inSpecular, nvrhi::ITexture* materialId,
+      nvrhi::ITexture* fastDiffuse, nvrhi::ITexture* fastSpecular, nvrhi::ITexture* normalRoughness,
+      nvrhi::ITexture* viewZ);
 
   nvrhi::IDevice* _device = nullptr;
   DenoiseTemporalPass* _temporalPass = nullptr;

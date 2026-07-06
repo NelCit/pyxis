@@ -43,6 +43,7 @@
 //   set=1, binding=14 : RWTexture2D<float4> gOutWorldPosEye  RGBA32F
 //   set=1, binding=15 : RWStructuredBuffer<PickResult> gPickResult
 //   set=1, binding=16 : ConstantBuffer<FrameUiUniforms> gFrameUi
+//   set=1, binding=17 : RWTexture2D<float4> gSpecularAlbedo  RGBA16F (DLSS Stage 2b, RR guide)
 
 #pragma once
 
@@ -144,6 +145,12 @@ class RaytracedGBufferPass final : public IRenderPass {
     return _gNormalRoughness.Get();
   }
   [[nodiscard]] nvrhi::ITexture* Emissive() const noexcept { return _gEmissive.Get(); }
+  // DLSS Stage 2b — Ray Reconstruction's kBufferTypeSpecularAlbedo guide
+  // (raytraced_gbuffer.slang's EnvBRDFApprox2/OpenPBRSpecularF0 helpers).
+  // Same lifetime contract as the three accessors above.
+  [[nodiscard]] nvrhi::ITexture* SpecularAlbedo() const noexcept {
+    return _gSpecularAlbedo.Get();
+  }
 
  private:
   // Build the Set-1 binding set for the supplied visibility buffer +
@@ -198,6 +205,9 @@ class RaytracedGBufferPass final : public IRenderPass {
   nvrhi::TextureHandle _gAlbedo;
   nvrhi::TextureHandle _gNormalRoughness;
   nvrhi::TextureHandle _gEmissive;
+  // DLSS Stage 2b — Ray Reconstruction's specular-albedo guide (see
+  // SpecularAlbedo() above). Same resize cadence as the three above.
+  nvrhi::TextureHandle _gSpecularAlbedo;
   // P6 review — latched when EnsureVisibilityBuffer creates a FRESH
   // buffer; Execute then clears it to the miss pattern (hitT = -1.0f
   // bits) before any early-out, so a consumer can never read

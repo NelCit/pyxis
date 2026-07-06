@@ -145,6 +145,12 @@ target_sources(pyxis_renderer PRIVATE
     Private/Passes/DenoiseHistoryFixPass.cpp
     Private/Passes/DenoiseAtrousPass.h
     Private/Passes/DenoiseAtrousPass.cpp
+    # Noise-floor + vegetation spec (rtx-realtime-alignment-design.md,
+    # 2026-07-06), work item 1 — AO denoiser, runs alongside the 4-pass
+    # chain above (own ping-pong, not DenoiserResources; see its file
+    # header).
+    Private/Passes/DenoiseAoPass.h
+    Private/Passes/DenoiseAoPass.cpp
     # RTX-alignment design (rtx-realtime-alignment-design.md), WP2-final —
     # CompositePass replaces the retired RaytracedLightingPass megakernel,
     # recombining the five signal passes' outputs into the final radiance.
@@ -788,6 +794,18 @@ pyxis_compile_slang_shader(
     ENTRY_POINT main
     STAGE       compute
     OUTPUT      taa.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP}
+)
+# Noise-floor + vegetation spec (rtx-realtime-alignment-design.md,
+# 2026-07-06), work item 1 — DenoiseAoPass: temporal accumulation + small
+# edge-aware spatial pre-filter for AmbientOcclusionPass's raw gAo, folded
+# into ONE dispatch (one pass = one shader).
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/denoise_ao.slang
+    ENTRY_POINT main
+    STAGE       compute
+    OUTPUT      denoise_ao.spv
     INCLUDES    ${PYXIS_SHADER_INTEROP}
 )
 

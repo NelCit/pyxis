@@ -57,13 +57,17 @@ DenoiseTemporalPass::DenoiseTemporalPass(nvrhi::IDevice* device)
       nvrhi::BindingLayoutItem::Texture_SRV(2),              // 2  gMotionVector
       nvrhi::BindingLayoutItem::Texture_SRV(3),              // 3  gViewZ
       nvrhi::BindingLayoutItem::Texture_SRV(4),              // 4  gNormalRoughness
-      nvrhi::BindingLayoutItem::Texture_SRV(5),              // 5  gPrevDiffuse
-      nvrhi::BindingLayoutItem::Texture_SRV(6),              // 6  gPrevSpecular
+      nvrhi::BindingLayoutItem::Texture_SRV(5),              // 5  gPrevDiffuseSlow
+      nvrhi::BindingLayoutItem::Texture_SRV(6),              // 6  gPrevSpecularSlow
       nvrhi::BindingLayoutItem::Texture_SRV(7),              // 7  gPrevNormalViewZ
-      nvrhi::BindingLayoutItem::Texture_UAV(8),              // 8  gCurrDiffuse
-      nvrhi::BindingLayoutItem::Texture_UAV(9),              // 9  gCurrSpecular
-      nvrhi::BindingLayoutItem::Texture_UAV(10),             // 10 gCurrNormalViewZ
-      nvrhi::BindingLayoutItem::VolatileConstantBuffer(11),  // 11 DenoiseTemporalUniforms
+      nvrhi::BindingLayoutItem::Texture_SRV(8),              // 8  gPrevDiffuseFast
+      nvrhi::BindingLayoutItem::Texture_SRV(9),              // 9  gPrevSpecularFast
+      nvrhi::BindingLayoutItem::Texture_UAV(10),             // 10 gCurrDiffuseSlow
+      nvrhi::BindingLayoutItem::Texture_UAV(11),             // 11 gCurrSpecularSlow
+      nvrhi::BindingLayoutItem::Texture_UAV(12),             // 12 gCurrNormalViewZ
+      nvrhi::BindingLayoutItem::Texture_UAV(13),             // 13 gCurrDiffuseFast
+      nvrhi::BindingLayoutItem::Texture_UAV(14),             // 14 gCurrSpecularFast
+      nvrhi::BindingLayoutItem::VolatileConstantBuffer(15),  // 15 DenoiseTemporalUniforms
   };
   _bindingLayout = _device->createBindingLayout(layoutDesc);
   if (!_bindingLayout) {
@@ -120,11 +124,11 @@ nvrhi::BindingSetHandle DenoiseTemporalPass::GetOrCreateBindingSet(
   // so the cache key must fold them in too, not just the caller-owned
   // inputs — otherwise a stale binding set would point curr/prev at last
   // frame's roles.
-  const std::uint64_t key =
-      HashPointers({rawDiffuse, rawSpecular, motionVector, viewZ, normalRoughness,
-                    _resources.PrevDiffuse(), _resources.PrevSpecular(),
-                    _resources.PrevNormalViewZ(), _resources.CurrDiffuse(),
-                    _resources.CurrSpecular(), _resources.CurrNormalViewZ()});
+  const std::uint64_t key = HashPointers(
+      {rawDiffuse, rawSpecular, motionVector, viewZ, normalRoughness, _resources.PrevDiffuse(),
+       _resources.PrevSpecular(), _resources.PrevNormalViewZ(), _resources.PrevDiffuseFast(),
+       _resources.PrevSpecularFast(), _resources.CurrDiffuse(), _resources.CurrSpecular(),
+       _resources.CurrNormalViewZ(), _resources.CurrDiffuseFast(), _resources.CurrSpecularFast()});
   if (auto cached = _bindingSetCache.find(key); cached != _bindingSetCache.end())
     return cached->second;
   constexpr std::size_t MAX_CACHE_ENTRIES = 4;
@@ -141,10 +145,14 @@ nvrhi::BindingSetHandle DenoiseTemporalPass::GetOrCreateBindingSet(
       nvrhi::BindingSetItem::Texture_SRV(5, _resources.PrevDiffuse()),
       nvrhi::BindingSetItem::Texture_SRV(6, _resources.PrevSpecular()),
       nvrhi::BindingSetItem::Texture_SRV(7, _resources.PrevNormalViewZ()),
-      nvrhi::BindingSetItem::Texture_UAV(8, _resources.CurrDiffuse()),
-      nvrhi::BindingSetItem::Texture_UAV(9, _resources.CurrSpecular()),
-      nvrhi::BindingSetItem::Texture_UAV(10, _resources.CurrNormalViewZ()),
-      nvrhi::BindingSetItem::ConstantBuffer(11, _paramsBuffer),
+      nvrhi::BindingSetItem::Texture_SRV(8, _resources.PrevDiffuseFast()),
+      nvrhi::BindingSetItem::Texture_SRV(9, _resources.PrevSpecularFast()),
+      nvrhi::BindingSetItem::Texture_UAV(10, _resources.CurrDiffuse()),
+      nvrhi::BindingSetItem::Texture_UAV(11, _resources.CurrSpecular()),
+      nvrhi::BindingSetItem::Texture_UAV(12, _resources.CurrNormalViewZ()),
+      nvrhi::BindingSetItem::Texture_UAV(13, _resources.CurrDiffuseFast()),
+      nvrhi::BindingSetItem::Texture_UAV(14, _resources.CurrSpecularFast()),
+      nvrhi::BindingSetItem::ConstantBuffer(15, _paramsBuffer),
   };
   nvrhi::BindingSetHandle set = _device->createBindingSet(setDesc, _bindingLayout);
   _bindingSetCache.emplace(key, set);
@@ -180,8 +188,8 @@ void DenoiseTemporalPass::Execute(nvrhi::ICommandList* commandList, const PassCo
   params.destHeight = height;
   params.hasHistory = _resources.HasHistory() ? 1u : 0u;
   params.maxAccumFrames = 30u;      // NRD default target.
-  params.fastHistoryFrames = 6u;    // Plumbed; not yet read by the shader (see its doc comment).
-  params._pad0 = 0u;
+  params.fastHistoryFrames = 6u;    // NRD default target — work item 2 dual history.
+  params.clampSigma = 2.0f;         // NRD default target — fast-history luminance clamp.
   params._pad1 = 0u;
   params._pad2 = 0u;
   commandList->writeBuffer(_paramsBuffer, &params, sizeof(params));
@@ -210,11 +218,19 @@ void DenoiseTemporalPass::Execute(nvrhi::ICommandList* commandList, const PassCo
                                nvrhi::ResourceStates::ShaderResource);
   commandList->setTextureState(_resources.PrevNormalViewZ(), nvrhi::AllSubresources,
                                nvrhi::ResourceStates::ShaderResource);
+  commandList->setTextureState(_resources.PrevDiffuseFast(), nvrhi::AllSubresources,
+                               nvrhi::ResourceStates::ShaderResource);
+  commandList->setTextureState(_resources.PrevSpecularFast(), nvrhi::AllSubresources,
+                               nvrhi::ResourceStates::ShaderResource);
   commandList->setTextureState(_resources.CurrDiffuse(), nvrhi::AllSubresources,
                                nvrhi::ResourceStates::UnorderedAccess);
   commandList->setTextureState(_resources.CurrSpecular(), nvrhi::AllSubresources,
                                nvrhi::ResourceStates::UnorderedAccess);
   commandList->setTextureState(_resources.CurrNormalViewZ(), nvrhi::AllSubresources,
+                               nvrhi::ResourceStates::UnorderedAccess);
+  commandList->setTextureState(_resources.CurrDiffuseFast(), nvrhi::AllSubresources,
+                               nvrhi::ResourceStates::UnorderedAccess);
+  commandList->setTextureState(_resources.CurrSpecularFast(), nvrhi::AllSubresources,
                                nvrhi::ResourceStates::UnorderedAccess);
   commandList->commitBarriers();
 
@@ -234,6 +250,8 @@ void DenoiseTemporalPass::Execute(nvrhi::ICommandList* commandList, const PassCo
   // downstream reader (DenoiseHistoryFixPass).
   _lastWrittenDiffuse = _resources.CurrDiffuse();
   _lastWrittenSpecular = _resources.CurrSpecular();
+  _lastWrittenDiffuseFast = _resources.CurrDiffuseFast();
+  _lastWrittenSpecularFast = _resources.CurrSpecularFast();
 
   // Flip for next frame — the ping-pong role swap this WHOLE class exists
   // for. MUST happen after the dispatch above (the dispatch just wrote

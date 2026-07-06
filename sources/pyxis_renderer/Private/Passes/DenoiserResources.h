@@ -12,13 +12,22 @@
 // living inside a specific pass.
 //
 // Layout, per index:
-//   diffuse[i]     RGBA16F — {indirect-diffuse rgb, historyLength}
-//   specular[i]    RGBA16F — {reflections rgb, historyLength}
+//   diffuse[i]     RGBA16F — {indirect-diffuse rgb, historyLength} — the
+//     SLOW (long-memory, cap ~30) accumulator.
+//   specular[i]    RGBA16F — {reflections rgb, historyLength} — SLOW.
 //   normalViewZ[i] RGBA16F — {world normal xyz, viewZ} — snapshot of the
 //     G-buffer guide at the time that index was written, read back next
 //     frame as the disocclusion test's "previous" normal/depth (plan
 //     §"denoise_temporal.slang" thresholds: viewZ plane-distance 0.003 +
 //     normal dot 0.5).
+//   diffuseFast[i] / specularFast[i] RGBA16F — {rgb, historyLength} — the
+//     noise-floor + vegetation spec's (rtx-realtime-alignment-design.md,
+//     2026-07-06, work item 2) FAST (short-memory, cap ~6) accumulator,
+//     added alongside the SLOW one above: NRD ReLAX's dual-history anti-
+//     lag/anti-flatten mechanism (denoise_temporal.slang clamps the SLOW
+//     accumulator's luminance against the FAST one each frame) and the
+//     thin-geometry fix's (work item 4) preferred fallback for
+//     DenoiseHistoryFixPass when local normal/viewZ coherence is low.
 //
 // Ping-pong is REQUIRED (not a style choice): the temporal pass reads the
 // previous frame's data at a REPROJECTED (generally different) pixel
@@ -72,6 +81,22 @@ class DenoiserResources {
     return _normalViewZ[_currIndex].Get();
   }
 
+  // Work item 2 (ReLAX dual history) — the FAST (cap ~6) accumulator
+  // pair, ping-ponged in lockstep with the SLOW pair above (same
+  // _prevIndex/_currIndex — see Advance()).
+  [[nodiscard]] nvrhi::ITexture* PrevDiffuseFast() const noexcept {
+    return _diffuseFast[_prevIndex].Get();
+  }
+  [[nodiscard]] nvrhi::ITexture* CurrDiffuseFast() const noexcept {
+    return _diffuseFast[_currIndex].Get();
+  }
+  [[nodiscard]] nvrhi::ITexture* PrevSpecularFast() const noexcept {
+    return _specularFast[_prevIndex].Get();
+  }
+  [[nodiscard]] nvrhi::ITexture* CurrSpecularFast() const noexcept {
+    return _specularFast[_currIndex].Get();
+  }
+
   // Swap prev/curr for the NEXT frame — call once per frame, AFTER
   // DenoiseTemporalPass::Execute has finished writing into the CurrX()
   // textures. Also flips HasHistory() to true (a no-op if already true).
@@ -94,6 +119,9 @@ class DenoiserResources {
   std::array<nvrhi::TextureHandle, 2> _diffuse;
   std::array<nvrhi::TextureHandle, 2> _specular;
   std::array<nvrhi::TextureHandle, 2> _normalViewZ;
+  // Work item 2 — FAST accumulator pair (see class doc comment above).
+  std::array<nvrhi::TextureHandle, 2> _diffuseFast;
+  std::array<nvrhi::TextureHandle, 2> _specularFast;
   uint32_t _width = 0;
   uint32_t _height = 0;
   uint32_t _prevIndex = 0;

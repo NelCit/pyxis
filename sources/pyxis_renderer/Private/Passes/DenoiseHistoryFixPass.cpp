@@ -74,6 +74,10 @@ DenoiseHistoryFixPass::DenoiseHistoryFixPass(nvrhi::IDevice* device,
       nvrhi::BindingLayoutItem::Texture_UAV(3),             // 3 gOutSpecular
       nvrhi::BindingLayoutItem::VolatileConstantBuffer(4),  // 4 DenoiseHistoryFixUniforms
       nvrhi::BindingLayoutItem::Texture_SRV(5),             // 5 gMaterialId (halo-fix edge-stop)
+      nvrhi::BindingLayoutItem::Texture_SRV(6),             // 6 gFastDiffuse (thin-geometry fix)
+      nvrhi::BindingLayoutItem::Texture_SRV(7),             // 7 gFastSpecular (thin-geometry fix)
+      nvrhi::BindingLayoutItem::Texture_SRV(8),             // 8 gNormalRoughness (thin-geometry fix)
+      nvrhi::BindingLayoutItem::Texture_SRV(9),             // 9 gViewZ (thin-geometry fix)
   };
   _bindingLayout = _device->createBindingLayout(layoutDesc);
   if (!_bindingLayout) {
@@ -153,10 +157,12 @@ nvrhi::ITexture* DenoiseHistoryFixPass::EnsureOutputs(uint32_t width, uint32_t h
   return _outputDiffuse.Get();
 }
 
-nvrhi::BindingSetHandle DenoiseHistoryFixPass::GetOrCreateBindingSet(nvrhi::ITexture* inDiffuse,
-                                                                     nvrhi::ITexture* inSpecular,
-                                                                     nvrhi::ITexture* materialId) {
-  const std::uint64_t key = HashPointers({inDiffuse, inSpecular, materialId});
+nvrhi::BindingSetHandle DenoiseHistoryFixPass::GetOrCreateBindingSet(
+    nvrhi::ITexture* inDiffuse, nvrhi::ITexture* inSpecular, nvrhi::ITexture* materialId,
+    nvrhi::ITexture* fastDiffuse, nvrhi::ITexture* fastSpecular, nvrhi::ITexture* normalRoughness,
+    nvrhi::ITexture* viewZ) {
+  const std::uint64_t key = HashPointers(
+      {inDiffuse, inSpecular, materialId, fastDiffuse, fastSpecular, normalRoughness, viewZ});
   if (auto cached = _bindingSetCache.find(key); cached != _bindingSetCache.end())
     return cached->second;
   constexpr std::size_t MAX_CACHE_ENTRIES = 4;
@@ -171,6 +177,10 @@ nvrhi::BindingSetHandle DenoiseHistoryFixPass::GetOrCreateBindingSet(nvrhi::ITex
       nvrhi::BindingSetItem::Texture_UAV(3, _outputSpecular.Get()),
       nvrhi::BindingSetItem::ConstantBuffer(4, _paramsBuffer),
       nvrhi::BindingSetItem::Texture_SRV(5, materialId),
+      nvrhi::BindingSetItem::Texture_SRV(6, fastDiffuse),
+      nvrhi::BindingSetItem::Texture_SRV(7, fastSpecular),
+      nvrhi::BindingSetItem::Texture_SRV(8, normalRoughness),
+      nvrhi::BindingSetItem::Texture_SRV(9, viewZ),
   };
   nvrhi::BindingSetHandle set = _device->createBindingSet(setDesc, _bindingLayout);
   _bindingSetCache.emplace(key, set);
@@ -199,6 +209,19 @@ void DenoiseHistoryFixPass::Execute(nvrhi::ICommandList* commandList,
                                                 : _fallbackMaterialId.Get();
   if (materialId == nullptr)
     return;
+  // Work item 4 (thin-geometry flattening fix) — the FAST accumulator
+  // (preferred fallback at low local geometry coherence) plus the current
+  // G-buffer guides (for the local coherence estimate itself). All four
+  // are the SAME textures every other pass in this chain already
+  // consumes; a missing one degrades to "nothing new displayed" like
+  // every other required input above.
+  nvrhi::ITexture* const fastDiffuse = _temporalPass->FastDiffuse();
+  nvrhi::ITexture* const fastSpecular = _temporalPass->FastSpecular();
+  nvrhi::ITexture* const normalRoughness = context.gNormalRoughness;
+  nvrhi::ITexture* const viewZ = context.gViewZ;
+  if (fastDiffuse == nullptr || fastSpecular == nullptr || normalRoughness == nullptr
+      || viewZ == nullptr)
+    return;
 
   const nvrhi::TextureDesc& desc = inDiffuse->getDesc();
   const uint32_t width = desc.width;
@@ -213,14 +236,22 @@ void DenoiseHistoryFixPass::Execute(nvrhi::ICommandList* commandList,
   params._pad1 = 0u;
   commandList->writeBuffer(_paramsBuffer, &params, sizeof(params));
 
-  const nvrhi::BindingSetHandle bindingSet =
-      GetOrCreateBindingSet(inDiffuse, inSpecular, materialId);
+  const nvrhi::BindingSetHandle bindingSet = GetOrCreateBindingSet(
+      inDiffuse, inSpecular, materialId, fastDiffuse, fastSpecular, normalRoughness, viewZ);
   if (!bindingSet)
     return;
 
   commandList->setTextureState(inDiffuse, nvrhi::AllSubresources,
                                nvrhi::ResourceStates::ShaderResource);
   commandList->setTextureState(inSpecular, nvrhi::AllSubresources,
+                               nvrhi::ResourceStates::ShaderResource);
+  commandList->setTextureState(fastDiffuse, nvrhi::AllSubresources,
+                               nvrhi::ResourceStates::ShaderResource);
+  commandList->setTextureState(fastSpecular, nvrhi::AllSubresources,
+                               nvrhi::ResourceStates::ShaderResource);
+  commandList->setTextureState(normalRoughness, nvrhi::AllSubresources,
+                               nvrhi::ResourceStates::ShaderResource);
+  commandList->setTextureState(viewZ, nvrhi::AllSubresources,
                                nvrhi::ResourceStates::ShaderResource);
   commandList->setTextureState(materialId, nvrhi::AllSubresources,
                                nvrhi::ResourceStates::ShaderResource);

@@ -299,6 +299,23 @@ void DlssPass::Execute(nvrhi::ICommandList* commandList, const PassContext& cont
       || _scene == nullptr || !_scene->HasCamera() || _sceneBindings == nullptr)
     return;
 
+  // DLSS Stage 2b — Ray Reconstruction's guide buffers (ProgrammingGuideDLSS_RR.md
+  // §4.1): gAlbedo (diffuse), gSpecularAlbedo (new — raytraced_gbuffer.slang's
+  // EnvBRDFApprox2/OpenPBRSpecularF0), gNormalRoughness (ePacked — roughness
+  // already lives in .a), and the RAW (never denoised — see
+  // PyxisRenderer::RenderFrame's passMask forcing) ReflectionsPass output
+  // for kBufferTypeSpecularHitDistance (.a = mean hitT). `useRR` degrades
+  // to the proven SR path below whenever the provider itself can't do RR
+  // OR any one of these guides isn't ready yet (first frame / a signal
+  // pass failed to initialise) — same defensive-recheck-not-second-source-
+  // of-truth reasoning as the `denoiser != DENOISER_DLSS` gate above.
+  nvrhi::ITexture* const albedo = context.gAlbedo;
+  nvrhi::ITexture* const specularAlbedo = context.gSpecularAlbedo;
+  nvrhi::ITexture* const normalRoughness = context.gNormalRoughness;
+  nvrhi::ITexture* const specularHitDistance = context.gReflections;
+  const bool useRR = _dlssProvider->IsRRUsable() && albedo != nullptr && specularAlbedo != nullptr
+                    && normalRoughness != nullptr && specularHitDistance != nullptr;
+
   const nvrhi::TextureDesc& renderDesc = colorIn->getDesc();
   const nvrhi::TextureDesc& displayDesc = displayTarget->getDesc();
   // §30.10 — no allocations inside Execute; PyxisRenderer::RenderFrame
@@ -359,6 +376,16 @@ void DlssPass::Execute(nvrhi::ICommandList* commandList, const PassContext& cont
   commandList->setTextureState(dlssDepth, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
   commandList->setTextureState(mvec, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
   commandList->setTextureState(output, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
+  if (useRR)
+  {
+    commandList->setTextureState(albedo, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
+    commandList->setTextureState(specularAlbedo, nvrhi::AllSubresources,
+                                 nvrhi::ResourceStates::UnorderedAccess);
+    commandList->setTextureState(normalRoughness, nvrhi::AllSubresources,
+                                 nvrhi::ResourceStates::UnorderedAccess);
+    commandList->setTextureState(specularHitDistance, nvrhi::AllSubresources,
+                                 nvrhi::ResourceStates::UnorderedAccess);
+  }
   commandList->commitBarriers();
 
   // ---- Camera matrices (CPU-side, from SceneBindings' snapshot of THIS
@@ -405,44 +432,104 @@ void DlssPass::Execute(nvrhi::ICommandList* commandList, const PassContext& cont
   // `taaJitterEnabled`, which PyxisRenderer also sets true whenever the
   // effective denoiser is Dlss (see its own RenderFrame comment).
   const shaderinterop::float2 jitter = ComputeHaltonJitter(context.frameIndex);
+  const uint32_t dlssExecMode = context.settings->realTimeQuality.dlssExecMode;
+  const bool orthographic = camera.projectionMode == 1u;
 
-  DlssProvider::FrameInputs inputs{};
-  inputs.frameIndex = context.frameIndex;
-  inputs.renderWidth = renderDesc.width;
-  inputs.renderHeight = renderDesc.height;
-  inputs.displayWidth = displayDesc.width;
-  inputs.displayHeight = displayDesc.height;
-  inputs.dlssExecMode = context.settings->realTimeQuality.dlssExecMode;
-  inputs.reset = false;  // DlssProvider::Evaluate derives first-frame/resolution-change resets itself.
-  inputs.orthographic = camera.projectionMode == 1u;
-  inputs.jitterX = jitter.x;
-  inputs.jitterY = jitter.y;
-  inputs.cameraViewToClip = viewToClipFlat;
-  inputs.clipToCameraView = clipToViewFlat;
-  inputs.clipToPrevClip = clipToPrevClipFlat;
-  inputs.prevClipToClip = prevClipToClipFlat;
-  inputs.cameraPos[0] = cameraPos[0];
-  inputs.cameraPos[1] = cameraPos[1];
-  inputs.cameraPos[2] = cameraPos[2];
-  inputs.cameraUp[0] = cameraUp[0];
-  inputs.cameraUp[1] = cameraUp[1];
-  inputs.cameraUp[2] = cameraUp[2];
-  inputs.cameraRight[0] = cameraRight[0];
-  inputs.cameraRight[1] = cameraRight[1];
-  inputs.cameraRight[2] = cameraRight[2];
-  inputs.cameraFwd[0] = cameraFwd[0];
-  inputs.cameraFwd[1] = cameraFwd[1];
-  inputs.cameraFwd[2] = cameraFwd[2];
-  inputs.cameraNear = camera.nearClip;
-  inputs.cameraFar = camera.farClip;
-  inputs.colorIn = ToTaggedImage(colorIn);
-  inputs.colorOut = ToTaggedImage(output);
-  inputs.depth = ToTaggedImage(dlssDepth);  // converted NDC depth, NOT raw gViewZ — see above.
-  inputs.mvec = ToTaggedImage(mvec);
-  inputs.vkCommandBuffer = commandList->getNativeObject(nvrhi::ObjectTypes::VK_CommandBuffer);
+  bool evaluateOk = false;
+  if (useRR)
+  {
+    // DLSS Stage 2b — DLSSDOptions::worldToCameraView / cameraViewToWorld
+    // (ProgrammingGuideDLSS_RR.md §4.1.9, kBufferTypeSpecularHitDistance's
+    // reprojection contract). cameraViewToWorld IS worldFromViewFlat
+    // (already computed above for ExtractCameraBasis); worldToCameraView
+    // is its inverse — same hlslpp::inverse pattern this function already
+    // uses for clipToPrevClip/prevClipToClip below.
+    const hlslpp::float4x4 viewFromWorld =
+        hlslpp::inverse(_sceneBindings->LastWorldFromView());
+    float viewFromWorldFlat[16];
+    hlslpp::store(viewFromWorldFlat, viewFromWorld);
 
-  const bool ok = _dlssProvider->Evaluate(inputs);
-  if (!ok)
+    DlssProvider::FrameInputsRR inputsRR{};
+    inputsRR.frameIndex = context.frameIndex;
+    inputsRR.renderWidth = renderDesc.width;
+    inputsRR.renderHeight = renderDesc.height;
+    inputsRR.displayWidth = displayDesc.width;
+    inputsRR.displayHeight = displayDesc.height;
+    inputsRR.dlssExecMode = dlssExecMode;
+    inputsRR.orthographic = orthographic;
+    inputsRR.jitterX = jitter.x;
+    inputsRR.jitterY = jitter.y;
+    inputsRR.cameraViewToClip = viewToClipFlat;
+    inputsRR.clipToCameraView = clipToViewFlat;
+    inputsRR.clipToPrevClip = clipToPrevClipFlat;
+    inputsRR.prevClipToClip = prevClipToClipFlat;
+    inputsRR.worldToCameraView = viewFromWorldFlat;
+    inputsRR.cameraViewToWorld = worldFromViewFlat;
+    inputsRR.cameraPos[0] = cameraPos[0];
+    inputsRR.cameraPos[1] = cameraPos[1];
+    inputsRR.cameraPos[2] = cameraPos[2];
+    inputsRR.cameraUp[0] = cameraUp[0];
+    inputsRR.cameraUp[1] = cameraUp[1];
+    inputsRR.cameraUp[2] = cameraUp[2];
+    inputsRR.cameraRight[0] = cameraRight[0];
+    inputsRR.cameraRight[1] = cameraRight[1];
+    inputsRR.cameraRight[2] = cameraRight[2];
+    inputsRR.cameraFwd[0] = cameraFwd[0];
+    inputsRR.cameraFwd[1] = cameraFwd[1];
+    inputsRR.cameraFwd[2] = cameraFwd[2];
+    inputsRR.cameraNear = camera.nearClip;
+    inputsRR.cameraFar = camera.farClip;
+    inputsRR.colorIn = ToTaggedImage(colorIn);
+    inputsRR.colorOut = ToTaggedImage(output);
+    inputsRR.depth = ToTaggedImage(dlssDepth);
+    inputsRR.mvec = ToTaggedImage(mvec);
+    inputsRR.albedo = ToTaggedImage(albedo);
+    inputsRR.specularAlbedo = ToTaggedImage(specularAlbedo);
+    inputsRR.normalRoughness = ToTaggedImage(normalRoughness);
+    inputsRR.specularHitDistance = ToTaggedImage(specularHitDistance);
+    inputsRR.vkCommandBuffer = commandList->getNativeObject(nvrhi::ObjectTypes::VK_CommandBuffer);
+    evaluateOk = _dlssProvider->EvaluateRR(inputsRR);
+  }
+  else
+  {
+    DlssProvider::FrameInputs inputs{};
+    inputs.frameIndex = context.frameIndex;
+    inputs.renderWidth = renderDesc.width;
+    inputs.renderHeight = renderDesc.height;
+    inputs.displayWidth = displayDesc.width;
+    inputs.displayHeight = displayDesc.height;
+    inputs.dlssExecMode = dlssExecMode;
+    inputs.reset = false;  // DlssProvider::Evaluate derives first-frame/resolution-change resets itself.
+    inputs.orthographic = orthographic;
+    inputs.jitterX = jitter.x;
+    inputs.jitterY = jitter.y;
+    inputs.cameraViewToClip = viewToClipFlat;
+    inputs.clipToCameraView = clipToViewFlat;
+    inputs.clipToPrevClip = clipToPrevClipFlat;
+    inputs.prevClipToClip = prevClipToClipFlat;
+    inputs.cameraPos[0] = cameraPos[0];
+    inputs.cameraPos[1] = cameraPos[1];
+    inputs.cameraPos[2] = cameraPos[2];
+    inputs.cameraUp[0] = cameraUp[0];
+    inputs.cameraUp[1] = cameraUp[1];
+    inputs.cameraUp[2] = cameraUp[2];
+    inputs.cameraRight[0] = cameraRight[0];
+    inputs.cameraRight[1] = cameraRight[1];
+    inputs.cameraRight[2] = cameraRight[2];
+    inputs.cameraFwd[0] = cameraFwd[0];
+    inputs.cameraFwd[1] = cameraFwd[1];
+    inputs.cameraFwd[2] = cameraFwd[2];
+    inputs.cameraNear = camera.nearClip;
+    inputs.cameraFar = camera.farClip;
+    inputs.colorIn = ToTaggedImage(colorIn);
+    inputs.colorOut = ToTaggedImage(output);
+    inputs.depth = ToTaggedImage(dlssDepth);  // converted NDC depth, NOT raw gViewZ — see above.
+    inputs.mvec = ToTaggedImage(mvec);
+    inputs.vkCommandBuffer = commandList->getNativeObject(nvrhi::ObjectTypes::VK_CommandBuffer);
+    evaluateOk = _dlssProvider->Evaluate(inputs);
+  }
+
+  if (!evaluateOk)
   {
     // Graceful degradation, same shape as every other pass's shader-
     // load-failure gate: leave `output` whatever it held last (garbage on
@@ -452,8 +539,9 @@ void DlssPass::Execute(nvrhi::ICommandList* commandList, const PassContext& cont
     // is a distinct, rarer failure mode (device interop succeeded at
     // startup, then a specific frame's tag/evaluate call failed), so it
     // gets its own log line instead.
-    Logging::Get().Error(log::RENDER,
-                         "DlssPass: DlssProvider::Evaluate failed this frame; output stale");
+    Logging::Get().Error(log::RENDER, std::string{"DlssPass: DlssProvider::"}
+                                          + (useRR ? "EvaluateRR" : "Evaluate")
+                                          + " failed this frame; output stale");
     return;
   }
 

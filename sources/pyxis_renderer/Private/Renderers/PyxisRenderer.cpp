@@ -9,6 +9,7 @@
 #include "Passes/AutoExposurePass.h"
 #include "Passes/BlitToSrgbPass.h"
 #include "Passes/CompositePass.h"
+#include "Passes/DenoiseAoPass.h"
 #include "Passes/DenoiseAtrousPass.h"
 #include "Passes/DenoiseHistoryFixPass.h"
 #include "Passes/DenoiseShadowPass.h"
@@ -197,6 +198,17 @@ PyxisRenderer::PyxisRenderer(nvrhi::IDevice* device, GpuScene& scene, Profiler& 
   DenoiseAtrousPass* const denoiseAtrousRaw = denoiseAtrous.get();
   _denoiseAtrousPass = denoiseAtrousRaw;
   _graph->AddPass(std::move(denoiseAtrous));
+  // Noise-floor + vegetation spec (rtx-realtime-alignment-design.md,
+  // 2026-07-06), work item 1 — DenoiseAoPass runs alongside the four
+  // passes above (independent of the diffuse/specular chain — it only
+  // touches gAo), gated on the SAME PASS_MASK_DENOISE bit. CompositePass
+  // is ctor-injected its pointer too and picks its Output() instead of the
+  // raw context.gAo when the bit is set — identical raw-vs-denoised
+  // pattern to the shadow/atrous pointers above.
+  auto denoiseAo = std::make_unique<DenoiseAoPass>(device);
+  DenoiseAoPass* const denoiseAoRaw = denoiseAo.get();
+  _denoiseAoPass = denoiseAoRaw;
+  _graph->AddPass(std::move(denoiseAo));
   // RTX-alignment design (rtx-realtime-alignment-design.md), WP2-final —
   // CompositePass replaces the retired RaytracedLightingPass megakernel:
   // it recombines the five signal passes' outputs (+ the G-buffer's
@@ -205,7 +217,7 @@ PyxisRenderer::PyxisRenderer(nvrhi::IDevice* device, GpuScene& scene, Profiler& 
   // the retired pass — transparency-composited coverage is only known
   // once every signal has been combined).
   auto composite = std::make_unique<CompositePass>(device, scene, *_sceneBindings, denoiseShadowRaw,
-                                                   denoiseAtrousRaw);
+                                                   denoiseAtrousRaw, denoiseAoRaw);
   _compositePass = composite.get();
   _graph->AddPass(std::move(composite));
   // DLSS Stage 2a (rtx-realtime-alignment-design.md) — DlssPass runs next,
@@ -257,8 +269,8 @@ PyxisRenderer::PyxisRenderer(nvrhi::IDevice* device, GpuScene& scene, Profiler& 
   _graph->AddPass(std::make_unique<BlitToSrgbPass>(device));
   Logging::Get().Info(log::RENDER,
                       "PyxisRenderer: initialised (RaytracedGBuffer + 5 signal passes + "
-                      "4-pass denoiser chain + Composite + Dlss + AutoExposure + Taa + Tonemap + "
-                      "SsaaResolve + BlitToSrgb registered)");
+                      "5-pass denoiser chain (Shadow/Temporal/HistoryFix/Atrous/Ao) + Composite + "
+                      "Dlss + AutoExposure + Taa + Tonemap + SsaaResolve + BlitToSrgb registered)");
 }
 
 // Out-of-line dtor lives here so unique_ptr<RenderGraph>'s (and, since
@@ -291,14 +303,21 @@ void PyxisRenderer::RenderFrame(nvrhi::ICommandList* commandList, const RenderSe
     downgradeReason = dlssAvailability.reason;
   }
 
-  // DLSS Stage 2a — two-resolution pipeline. `renderWidth`/`renderHeight`
+  // DLSS Stage 2b — graceful ladder: RR (Ray Reconstruction) -> SR +
+  // builtin denoiser -> builtin native. `IsRRUsable()` only ever returns
+  // true once DlssProvider::Initialize confirmed BOTH SR and RR usable
+  // (see its own doc comment), so this is cheap and safe to re-derive
+  // every frame exactly like `dlssAvailability` above — no separate probe.
+  const bool dlssUsesRR = _dlssProvider->IsRRUsable();
+
+  // DLSS Stage 2a/2b — two-resolution pipeline. `renderWidth`/`renderHeight`
   // default to native (== the display target's own dims) so the
   // Builtin/Off path stays byte-for-byte identical to Stage 1. A usable
   // provider can still fail to produce a resolution for THIS frame (no
   // display target bound at all — e.g. a device-only smoke test — or
-  // slDLSSGetOptimalSettings itself failing); either downgrades to
-  // Builtin for this frame rather than running the graph at an undefined
-  // resolution.
+  // slDLSSGetOptimalSettings/slDLSSDGetOptimalSettings itself failing);
+  // either downgrades to Builtin for this frame rather than running the
+  // graph at an undefined resolution.
   uint32_t renderWidth = settings.width;
   uint32_t renderHeight = settings.height;
   if (effectiveDenoiser == DENOISER_DLSS)
@@ -311,12 +330,23 @@ void PyxisRenderer::RenderFrame(nvrhi::ICommandList* commandList, const RenderSe
     else
     {
       const nvrhi::TextureDesc& displayDescForRes = targets.color->getDesc();
-      const DlssProvider::RenderResolution optimal = _dlssProvider->GetOptimalRenderResolution(
-          displayDescForRes.width, displayDescForRes.height, settings.realTimeQuality.dlssExecMode);
+      // RR runs "in the same Performance Quality Mode set for DLSS"
+      // (ProgrammingGuideDLSS_RR.md 3.0) but exposes its own optimal-
+      // settings entry point — query the one that matches the rung this
+      // frame will actually evaluate.
+      const DlssProvider::RenderResolution optimal =
+          dlssUsesRR
+              ? _dlssProvider->GetOptimalRenderResolutionRR(displayDescForRes.width,
+                                                            displayDescForRes.height,
+                                                            settings.realTimeQuality.dlssExecMode)
+              : _dlssProvider->GetOptimalRenderResolution(displayDescForRes.width,
+                                                          displayDescForRes.height,
+                                                          settings.realTimeQuality.dlssExecMode);
       if (optimal.width == 0u || optimal.height == 0u)
       {
         effectiveDenoiser = DENOISER_BUILTIN;
-        downgradeReason = "slDLSSGetOptimalSettings failed this frame";
+        downgradeReason = dlssUsesRR ? "slDLSSDGetOptimalSettings failed this frame"
+                                     : "slDLSSGetOptimalSettings failed this frame";
       }
       else
       {
@@ -345,17 +375,41 @@ void PyxisRenderer::RenderFrame(nvrhi::ICommandList* commandList, const RenderSe
   _dlssStatus.effectiveDenoiser = effectiveDenoiser;
   _dlssStatus.reason = MakeStatusMessage(downgradeReason);
 
+  // DLSS Stage 2b — log the active ladder rung once per change, same
+  // change-gated pattern as the "denoiser: requested=..." line above (not
+  // merged into it: that line's own gate is requested/effective denoiser
+  // changing, which won't fire on an RR<->SR flip that happens with
+  // DENOISER_DLSS staying the effective value throughout).
+  const bool dlssActiveThisFrame = (effectiveDenoiser == DENOISER_DLSS);
+  if (dlssActiveThisFrame
+      && (!_dlssRungLogged || dlssUsesRR != _dlssLastRungWasRR))
+  {
+    if (dlssUsesRR)
+      Logging::Get().Info(log::RENDER, "dlss: RR active");
+    else
+      Logging::Get().Info(log::RENDER, "dlss: SR+builtin (RR unsupported: "
+                                           + _dlssProvider->LastRRResult().reason + ")");
+    _dlssRungLogged = true;
+    _dlssLastRungWasRR = dlssUsesRR;
+  }
+
   // Force/mask the denoise+TAA passMask bits on a LOCAL settings copy
   // based on the FINAL effective denoiser:
   //   - DENOISER_BUILTIN: authored passMask bits pass through unchanged
   //     (today's pre-Stage-2a behaviour).
-  //   - DENOISER_DLSS: rtx-realtime-alignment-design.md's documented
-  //     Stage 2a semantic — "builtin denoise at renderRes + DLSS-SR
-  //     upscale": the ReLAX/SIGMA chain is forced ON regardless of the
-  //     authored bit (DLSS-SR alone only upscales, it doesn't denoise),
-  //     TAA is forced OFF (DLSS's own temporal accumulation replaces it —
-  //     running both would double-blend history at two different
-  //     resolutions).
+  //   - DENOISER_DLSS + RR unusable (SR rung): rtx-realtime-alignment-
+  //     design.md's documented Stage 2a semantic — "builtin denoise at
+  //     renderRes + DLSS-SR upscale": the ReLAX/SIGMA chain is forced ON
+  //     regardless of the authored bit (DLSS-SR alone only upscales, it
+  //     doesn't denoise), TAA is forced OFF (DLSS's own temporal
+  //     accumulation replaces it — running both would double-blend
+  //     history at two different resolutions).
+  //   - DENOISER_DLSS + RR usable (RR rung, Stage 2b): the OPPOSITE
+  //     denoise forcing — RR IS the denoiser (ProgrammingGuideDLSS_RR.md's
+  //     whole premise: it consumes RAW noisy per-signal radiance +
+  //     G-buffer guides instead of a pre-denoised image), so
+  //     PASS_MASK_DENOISE is forced OFF so CompositePass feeds it the raw
+  //     signals. TAA stays forced OFF for the same reason as the SR rung.
   //   - DENOISER_OFF: both forced OFF regardless of the authored passMask
   //     (unchanged from Stage 1).
   // A copy (not a const_cast) because PassContext::settings is threaded to
@@ -365,9 +419,12 @@ void PyxisRenderer::RenderFrame(nvrhi::ICommandList* commandList, const RenderSe
   // TaaPass source (their existing self-gate on PASS_MASK_DENOISE /
   // PASS_MASK_TAA does the rest).
   RenderSettings effectiveSettings = settings;
-  if (effectiveDenoiser == DENOISER_DLSS)
+  if (dlssActiveThisFrame)
   {
-    effectiveSettings.realTimeQuality.passMask |= shaderinterop::PASS_MASK_DENOISE;
+    if (dlssUsesRR)
+      effectiveSettings.realTimeQuality.passMask &= ~shaderinterop::PASS_MASK_DENOISE;
+    else
+      effectiveSettings.realTimeQuality.passMask |= shaderinterop::PASS_MASK_DENOISE;
     effectiveSettings.realTimeQuality.passMask &= ~shaderinterop::PASS_MASK_TAA;
   }
   else if (effectiveDenoiser == DENOISER_OFF)
@@ -441,6 +498,7 @@ void PyxisRenderer::RenderFrame(nvrhi::ICommandList* commandList, const RenderSe
       context.gAlbedo = gbuf->Albedo();
       context.gNormalRoughness = gbuf->NormalRoughness();
       context.gEmissive = gbuf->Emissive();
+      context.gSpecularAlbedo = gbuf->SpecularAlbedo();
     }
     context.gViewZ = targets.viewZAov;
     context.gMotionVector = targets.motionVector;
@@ -619,8 +677,9 @@ void PyxisRenderer::RenderFrame(nvrhi::ICommandList* commandList, const RenderSe
 
   const Profiler::CpuScope frameScope(*_profiler, "render.frame.cpu");
   // The graph runs RaytracedGBuffer → [DirectLighting, IndirectDiffuse,
-  // AmbientOcclusion, Reflections, Translucency] → 4-pass denoiser chain →
-  // Composite → Dlss → AutoExposure → Taa → Tonemap → SsaaResolve →
+  // AmbientOcclusion, Reflections, Translucency] → 5-pass denoiser chain
+  // (Shadow, Temporal, HistoryFix, Atrous, Ao) → Composite → Dlss →
+  // AutoExposure → Taa → Tonemap → SsaaResolve →
   // BlitToSrgb. Dlss no-ops unless effective denoiser == Dlss (in which
   // case Taa's own passMask bit is already forced off above — they never
   // both run); SsaaResolve no-ops at factor < 2; BlitToSrgb no-ops when

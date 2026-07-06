@@ -20,33 +20,48 @@
 // target 30) — alpha = 1/historyLength gives fast initial convergence
 // that slows toward a ~30-frame effective window.
 //
-// Simplification vs. true NRD RELAX (tracked as debt): this is a SINGLE
-// accumulator per signal, not NRD's parallel fast+slow dual-history blend
-// (`fastHistoryFrames`, DenoiseTemporalUniforms, is plumbed but not yet
-// read by this shader) or its luminance-variance-based clamp against a
-// fast history. History-length-driven alpha alone already removes most
-// of the Phase B estimators' per-frame noise across a static camera/scene.
+// Noise-floor + vegetation spec (rtx-realtime-alignment-design.md,
+// 2026-07-06), work item 2 — ReLAX DUAL history: alongside the SLOW
+// accumulator above (cap `maxAccumFrames`, ~30), a second FAST
+// accumulator (cap `fastHistoryFrames`, ~6) is maintained in lockstep
+// (same reprojection/disocclusion test — geometry doesn't care which
+// accumulator is reading it). The SLOW accumulator's LUMINANCE is then
+// clamped against the FAST accumulator's luminance ± `clampSigma` (NRD
+// default target ~2) local standard deviations, estimated from a 3x3
+// spatial neighborhood of THIS frame's raw (pre-accumulation) signal —
+// the standard SVGF/ReLAX anti-lag (fast reacts quickly to a real
+// lighting change) + anti-flatten (slow's long memory doesn't let a
+// stale value survive an actual change, nor drift away from the fast
+// track's short-term truth) mechanism. Skipped on disocclusion (both
+// accumulators already reset to the identical raw value that frame).
+// DenoiseHistoryFixPass (work item 4) also reads the FAST accumulator
+// directly as its preferred fallback at thin/chaotic geometry.
 //
 // Ping-pong is REQUIRED, not a style choice: this dispatch reads the
 // PREVIOUS frame's data at a reprojected (generally different) pixel
 // while writing THIS frame's data at the current pixel — a single shared
 // buffer would race. DenoiserResources (Private/Passes/DenoiserResources.h)
-// owns the two index-swapped texture sets.
+// owns the four index-swapped texture sets (fast+slow x diffuse+specular)
+// plus the shared normalViewZ set.
 //
 // A COMPUTE pass — no TraceRay, no SceneBindings (screen-space only).
 // Bindings (single Set 0):
-//   0  : Texture2D<float4> gRawDiffuse       (SRV, IndirectDiffusePass output)
-//   1  : Texture2D<float4> gRawSpecular      (SRV, ReflectionsPass output)
-//   2  : Texture2D<float2> gMotionVector     (SRV, GBuffer guide)
-//   3  : Texture2D<float>  gViewZ            (SRV, GBuffer guide)
-//   4  : Texture2D<float4> gNormalRoughness  (SRV, GBuffer guide)
-//   5  : Texture2D<float4> gPrevDiffuse      (SRV, DenoiserResources)
-//   6  : Texture2D<float4> gPrevSpecular     (SRV, DenoiserResources)
-//   7  : Texture2D<float4> gPrevNormalViewZ  (SRV, DenoiserResources)
-//   8  : RWTexture2D<float4> gCurrDiffuse    (UAV, DenoiserResources)
-//   9  : RWTexture2D<float4> gCurrSpecular   (UAV, DenoiserResources)
-//   10 : RWTexture2D<float4> gCurrNormalViewZ(UAV, DenoiserResources)
-//   11 : ConstantBuffer<DenoiseTemporalUniforms>
+//   0  : Texture2D<float4> gRawDiffuse        (SRV, IndirectDiffusePass output)
+//   1  : Texture2D<float4> gRawSpecular       (SRV, ReflectionsPass output)
+//   2  : Texture2D<float2> gMotionVector      (SRV, GBuffer guide)
+//   3  : Texture2D<float>  gViewZ             (SRV, GBuffer guide)
+//   4  : Texture2D<float4> gNormalRoughness   (SRV, GBuffer guide)
+//   5  : Texture2D<float4> gPrevDiffuseSlow   (SRV, DenoiserResources)
+//   6  : Texture2D<float4> gPrevSpecularSlow  (SRV, DenoiserResources)
+//   7  : Texture2D<float4> gPrevNormalViewZ   (SRV, DenoiserResources)
+//   8  : Texture2D<float4> gPrevDiffuseFast   (SRV, DenoiserResources)
+//   9  : Texture2D<float4> gPrevSpecularFast  (SRV, DenoiserResources)
+//   10 : RWTexture2D<float4> gCurrDiffuseSlow  (UAV, DenoiserResources)
+//   11 : RWTexture2D<float4> gCurrSpecularSlow (UAV, DenoiserResources)
+//   12 : RWTexture2D<float4> gCurrNormalViewZ  (UAV, DenoiserResources)
+//   13 : RWTexture2D<float4> gCurrDiffuseFast  (UAV, DenoiserResources)
+//   14 : RWTexture2D<float4> gCurrSpecularFast (UAV, DenoiserResources)
+//   15 : ConstantBuffer<DenoiseTemporalUniforms>
 
 #include "ShaderInterop.slang"
 
@@ -55,19 +70,58 @@
 [[vk::binding(2, 0)]]  Texture2D<float2>   gMotionVector;
 [[vk::binding(3, 0)]]  Texture2D<float>    gViewZ;
 [[vk::binding(4, 0)]]  Texture2D<float4>   gNormalRoughness;
-[[vk::binding(5, 0)]]  Texture2D<float4>   gPrevDiffuse;
-[[vk::binding(6, 0)]]  Texture2D<float4>   gPrevSpecular;
+[[vk::binding(5, 0)]]  Texture2D<float4>   gPrevDiffuseSlow;
+[[vk::binding(6, 0)]]  Texture2D<float4>   gPrevSpecularSlow;
 [[vk::binding(7, 0)]]  Texture2D<float4>   gPrevNormalViewZ;
-[[vk::binding(8, 0)]]  RWTexture2D<float4> gCurrDiffuse;
-[[vk::binding(9, 0)]]  RWTexture2D<float4> gCurrSpecular;
-[[vk::binding(10, 0)]] RWTexture2D<float4> gCurrNormalViewZ;
-[[vk::binding(11, 0)]] ConstantBuffer<DenoiseTemporalUniforms> gParams;
+[[vk::binding(8, 0)]]  Texture2D<float4>   gPrevDiffuseFast;
+[[vk::binding(9, 0)]]  Texture2D<float4>   gPrevSpecularFast;
+[[vk::binding(10, 0)]] RWTexture2D<float4> gCurrDiffuseSlow;
+[[vk::binding(11, 0)]] RWTexture2D<float4> gCurrSpecularSlow;
+[[vk::binding(12, 0)]] RWTexture2D<float4> gCurrNormalViewZ;
+[[vk::binding(13, 0)]] RWTexture2D<float4> gCurrDiffuseFast;
+[[vk::binding(14, 0)]] RWTexture2D<float4> gCurrSpecularFast;
+[[vk::binding(15, 0)]] ConstantBuffer<DenoiseTemporalUniforms> gParams;
+
+float Luma(float3 c) {
+    return dot(c, float3(0.2126, 0.7152, 0.0722));
+}
+
+// Cheap per-pixel local standard deviation of the RAW (pre-accumulation)
+// signal's luminance, from its immediate 3x3 neighborhood — the spatial
+// proxy for "how noisy/volatile is this pixel right now" that the
+// fast-history luminance clamp uses in place of a tracked temporal
+// variance (which this simplified chain doesn't carry — see file header).
+float LocalRawLumaStdDev(Texture2D<float4> rawTex, uint2 centerPixel, uint2 dims) {
+    float sum = 0.0;
+    float sumSq = 0.0;
+    float count = 0.0;
+    [loop]
+    for (int dy = -1; dy <= 1; ++dy) {
+        [loop]
+        for (int dx = -1; dx <= 1; ++dx) {
+            const int2 samplePixelSigned = int2(centerPixel) + int2(dx, dy);
+            if (samplePixelSigned.x < 0 || samplePixelSigned.y < 0
+                || samplePixelSigned.x >= int(dims.x) || samplePixelSigned.y >= int(dims.y))
+                continue;
+            const float luma = Luma(rawTex[uint2(samplePixelSigned)].rgb);
+            sum += luma;
+            sumSq += luma * luma;
+            count += 1.0;
+        }
+    }
+    if (count < 2.0)
+        return 0.0;
+    const float mean = sum / count;
+    const float variance = max(sumSq / count - mean * mean, 0.0);
+    return sqrt(variance);
+}
 
 [numthreads(8, 8, 1)]
 void main(uint3 dispatchThreadId : SV_DispatchThreadID) {
     const uint2 pixel = dispatchThreadId.xy;
     if (pixel.x >= gParams.destWidth || pixel.y >= gParams.destHeight)
         return;
+    const uint2 dims = uint2(gParams.destWidth, gParams.destHeight);
 
     const float4 rawDiffuse = gRawDiffuse[pixel];
     const float4 rawSpecular = gRawSpecular[pixel];
@@ -86,10 +140,14 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID) {
                             && prevPixel.y < int(gParams.destHeight);
 
     bool disoccluded = true;
-    float3 prevDiffuseColor = float3(0.0, 0.0, 0.0);
-    float3 prevSpecularColor = float3(0.0, 0.0, 0.0);
-    float prevHistoryLenDiffuse = 0.0;
-    float prevHistoryLenSpecular = 0.0;
+    float3 prevDiffuseSlow = float3(0.0, 0.0, 0.0);
+    float3 prevSpecularSlow = float3(0.0, 0.0, 0.0);
+    float prevHistLenDiffuseSlow = 0.0;
+    float prevHistLenSpecularSlow = 0.0;
+    float3 prevDiffuseFast = float3(0.0, 0.0, 0.0);
+    float3 prevSpecularFast = float3(0.0, 0.0, 0.0);
+    float prevHistLenDiffuseFast = 0.0;
+    float prevHistLenSpecularFast = 0.0;
 
     if (gParams.hasHistory != 0u && insideBounds) {
         const uint2 prevPixelU = uint2(prevPixel);
@@ -102,30 +160,74 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID) {
         const float normalDot = dot(normal, prevNormal);
         if (planeDistance < 0.003 && normalDot > 0.5) {
             disoccluded = false;
-            const float4 prevD = gPrevDiffuse[prevPixelU];
-            const float4 prevS = gPrevSpecular[prevPixelU];
-            prevDiffuseColor = prevD.rgb;
-            prevHistoryLenDiffuse = prevD.a;
-            prevSpecularColor = prevS.rgb;
-            prevHistoryLenSpecular = prevS.a;
+            const float4 prevDSlow = gPrevDiffuseSlow[prevPixelU];
+            const float4 prevSSlow = gPrevSpecularSlow[prevPixelU];
+            prevDiffuseSlow = prevDSlow.rgb;
+            prevHistLenDiffuseSlow = prevDSlow.a;
+            prevSpecularSlow = prevSSlow.rgb;
+            prevHistLenSpecularSlow = prevSSlow.a;
+            const float4 prevDFast = gPrevDiffuseFast[prevPixelU];
+            const float4 prevSFast = gPrevSpecularFast[prevPixelU];
+            prevDiffuseFast = prevDFast.rgb;
+            prevHistLenDiffuseFast = prevDFast.a;
+            prevSpecularFast = prevSFast.rgb;
+            prevHistLenSpecularFast = prevSFast.a;
         }
     }
 
-    const float maxAccum = float(max(gParams.maxAccumFrames, 1u));
-    const float newHistoryLenDiffuse =
-        disoccluded ? 1.0 : min(prevHistoryLenDiffuse + 1.0, maxAccum);
-    const float newHistoryLenSpecular =
-        disoccluded ? 1.0 : min(prevHistoryLenSpecular + 1.0, maxAccum);
+    const float maxAccumSlow = float(max(gParams.maxAccumFrames, 1u));
+    const float maxAccumFast = float(max(gParams.fastHistoryFrames, 1u));
 
-    const float alphaDiffuse = 1.0 / newHistoryLenDiffuse;
-    const float alphaSpecular = 1.0 / newHistoryLenSpecular;
+    // SLOW accumulator (long memory).
+    const float newHistLenDiffuseSlow =
+        disoccluded ? 1.0 : min(prevHistLenDiffuseSlow + 1.0, maxAccumSlow);
+    const float newHistLenSpecularSlow =
+        disoccluded ? 1.0 : min(prevHistLenSpecularSlow + 1.0, maxAccumSlow);
+    const float alphaDiffuseSlow = 1.0 / newHistLenDiffuseSlow;
+    const float alphaSpecularSlow = 1.0 / newHistLenSpecularSlow;
+    float3 outDiffuseSlow =
+        disoccluded ? rawDiffuse.rgb : lerp(prevDiffuseSlow, rawDiffuse.rgb, alphaDiffuseSlow);
+    float3 outSpecularSlow =
+        disoccluded ? rawSpecular.rgb : lerp(prevSpecularSlow, rawSpecular.rgb, alphaSpecularSlow);
 
-    const float3 outDiffuse =
-        disoccluded ? rawDiffuse.rgb : lerp(prevDiffuseColor, rawDiffuse.rgb, alphaDiffuse);
-    const float3 outSpecular =
-        disoccluded ? rawSpecular.rgb : lerp(prevSpecularColor, rawSpecular.rgb, alphaSpecular);
+    // FAST accumulator (short memory) — work item 2.
+    const float newHistLenDiffuseFast =
+        disoccluded ? 1.0 : min(prevHistLenDiffuseFast + 1.0, maxAccumFast);
+    const float newHistLenSpecularFast =
+        disoccluded ? 1.0 : min(prevHistLenSpecularFast + 1.0, maxAccumFast);
+    const float alphaDiffuseFast = 1.0 / newHistLenDiffuseFast;
+    const float alphaSpecularFast = 1.0 / newHistLenSpecularFast;
+    const float3 outDiffuseFast =
+        disoccluded ? rawDiffuse.rgb : lerp(prevDiffuseFast, rawDiffuse.rgb, alphaDiffuseFast);
+    const float3 outSpecularFast =
+        disoccluded ? rawSpecular.rgb : lerp(prevSpecularFast, rawSpecular.rgb, alphaSpecularFast);
 
-    gCurrDiffuse[pixel] = float4(outDiffuse, newHistoryLenDiffuse);
-    gCurrSpecular[pixel] = float4(outSpecular, newHistoryLenSpecular);
+    // Fast-history luminance clamp of the slow accumulator (work item 2) —
+    // skipped on disocclusion (both accumulators already equal the raw
+    // value this frame, nothing to reconcile).
+    if (!disoccluded) {
+        const float sigmaDiffuse = LocalRawLumaStdDev(gRawDiffuse, pixel, dims);
+        const float lumFastDiffuse = Luma(outDiffuseFast);
+        const float lumSlowDiffuseRaw = Luma(outDiffuseSlow);
+        const float loDiffuse = lumFastDiffuse - gParams.clampSigma * sigmaDiffuse;
+        const float hiDiffuse = lumFastDiffuse + gParams.clampSigma * sigmaDiffuse;
+        const float lumDiffuseClamped = clamp(lumSlowDiffuseRaw, loDiffuse, hiDiffuse);
+        if (lumSlowDiffuseRaw > 1e-5)
+            outDiffuseSlow *= (lumDiffuseClamped / lumSlowDiffuseRaw);
+
+        const float sigmaSpecular = LocalRawLumaStdDev(gRawSpecular, pixel, dims);
+        const float lumFastSpecular = Luma(outSpecularFast);
+        const float lumSlowSpecularRaw = Luma(outSpecularSlow);
+        const float loSpecular = lumFastSpecular - gParams.clampSigma * sigmaSpecular;
+        const float hiSpecular = lumFastSpecular + gParams.clampSigma * sigmaSpecular;
+        const float lumSpecularClamped = clamp(lumSlowSpecularRaw, loSpecular, hiSpecular);
+        if (lumSlowSpecularRaw > 1e-5)
+            outSpecularSlow *= (lumSpecularClamped / lumSlowSpecularRaw);
+    }
+
+    gCurrDiffuseSlow[pixel] = float4(outDiffuseSlow, newHistLenDiffuseSlow);
+    gCurrSpecularSlow[pixel] = float4(outSpecularSlow, newHistLenSpecularSlow);
     gCurrNormalViewZ[pixel] = float4(normal, viewZ);
+    gCurrDiffuseFast[pixel] = float4(outDiffuseFast, newHistLenDiffuseFast);
+    gCurrSpecularFast[pixel] = float4(outSpecularFast, newHistLenSpecularFast);
 }

@@ -29,16 +29,39 @@
 // on the G-buffer material id (gMaterialId): a tap whose material slot
 // differs from the center pixel's contributes nothing.
 //
+// Noise-floor + vegetation spec (rtx-realtime-alignment-design.md,
+// 2026-07-06), work item 4 — thin-geometry flattening: the materialId
+// guard above does nothing for foliage (every leaf/blade on a plant
+// shares ONE material slot), and normals/viewZ are chaotic at blade
+// scale — so a still-short history length used to pick the SAME wide
+// stride the vase silhouette above needs, flattening plant interiors to
+// their mean while still leaving speckle (the reported "no
+// self-shadowing" look). Fix: compute a local normal/viewZ COHERENCE
+// factor (1 = flat/coherent geometry, 0 = chaotic/thin — the blade-scale
+// signature) from the immediate 3x3 neighborhood of the CURRENT G-buffer
+// guides (native stride-1 taps, independent of the history-fix `stride`
+// itself, which operates on the SIGNAL texture). Low coherence caps the
+// stride toward HISTORY_FIX_MIN_STRIDE regardless of how short the
+// history is, AND blends the result toward DenoiseTemporalPass's FAST
+// (short-memory, ~6-frame) accumulator instead of the wide spatial
+// average — preferring a temporally-recent value over a spatially-
+// flattened one exactly where the wide blur would otherwise erase
+// plant-interior occlusion contrast.
+//
 // A COMPUTE pass — no TraceRay, no SceneBindings (screen-space only).
 // Bindings (single Set 0):
-//   0 : Texture2D<float4> gInDiffuse   (SRV, DenoiseTemporalPass output)
-//   1 : Texture2D<float4> gInSpecular  (SRV, DenoiseTemporalPass output)
+//   0 : Texture2D<float4> gInDiffuse   (SRV, DenoiseTemporalPass SLOW output)
+//   1 : Texture2D<float4> gInSpecular  (SRV, DenoiseTemporalPass SLOW output)
 //   2 : RWTexture2D<float4> gOutDiffuse  (UAV)
 //   3 : RWTexture2D<float4> gOutSpecular (UAV)
 //   4 : ConstantBuffer<DenoiseHistoryFixUniforms>
 //   5 : Texture2D<uint> gMaterialId (SRV, GBuffer guide; ~0u on miss — 1x1
 //       zero-filled fallback when the caller doesn't wire materialIdAov,
 //       see DenoiseHistoryFixPass.cpp)
+//   6 : Texture2D<float4> gFastDiffuse  (SRV, DenoiseTemporalPass FAST output)
+//   7 : Texture2D<float4> gFastSpecular (SRV, DenoiseTemporalPass FAST output)
+//   8 : Texture2D<float4> gNormalRoughness (SRV, GBuffer guide)
+//   9 : Texture2D<float>  gViewZ           (SRV, GBuffer guide)
 
 #include "ShaderInterop.slang"
 
@@ -48,10 +71,28 @@
 [[vk::binding(3, 0)]] RWTexture2D<float4> gOutSpecular;
 [[vk::binding(4, 0)]] ConstantBuffer<DenoiseHistoryFixUniforms> gParams;
 [[vk::binding(5, 0)]] Texture2D<uint>     gMaterialId;
+[[vk::binding(6, 0)]] Texture2D<float4>   gFastDiffuse;
+[[vk::binding(7, 0)]] Texture2D<float4>   gFastSpecular;
+[[vk::binding(8, 0)]] Texture2D<float4>   gNormalRoughness;
+[[vk::binding(9, 0)]] Texture2D<float>    gViewZ;
 
 static const float HISTORY_FIX_THRESHOLD = 3.0;
 static const float HISTORY_FIX_MAX_STRIDE = 14.0;
 static const float HISTORY_FIX_MIN_STRIDE = 1.0;
+// Relative viewZ delta (fraction of centerViewZ) beyond which a 3x3
+// neighbor is treated as fully depth-incoherent — thin/foliage geometry
+// routinely exceeds this at blade edges; a flat wall/floor never does.
+// Relative viewZ delta (fraction of centerViewZ) beyond which a 3x3
+// neighbor is treated as a genuine depth DISCONTINUITY (a silhouette
+// crossing) rather than an ordinary smooth perspective gradient (a
+// receding wall/floor easily varies several % per pixel at 480p-ish
+// resolutions without being "thin geometry" at all — recalibrated after
+// the first cut's tight 0.02 soft-falloff scale flagged ordinary smooth
+// surfaces as chaotic and REGRESSED the whole-frame noise-proxy measure;
+// see this file's WidenedBoxAverage/ComputeLocalCoherence history). A
+// hard cutoff (not a soft 1/scale falloff) so a steep-but-smooth gradient
+// scores fully coherent right up until it's actually a jump.
+static const float THIN_GEOMETRY_VIEWZ_DISCONTINUITY = 0.5;
 
 // A small 3x3 sparse-tap box average at the given pixel stride — cheap
 // spatial fill for a disoccluded (low-history) pixel. `channel` selects
@@ -88,6 +129,44 @@ float3 WidenedBoxAverage(Texture2D<float4> tex, uint2 centerPixel, float stride,
     return (weight > 0.0) ? (sum / weight) : tex[centerPixel].rgb;
 }
 
+// Local normal/viewZ coherence over the immediate 3x3 neighborhood, at
+// native (stride-1) resolution — the thin-geometry signature (work item
+// 4). 1 = flat/coherent (a wall, a floor); 0 = chaotic (blade-scale
+// foliage silhouettes, where neighboring pixels routinely hit different
+// leaves/blades at very different depths and normals).
+float ComputeLocalCoherence(uint2 centerPixel, uint2 dims) {
+    const float3 centerNormal = gNormalRoughness[centerPixel].xyz;
+    const float centerViewZ = gViewZ[centerPixel];
+
+    float normalSum = 0.0;
+    float viewZSum = 0.0;
+    float count = 0.0;
+    [loop]
+    for (int dy = -1; dy <= 1; ++dy) {
+        [loop]
+        for (int dx = -1; dx <= 1; ++dx) {
+            if (dx == 0 && dy == 0)
+                continue;
+            const int2 neighborSigned = int2(centerPixel) + int2(dx, dy);
+            if (neighborSigned.x < 0 || neighborSigned.y < 0 || neighborSigned.x >= int(dims.x)
+                || neighborSigned.y >= int(dims.y))
+                continue;
+            const uint2 neighbor = uint2(neighborSigned);
+            normalSum += saturate(dot(centerNormal, gNormalRoughness[neighbor].xyz));
+            const float neighborViewZ = gViewZ[neighbor];
+            const float relDelta = abs(neighborViewZ - centerViewZ) / max(centerViewZ, 1e-3);
+            // Hard discontinuity gate, not a soft falloff (see the
+            // constant's doc comment) — a smooth gradient never trips
+            // this regardless of how steep it is; only an actual jump does.
+            viewZSum += (relDelta < THIN_GEOMETRY_VIEWZ_DISCONTINUITY) ? 1.0 : 0.0;
+            count += 1.0;
+        }
+    }
+    if (count < 1.0)
+        return 1.0;
+    return saturate((normalSum / count) * (viewZSum / count));
+}
+
 [numthreads(8, 8, 1)]
 void main(uint3 dispatchThreadId : SV_DispatchThreadID) {
     const uint2 pixel = dispatchThreadId.xy;
@@ -98,19 +177,30 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID) {
     const float4 centerDiffuse = gInDiffuse[pixel];
     const float4 centerSpecular = gInSpecular[pixel];
     const uint centerMaterialId = gMaterialId[pixel];
+    const float coherence = ComputeLocalCoherence(pixel, dims);
 
     float3 outDiffuseColor = centerDiffuse.rgb;
     if (centerDiffuse.a < HISTORY_FIX_THRESHOLD) {
         const float t = saturate(centerDiffuse.a / HISTORY_FIX_THRESHOLD);
-        const float stride = lerp(HISTORY_FIX_MAX_STRIDE, HISTORY_FIX_MIN_STRIDE, t);
-        outDiffuseColor = WidenedBoxAverage(gInDiffuse, pixel, stride, dims, centerMaterialId);
+        float stride = lerp(HISTORY_FIX_MAX_STRIDE, HISTORY_FIX_MIN_STRIDE, t);
+        // Thin-geometry guard (work item 4): cap the stride by local
+        // geometry coherence so blade-scale chaotic normals/viewZ never
+        // take the wide tap a still-short history alone would pick.
+        stride = lerp(HISTORY_FIX_MIN_STRIDE, stride, coherence);
+        const float3 wideAverage = WidenedBoxAverage(gInDiffuse, pixel, stride, dims, centerMaterialId);
+        // Prefer the FAST (short-memory ReLAX) history over the wide
+        // spatial blur exactly where that blur would flatten thin
+        // geometry — blend toward it as coherence drops.
+        outDiffuseColor = lerp(gFastDiffuse[pixel].rgb, wideAverage, coherence);
     }
 
     float3 outSpecularColor = centerSpecular.rgb;
     if (centerSpecular.a < HISTORY_FIX_THRESHOLD) {
         const float t = saturate(centerSpecular.a / HISTORY_FIX_THRESHOLD);
-        const float stride = lerp(HISTORY_FIX_MAX_STRIDE, HISTORY_FIX_MIN_STRIDE, t);
-        outSpecularColor = WidenedBoxAverage(gInSpecular, pixel, stride, dims, centerMaterialId);
+        float stride = lerp(HISTORY_FIX_MAX_STRIDE, HISTORY_FIX_MIN_STRIDE, t);
+        stride = lerp(HISTORY_FIX_MIN_STRIDE, stride, coherence);
+        const float3 wideAverage = WidenedBoxAverage(gInSpecular, pixel, stride, dims, centerMaterialId);
+        outSpecularColor = lerp(gFastSpecular[pixel].rgb, wideAverage, coherence);
     }
 
     // History length passes through unchanged — only the radiance gets

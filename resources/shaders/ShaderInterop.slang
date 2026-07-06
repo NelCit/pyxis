@@ -1020,13 +1020,22 @@ struct DenoiseShadowUniforms {
 // "specular" GI). `hasHistory` is the CPU-tracked "do the ping-pong
 // buffers hold a previous frame yet" gate (DenoiserResources); 0 on the
 // first frame after (re)creation, 1 forever after.
+//
+// Noise-floor + vegetation spec (rtx-realtime-alignment-design.md,
+// 2026-07-06), work item 2 — ReLAX dual history: `fastHistoryFrames`
+// (NRD default target 6) now backs a SECOND accumulator per signal
+// (DenoiserResources' *Fast arrays) alongside the existing `maxAccumFrames`
+// (30) "slow" one. `clampSigma` (NRD default target ~2) is the fast-
+// history luminance clamp strength applied to the slow accumulator each
+// frame (denoise_temporal.slang's anti-lag / anti-flatten mechanism) —
+// was `_pad0`; struct size is unchanged.
 struct DenoiseTemporalUniforms {
     uint destWidth;
     uint destHeight;
     uint hasHistory;
     uint maxAccumFrames;      // NRD default target: 30
     uint fastHistoryFrames;   // NRD default target: 6
-    uint _pad0;
+    float clampSigma;         // NRD default target: ~2 (was _pad0)
     uint _pad1;
     uint _pad2;
 };
@@ -1058,16 +1067,44 @@ struct DenoiseAtrousUniforms {
     uint  _pad2;
 };
 
+// DenoiseAoPass — noise-floor + vegetation spec (rtx-realtime-alignment-
+// design.md, 2026-07-06), work item 1: cheapest ReBLUR-occlusion-style
+// filter for AmbientOcclusionPass's raw gAo — temporal accumulation into
+// its own single-channel ping-pong history (packed into a float4 for
+// texture-format reuse: r = accumulated AO, g = history length) plus a
+// small edge-aware spatial pre-filter, both folded into ONE dispatch of
+// denoise_ao.slang (one pass = one shader). `maxAccumFrames` /
+// `spatialRadiusPixels` are NRD-ReBLUR-occlusion-default-derived.
+struct DenoiseAoUniforms {
+    uint  destWidth;
+    uint  destHeight;
+    uint  hasHistory;
+    uint  maxAccumFrames;      // NRD-default-derived: 32
+    float spatialRadiusPixels; // NRD-default-derived (ReBLUR pre-pass): 2.0
+    uint  _pad0;
+    uint  _pad1;
+    uint  _pad2;
+};
+
 // TaaPass — jittered-history reprojection + 3x3 neighborhood clamp.
 // `hasHistory` mirrors DenoiseTemporalUniforms' gate (TaaPass owns its own
 // single history texture, no ping-pong needed — see TaaPass's doc
 // comment for why a single buffer + a scratch-then-copy-back shape is
 // sufficient here).
+//
+// Noise-floor + vegetation spec (rtx-realtime-alignment-design.md,
+// 2026-07-06), work item 3 — adaptive TAA blend: the fixed 0.1 blend is
+// replaced by a confidence-driven alpha (history-length-based, same
+// 1/historyLength shape DenoiseTemporalUniforms uses); `alphaMin` (was
+// `blendAlpha`) is now the FLOOR that alpha converges toward as history
+// accumulates, not a flat per-frame blend — NRD-default-derived, ~1/32
+// (ReLAX's own "fast" antilag alpha floor, reused here as TAA's
+// convergence floor). Struct size/layout unchanged.
 struct TaaUniforms {
     uint  destWidth;
     uint  destHeight;
     uint  hasHistory;
-    float blendAlpha;   // frozen spec default: 0.1
+    float alphaMin;   // was `blendAlpha`; NRD-default-derived floor: 1/32
 };
 
 // DLSS Stage 2a (rtx-realtime-alignment-design.md) — DlssPass's own tiny
@@ -1199,6 +1236,10 @@ struct DlssDepthUniforms {
                   "TaaUniforms must be 16 bytes (1 cbuffer row).");
     static_assert(sizeof(TaaUniforms) % 16 == 0,
                   "TaaUniforms must be 16-byte aligned (cbuffer std140 rule).");
+    static_assert(sizeof(DenoiseAoUniforms) == 32,
+                  "DenoiseAoUniforms must be 32 bytes (2 cbuffer rows).");
+    static_assert(sizeof(DenoiseAoUniforms) % 16 == 0,
+                  "DenoiseAoUniforms must be 16-byte aligned (cbuffer std140 rule).");
 
     // Sentinel bindless slot meaning "no texture bound for this lobe".
     // The closesthit checks the matching MaterialFlag bit before

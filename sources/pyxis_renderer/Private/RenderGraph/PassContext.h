@@ -105,6 +105,11 @@ struct PassContext {
   nvrhi::ITexture* gEmissive = nullptr;
   nvrhi::ITexture* gViewZ = nullptr;
   nvrhi::ITexture* gMotionVector = nullptr;
+  // DLSS Stage 2b (rtx-realtime-alignment-design.md) — RR's
+  // kBufferTypeSpecularAlbedo guide (RaytracedGBufferPass::SpecularAlbedo()).
+  // Null under the exact same conditions as gAlbedo above; consumed only by
+  // DlssPass's Ray-Reconstruction path.
+  nvrhi::ITexture* gSpecularAlbedo = nullptr;
   // RTX-alignment design (rtx-realtime-alignment-design.md), WP2-final —
   // the five Phase A signal passes' own outputs, threaded here now that
   // CompositePass is their first real consumer (WP2-signals' comment on

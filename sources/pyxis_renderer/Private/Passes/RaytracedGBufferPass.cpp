@@ -219,6 +219,7 @@ RaytracedGBufferPass::RaytracedGBufferPass(nvrhi::IDevice* device, GpuScene& sce
       nvrhi::BindingLayoutItem::Texture_UAV(14),          // 14 gOutWorldPosEye
       nvrhi::BindingLayoutItem::StructuredBuffer_UAV(15), // 15 pickResult
       nvrhi::BindingLayoutItem::ConstantBuffer(16),       // 16 FrameUiUniforms
+      nvrhi::BindingLayoutItem::Texture_UAV(17),          // 17 gSpecularAlbedo (DLSS Stage 2b)
   };
   _passLayout = _device->createBindingLayout(layoutDesc);
   if (!_passLayout)
@@ -413,7 +414,11 @@ nvrhi::IBuffer* RaytracedGBufferPass::EnsureVisibilityBuffer(uint32_t width, uin
   _gNormalRoughness = makeGuideTexture(nvrhi::Format::RGBA16_FLOAT,
                                        "RaytracedGBuffer.gNormalRoughness");
   _gEmissive = makeGuideTexture(nvrhi::Format::RGBA16_FLOAT, "RaytracedGBuffer.gEmissive");
-  if (!_gAlbedo || !_gNormalRoughness || !_gEmissive)
+  // DLSS Stage 2b — RR's kBufferTypeSpecularAlbedo guide, same resize
+  // cadence as the three guides above.
+  _gSpecularAlbedo =
+      makeGuideTexture(nvrhi::Format::RGBA16_FLOAT, "RaytracedGBuffer.gSpecularAlbedo");
+  if (!_gAlbedo || !_gNormalRoughness || !_gEmissive || !_gSpecularAlbedo)
   {
     Logging::Get().Error(log::RENDER,
                          "RaytracedGBufferPass: createTexture(material G-buffer) failed; "
@@ -624,6 +629,7 @@ nvrhi::BindingSetHandle RaytracedGBufferPass::GetOrCreateBindingSet(
       nvrhi::BindingSetItem::Texture_UAV(14, worldPosEyeAov),
       nvrhi::BindingSetItem::StructuredBuffer_UAV(15, pickBuffer),
       nvrhi::BindingSetItem::ConstantBuffer(16, _frameUiBuffer),
+      nvrhi::BindingSetItem::Texture_UAV(17, _gSpecularAlbedo.Get()),
   };
   nvrhi::BindingSetHandle set = _device->createBindingSet(setDesc, _passLayout);
   _bindingSetCache[visibility] = set;
@@ -657,7 +663,7 @@ void RaytracedGBufferPass::Execute(nvrhi::ICommandList* commandList,
     _visibilityNeedsClear = false;
   }
 
-  if (!_shadersOk || !_gAlbedo || !_gNormalRoughness || !_gEmissive)
+  if (!_shadersOk || !_gAlbedo || !_gNormalRoughness || !_gEmissive || !_gSpecularAlbedo)
     return;
   // WP2-core — the shared Set-0 binding set, built ONCE per frame by
   // PyxisRenderer::RenderFrame (before the graph walks) via
@@ -738,6 +744,8 @@ void RaytracedGBufferPass::Execute(nvrhi::ICommandList* commandList,
   commandList->setTextureState(_gNormalRoughness.Get(), nvrhi::AllSubresources,
                                nvrhi::ResourceStates::UnorderedAccess);
   commandList->setTextureState(_gEmissive.Get(), nvrhi::AllSubresources,
+                               nvrhi::ResourceStates::UnorderedAccess);
+  commandList->setTextureState(_gSpecularAlbedo.Get(), nvrhi::AllSubresources,
                                nvrhi::ResourceStates::UnorderedAccess);
   if (context.targets->normalAov != nullptr)
     commandList->setTextureState(context.targets->normalAov, nvrhi::AllSubresources,

@@ -12,13 +12,21 @@
 //   2  : Texture2D<float2> gMotionVector (SRV)
 //   3  : Texture2D<float>  gViewZ (SRV)
 //   4  : Texture2D<float4> gNormalRoughness (SRV)
-//   5  : Texture2D<float4> gPrevDiffuse (SRV)
-//   6  : Texture2D<float4> gPrevSpecular (SRV)
+//   5  : Texture2D<float4> gPrevDiffuseSlow (SRV)
+//   6  : Texture2D<float4> gPrevSpecularSlow (SRV)
 //   7  : Texture2D<float4> gPrevNormalViewZ (SRV)
-//   8  : RWTexture2D<float4> gCurrDiffuse (UAV)
-//   9  : RWTexture2D<float4> gCurrSpecular (UAV)
-//   10 : RWTexture2D<float4> gCurrNormalViewZ (UAV)
-//   11 : ConstantBuffer<DenoiseTemporalUniforms>
+//   8  : Texture2D<float4> gPrevDiffuseFast (SRV)
+//   9  : Texture2D<float4> gPrevSpecularFast (SRV)
+//   10 : RWTexture2D<float4> gCurrDiffuseSlow (UAV)
+//   11 : RWTexture2D<float4> gCurrSpecularSlow (UAV)
+//   12 : RWTexture2D<float4> gCurrNormalViewZ (UAV)
+//   13 : RWTexture2D<float4> gCurrDiffuseFast (UAV)
+//   14 : RWTexture2D<float4> gCurrSpecularFast (UAV)
+//   15 : ConstantBuffer<DenoiseTemporalUniforms>
+//
+// Noise-floor + vegetation spec (rtx-realtime-alignment-design.md,
+// 2026-07-06), work item 2 — dual fast+slow history; see
+// denoise_temporal.slang's file header for the full estimator.
 
 #pragma once
 
@@ -59,6 +67,13 @@ class DenoiseTemporalPass final : public IRenderPass {
   [[nodiscard]] nvrhi::ITexture* Diffuse() const noexcept { return _lastWrittenDiffuse; }
   [[nodiscard]] nvrhi::ITexture* Specular() const noexcept { return _lastWrittenSpecular; }
 
+  // Work item 2 (ReLAX dual history) / work item 4 (thin-geometry fix) —
+  // the FAST (short-memory) accumulator, same "snapshot before Advance()"
+  // contract as Diffuse()/Specular() above. DenoiseHistoryFixPass reads
+  // these as its preferred fallback at low local geometry coherence.
+  [[nodiscard]] nvrhi::ITexture* FastDiffuse() const noexcept { return _lastWrittenDiffuseFast; }
+  [[nodiscard]] nvrhi::ITexture* FastSpecular() const noexcept { return _lastWrittenSpecularFast; }
+
  private:
   [[nodiscard]] nvrhi::BindingSetHandle GetOrCreateBindingSet(
       nvrhi::ITexture* rawDiffuse, nvrhi::ITexture* rawSpecular, nvrhi::ITexture* motionVector,
@@ -76,6 +91,9 @@ class DenoiseTemporalPass final : public IRenderPass {
   // Execute() calls _resources.Advance().
   nvrhi::ITexture* _lastWrittenDiffuse = nullptr;
   nvrhi::ITexture* _lastWrittenSpecular = nullptr;
+  // Work item 2 — same snapshot contract, for the FAST accumulator.
+  nvrhi::ITexture* _lastWrittenDiffuseFast = nullptr;
+  nvrhi::ITexture* _lastWrittenSpecularFast = nullptr;
 
   std::unordered_map<std::uint64_t, nvrhi::BindingSetHandle> _bindingSetCache;
 

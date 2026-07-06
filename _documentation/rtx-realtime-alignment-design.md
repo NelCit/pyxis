@@ -328,6 +328,28 @@ All stochastic sampling uses the §12 PCG32 streams seeded from
 - **Eco mode**: stop re-rendering after `ecoModeFrames` (500) unchanged
   frames (viewer only; camera/scene change resets).
 
+## Noise-floor + vegetation spec (frozen; launches after RR lands)
+
+Owner reports (2026-07-06): vegetation reads as having no self-shadowing;
+final render still too noisy. Diagnosis: the occlusion SIGNALS are present
+(AO AOV shows dark plant interiors; opaque leaves occlude shadow rays; no
+backface culling on occlusion rays) — the presentation chain loses them:
+all foliage shares ONE material so the denoisers' materialId edge-stop
+gives no intra-plant protection, normals/viewZ are chaotic at blade scale,
+so history-fix/à-trous flatten plant interiors to their mean while still
+leaving speckle (the known 40%-vs-25% floor). Work items, builtin chain:
+1. Denoise AO (currently raw) — cheapest occlusion-variant filter.
+2. ReLAX dual history (fast+slow) instead of the single accumulator;
+   luminance-variance-guided à-trous φ (currently fixed).
+3. Adaptive TAA blend (α from history confidence, not fixed 0.1).
+4. Thin-geometry handling: when temporal reprojection rejects on
+   depth/normal at sub-pixel geometry, prefer fast-history over the
+   history-fix wide blur (stride-14 taps are what flatten plants).
+5. Evaluate RR's effect on vegetation specifically (neural denoise should
+   preserve blade-scale shading) — RR may make items 2-4 viewer-optional.
+Measure: planter crops (raw signal vs denoised vs NVIDIA), converged RMSE
+(baseline 0.2150), and the noise proxy (single-frame ratio target ≤25%).
+
 ## Determinism & regression strategy (the hard constraint)
 
 Stochastic sampling + temporal passes change every golden image. Strategy:
@@ -421,6 +443,29 @@ metals/glass rows in the forensics table are a methodology artifact
 | + gradient-footprint clamp (64-texel) in SampleByGrad — legit hardening, no-op for continuous UVs; cleaned the vase's LEFT half only | **0.2152** (unchanged full-frame) | — |
 
 | + **USD st V-flip** (StToImageUv at the bindless sample boundary): Pyxis sampled raw `st` against top-row-first image uploads — spec requires the bottom-left→image flip. Invisible on tileable content, catastrophic on bake atlases (islands land in dilation gutters = the Seahorn stripes). Verified: iso front+back clean, Lobby vase coherent, matches ovrtx | **0.2150** | 0.504 |
+
+| + Plaster/UsdPreviewSurface-fallback fix (texture × disconnected 0.18 placeholder tint — general bug) | **0.2145** | — |
+| + noise-floor + veg (AO denoise, dual-history, adaptive TAA) | 0.2135 | 0.502 |
+| + **traced rough reflections** (ceiling 0.3→0.6: indoor glossy surfaces trace the real dark interior via GGX-VNDF instead of reflecting the bright sky-dome) | **0.1826** | — |
+
+Traced-reflections notes (measured 2026-07-06): tables 2.1× too bright →
+FIXED (now slightly too dark — reflected interior lacks ambient fill;
+occlusion-aware ambient at reflection ClosestHit is the follow-up). Floor
+UNCHANGED — its gap is material-translation (marble inlay), not reflection.
+materialId 7 door panel minor regress (same too-dark cause). GPU flat
+(~3 ms pass.Reflections). Fallback disable (1.01) bought only ~1% more, so
+0.6 ships. The dome-ambient-in-reflection experiment that regressed earlier
+is DIFFERENT from the wanted occlusion-aware term — blanket unoccluded
+ambient over-brightens; the follow-up must gate on an AO ray.
+
+DLSS Stage 2b status (2026-07-06): Ray Reconstruction implemented
+end-to-end (gSpecularAlbedo via EnvBRDFApprox2, EvaluateRR, graceful
+RR→SR+builtin→native ladder) but ENVIRONMENT-BLOCKED here: loading
+kFeatureDLSS_RR pre-device triggers an unbounded nvngx_update.exe retry
+storm (NGX 0xbad00005 self-heal loop; no network/model cache). Feature
+load safety-reverted + documented in DlssDeviceExtensions.cpp. Validate
+RR on a machine with a warm NGX cache or newer Streamline. The builtin
+chain is therefore the only user-facing denoiser on this machine.
 
 Seahorn saga final record (three wrong theories, one real bug, owner
 caught two over-claims): wrap modes (nil — UVs never leave [0,1]),

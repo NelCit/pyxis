@@ -319,6 +319,57 @@ void DlssProvider::Initialize(const VulkanContext& vk) noexcept {
   log.Info(log::RENDER, "DlssProvider: Initialize — slSetVulkanInfo + "
                         "slIsFeatureSupported(kFeatureDLSS) both OK; DLSS-SR is usable on this "
                         "adapter/driver");
+
+  // DLSS Stage 2b — Ray Reconstruction. ProgrammingGuideDLSS_RR.md 3.0:
+  // "DLSS-RR is an extension to DLSS" — only probed now that SR itself is
+  // confirmed usable (adapterInfo/vulkanInfo already set up above). A
+  // failure here is NOT fatal to SR: it just leaves _rrAvailability.usable
+  // false, and DlssPass/PyxisRenderer fall back to the SR+builtin-denoiser
+  // rung (the ladder's middle step) — SR itself is untouched either way.
+  const sl::Result rrSupportResult = _impl->slIsFeatureSupported(sl::kFeatureDLSS_RR, adapterInfo);
+  if (rrSupportResult != sl::Result::eOk)
+  {
+    _rrAvailability.usable = false;
+    _rrAvailability.failedAt = ProbeStage::DeviceInteropFailed;
+    _rrAvailability.reason = "slIsFeatureSupported(kFeatureDLSS_RR) failed (sl::Result="
+                             + std::to_string(static_cast<int>(rrSupportResult))
+                             + ") -- nvngx_dlssd.dll likely not staged alongside sl.dlss_d.dll, "
+                               "or the adapter/driver doesn't support Ray Reconstruction; "
+                               "falling back to DLSS-SR + the builtin denoiser chain";
+    log.Info(log::RENDER, "DlssProvider: Initialize — " + _rrAvailability.reason);
+  }
+  else
+  {
+    void* dlssdGetOptimalSettingsFn = nullptr;
+    void* dlssdSetOptionsFn = nullptr;
+    const sl::Result rrOptSettingsFnResult = _impl->slGetFeatureFunction(
+        sl::kFeatureDLSS_RR, "slDLSSDGetOptimalSettings", dlssdGetOptimalSettingsFn);
+    const sl::Result rrSetOptionsFnResult = _impl->slGetFeatureFunction(
+        sl::kFeatureDLSS_RR, "slDLSSDSetOptions", dlssdSetOptionsFn);
+    if (rrOptSettingsFnResult != sl::Result::eOk || rrSetOptionsFnResult != sl::Result::eOk
+        || dlssdGetOptimalSettingsFn == nullptr || dlssdSetOptionsFn == nullptr)
+    {
+      _rrAvailability.usable = false;
+      _rrAvailability.failedAt = ProbeStage::DeviceInteropFailed;
+      _rrAvailability.reason =
+          "slGetFeatureFunction couldn't resolve slDLSSDGetOptimalSettings / slDLSSDSetOptions "
+          "from the sl.dlss_d.dll plugin; falling back to DLSS-SR + the builtin denoiser chain";
+      log.Info(log::RENDER, "DlssProvider: Initialize — " + _rrAvailability.reason);
+    }
+    else
+    {
+      _impl->slDLSSDGetOptimalSettings =
+          reinterpret_cast<PFun_slDLSSDGetOptimalSettings*>(dlssdGetOptimalSettingsFn);
+      _impl->slDLSSDSetOptions = reinterpret_cast<PFun_slDLSSDSetOptions*>(dlssdSetOptionsFn);
+      _rrAvailability.usable = true;
+      _rrAvailability.failedAt = ProbeStage::Usable;
+      _rrAvailability.reason.clear();
+      log.Info(log::RENDER,
+               "DlssProvider: Initialize — slIsFeatureSupported(kFeatureDLSS_RR) OK; DLSS-RR "
+               "(Ray Reconstruction) is usable on this adapter/driver -- replaces the builtin "
+               "denoiser chain + SR when active");
+    }
+  }
 #endif  // _WIN32
 }
 

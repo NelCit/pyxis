@@ -191,7 +191,13 @@ void TaaPass::Execute(nvrhi::ICommandList* commandList, const PassContext& conte
   params.destWidth = width;
   params.destHeight = height;
   params.hasHistory = _hasHistory ? 1u : 0u;
-  params.blendAlpha = 0.1f;  // frozen spec default.
+  // Noise-floor + vegetation spec (rtx-realtime-alignment-design.md,
+  // 2026-07-06), work item 3 — adaptive blend: this is now the FLOOR
+  // alpha converges toward as history accumulates (taa.slang derives the
+  // actual per-pixel alpha from a confidence/history-length signal), not
+  // a flat per-frame blend. NRD-default-derived (~1/32, ReLAX's own
+  // "fast" antilag alpha floor).
+  params.alphaMin = 1.0f / 32.0f;
   commandList->writeBuffer(_paramsBuffer, &params, sizeof(params));
 
   const nvrhi::BindingSetHandle bindingSet = GetOrCreateBindingSet(currentColor, motionVector);

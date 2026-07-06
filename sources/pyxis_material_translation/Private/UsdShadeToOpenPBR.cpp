@@ -2202,6 +2202,34 @@ OpenPBRMaterialDesc FromUsdShade(const pxr::UsdShadeMaterial& material,
     resolveSlot("emissiveColor", TextureKey::Role::Emission,          desc.emissionMap);
     resolveSlot("opacity",       TextureKey::Role::RoughnessMetallic, desc.opacityMap);
 
+    // 2026-07-06 RTX-alignment round 2 (materials round-2 follow-up,
+    // rtx-realtime-alignment-design.md) — root cause of
+    // Plaster_Wall_Cracked rendering at linear albedo ~0.05 vs ovrtx's
+    // ~0.50 (10x too dark, the biggest single-material offender).
+    // Unlike OmniPBR (separate diffuse_texture + diffuse_tint inputs,
+    // tint defaulting to white — see TranslateMdl above), USD's
+    // UsdPreviewSurface spec has no tint concept for `diffuseColor`:
+    // when the input is texture-connected, the texture IS the albedo,
+    // full stop. The scalar `ReadColor` picked up above is only the
+    // USD-mandated value used when the input is NOT connected — every
+    // DCC-baked material in this scene (Oak, Terrazzo, Slate, Plaster,
+    // ...) authors that disconnected-fallback scalar as an inert
+    // (0.18, 0.18, 0.18) placeholder alongside its texture connection.
+    // Every OTHER textured material here resolves through TranslateMdl
+    // instead (its MDL surface is OmniPBR-family), so this path was
+    // dormant; Plaster_Wall_Cracked's MDL call (`= Plaster_Wall(...)`,
+    // a bespoke vMaterials df:: graph) is the one material that isn't,
+    // and it fell all the way through to here. shading.slang's
+    // baseColor × texSample multiply then applied that 0.18 leftover
+    // as an unintended ~5.5x darkening on top of the texture's own
+    // sRGB decode — matching the measured 10x gap. Resetting the tint
+    // to white whenever the texture resolved (mirroring TranslateMdl's
+    // `if (desc.baseColorMap != Invalid) desc.baseColor = diffuseTint`
+    // pattern, with an implicit tint of white here) fixes every
+    // material on this fallback path, not just Plaster's.
+    if (desc.baseColorMap != TextureHandle::Invalid)
+      desc.baseColor = hlslpp::float3{1.0f, 1.0f, 1.0f};
+
     // V2.A.24 / V2.A.29 — stash artist-authored sampler config on the
     // baseColor slot (the most commonly-authored texture). Pyxis still
     // samples with the global `repeat` sampler in the closesthit; the

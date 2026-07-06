@@ -66,6 +66,7 @@ class SceneBindings;
 struct RenderTargets;
 class DenoiseShadowPass;
 class DenoiseAtrousPass;
+class DenoiseAoPass;
 
 class CompositePass final : public IRenderPass {
  public:
@@ -81,9 +82,15 @@ class CompositePass final : public IRenderPass {
   // doc comment on why they can't be overwritten there). Null pointers
   // (or a clear passMask bit) fall back to the pre-Phase-B raw-signal
   // path exactly.
+  //
+  // `denoiseAoPass` (noise-floor + vegetation spec, rtx-realtime-
+  // alignment-design.md, 2026-07-06, work item 1) is the same optional/
+  // nullable shape: when PASS_MASK_DENOISE is set, Execute() reads gAo
+  // from `denoiseAoPass` instead of the raw context.gAo.
   CompositePass(nvrhi::IDevice* device, GpuScene& scene, SceneBindings& sceneBindings,
                DenoiseShadowPass* denoiseShadowPass = nullptr,
-               DenoiseAtrousPass* denoiseAtrousPass = nullptr);
+               DenoiseAtrousPass* denoiseAtrousPass = nullptr,
+               DenoiseAoPass* denoiseAoPass = nullptr);
   ~CompositePass() override;
   CompositePass(const CompositePass&) = delete;
   CompositePass& operator=(const CompositePass&) = delete;
@@ -145,6 +152,7 @@ class CompositePass final : public IRenderPass {
   // Phase B — see the ctor's doc comment. Borrowed, nullable.
   DenoiseShadowPass* _denoiseShadowPass = nullptr;
   DenoiseAtrousPass* _denoiseAtrousPass = nullptr;
+  DenoiseAoPass* _denoiseAoPass = nullptr;
 
   nvrhi::ShaderHandle _shader;
   nvrhi::BindingLayoutHandle _passLayout;

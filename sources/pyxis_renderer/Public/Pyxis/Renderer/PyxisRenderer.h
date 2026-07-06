@@ -207,6 +207,10 @@ class PYXIS_RENDERER_API PyxisRenderer final {
   class IRenderPass* _denoiseTemporalPass = nullptr;
   class IRenderPass* _denoiseHistoryFixPass = nullptr;
   class IRenderPass* _denoiseAtrousPass = nullptr;
+  // Noise-floor + vegetation spec (rtx-realtime-alignment-design.md,
+  // 2026-07-06), work item 1 — AO denoiser, runs alongside the four passes
+  // above (own ping-pong; gated on the SAME PASS_MASK_DENOISE bit).
+  class IRenderPass* _denoiseAoPass = nullptr;
   class IRenderPass* _taaPass = nullptr;
   // DLSS Stage 2a (rtx-realtime-alignment-design.md) — registered between
   // _compositePass and _autoExposurePass. Borrowed pointer, same
@@ -242,6 +246,12 @@ class PYXIS_RENDERER_API PyxisRenderer final {
   // comment), so this just distinguishes "never logged" from "logged and
   // unchanged since".
   bool _dlssStatusLogged = false;
+  // DLSS Stage 2b — mirrors _dlssStatusLogged's "log once, then only on
+  // change" contract for the RR-vs-SR ladder rung (a distinct axis from
+  // requested/effective denoiser: both stay DENOISER_DLSS across an RR<->SR
+  // flip, so _dlssStatusLogged's own gate wouldn't fire on one).
+  bool _dlssRungLogged = false;
+  bool _dlssLastRungWasRR = false;
 };
 
 }  // namespace pyxis
