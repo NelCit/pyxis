@@ -125,6 +125,11 @@ target_sources(pyxis_renderer PRIVATE
     Private/Passes/DirectLightingPass.cpp
     Private/Passes/IndirectDiffusePass.h
     Private/Passes/IndirectDiffusePass.cpp
+
+    # RTX-alignment (rtx-realtime-alignment-design.md, 2026-07-07) — SHARC
+    # world-space radiance cache Resolve pass + owner of the cache buffers.
+    Private/Passes/SharcResolvePass.h
+    Private/Passes/SharcResolvePass.cpp
     Private/Passes/AmbientOcclusionPass.h
     Private/Passes/AmbientOcclusionPass.cpp
     Private/Passes/ReflectionsPass.h
@@ -395,6 +400,10 @@ set(PYXIS_SHADER_ANYHIT     ${CMAKE_SOURCE_DIR}/resources/shaders/raytraced_anyh
 # stochastic estimator); NOT compiled standalone, same convention as the
 # other shared modules above.
 set(PYXIS_SHADER_RNG        ${CMAKE_SOURCE_DIR}/resources/shaders/rng.slang)
+# RTX-alignment (rtx-realtime-alignment-design.md, 2026-07-07) — the SHARC
+# world-space radiance-cache module (clean-room). #included by indirect_diffuse
+# (query+update) and sharc_resolve (compute); NOT compiled standalone.
+set(PYXIS_SHADER_RADIANCE_CACHE ${CMAKE_SOURCE_DIR}/resources/shaders/radiance_cache.slang)
 
 # --- RT pipeline A: RaytracedGBufferPass (extended G-buffer, RTX-alignment
 # WP2-core rewrite) — ONE shader file carrying all four entry points
@@ -460,7 +469,7 @@ pyxis_compile_slang_shader(
     OUTPUT      direct_lighting_raygen.spv
     INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
                 ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR} ${PYXIS_SHADER_ANYHIT}
-                ${PYXIS_SHADER_RNG}
+                ${PYXIS_SHADER_RNG} ${PYXIS_SHADER_RADIANCE_CACHE}
 )
 pyxis_compile_slang_shader(
     TARGET      pyxis_renderer
@@ -470,7 +479,7 @@ pyxis_compile_slang_shader(
     OUTPUT      direct_lighting_shadow_miss.spv
     INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
                 ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR} ${PYXIS_SHADER_ANYHIT}
-                ${PYXIS_SHADER_RNG}
+                ${PYXIS_SHADER_RNG} ${PYXIS_SHADER_RADIANCE_CACHE}
 )
 pyxis_compile_slang_shader(
     TARGET      pyxis_renderer
@@ -480,7 +489,7 @@ pyxis_compile_slang_shader(
     OUTPUT      direct_lighting_anyhit.spv
     INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
                 ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR} ${PYXIS_SHADER_ANYHIT}
-                ${PYXIS_SHADER_RNG}
+                ${PYXIS_SHADER_RNG} ${PYXIS_SHADER_RADIANCE_CACHE}
 )
 
 # IndirectDiffusePass — RayGenMain, ClosestHitMain, MissMain,
@@ -494,7 +503,7 @@ pyxis_compile_slang_shader(
     OUTPUT      indirect_diffuse_raygen.spv
     INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
                 ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR} ${PYXIS_SHADER_ANYHIT}
-                ${PYXIS_SHADER_RNG}
+                ${PYXIS_SHADER_RNG} ${PYXIS_SHADER_RADIANCE_CACHE}
 )
 pyxis_compile_slang_shader(
     TARGET      pyxis_renderer
@@ -504,7 +513,7 @@ pyxis_compile_slang_shader(
     OUTPUT      indirect_diffuse_closesthit.spv
     INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
                 ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR} ${PYXIS_SHADER_ANYHIT}
-                ${PYXIS_SHADER_RNG}
+                ${PYXIS_SHADER_RNG} ${PYXIS_SHADER_RADIANCE_CACHE}
 )
 pyxis_compile_slang_shader(
     TARGET      pyxis_renderer
@@ -514,7 +523,7 @@ pyxis_compile_slang_shader(
     OUTPUT      indirect_diffuse_miss.spv
     INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
                 ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR} ${PYXIS_SHADER_ANYHIT}
-                ${PYXIS_SHADER_RNG}
+                ${PYXIS_SHADER_RNG} ${PYXIS_SHADER_RADIANCE_CACHE}
 )
 pyxis_compile_slang_shader(
     TARGET      pyxis_renderer
@@ -524,7 +533,7 @@ pyxis_compile_slang_shader(
     OUTPUT      indirect_diffuse_shadow_miss.spv
     INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
                 ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR} ${PYXIS_SHADER_ANYHIT}
-                ${PYXIS_SHADER_RNG}
+                ${PYXIS_SHADER_RNG} ${PYXIS_SHADER_RADIANCE_CACHE}
 )
 pyxis_compile_slang_shader(
     TARGET      pyxis_renderer
@@ -534,7 +543,7 @@ pyxis_compile_slang_shader(
     OUTPUT      indirect_diffuse_anyhit.spv
     INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
                 ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR} ${PYXIS_SHADER_ANYHIT}
-                ${PYXIS_SHADER_RNG}
+                ${PYXIS_SHADER_RNG} ${PYXIS_SHADER_RADIANCE_CACHE}
 )
 
 # AmbientOcclusionPass — RayGenMain, MissMain, AnyHitMain. Deliberately
@@ -548,7 +557,7 @@ pyxis_compile_slang_shader(
     STAGE       raygen
     OUTPUT      ambient_occlusion_raygen.spv
     INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_ANYHIT}
-                ${PYXIS_SHADER_RNG}
+                ${PYXIS_SHADER_RNG} ${PYXIS_SHADER_RADIANCE_CACHE}
 )
 pyxis_compile_slang_shader(
     TARGET      pyxis_renderer
@@ -557,7 +566,7 @@ pyxis_compile_slang_shader(
     STAGE       miss
     OUTPUT      ambient_occlusion_miss.spv
     INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_ANYHIT}
-                ${PYXIS_SHADER_RNG}
+                ${PYXIS_SHADER_RNG} ${PYXIS_SHADER_RADIANCE_CACHE}
 )
 pyxis_compile_slang_shader(
     TARGET      pyxis_renderer
@@ -566,7 +575,7 @@ pyxis_compile_slang_shader(
     STAGE       anyhit
     OUTPUT      ambient_occlusion_anyhit.spv
     INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_ANYHIT}
-                ${PYXIS_SHADER_RNG}
+                ${PYXIS_SHADER_RNG} ${PYXIS_SHADER_RADIANCE_CACHE}
 )
 
 # ReflectionsPass — RayGenMain, ClosestHitMain, MissMain (primary
@@ -584,7 +593,7 @@ pyxis_compile_slang_shader(
     OUTPUT      reflections_raygen.spv
     INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
                 ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR} ${PYXIS_SHADER_ANYHIT}
-                ${PYXIS_SHADER_RNG}
+                ${PYXIS_SHADER_RNG} ${PYXIS_SHADER_RADIANCE_CACHE}
 )
 pyxis_compile_slang_shader(
     TARGET      pyxis_renderer
@@ -594,7 +603,7 @@ pyxis_compile_slang_shader(
     OUTPUT      reflections_closesthit.spv
     INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
                 ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR} ${PYXIS_SHADER_ANYHIT}
-                ${PYXIS_SHADER_RNG}
+                ${PYXIS_SHADER_RNG} ${PYXIS_SHADER_RADIANCE_CACHE}
 )
 pyxis_compile_slang_shader(
     TARGET      pyxis_renderer
@@ -604,7 +613,7 @@ pyxis_compile_slang_shader(
     OUTPUT      reflections_miss.spv
     INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
                 ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR} ${PYXIS_SHADER_ANYHIT}
-                ${PYXIS_SHADER_RNG}
+                ${PYXIS_SHADER_RNG} ${PYXIS_SHADER_RADIANCE_CACHE}
 )
 pyxis_compile_slang_shader(
     TARGET      pyxis_renderer
@@ -614,7 +623,7 @@ pyxis_compile_slang_shader(
     OUTPUT      reflections_ao_anyhit.spv
     INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
                 ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR} ${PYXIS_SHADER_ANYHIT}
-                ${PYXIS_SHADER_RNG}
+                ${PYXIS_SHADER_RNG} ${PYXIS_SHADER_RADIANCE_CACHE}
 )
 pyxis_compile_slang_shader(
     TARGET      pyxis_renderer
@@ -624,7 +633,7 @@ pyxis_compile_slang_shader(
     OUTPUT      reflections_ao_miss.spv
     INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
                 ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR} ${PYXIS_SHADER_ANYHIT}
-                ${PYXIS_SHADER_RNG}
+                ${PYXIS_SHADER_RNG} ${PYXIS_SHADER_RADIANCE_CACHE}
 )
 
 # TranslucencyPass — RayGenMain, ClosestHitMain, MissMain, AnyHitMain
@@ -818,6 +827,18 @@ pyxis_compile_slang_shader(
     STAGE       compute
     OUTPUT      denoise_atrous.spv
     INCLUDES    ${PYXIS_SHADER_INTEROP}
+)
+# SharcResolvePass — SHARC radiance-cache Resolve (RTX-alignment design,
+# 2026-07-07). Folds each cell's per-frame radiance sum into a cross-frame
+# running mean. Compute; includes radiance_cache.slang (the shared cache module,
+# NOT compiled standalone).
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/sharc_resolve.slang
+    ENTRY_POINT ResolveMain
+    STAGE       compute
+    OUTPUT      sharc_resolve.spv
+    INCLUDES    ${PYXIS_SHADER_RADIANCE_CACHE}
 )
 # TaaPass — jittered-history reprojection + neighborhood clamp, runs
 # before TonemapPass on the linear pre-tonemap color.

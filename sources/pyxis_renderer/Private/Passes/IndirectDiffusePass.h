@@ -17,6 +17,12 @@
 // `[[vk::binding(N, 1)]]` declarations):
 //   set=1, binding=0 : StructuredBuffer<VisibilityGpu> (GBuffer pass output)
 //   set=1, binding=1 : RWTexture2D<float4> gIndirectDiffuse (RGBA16F; .a = 1)
+//   set=1, binding=2 : RWByteAddressBuffer gShHash     (SHARC cache — checksum table)
+//   set=1, binding=3 : RWByteAddressBuffer gShAccum    (SHARC cache — per-frame sum)
+//   set=1, binding=4 : RWByteAddressBuffer gShResolved (SHARC cache — resolved radiance)
+// The three SHARC buffers are owned by SharcResolvePass (ctor-injected); they
+// are always bound but touched by the shader only when gQuality.giMode != 0
+// (PASS_MASK_SHARC_GI), so the builtin path stays byte-identical when off.
 
 #pragma once
 
@@ -34,10 +40,12 @@ namespace pyxis {
 
 class GpuScene;
 class SceneBindings;
+class SharcResolvePass;
 
 class IndirectDiffusePass final : public IRenderPass {
  public:
-  IndirectDiffusePass(nvrhi::IDevice* device, GpuScene& scene, SceneBindings& sceneBindings);
+  IndirectDiffusePass(nvrhi::IDevice* device, GpuScene& scene, SceneBindings& sceneBindings,
+                      SharcResolvePass& sharc);
   ~IndirectDiffusePass() override;
   IndirectDiffusePass(const IndirectDiffusePass&) = delete;
   IndirectDiffusePass& operator=(const IndirectDiffusePass&) = delete;
@@ -65,6 +73,7 @@ class IndirectDiffusePass final : public IRenderPass {
   nvrhi::IDevice* _device = nullptr;
   GpuScene* _scene = nullptr;
   SceneBindings* _sceneBindings = nullptr;
+  SharcResolvePass* _sharc = nullptr;  // owns the 3 SHARC cache buffers (bound in Set 1)
 
   nvrhi::ShaderHandle _raygenShader;
   nvrhi::ShaderHandle _closestHitShader;

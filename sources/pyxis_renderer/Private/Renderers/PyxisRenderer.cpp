@@ -20,6 +20,7 @@
 #include "Passes/IndirectDiffusePass.h"
 #include "Passes/RaytracedGBufferPass.h"
 #include "Passes/ReflectionsPass.h"
+#include "Passes/SharcResolvePass.h"
 #include "Passes/SceneBindings.h"
 #include "Passes/SsaaResolvePass.h"
 #include "Passes/TaaPass.h"
@@ -153,7 +154,19 @@ PyxisRenderer::PyxisRenderer(nvrhi::IDevice* device, GpuScene& scene, Profiler& 
   auto directLighting = std::make_unique<DirectLightingPass>(device, scene, *_sceneBindings);
   _directLightingPass = directLighting.get();
   _graph->AddPass(std::move(directLighting));
-  auto indirectDiffuse = std::make_unique<IndirectDiffusePass>(device, scene, *_sceneBindings);
+  // SHARC world-space radiance cache (rtx-realtime-alignment-design.md,
+  // 2026-07-07) — OPTIONAL infinite-bounce indirect-diffuse GI, gated on
+  // RealTimeQuality::passMask bit 9 (PASS_MASK_SHARC_GI). SharcResolvePass owns
+  // the three cache buffers + runs the per-frame Resolve compute; it MUST
+  // precede IndirectDiffusePass so this frame's query reads freshly-resolved
+  // data, and IndirectDiffusePass is ctor-injected a reference to reach the
+  // buffers (which it binds in Set 1 and updates/queries when giMode is on).
+  // No-op + byte-identical builtin path when the bit is clear.
+  auto sharcResolve = std::make_unique<SharcResolvePass>(device);
+  SharcResolvePass* const sharcResolveRaw = sharcResolve.get();
+  _graph->AddPass(std::move(sharcResolve));
+  auto indirectDiffuse =
+      std::make_unique<IndirectDiffusePass>(device, scene, *_sceneBindings, *sharcResolveRaw);
   _indirectDiffusePass = indirectDiffuse.get();
   _graph->AddPass(std::move(indirectDiffuse));
   auto ambientOcclusion = std::make_unique<AmbientOcclusionPass>(device, scene, *_sceneBindings);

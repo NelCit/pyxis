@@ -379,7 +379,12 @@ nvrhi::BindingSetHandle SceneBindings::Update(nvrhi::ICommandList* commandList,
   qualityUniforms.maxRayIntensityDirect = quality.maxRayIntensityDirect / exposureScale;
   qualityUniforms.maxRayIntensityIndirect = quality.maxRayIntensityIndirect / exposureScale;
   qualityUniforms.maxRayIntensityReflections = quality.maxRayIntensityReflections / exposureScale;
-  qualityUniforms._rtqPad0 = 0u;
+  // SHARC radiance cache gate (rtx-realtime-alignment-design.md, 2026-07-07):
+  // passMask bit 9 (PASS_MASK_SHARC_GI) => gQuality.giMode 1, the
+  // indirect_diffuse.slang dynamically-uniform branch that enables the
+  // world-space cache query+update. Clear => builtin path (byte-identical).
+  qualityUniforms.giMode =
+      (quality.passMask & shaderinterop::PASS_MASK_SHARC_GI) != 0u ? 1u : 0u;
   qualityUniforms._rtqPad1 = 0u;
   commandList->writeBuffer(_realTimeQualityBuffer.Get(), &qualityUniforms,
                            sizeof(qualityUniforms));

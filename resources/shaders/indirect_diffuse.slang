@@ -71,9 +71,23 @@
                              // + EvaluateOpenPBRDirect / OpenPBREmission; pulls in dome_sample.slang
                              // (gLights / gDomeEnvMap / gDomeSampler / SampleDomeBackground)
 #include "rng.slang"         // Pcg32 + cosine-hemisphere sampling + MakeStreamId
+#include "radiance_cache.slang"  // SHARC world-space radiance cache (gQuality.giMode gate)
 
 [[vk::binding(0, 1)]] StructuredBuffer<VisibilityGpu> gVisibility;
 [[vk::binding(1, 1)]] RWTexture2D<float4>              gIndirectDiffuse;
+// SHARC radiance cache (rtx-realtime-alignment-design.md, 2026-07-07) — always
+// bound (the C++ side binds full-size buffers when PASS_MASK_SHARC_GI is set,
+// a 1-cell placeholder otherwise). Touched ONLY when gQuality.giMode != 0, so
+// the builtin indirect path stays byte-identical when the cache is off. All
+// three are byte-address UAVs for atomic accumulate + collision-probe inserts.
+[[vk::binding(2, 1)]] RWByteAddressBuffer gShHash;      // 4 B/cell  checksum table
+[[vk::binding(3, 1)]] RWByteAddressBuffer gShAccum;     // 16 B/cell this-frame radiance sum + count
+[[vk::binding(4, 1)]] RWByteAddressBuffer gShResolved;  // 16 B/cell cross-frame resolved radiance
+
+// Camera world position (grid LoD origin) — view-space origin (0,0,0) mapped to
+// world via the inverse-view matrix's translation (last column, per the §10
+// row-major/column-vector convention).
+float3 SharcCameraWorld() { return mul(gCamera.worldFromView, float4(0.0, 0.0, 0.0, 1.0)).xyz; }
 
 float IndirectLuminance(float3 c) {
     return dot(c, float3(0.2126, 0.7152, 0.0722));
@@ -225,6 +239,26 @@ void ClosestHitMain(inout BouncePayload payload, in BuiltInTriangleIntersectionA
         worldHit, WorldRayDirection(), RayTCurrent(),
         ObjectToWorld3x4(), WorldToObject3x4());
     const float3 viewDir = normalize(-WorldRayDirection());
+
+    // SHARC QUERY (rtx-realtime-alignment-design.md, 2026-07-07): at a deep
+    // bounce vertex (depth >= 2 — the term the depth-1 vertex's continuation
+    // is fetching), try the world-space radiance cache. A hit returns the
+    // cross-frame-resolved outgoing radiance at this point — which, because
+    // the cache is fed by every pixel's depth-1 update (below) with its own
+    // cached deeper term, has propagated toward the infinite-bounce
+    // equilibrium — and terminates the path early (the SHARC "Render" step).
+    // A miss falls through to the normal (bootstrap) shading, whose result the
+    // depth-1 vertex will fold into the cache over subsequent frames. giMode
+    // is dynamically uniform => builtin path untouched when off.
+    if (gQuality.giMode != 0u && payload.bounceDepth >= 2u)
+    {
+        float3 cachedRadiance;
+        if (SharcQuery(gShHash, gShResolved, worldHit, SharcCameraWorld(), cachedRadiance))
+        {
+            payload.radiance = cachedRadiance * payload.throughput;
+            return;
+        }
+    }
 
     uint lightCount;
     uint _stride;
@@ -462,6 +496,24 @@ void ClosestHitMain(inout BouncePayload payload, in BuiltInTriangleIntersectionA
     payload.radiance =
         (directContribution + domeContribution + emission + secondBounceRadiance)
         * payload.throughput;
+
+    // SHARC UPDATE (rtx-realtime-alignment-design.md, 2026-07-07): accumulate
+    // this vertex's outgoing radiance into its world-space cache cell. Only the
+    // depth-1 vertex updates — it holds the fullest local estimate (direct +
+    // dome + emission + albedo·[cached deeper term]); the depth-2 vertex is a
+    // pure query/bootstrap site (accumulating its truncated bootstrap there
+    // would pollute the cell it will properly receive when some other pixel's
+    // depth-1 bounce lands on it). SharcResolvePass folds this frame's sum into
+    // the resolved running mean before next frame's query reads it. The
+    // throughput multiply is undone here so the CACHED value is the surface's
+    // own outgoing radiance, independent of the glass this particular bounce
+    // ray happened to cross (throughput is (1,1,1) in the common no-glass case).
+    if (gQuality.giMode != 0u && payload.bounceDepth == 1u)
+    {
+        const float3 tp = max(payload.throughput, float3(1e-4, 1e-4, 1e-4));
+        SharcAccumulate(gShHash, gShAccum, worldHit, SharcCameraWorld(),
+                        payload.radiance / tp);
+    }
 }
 
 // --------------------------------------------------------------------

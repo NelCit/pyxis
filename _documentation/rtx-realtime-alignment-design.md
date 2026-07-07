@@ -803,3 +803,41 @@ environment reflection on dielectrics at reflection/ambient hits.
 reflection in the ambient/indirect term (not just the explicit reflection trace).
 NOT a radiance cache; NOT per-material tint; NOT tonemap. This is per-signal
 reflection-fidelity work, GPU-render-gated + iterative.
+
+## SHARC radiance cache — IMPLEMENTED (optional) + MEASURED neutral (2026-07-07)
+
+Owner directive: "do sharc as an optional render setting, either our current way,
+either sharc." SHARC (Spatial Hash Radiance Cache) is now a real, toggleable GI
+mode. **Clean-room** Slang implementation (`radiance_cache.slang`,
+`sharc_resolve.slang`) written from the published algorithm (SHaRC Integration
+guide) — NVIDIA's RTXGI SDK source was NOT copied: its NVIDIA-RTX-SDK license
+§4(e) forbids the SDK becoming subject to an OSS license, incompatible with
+Pyxis's Apache-2.0. We own every line.
+
+**Architecture** (adapted to Pyxis's static-camera, N-frame-converged headless
+render): a world-space multi-resolution spatial-hash cache (2^21 cells, ~75 MiB,
+fp32; distance-based voxel LoD). Three byte-address buffers (hash checksum /
+per-frame accum / cross-frame resolved) owned by a new `SharcResolvePass`
+(compute) that runs BEFORE IndirectDiffusePass. IndirectDiffusePass, at its
+depth-1 bounce vertex, UPDATEs the cache with `direct+dome+emission+albedo·[cached
+deeper term]`; at the depth-2 vertex it QUERIEs the cache and early-terminates on
+a hit (infinite-bounce feedback across pixels/frames). Gated on
+`RealTimeQuality::passMask` bit 9 (`PASS_MASK_SHARC_GI` = 0x200) → `gQuality.giMode`
+(a dynamically-uniform shader branch, no spec constant); clear (default) =
+byte-identical builtin path.
+
+**Result (World Lobby / CamLobbyWide, 96 frames, honest sRGB metric):**
+- SHARC OFF (default, new binary): **0.15959** — unregressed vs the 0.15952 baseline.
+- SHARC ON: **0.15998** — NEUTRAL (+0.0004 = run-to-run noise). Per-material
+  breakdown is unchanged (id30 glass floor 0.306, id40 satin -0.071, id7 iron
+  -0.209 all identical). Mean preserved (0.489 vs 0.487).
+
+**Conclusion:** SHARC works (runs, engages, converges, mean-preserving) but does
+NOT move the honest metric — empirically confirming the gap characterisation
+above. Why: (1) the dominant residuals (glass floor, satin tables, windows) are
+SPECULAR/reflection surfaces; SHARC feeds only the indirect-DIFFUSE pass. (2) In a
+dome-lit interior the indirect-diffuse term is a small energy fraction and the
+infinite-bounce (3rd+) increment over the existing 2-bounce estimate is tiny. (3)
+The residual is reflection dynamic-range + high-frequency content, which no
+diffuse-irradiance cache touches. Shipped as an OPTIONAL mode (off by default);
+the reflection-fidelity lever above remains the path toward 0.05.

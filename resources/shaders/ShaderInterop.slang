@@ -973,7 +973,12 @@ struct RealTimeQualityUniforms {
     // Row 2.
     float maxRayIntensityIndirect;      // Phase B — IndirectDiffusePass firefly clamp. No-op today.
     float maxRayIntensityReflections;   // Phase B — ReflectionsPass firefly clamp. No-op today.
-    uint  _rtqPad0;
+    // SHARC radiance cache (rtx-realtime-alignment-design.md, 2026-07-07).
+    // 0 = builtin indirect path (byte-identical default); 1 = SHARC world-space
+    // radiance cache query+update at bounce hits (radiance_cache.slang).
+    // Derived CPU-side from RealTimeQuality::passMask bit 9 (PASS_MASK_SHARC_GI)
+    // in SceneBindings::Update — a dynamically-uniform branch, no spec constant.
+    uint  giMode;                       // was _rtqPad0
     uint  _rtqPad1;
 };
 
@@ -1337,6 +1342,12 @@ struct AccumulationUniforms {
     // DLSS Ray Reconstruction for this signal — see reflections.slang's
     // file header) to opt in.
     constexpr uint32_t PASS_MASK_STOCHASTIC_REFLECTIONS = 1u << 8;  // 0x100 — ReflectionsPass specWeight fix
+    // SHARC world-space radiance cache (rtx-realtime-alignment-design.md,
+    // 2026-07-07) — OPTIONAL infinite-bounce indirect-diffuse GI. When set:
+    // SharcResolvePass runs, IndirectDiffusePass binds + updates/queries the
+    // cache buffers, and gQuality.giMode is 1 (the shader's dynamically-uniform
+    // gate). Clear (default) => byte-identical builtin indirect path.
+    constexpr uint32_t PASS_MASK_SHARC_GI = 1u << 9;  // 0x200 — SHARC radiance cache
 
     }  // namespace pyxis::shaderinterop
 #endif
