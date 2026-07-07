@@ -1818,8 +1818,15 @@ void TranslateMdl(const pxr::UsdShadeShader& shader,
                                     PresetBool(preset, "flip_tangent_u", false), timeCode)
                             ? 1u
                             : 0u;
+    // RTX-alignment (2026-07-07): MDL OmniPBR/OmniGlass declare
+    // `uniform bool flip_tangent_v = true` (DirectX green-channel convention);
+    // OmniPBRBase negates tangent_v when set. All 24 World Lobby preset .mdl
+    // that bind a normalmap omit flip_tangent_v from the baked call, so the
+    // MDL declaration default (true) applies in ovrtx. The prior `false`
+    // fallback left every unauthored normal map V-inverted vs ovrtx. Fallback
+    // is now true to match the MDL default (flip_tangent_u default IS false).
     desc.flipTangentV = ReadBoolish(shader, pxr::TfToken("flip_tangent_v"),
-                                    PresetBool(preset, "flip_tangent_v", false), timeCode)
+                                    PresetBool(preset, "flip_tangent_v", true), timeCode)
                             ? 1u
                             : 0u;
   }
