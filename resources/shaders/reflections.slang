@@ -102,11 +102,24 @@
                              // (gLights / gDomeEnvMap / gDomeSampler / latLongUv /
                              // SampleDomeBackground) transitively.
 #include "rng.slang"         // Pcg32 + BuildOrthonormalBasis + MakeStreamId
+#include "radiance_cache.slang"  // SHARC world-space radiance cache (gQuality.giMode gate)
 
 [[vk::binding(0, 1)]] StructuredBuffer<VisibilityGpu> gVisibility;
 [[vk::binding(1, 1)]] Texture2D<float4>                gNormalRoughness;
 [[vk::binding(2, 1)]] RWTexture2D<float4>              gReflections;
 [[vk::binding(3, 1)]] RWTexture2D<float4>              gReflectionWeight;
+// SHARC radiance cache (rtx-realtime-alignment-design.md, 2026-07-07) — reused
+// from IndirectDiffusePass's update. Reflections only QUERIES (read-only): at a
+// GLOSSY reflection hit, the cached full outgoing radiance supplies the
+// indirect-GI term the cheap reflection-hit shade (direct + dome-ambient +
+// emission) is missing — see ClosestHitMain's "One-bounce GI (NOT implemented)"
+// note. Always bound; touched only when gQuality.giMode != 0. Owned by
+// SharcResolvePass; hash + resolved suffice for a query (no accum/update here).
+[[vk::binding(4, 1)]] RWByteAddressBuffer gShHash;      // 4 B/cell checksum table
+[[vk::binding(5, 1)]] RWByteAddressBuffer gShResolved;  // 16 B/cell resolved radiance
+
+// Camera world position (grid LoD origin) — view-space (0,0,0) → world.
+float3 SharcCameraWorld() { return mul(gCamera.worldFromView, float4(0.0, 0.0, 0.0, 1.0)).xyz; }
 
 // Specular MODEL GAP fix — folded at pipeline-creation time by
 // ReflectionsPass.cpp from RealTimeQuality::passMask bit 8 (see this
@@ -156,7 +169,10 @@ static const float REFLECTION_TRACE_ROUGHNESS_CEILING = 0.6;
 // resulting radiance + hit distance).
 struct ReflectionPayload {
     float3 color;
-    float  hitT;  // RayTCurrent() at the hit; -1.0 on miss.
+    float  hitT;       // RayTCurrent() at the hit; -1.0 on miss.
+    float  roughness;  // primary (reflecting) surface roughness — SHARC cache gate
+                       // (only glossy reflections use the voxel-blurred cache;
+                       // sharp mirrors keep their traced sample). Set by RayGen.
 };
 
 float ReflectionsLuminance(float3 c) {
@@ -559,6 +575,7 @@ void RayGenMain() {
         ReflectionPayload payload;
         payload.color = float3(0.0f, 0.0f, 0.0f);
         payload.hitT  = -1.0f;
+        payload.roughness = roughness;  // SHARC cache gate at the hit (glossy only)
         TraceRay(gTlas, RAY_FLAG_NONE, 0xFFu, 0, 0, 0, reflRay, payload);
 
         // Heitz 2018 "Sampling the GGX Distribution of Visible Normals" —
@@ -672,6 +689,29 @@ void ClosestHitMain(inout ReflectionPayload payload, in BuiltInTriangleIntersect
         worldHit, WorldRayDirection(), RayTCurrent(),
         ObjectToWorld3x4(), WorldToObject3x4());
     const float3 viewDir = normalize(-WorldRayDirection());
+
+    // SHARC (rtx-realtime-alignment-design.md, 2026-07-07) — supply the
+    // indirect-GI term this cheap reflection-hit shade is missing (see the
+    // "One-bounce GI at the reflection hit (NOT implemented)" note below).
+    // The cache holds the reflected surface's FULL diffuse outgoing radiance
+    // (direct + dome + emission + infinite-bounce indirect), populated by
+    // IndirectDiffusePass. Using it at GLOSSY reflection hits brightens the
+    // reflected interior to match the real (primary-shaded) world — the fix
+    // for the systematically-too-dark glossy/satin/metal surfaces (id40/id7).
+    // GATED on glossy roughness (> 0.3, ovrtx's roughnessCacheThreshold): a
+    // sharp mirror (id30 glass floor, roughness 0) keeps its traced sample so
+    // the voxel-blurred cache never softens a mirror reflection. giMode is
+    // dynamically uniform => builtin path untouched when off.
+    if (gQuality.giMode != 0u && payload.roughness > 0.3f)
+    {
+        float3 cachedRadiance;
+        if (SharcQuery(gShHash, gShResolved, worldHit, SharcCameraWorld(), cachedRadiance))
+        {
+            payload.color = cachedRadiance;
+            payload.hitT  = RayTCurrent();
+            return;
+        }
+    }
 
     uint lightCount;
     uint _stride;

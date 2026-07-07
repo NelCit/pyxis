@@ -45,10 +45,12 @@ namespace pyxis {
 
 class GpuScene;
 class SceneBindings;
+class SharcResolvePass;
 
 class ReflectionsPass final : public IRenderPass {
  public:
-  ReflectionsPass(nvrhi::IDevice* device, GpuScene& scene, SceneBindings& sceneBindings);
+  ReflectionsPass(nvrhi::IDevice* device, GpuScene& scene, SceneBindings& sceneBindings,
+                  SharcResolvePass& sharc);
   ~ReflectionsPass() override;
   ReflectionsPass(const ReflectionsPass&) = delete;
   ReflectionsPass& operator=(const ReflectionsPass&) = delete;
@@ -108,6 +110,7 @@ class ReflectionsPass final : public IRenderPass {
   nvrhi::IDevice* _device = nullptr;
   GpuScene* _scene = nullptr;
   SceneBindings* _sceneBindings = nullptr;
+  SharcResolvePass* _sharc = nullptr;  // SHARC cache (hash+resolved) queried at glossy hits
 
   nvrhi::ShaderHandle _raygenShader;
   nvrhi::ShaderHandle _closestHitShader;

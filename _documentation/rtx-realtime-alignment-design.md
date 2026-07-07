@@ -832,12 +832,29 @@ byte-identical builtin path.
   breakdown is unchanged (id30 glass floor 0.306, id40 satin -0.071, id7 iron
   -0.209 all identical). Mean preserved (0.489 vs 0.487).
 
-**Conclusion:** SHARC works (runs, engages, converges, mean-preserving) but does
-NOT move the honest metric — empirically confirming the gap characterisation
-above. Why: (1) the dominant residuals (glass floor, satin tables, windows) are
-SPECULAR/reflection surfaces; SHARC feeds only the indirect-DIFFUSE pass. (2) In a
-dome-lit interior the indirect-diffuse term is a small energy fraction and the
-infinite-bounce (3rd+) increment over the existing 2-bounce estimate is tiny. (3)
-The residual is reflection dynamic-range + high-frequency content, which no
-diffuse-irradiance cache touches. Shipped as an OPTIONAL mode (off by default);
-the reflection-fidelity lever above remains the path toward 0.05.
+**First result (SHARC → IndirectDiffuse only): NEUTRAL** (0.15952 → 0.15998). Why:
+the indirect-DIFFUSE pass already does 2-bounce GI, so the infinite-bounce
+increment is tiny; and the dominant residuals are SPECULAR surfaces the diffuse
+pass never touches. That pointed at the real hole:
+
+**BREAKTHROUGH (SHARC → Reflections): 0.15952 → 0.15273** (−0.0068, ~4%). The
+reflection ClosestHit shaded reflected hits with only `direct + dome-ambient +
+emission` — NO indirect GI (its own "One-bounce GI at the reflection hit (NOT
+implemented)" note). So the reflected WORLD was dimmer than the real world →
+every glossy surface read too dark. Wiring the SHARC query into ReflectionsPass's
+ClosestHit (glossy hits only, roughness > 0.3 so the sharp id30 mirror keeps its
+traced sample) supplies that missing indirect term from the cache. Measured
+per-material moves (96f, honest, ev re-tuned -1.1→-1.2 to re-match the mean the
+added energy shifted):
+- id40 Paint_Satin tables: **-0.071 → +0.028**, MSEshare 0.00313 → 0.00120 (off
+  the top ranks — the biggest single win).
+- id7 Iron_Brushed: **-0.209 → -0.156** (metal reflection less dim).
+- id30 glass floor: unchanged (roughness gate protected the sharp mirror).
+- SHARC OFF default: 0.15959, unregressed.
+
+**Conclusion:** SHARC is the right tool, but for the REFLECTION pass (where the GI
+was missing), not the indirect-diffuse pass (which already had it). Confirms the
+gap = reflected-content dynamic range. Committed as the optional giMode. Remaining
+top residuals: id30 sharp glass-floor reflection (matched-mean pattern, ~48% of
+MSE — hardest), id3 concrete +0.121 (matte, too bright — separate albedo issue),
+id7 iron still -0.156. Next levers there.

@@ -172,7 +172,12 @@ PyxisRenderer::PyxisRenderer(nvrhi::IDevice* device, GpuScene& scene, Profiler& 
   auto ambientOcclusion = std::make_unique<AmbientOcclusionPass>(device, scene, *_sceneBindings);
   _ambientOcclusionPass = ambientOcclusion.get();
   _graph->AddPass(std::move(ambientOcclusion));
-  auto reflections = std::make_unique<ReflectionsPass>(device, scene, *_sceneBindings);
+  // ReflectionsPass also queries the SHARC cache (rtx-realtime-alignment-
+  // design.md, 2026-07-07) at glossy reflection hits to supply the indirect-GI
+  // term its cheap reflection-hit shade lacks (the too-dark glossy/metal
+  // surfaces). Shares SharcResolvePass's buffers; no-op when giMode is off.
+  auto reflections =
+      std::make_unique<ReflectionsPass>(device, scene, *_sceneBindings, *sharcResolveRaw);
   _reflectionsPass = reflections.get();
   _graph->AddPass(std::move(reflections));
   auto translucency = std::make_unique<TranslucencyPass>(device, scene, *_sceneBindings);
