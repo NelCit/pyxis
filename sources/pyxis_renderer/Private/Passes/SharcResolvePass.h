@@ -33,7 +33,7 @@ namespace pyxis {
 class SharcResolvePass final : public IRenderPass {
  public:
   // MUST match SHARC_CAPACITY in resources/shaders/radiance_cache.slang.
-  static constexpr uint32_t CAPACITY = 1u << 21;  // 2,097,152 voxel cells
+  static constexpr uint32_t CAPACITY = 1u << 22;  // 4,194,304 voxel cells (finer grid + trilinear)
   static constexpr uint32_t HASH_BYTES = CAPACITY * 4u;    // uint32 checksum / cell
   static constexpr uint32_t VOXEL_BYTES = CAPACITY * 16u;  // uint4 / float4 per cell
 

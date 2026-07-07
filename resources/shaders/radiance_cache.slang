@@ -41,9 +41,12 @@
 #define PYXIS_RADIANCE_CACHE_SLANG
 
 // ---- tunables ------------------------------------------------------------
-// Capacity: number of voxel cells (power of two). 2^21 = 2,097,152 cells.
-// Table buffers: hash (4B) + accum (16B) + resolved (16B) = 36B/cell ≈ 75 MiB.
-static const uint  SHARC_CAPACITY        = 1u << 21;
+// Capacity: number of voxel cells (power of two). 2^22 = 4,194,304 cells.
+// Table buffers: hash (4B) + accum (16B) + resolved (16B) = 36B/cell ≈ 150 MiB.
+// Raised from 2^21 for the finer grid (GRID_DENSITY 0.5) + trilinear query —
+// finer cells occupy more of the table, so more capacity avoids probe-fail
+// collisions (which would show as dark specks in the interpolated result).
+static const uint  SHARC_CAPACITY        = 1u << 22;
 static const uint  SHARC_CAPACITY_MASK   = SHARC_CAPACITY - 1u;
 // Linear-probe length on collision before giving up (miss = cache absent).
 static const uint  SHARC_PROBE_COUNT     = 8u;
@@ -61,7 +64,7 @@ static const float SHARC_LOG_BASE        = 2.0;
 // by powers of LOG_BASE. LOWER GRID_DENSITY => finer cells (0.015·2 = ~3% of
 // distance here). Finer = sharper reflected detail (reflections read this cache),
 // at the cost of more occupied cells (raise SHARC_CAPACITY if collisions appear).
-static const float SHARC_GRID_DENSITY    = 8.0;      // lower = finer cells (8 = converges well at 96f)
+static const float SHARC_GRID_DENSITY    = 0.5;      // lower = finer cells; trilinear query averages 8 => finer viable
 static const float SHARC_VOXEL_BASE      = 0.015;    // metres, finest cell edge
 static const int   SHARC_LEVEL_MIN       = 0;
 static const int   SHARC_LEVEL_MAX       = 16;
@@ -171,16 +174,13 @@ void SharcAccumulate(RWByteAddressBuffer hashEntries, RWByteAddressBuffer accum,
     accum.InterlockedAdd(byteOff + 12u, 1u,        prev);
 }
 
-// QUERY: read the resolved infinite-bounce radiance at posWorld. Returns false
-// if the cell is absent / never resolved (caller falls back to its own path).
-// Buffers are bound as UAVs (RW) so the query pass can share the same binding
-// set as the update path; UAV .Load reads are valid.
-bool SharcQuery(RWByteAddressBuffer hashEntries, RWByteAddressBuffer resolved,
-                float3 posWorld, float3 camWorld, out float3 radiance)
+// Read ONE cell's resolved radiance by (coord, level). Returns false if the
+// cell is empty / unresolved. Buffers are UAVs (RW) so a query pass can share
+// the update binding set; UAV .Load reads are valid.
+bool SharcReadCellAt(RWByteAddressBuffer hashEntries, RWByteAddressBuffer resolved,
+                     int3 coord, int level, out float3 radiance)
 {
     radiance = float3(0.0, 0.0, 0.0);
-    const int level = SharcGridLevel(posWorld, camWorld);
-    const int3 coord = SharcGridCoord(posWorld, level);
     uint checksum = SharcVoxelKey(coord, level);
     if (checksum == SHARC_EMPTY) checksum = 1u;
     const uint base = SharcHashU32(checksum) & SHARC_CAPACITY_MASK;
@@ -189,17 +189,56 @@ bool SharcQuery(RWByteAddressBuffer hashEntries, RWByteAddressBuffer resolved,
     {
         const uint slot = (base + i) & SHARC_CAPACITY_MASK;
         const uint stored = hashEntries.Load(slot * 4u);
-        if (stored == SHARC_EMPTY) return false;
+        if (stored == SHARC_EMPTY) return false;      // empty run ends the probe
         if (stored == checksum)
         {
-            const uint byteOff = slot * 16u;
-            const float4 res = asfloat(resolved.Load4(byteOff));
-            if (res.w < 0.5) return false;  // allocated but not yet resolved
+            const float4 res = asfloat(resolved.Load4(slot * 16u));
+            if (res.w < 0.5) return false;            // allocated but not yet resolved
             radiance = res.xyz;
             return true;
         }
     }
     return false;
+}
+
+// QUERY: TRILINEARLY-interpolated resolved radiance at posWorld (full-SHARC v2).
+// Samples the 8 cells whose CENTERS surround posWorld and blends by proximity,
+// removing the "blocky" per-cell steps the single-cell lookup produced in
+// reflections (user-reported grain / dropped detail). Empty corners are skipped
+// and the remaining weights renormalized, so a partially-populated
+// neighbourhood still returns a smooth value. Returns false only if ALL 8
+// corners are empty (caller falls back to its own path).
+bool SharcQuery(RWByteAddressBuffer hashEntries, RWByteAddressBuffer resolved,
+                float3 posWorld, float3 camWorld, out float3 radiance)
+{
+    radiance = float3(0.0, 0.0, 0.0);
+    const int level = SharcGridLevel(posWorld, camWorld);
+    const float voxel = SharcVoxelSize(level);
+    // Cell-center space: cell C's centre is (C+0.5)*voxel, so shift by -0.5.
+    const float3 g = posWorld / voxel - 0.5;
+    const int3 baseC = int3(floor(g));
+    const float3 f = g - float3(baseC);
+    float3 sum = float3(0.0, 0.0, 0.0);
+    float  wsum = 0.0;
+    [unroll]
+    for (int i = 0; i < 8; ++i)
+    {
+        const int3 o = int3(i & 1, (i >> 1) & 1, (i >> 2) & 1);
+        const float3 wv = float3(o.x == 1 ? f.x : 1.0 - f.x,
+                                 o.y == 1 ? f.y : 1.0 - f.y,
+                                 o.z == 1 ? f.z : 1.0 - f.z);
+        const float w = wv.x * wv.y * wv.z;
+        if (w < 1e-4) continue;
+        float3 r;
+        if (SharcReadCellAt(hashEntries, resolved, baseC + o, level, r))
+        {
+            sum += w * r;
+            wsum += w;
+        }
+    }
+    if (wsum < 1e-3) return false;
+    radiance = sum / wsum;
+    return true;
 }
 
 #endif  // PYXIS_RADIANCE_CACHE_SLANG
