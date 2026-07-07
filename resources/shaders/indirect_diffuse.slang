@@ -409,11 +409,20 @@ void ClosestHitMain(inout BouncePayload payload, in BuiltInTriangleIntersectionA
                  RAY_FLAG_SKIP_CLOSEST_HIT_SHADER | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH,
                  0xFFu, 0, 0, /*MissShaderIndex*/ 1, domeRay, domeShadowPayload);
 
-        // Cosine-weighted importance sampling cancels BSDF x cos / pdf
-        // exactly (same argument as RayGen's own bounce estimator, file
-        // header) — the visibility-gated dome radiance IS the demodulated
-        // contribution, no further weighting needed.
-        float3 domeValue = SampleDomeBackground(domeDirWorld) * domeShadowPayload.radiance.x;
+        // Cosine-weighted importance sampling of the Lambertian lobe cancels
+        // BSDF x cos / pdf down to the surface's DIFFUSE ALBEDO (f·cos/pdf =
+        // rho for a cosine-sampled diffuse lobe), NOT 1. This is L_o(this hit)
+        // — the bounce vertex's OWN outgoing radiance — so it must carry this
+        // hit's albedo just like directContribution (EvaluateOpenPBRDirect's
+        // BSDF) and secondBounceRadiance (× surf.baseColor) already do. The
+        // prior version omitted the albedo, over-brightening the dome response
+        // of DARK bounce surfaces (measured: it inflates the SHARC cache and
+        // every reflection reading from it — the glass floor id30's reflected
+        // interior). surf.baseColor is the same albedo CompositePass / the
+        // second-bounce term use. (rtx-realtime-alignment-design.md, 2026-07-07:
+        // "bounce dome missing albedo" audit defect.)
+        float3 domeValue =
+            SampleDomeBackground(domeDirWorld) * domeShadowPayload.radiance.x * surf.baseColor;
         const float domeLum = IndirectLuminance(domeValue);
         if (domeLum > gQuality.maxRayIntensityIndirect && domeLum > 1e-9)
             domeValue *= gQuality.maxRayIntensityIndirect / domeLum;

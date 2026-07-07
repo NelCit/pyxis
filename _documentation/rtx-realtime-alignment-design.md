@@ -868,3 +868,20 @@ reflections finer. **Cumulative: 0.15959 (builtin) → ~0.1258 (SHARC on), -0.03
 -21%.** Debt: a true mirror OBJECT would ideally still trace — a cone-width gate
 (SHaRC GetVoxelSize) is the faithful refinement. Remaining top residuals: id30 (now
 0.235, still #1), id2 windows (transmission, too dark), id3 concrete +0.12 (matte).
+
+## Dome-albedo correctness fix — 0.12537 → 0.11746 (2026-07-07)
+
+Audit defect "bounce dome missing albedo": indirect_diffuse.slang ClosestHit's
+dome-NEE term (domeContribution) omitted the bounce hit's diffuse albedo, while
+directContribution (BSDF) and secondBounceRadiance (× baseColor) both carried it.
+For a cosine-sampled Lambertian lobe f·cos/pdf = rho (albedo), NOT 1 — so the dome
+term was too bright for DARK bounce surfaces, inflating the SHARC cache and every
+reflection reading from it. Fix: domeValue *= surf.baseColor. Helps BOTH paths
+(the exposure re-tunes brighter since the indirect darkens):
+- SHARC OFF (default): 0.15959 → 0.15644 (ev -0.85).
+- SHARC ON: 0.12537 → 0.11746 (ev -0.70). id30 glass floor +0.072 → +0.009
+  (RMSE 0.230 → 0.198) — the over-bright cache was the main id30 residual.
+Side effect: the correct (darker) cache REVEALED that id40 satin's reflection is
+itself a bit too dark (-0.076, was masked at +0.00 by the over-bright cache) — a
+reflection-strength residual for later. Cumulative honest RMSE: 0.15959 → 0.11746
+(-26%) since the SHARC-reflection + dome-albedo work.
