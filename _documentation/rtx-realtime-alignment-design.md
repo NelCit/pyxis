@@ -714,3 +714,38 @@ not an unmatchable model gap.
 2. Dome set: #2 + #3 (re-derive clamp) + #4 together.
 3. Metals: #8 specular IBL + (1-M) gate + #7/D4/D7.
 4. Area lights #5. Then #9 decision, vegetation, concrete (AccumulationPass).
+
+---
+
+## HONEST-METRIC BREAKTHROUGH (2026-07-07, cont.)
+
+**The measurement was in the wrong colour space all along.** rank.py now applies
+the sRGB OETF to the ACES-linear .exr (matching Pyxis's own .png and ovrtx's PNG
+space) — the correct comparison. Old raw metric (0.172) was ACES-linear vs sRGB,
+a flattering coincidence.
+
+**In the honest sRGB metric, the entire frame is ~uniformly 2.14x TOO BRIGHT**
+(mean 0.643 vs ovrtx 0.487; committed-state honest RMSE 0.231). NOT the exposure:
+CamLobbyWide's photographic attrs are neutral (iso100/time1/fStop1/resp1 ->
+scale 1.0), and Pyxis uses the same authored exposure=-10 as ovrtx. So Pyxis's
+LIGHT TRANSPORT emits 2.14x more radiance than ovrtx's for the same scene/camera.
+Root not yet pinned (dome double-count self-cancels ~1x via the firefly clamp;
+likely a combination of the audit's brightening bugs #3/#6/metals, or a dome
+radiance-units convention). 
+
+**Global exposure calibration render.exposure = -1.1 (on top of -10) matches
+ovrtx's mean EXACTLY (0.487) and gives honest RMSE 0.231 -> 0.15959** — the single
+biggest lever. Stopgap for the 2.14x until the light-transport root is fixed.
+
+**Honest-space per-material residuals at correct exposure (ev110, 0.15959):**
+- id30 glass floor: localRMSE 0.306, MSEshare 0.01135 (44% of total!), mean +0.020
+  (right) but STRUCTURAL variance 0.294 -> reflected content differs per-pixel
+  (reflection ClosestHit shades hits with a simpler model than the full pipeline).
+  THE dominant remaining residual; hard (reflection-accuracy).
+- id7 iron door -0.208 (metal, needs specular IBL); id3 concrete +0.117 (firefly
+  fro single-sample metalness -> AccumulationPass); id40 tables -0.071; id2 -0.062;
+  id36 -0.082. Most other materials within +/-0.03.
+
+Note: the raw-metric "reflective too dark" narrative was an artifact; in the honest
+metric reflective surfaces are ~right-or-bright. Prior raw-space fix directions
+(pi-brighten, GI-fill) were WRONG-signed. Honest metric is now the standard.
