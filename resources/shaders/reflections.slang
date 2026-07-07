@@ -695,14 +695,23 @@ void ClosestHitMain(inout ReflectionPayload payload, in BuiltInTriangleIntersect
     // "One-bounce GI at the reflection hit (NOT implemented)" note below).
     // The cache holds the reflected surface's FULL diffuse outgoing radiance
     // (direct + dome + emission + infinite-bounce indirect), populated by
-    // IndirectDiffusePass. Using it at GLOSSY reflection hits brightens the
-    // reflected interior to match the real (primary-shaded) world — the fix
-    // for the systematically-too-dark glossy/satin/metal surfaces (id40/id7).
-    // GATED on glossy roughness (> 0.3, ovrtx's roughnessCacheThreshold): a
-    // sharp mirror (id30 glass floor, roughness 0) keeps its traced sample so
-    // the voxel-blurred cache never softens a mirror reflection. giMode is
-    // dynamically uniform => builtin path untouched when off.
-    if (gQuality.giMode != 0u && payload.roughness > 0.3f)
+    // IndirectDiffusePass. Using it at reflection hits brightens the reflected
+    // interior to match the real (primary-shaded) world — the fix for the
+    // systematically-too-dark reflective surfaces.
+    //
+    // NO roughness gate (measured): an earlier version gated on roughness > 0.3
+    // to keep sharp mirrors on their traced sample, but the World Lobby's glossy
+    // GLASS FLOOR (id30, roughness 0, ~48% of frame MSE) is reflection-dominated
+    // and was DIM without the cached GI — including it dropped whole-frame RMSE
+    // 0.153 -> 0.126 (id30 local 0.306 -> 0.235). The voxel blur costs less than
+    // the brightness match gains, and it matches ovrtx (whose RT reflections also
+    // query the radiance cache); the distance-based voxel LoD already keeps
+    // near-field reflections finer. True mirror OBJECTS (a decorative mirror)
+    // would ideally still trace — a cone-width gate (SHaRC's GetVoxelSize check)
+    // is the faithful refinement, tracked as debt. giMode is dynamically uniform
+    // => builtin path untouched when off. `payload.roughness` is retained for
+    // that future cone gate.
+    if (gQuality.giMode != 0u)
     {
         float3 cachedRadiance;
         if (SharcQuery(gShHash, gShResolved, worldHit, SharcCameraWorld(), cachedRadiance))

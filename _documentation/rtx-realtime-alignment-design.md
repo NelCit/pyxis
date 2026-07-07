@@ -854,7 +854,17 @@ added energy shifted):
 
 **Conclusion:** SHARC is the right tool, but for the REFLECTION pass (where the GI
 was missing), not the indirect-diffuse pass (which already had it). Confirms the
-gap = reflected-content dynamic range. Committed as the optional giMode. Remaining
-top residuals: id30 sharp glass-floor reflection (matched-mean pattern, ~48% of
-MSE — hardest), id3 concrete +0.121 (matte, too bright — separate albedo issue),
-id7 iron still -0.156. Next levers there.
+gap = reflected-content dynamic range. Committed as the optional giMode.
+
+**NO-GATE follow-up: 0.15273 → ~0.1258** (best in an ev sweep, ev -1.1→-1.3). The
+roughness>0.3 gate was REMOVED after measuring: the glass FLOOR (id30, roughness 0,
+~48% of frame MSE) is reflection-dominated and was DIM without cached GI; letting
+it (and all traced reflections) query the cache dropped whole-frame RMSE
+0.15273 → 0.12607 (id30 local 0.306 → 0.235, MSEshare 0.0113 → 0.0067), then the ev
+re-tune to ~-1.3 (the added reflection energy shifted the mean) → ~0.1258. The
+voxel blur costs less than the brightness match gains, and it matches ovrtx (whose
+RT reflections query the radiance cache too); the distance-LoD keeps near-field
+reflections finer. **Cumulative: 0.15959 (builtin) → ~0.1258 (SHARC on), -0.034 /
+-21%.** Debt: a true mirror OBJECT would ideally still trace — a cone-width gate
+(SHaRC GetVoxelSize) is the faithful refinement. Remaining top residuals: id30 (now
+0.235, still #1), id2 windows (transmission, too dark), id3 concrete +0.12 (matte).
