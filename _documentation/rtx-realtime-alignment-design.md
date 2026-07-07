@@ -749,3 +749,57 @@ biggest lever. Stopgap for the 2.14x until the light-transport root is fixed.
 Note: the raw-metric "reflective too dark" narrative was an artifact; in the honest
 metric reflective surfaces are ~right-or-bright. Prior raw-space fix directions
 (pi-brighten, GI-fill) were WRONG-signed. Honest metric is now the standard.
+
+## ovrtx PIPELINE VERIFIED + GAP CHARACTERISED (2026-07-07)
+
+**Q (owner): does ovrtx use a radiance cache? verify its pipeline, compare to ours.**
+
+**A: YES — and it matches our architecture, but it is NOT our residual's lever.**
+Authoritative NVIDIA docs (Omniverse "RTX - Real-Time" mode + RTXGI 2.0):
+- ovrtx RT runs SEPARATE per-signal passes: RT-AO, direct+RT-shadows, RT indirect
+  diffuse GI, RT reflections, translucency, SSS — *identical decomposition to Pyxis*.
+- Its indirect-diffuse GI uses a world-space radiance cache (RTXGI 2.0 SHARC /
+  DDGI / NRC family) giving "infinite-bounce" GI. Our reference capture
+  (rendermode "(default)" = RT, "Indirect Diffuse GI" on since 105.0) uses it.
+- So ovrtx's reflected interiors carry infinite-bounce cached radiance; Pyxis's
+  reflection/indirect hits truncate at 2 bounces + dome-ambient. Real difference.
+
+**BUT the honest-metric residual is NOT brightness-deficit, so a radiance cache
+(which only ADDS light) is the wrong tool.** Evidence chain (all no-render analysis
+on the committed 0.15952 baseline, `scratchpad/*.py`):
+1. Per-material signs are MIXED: id30 +0.020, id3 +0.115, id37 +0.036 too BRIGHT;
+   id40 -0.071, id2 -0.062, id7 -0.208 too dark. Adding light helps some, hurts others.
+2. id30 (glass floor, 45% of MSE) is matched-MEAN (dLuma +0.020) with localRMSE
+   0.306 — a spatial PATTERN mismatch, not a brightness gap. Isolated crops confirm
+   both render a dark glossy reflective floor; the difference is reflection
+   sharpness/detail/colour-temp (hard, cross-renderer).
+3. **Transfer function Pyxis->ovrtx is near-IDENTITY** (best global tone LUT only
+   0.15952->0.15499; best gamma = 1.00). NOT a tone/contrast bug.
+4. **Best pixel shift is (0,0)** — geometry/camera are perfectly aligned. NOT a
+   misalignment bug.
+5. **Perfect per-material MEAN match floors at 0.15046** — only 0.009 of the RMSE is
+   fixable by any per-material brightness/tint change.
+6. **Error is LOW-frequency-dominated**: blur8 residual 0.135 vs high-freq-only
+   0.072. Not noise/denoiser/texture-detail — broad within-material shading.
+
+**The gap IS real and fixable.** ovrtx's own RT-vs-PT render of this exact
+scene/camera = **RMSE 0.012** (PT-vs-PT2 = 0.005). A correct renderer reaches ~0.012
+against the RT reference; Pyxis at 0.159 is 13x worse. So 0.05 is achievable — the
+residual is genuine Pyxis rendering error, not cross-renderer noise floor.
+
+**Localised nature (low-freq signed heatmap, `scratchpad/lowfreq_heat.png`):** the
+dominant error is on the FLOOR — bottom-left -0.192 (Pyxis too dark), bottom-center
++0.111 (too bright). Pyxis's reflective floor has COMPRESSED dynamic range: bright
+window reflections (grazing, near-field) aren't bright enough; dark glass isn't dark
+enough. Bottom-left is 36% Tinted_Glass (id30) + 32% Paint_Satin tables (id40,
+base=0.029) + 26% Terrazzo. Recurring theme: **dark low-albedo glossy dielectrics
+(satin tables, tinted glass) are reflection-dominated (diffuse~=0) and Pyxis's
+reflection on them is too weak/flat**, so they fall toward black where ovrtx shows
+environment sheen. Prime physical suspect: grazing-angle Fresnel + specular-IBL/
+environment reflection on dielectrics at reflection/ambient hits.
+
+**Next lever (recommended):** raise reflected dynamic range on dark glossy dielectrics
+— verify grazing Fresnel rise + that dielectrics receive specular-environment
+reflection in the ambient/indirect term (not just the explicit reflection trace).
+NOT a radiance cache; NOT per-material tint; NOT tonemap. This is per-signal
+reflection-fidelity work, GPU-render-gated + iterative.
