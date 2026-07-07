@@ -57,7 +57,11 @@ static const float SHARC_ACCUM_FRAME_MAX = 64.0;
 // level = floor(log_logBase(d · SHARC_GRID_DENSITY)). Tuned for World Lobby's
 // metre-scale interior (a few cm near-camera, growing with depth).
 static const float SHARC_LOG_BASE        = 2.0;
-static const float SHARC_GRID_DENSITY    = 8.0;      // higher = finer cells
+// voxelSize ~= VOXEL_BASE·GRID_DENSITY as a fraction of camera distance, stepped
+// by powers of LOG_BASE. LOWER GRID_DENSITY => finer cells (0.015·2 = ~3% of
+// distance here). Finer = sharper reflected detail (reflections read this cache),
+// at the cost of more occupied cells (raise SHARC_CAPACITY if collisions appear).
+static const float SHARC_GRID_DENSITY    = 8.0;      // lower = finer cells (8 = converges well at 96f)
 static const float SHARC_VOXEL_BASE      = 0.015;    // metres, finest cell edge
 static const int   SHARC_LEVEL_MIN       = 0;
 static const int   SHARC_LEVEL_MAX       = 16;

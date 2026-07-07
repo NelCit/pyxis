@@ -885,3 +885,17 @@ Side effect: the correct (darker) cache REVEALED that id40 satin's reflection is
 itself a bit too dark (-0.076, was masked at +0.00 by the over-bright cache) — a
 reflection-strength residual for later. Cumulative honest RMSE: 0.15959 → 0.11746
 (-26%) since the SHARC-reflection + dome-albedo work.
+
+## Reflection-through-glass — 0.11746 → 0.10260 (2026-07-07)
+
+Heatmap at 0.117 showed the left terrazzo floor too dark (−0.11): it grazes toward
+the floor-to-ceiling windows, but in reflection a Clear_Glass hit returned its ~black
+diffuse instead of the bright exterior behind it. Fix (reflections.slang ClosestHit):
+a transmissive reflection hit (transmissionWeight > 0.5) returns the dome radiance in
+the ray direction × transmission_color (thin-pane ≈ straight-through), instead of the
+dark glass. id30 glass floor halved (0.00475 → 0.00177 MSEshare); with the exposure
+re-tuned for the added reflected-sky energy (−0.70 → −1.00) whole-frame 0.11746 →
+0.10260. CUMULATIVE 0.15959 → 0.10260 (−36%). New residuals: id2 windows direct
+transmission −0.046 (now #1), and glossy/metal surfaces reflecting the full bright
+dome now slightly over-bright (id40 satin +0.098, id38 metal-feet +0.538 blown — the
+approximation lacks the mullion breakup ovrtx's real reflected window has).

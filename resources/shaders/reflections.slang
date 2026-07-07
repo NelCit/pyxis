@@ -690,6 +690,26 @@ void ClosestHitMain(inout ReflectionPayload payload, in BuiltInTriangleIntersect
         ObjectToWorld3x4(), WorldToObject3x4());
     const float3 viewDir = normalize(-WorldRayDirection());
 
+    // Reflection-through-glass (rtx-realtime-alignment-design.md, 2026-07-07) —
+    // a reflected TRANSMISSIVE surface (the curtain-wall windows, Clear_Glass)
+    // must show what's BEHIND it, not its ~black diffuse. The dominant such case
+    // in this view is the polished floor / tables reflecting the floor-to-ceiling
+    // windows: the reflection ray hits the glass, and behind it is the exterior
+    // (dome/sky). Approximate "seeing through the pane" as the dome radiance in
+    // the ray's own direction, tinted by the glass transmission_color (the pane
+    // is thin, so the refracted direction ≈ the incident one). Without this the
+    // reflected windows read black, darkening the whole left terrazzo strip that
+    // grazes toward them (heatmap: bottom-left −0.11). Mullions/frames are
+    // separate OPAQUE geometry and still hit ClosestHit normally below. Gated on
+    // the shared MATERIAL_FLAG_TRANSMISSION_ENABLED via transmissionWeight.
+    if (surf.pbr.transmissionWeight > 0.5)
+    {
+        payload.color = SampleDomeBackground(WorldRayDirection())
+                      * saturate(surf.pbr.transmissionColor);
+        payload.hitT  = RayTCurrent();
+        return;
+    }
+
     // SHARC (rtx-realtime-alignment-design.md, 2026-07-07) — supply the
     // indirect-GI term this cheap reflection-hit shade is missing (see the
     // "One-bounce GI at the reflection hit (NOT implemented)" note below).
