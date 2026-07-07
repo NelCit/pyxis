@@ -704,8 +704,17 @@ void ClosestHitMain(inout ReflectionPayload payload, in BuiltInTriangleIntersect
     // the shared MATERIAL_FLAG_TRANSMISSION_ENABLED via transmissionWeight.
     if (surf.pbr.transmissionWeight > 0.5)
     {
+        // Sky TRANSMITTED through the pane = sky · transmission_color · (1 − R),
+        // where R is the pane's own Fresnel reflectance at this hit angle — the
+        // light that reflects OFF the outer surface never reaches the viewer
+        // through the glass. Omitting (1−R) returned the full dome and
+        // over-brightened everything grazing toward the windows (id38 metal
+        // feet, id40 satin, id30 floor blew out). At grazing (where the floor
+        // sees the windows) R rises, correctly dimming the reflected sky.
+        const float NdotV = max(0.0, dot(surf.normalWorld, viewDir));
+        const float R = FresnelDielectricExact(NdotV, max(1.01, surf.pbr.specularIor));
         payload.color = SampleDomeBackground(WorldRayDirection())
-                      * saturate(surf.pbr.transmissionColor);
+                      * saturate(surf.pbr.transmissionColor) * (1.0 - R);
         payload.hitT  = RayTCurrent();
         return;
     }
