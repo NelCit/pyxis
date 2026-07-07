@@ -651,3 +651,66 @@ calibrates against final images + the depth/normal/albedo guides instead.
   for each new pass, not just final-image comparison.
 - Per-pass profiler scopes (`pass.*`) extend the §34 KPI table; PathTrace
   budget re-splits across the new passes.
+
+---
+
+## Correctness Roadmap — 5-agent deep audit (2026-07-07)
+
+State at audit: whole-frame RMSE vs ovrtx rt_wide = **0.17232** (HEAD 8443eb8);
+after flip_tangent_v fix (abcf577) = 0.17220. Committed this session: GGX
+stochastic default (04e03d1), dome double-count MIS (8443eb8), flip_tangent_v
+(abcf577).
+
+### CRITICAL META-FINDING: the metric is in the WRONG colour space, and the bugs cancel
+- **Colour space (D2-calibration):** ExrWriter.cpp `Bgra8ToRgbaFloat` copies the
+  post-Tonemap BGRA8 bytes as `byte/255` (NO sRGB OETF), while PngWriter applies
+  the sRGB LUT. Verified empirically: `verify.png == sRGB(domemis.exr)` (RMSE
+  0.001). So the `.exr` is ACES-linear, ovrtx PNG is sRGB(ACES); rank.py compares
+  them RAW = mismatched spaces. It "works" (0.172) only because the USD camera
+  `exposure = -10` is tuned ~1.3 stops bright, coincidentally cancelling the
+  missing gamma. Fitting ovrtx's own HdrColor->LdrColor = sRGB(ACES_Narkowicz)
+  at RMSE 0.0011 (its tonemap = Pyxis's ACES constants + sRGB).
+- **The 0.172 is a fragile balance of ~10 correctness bugs that partially cancel.**
+  Isolated "correct" fixes overshoot (pi-fix -> 0.208). Fix as COORDINATED SETS,
+  after fixing the colour-space measurement + re-deriving exposure/clamps.
+
+### Ranked correctness defects (file:line, both Fable audits + D-agents)
+1. **pi units error** openpbr_material.slang:793 EvaluateOpenPBRAmbient returns
+   rho*L/pi; L is a mip radiance average -> correct is rho*L. Reflection hits +
+   translucency are pi(3.14x) too dark (id40 gap 3.25x~=pi). THE reflective-wall
+   root cause. Entangled with #6 (fix together).
+2. **Cross-signal dome double-count** ComputeDomeDirectDiffuse (gDirectDiffuse) +
+   raygen first-bounce-miss dome (gIndirectDiffuse) both count primary dome, no
+   MIS. ~2x. Cancelled by #3 on this scene.
+3. **Firefly clamp bias** maxRayIntensity 6400 < dome 12000 -> every dome sample
+   x0.53. Cancels #2. Must re-derive clamps as multiples of dome radiance.
+4. **Bounce dome NEE missing albedo** indirect_diffuse.slang:382 domeContribution
+   not x surf.baseColor (bright).
+5. **Area lights double-area** StageWalker x=worldArea AND shader x area/distSq
+   (rect too bright, small lights too dim); disk/sphere pdf wrong; sphere one-sided.
+6. **VNDF drops G2/G1** reflections.slang:546 plain average, missing F*G2/G1;
+   correct absorbed factor is env-BRDF (F0*A+B) not F(NdotV). Bright, cancels #1.
+7. **Composite double-Fresnel** composite.slang:198 (1-specWeight) attenuates
+   directSpecular (already Fresnel-weighted) + double-taxes direct diffuse.
+8. **Metals: no specular IBL + fictitious diffuse fill** EvaluateOpenPBRAmbient
+   x(1-metalness) (no specular env term) AND composite re-modulates dome/GI by
+   raw baseColor with no (1-M) gate -> metals get impossible Lambertian dome.
+9. **AO double-count** composite.slang:188 indirectDiffuse x ao (indirect already
+   self-occludes). RTX-RT convention, but a dark bias.
+10. **flip_tangent_v** FIXED (abcf577). **specular_level not read** (D4): dielectric
+    grazing ~2x too strong (F(grazing)->1 vs ovrtx 0.5; map specularWeight=2*level).
+    **metal F82 vs OmniPBR flat tint** (D7): gold too bright at grazing.
+    **Concrete grainy** (D3): single-sample firefly -> enable AccumulationPass.
+    **Vegetation dark** (D3): missing backlight/wrap (model gap).
+
+### ovrtx reflection mechanism (D1): ovrtx RT == its own PT (brightness baked into
+transport, not a real-time trick). So the reflective darkness is OUR bugs (#1,#6,#8),
+not an unmatchable model gap.
+
+### Coordinated fix plan (in order)
+0. Colour pipeline: ExrWriter sRGB + re-tune USD exposure so sRGB output mean ~=
+   ovrtx 0.487; make rank.py the correct space. Re-baseline.
+1. Reflections set: #1 (pi) + #6 (G2/G1 or env-BRDF) + #7 (composite Fresnel) together.
+2. Dome set: #2 + #3 (re-derive clamp) + #4 together.
+3. Metals: #8 specular IBL + (1-M) gate + #7/D4/D7.
+4. Area lights #5. Then #9 decision, vegetation, concrete (AccumulationPass).
