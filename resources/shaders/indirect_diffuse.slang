@@ -383,7 +383,15 @@ void ClosestHitMain(inout BouncePayload payload, in BuiltInTriangleIntersectionA
         const float domeLum = IndirectLuminance(domeValue);
         if (domeLum > gQuality.maxRayIntensityIndirect && domeLum > 1e-9)
             domeValue *= gQuality.maxRayIntensityIndirect / domeLum;
-        domeContribution = domeValue;
+        // RTX-alignment (2026-07-07, dome MIS): when THIS hit still has bounce
+        // budget, its continuation ray (below) ALSO captures the dome on miss
+        // (MissMain), sampling the SAME dome integral at this hit with the SAME
+        // cosine pdf as this NEE sample. Adding both double-counts the dome; the
+        // balance heuristic with equal pdfs weights each 0.5 (a 2-sample average).
+        // A terminal hit (no continuation) has no competing estimator -> weight 1.
+        const bool hitContinues =
+            payload.bounceDepth < min(gQuality.indirectMaxBounces, MAX_INDIRECT_BOUNCE_DEPTH);
+        domeContribution = domeValue * (hitContinues ? 0.5 : 1.0);
     }
 
     // RTX-alignment design, Phase B — second indirect-diffuse bounce
@@ -467,7 +475,15 @@ void ClosestHitMain(inout BouncePayload payload, in BuiltInTriangleIntersectionA
 // --------------------------------------------------------------------
 [shader("miss")]
 void MissMain(inout BouncePayload payload) {
-    payload.radiance = SampleDomeBackground(WorldRayDirection()) * payload.throughput;
+    // RTX-alignment (2026-07-07, dome MIS): a CONTINUATION ray (bounceDepth > 1,
+    // fired from a bounce hit that also drew a dome-NEE sample) that escapes to
+    // sky samples the SAME dome integral its originating hit already NEE-sampled,
+    // same cosine pdf. Balance heuristic -> weight 0.5 (2-sample average with that
+    // hit's halved domeContribution). The RayGen first-bounce ray (bounceDepth == 1)
+    // has no competing dome-NEE in THIS signal (the primary's dome is
+    // gDirectDiffuse's ComputeDomeDirectDiffuse), so it keeps full weight.
+    const float misWeight = (payload.bounceDepth > 1u) ? 0.5 : 1.0;
+    payload.radiance = SampleDomeBackground(WorldRayDirection()) * payload.throughput * misWeight;
 }
 
 // --------------------------------------------------------------------
