@@ -1226,3 +1226,30 @@ with real GI rays is the remaining (expensive, low-EV ~0.0006 MSE) option. Same 
 kills the planned reflections-fallback bootstrap (same physics). NrdProvider skeleton
 committed (3555bdc): instance + pipelines-from-embedded-SPIRV + pools translate onto NVRHI,
 both configs green; next stage = per-frame dispatch translation + graph wiring.
+
+## NRD integration — full staging record (2026-07-10, commits 1822bcc→6f628aa)
+
+Six commits land the complete OPTIONAL NRD backend skeleton→first-light:
+1822bcc fetch plumbing (PYXIS_WITH_NRD off-default, v4.17.3, SPIRV-only, FXC probe off);
+3555bdc NrdProvider stage 1 (instance RELAX_DIFFUSE_SPECULAR+SIGMA_SHADOW, 22 pipelines
+from embedded SPIRV via spirvBindingOffsets flattening, samplers, pools); 7a56e9e stage 2
+per-frame Evaluate (CommonSettings TRANSPOSED — NRD is column-major doc'd vs our row-major;
+motionVectorScale {-1/w,-1/h,0} for their prev-minus-current normalized-UV vs our
+current-minus-previous pixels; jitter passthrough verified; NRD_NORMAL_ENCODING=3
+RGBA16_UNORM + nrd_pack.slang best-fit pack; RelaxSettings) ; 3058128 denoiser=nrd settings
+surface v6.1.0 (honest ladder); 6f628aa stage 3 graph wiring (NrdDenoisePass →
+PassContext.nrdDenoised* → CompositePass preference; builtin trio still runs alongside).
+
+**FIRST LIGHT STATUS**: requested=Nrd effective=Nrd runs end-to-end (no crash/hang, 96f
+1080p). Output ENERGY-LOSING: whole-frame 0.240 vs builtin 0.08240 — image = direct-only
+signature ⇒ NRD OUT_DIFF/OUT_SPEC ≈ black ⇒ either the pack dispatch writes zeros into
+IN_* or the per-dispatch binding-slot translation misroutes (dispatches DO run, no NVRHI
+errors, no NaNs). NEXT DEBUG STEPS (in order): (1) temp-log dispatchDescsNum + dispatch
+names frame 0 (expect ~15-25 for RELAX); (2) dump _packedDiffuseRadianceHitDist after
+DispatchPack (add a --save hook or copy to an AOV) — if zeros, the pack binding set/slot
+order vs nrd_pack.slang bindings is wrong; (3) if pack OK, verify per-dispatch slot
+assignment: NRD resources must bind at slot = range baseRegisterIndex + intra-range offset
+(in DECLARATION order of the pipeline's resourceRanges), NOT resources[] array order;
+(4) check constantBufferData upload versioning. Known input gaps regardless: gViewZ=0 on
+miss (NRD wants >= denoisingRange), gIndirectDiffuse.a=1 placeholder hitDist. Builtin
+default verified unchanged (0.08240 delta +0.00000). SIGMA_SHADOW created but undispatched.
