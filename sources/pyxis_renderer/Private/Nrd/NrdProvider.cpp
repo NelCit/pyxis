@@ -136,6 +136,34 @@ NrdProvider::NrdProvider(nvrhi::IDevice* device) : _device(device) {
     return;
   }
 
+  // SET-1 LAYOUT — shared samplers + constant buffer (first-light fix,
+  // 2026-07-10; see NrdProvider.h's _set1Layout comment for the two-space
+  // derivation). The LAYOUT must exist BEFORE CreatePipelines (every NRD
+  // compute pipeline's bindingLayouts = {set0, set1}); the binding SET is
+  // built later, after CreateConstantBuffer.
+  {
+    const nrd::LibraryDesc& libraryDesc = *nrd::GetLibraryDesc();
+    nvrhi::BindingLayoutDesc set1Desc;
+    set1Desc.visibility = nvrhi::ShaderType::Compute;
+    set1Desc.bindingOffsets.shaderResource = 0;
+    set1Desc.bindingOffsets.unorderedAccess = 0;
+    set1Desc.bindingOffsets.sampler = libraryDesc.spirvBindingOffsets.samplerOffset;
+    set1Desc.bindingOffsets.constantBuffer = libraryDesc.spirvBindingOffsets.constantBufferOffset;
+    for (uint32_t i = 0; i < instanceDesc.samplersNum; ++i)
+      set1Desc.bindings.push_back(
+          nvrhi::BindingLayoutItem::Sampler(instanceDesc.samplersBaseRegisterIndex + i));
+    set1Desc.bindings.push_back(
+        nvrhi::BindingLayoutItem::VolatileConstantBuffer(instanceDesc.constantBufferRegisterIndex));
+    _set1Layout = _device->createBindingLayout(set1Desc);
+    if (!_set1Layout)
+    {
+      log.Error(log::RENDER, "NrdProvider: SET-1 layout creation failed");
+      nrd::DestroyInstance(*_instance);
+      _instance = nullptr;
+      return;
+    }
+  }
+
   if (!CreatePipelines(instanceDesc))
   {
     nrd::DestroyInstance(*_instance);
@@ -154,6 +182,26 @@ NrdProvider::NrdProvider(nvrhi::IDevice* device) : _device(device) {
     nrd::DestroyInstance(*_instance);
     _instance = nullptr;
     return;
+  }
+
+  // SET-1 BINDING SET — the samplers + CB instance data for the shared
+  // layout created above (needs _nrdConstantBuffer, hence after
+  // CreateConstantBuffer).
+  {
+    nvrhi::BindingSetDesc set1SetDesc;
+    for (uint32_t i = 0; i < instanceDesc.samplersNum; ++i)
+      set1SetDesc.bindings.push_back(nvrhi::BindingSetItem::Sampler(
+          instanceDesc.samplersBaseRegisterIndex + i, _samplers[i]));
+    set1SetDesc.bindings.push_back(nvrhi::BindingSetItem::ConstantBuffer(
+        instanceDesc.constantBufferRegisterIndex, _nrdConstantBuffer));
+    _set1BindingSet = _device->createBindingSet(set1SetDesc, _set1Layout);
+    if (!_set1BindingSet)
+    {
+      log.Error(log::RENDER, "NrdProvider: SET-1 binding-set creation failed");
+      nrd::DestroyInstance(*_instance);
+      _instance = nullptr;
+      return;
+    }
   }
 
   if (!CreatePackPipeline())
@@ -241,13 +289,14 @@ bool NrdProvider::CreatePipelines(const nrd::InstanceDesc& instanceDesc) {
       return false;
     }
 
-    // ---- Binding layout: one flattened Vulkan descriptor set --------
-    // See NrdProvider.h's "SPIR-V BINDING-OFFSET FLATTENING" section for
-    // the full derivation. `slot` below is always the RAW NRD HLSL
-    // register index; `bindingOffsets` (set once per layout) is what
-    // shifts each item into the final Vulkan binding number, matching
-    // NVRHI's own `bindingLocation = registerOffset + item.slot` formula
-    // (src/vulkan/vulkan-resource-bindings.cpp).
+    // ---- Binding layout SET 0: this pipeline's SRV/UAV resources ONLY
+    // (first-light fix, 2026-07-10 — see NrdProvider.h's _set1Layout
+    // comment: NRD's samplers + constant buffer live in register SPACE 1
+    // = Vulkan SET 1, verified via VUID-...-07988; they are provided by
+    // the shared _set1Layout/_set1BindingSet, NOT here). `slot` is the RAW
+    // NRD HLSL register index; `bindingOffsets` shifts each item into the
+    // final Vulkan binding number, matching NVRHI's own `bindingLocation =
+    // registerOffset + item.slot` (src/vulkan/vulkan-resource-bindings.cpp).
     nvrhi::BindingLayoutDesc layoutDesc;
     layoutDesc.visibility = nvrhi::ShaderType::Compute;
     layoutDesc.bindingOffsets.shaderResource = libraryDesc.spirvBindingOffsets.textureOffset;
@@ -278,20 +327,8 @@ bool NrdProvider::CreatePipelines(const nrd::InstanceDesc& instanceDesc) {
       }
     }
 
-    // Shared constant buffer -- only pipelines that actually reference it
-    // declare the binding (PipelineDesc::hasConstantData).
-    if (pipelineDesc.hasConstantData)
-      layoutDesc.bindings.push_back(
-          nvrhi::BindingLayoutItem::VolatileConstantBuffer(instanceDesc.constantBufferRegisterIndex));
-
-    // Samplers -- every pipeline gets the full, shared sampler set
-    // (instanceDesc.samplers[], "s" registers starting at
-    // samplersBaseRegisterIndex), matching NRDIntegration.hpp's own
-    // per-pipeline-layout-shared root-sampler list.
-    for (uint32_t i = 0; i < instanceDesc.samplersNum; ++i)
-      layoutDesc.bindings.push_back(
-          nvrhi::BindingLayoutItem::Sampler(instanceDesc.samplersBaseRegisterIndex + i));
-
+    // (Samplers + constant buffer intentionally NOT added here — they live
+    // in the shared SET-1 layout; see NrdProvider.h's _set1Layout comment.)
     nvrhi::BindingLayoutHandle bindingLayout = _device->createBindingLayout(layoutDesc);
     if (!bindingLayout)
     {
@@ -302,7 +339,9 @@ bool NrdProvider::CreatePipelines(const nrd::InstanceDesc& instanceDesc) {
 
     nvrhi::ComputePipelineDesc computeDesc;
     computeDesc.CS = shader;
-    computeDesc.bindingLayouts = {bindingLayout};
+    // SET 0 = this pipeline's resources; SET 1 = the shared samplers + CB
+    // (see _set1Layout's doc comment — NRD's SPIRV keeps them in space 1).
+    computeDesc.bindingLayouts = {bindingLayout, _set1Layout};
     nvrhi::ComputePipelineHandle pipeline = _device->createComputePipeline(computeDesc);
     if (!pipeline)
     {
@@ -812,20 +851,6 @@ bool NrdProvider::Evaluate(nvrhi::ICommandList* commandList, const FrameInputs& 
                                + std::to_string(static_cast<uint32_t>(dispatchResult)) + ")");
     return false;
   }
-  // TEMP DIAGNOSTIC (first-light debug step 1 — revert before commit):
-  // dispatch inventory, frame 0 only.
-  if (inputs.frameIndex == 0)
-  {
-    log.Info(log::RENDER, "NRDDBG dispatchNum=" + std::to_string(dispatchDescsNum));
-    for (uint32_t i = 0; i < dispatchDescsNum; ++i)
-      log.Info(log::RENDER,
-               "NRDDBG   [" + std::to_string(i) + "] "
-                   + (dispatchDescs[i].name != nullptr ? dispatchDescs[i].name : "?")
-                   + " pipe=" + std::to_string(dispatchDescs[i].pipelineIndex)
-                   + " res=" + std::to_string(dispatchDescs[i].resourcesNum)
-                   + " grid=" + std::to_string(dispatchDescs[i].gridWidth) + "x"
-                   + std::to_string(dispatchDescs[i].gridHeight));
-  }
 
   // ---- 5. Resource snapshot -- "real" (non-pool) resource types resolve
   // through this array; pool types resolve through Xxx PoolTexture() below.
@@ -938,14 +963,8 @@ bool NrdProvider::Evaluate(nvrhi::ICommandList* commandList, const FrameInputs& 
           setDesc.bindings.push_back(
               nvrhi::BindingSetItem::Texture_UAV(storageSlot++, resolved[resourceIndex]));
       }
-      const nrd::PipelineDesc& pipelineDesc = instanceDesc.pipelines[dispatch.pipelineIndex];
-      if (pipelineDesc.hasConstantData && _nrdConstantBuffer)
-        setDesc.bindings.push_back(nvrhi::BindingSetItem::ConstantBuffer(
-            instanceDesc.constantBufferRegisterIndex, _nrdConstantBuffer));
-      for (uint32_t samplerIndex = 0; samplerIndex < instanceDesc.samplersNum; ++samplerIndex)
-        setDesc.bindings.push_back(nvrhi::BindingSetItem::Sampler(
-            instanceDesc.samplersBaseRegisterIndex + samplerIndex, _samplers[samplerIndex]));
-
+      // (Samplers + CB live in the shared SET-1 binding set — see
+      // _set1Layout's doc comment; this per-dispatch set is SET 0 only.)
       nvrhi::BindingSetHandle newSet = _device->createBindingSet(setDesc, pipeline.bindingLayout);
       if (!newSet)
       {
@@ -993,7 +1012,8 @@ bool NrdProvider::Evaluate(nvrhi::ICommandList* commandList, const FrameInputs& 
 
     nvrhi::ComputeState computeState;
     computeState.pipeline = pipeline.pipeline;
-    computeState.bindings = {bindingSet};
+    // SET 0 = per-dispatch resources; SET 1 = shared samplers + CB.
+    computeState.bindings = {bindingSet, _set1BindingSet};
     commandList->setComputeState(computeState);
     commandList->dispatch(dispatch.gridWidth, dispatch.gridHeight, 1u);
   }

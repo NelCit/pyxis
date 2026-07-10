@@ -323,9 +323,23 @@ class NrdProvider final {
   // nrd::DispatchDesc::pipelineIndex refers back into.
   struct Pipeline {
     nvrhi::ShaderHandle shader;
-    nvrhi::BindingLayoutHandle bindingLayout;
+    nvrhi::BindingLayoutHandle bindingLayout;  // SET 0: this pipeline's SRV/UAV resources only.
     nvrhi::ComputePipelineHandle pipeline;
   };
+
+  // SET 1 — shared by every NRD pipeline (first-light fix, 2026-07-10):
+  // NRD's HLSL declares its resources in register SPACE 0 but its samplers
+  // (s0..s1) and constant buffer (b0) in SPACE 1; ShaderMake's --flatten
+  // per-kind shifts apply WITHIN each space, so the emitted SPIRV keeps TWO
+  // descriptor sets — Set 1 holding samplers at bindings 0..1 (samplerOffset
+  // 0) and the CB at binding 2 (bRegShift 2). Verified by validation:
+  // VUID-VkComputePipelineCreateInfo-layout-07988 named "[Set 1, Binding 2,
+  // RELAX_*Constants]" / "[Set 1, Binding 0, gNearestClamp]" on 20 of 22
+  // pipelines when everything was flattened into one set. The sampler set +
+  // CB are identical across pipelines, so ONE shared layout + ONE shared
+  // binding set serve every dispatch (ComputeState.bindings = {set0, set1}).
+  nvrhi::BindingLayoutHandle _set1Layout;
+  nvrhi::BindingSetHandle _set1BindingSet;
 
   // One entry per InstanceDesc::permanentPool[]/transientPool[] slot.
   // `desc` is kept (not just the derived nvrhi format/size) so Resize()
