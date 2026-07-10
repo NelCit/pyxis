@@ -435,6 +435,10 @@ class NrdProvider final {
   nvrhi::TextureHandle _packedNormalRoughness;          // RGBA16_UNORM.
   nvrhi::TextureHandle _packedDiffuseRadianceHitDist;   // RGBA16_FLOAT.
   nvrhi::TextureHandle _packedSpecRadianceHitDist;      // RGBA16_FLOAT.
+  // viewZ with the miss-sentinel remap (0 -> 1e6 >= denoisingRange) applied
+  // by nrd_pack.slang — bound to IN_VIEWZ instead of the raw gViewZ
+  // (input-gap fix, 2026-07-10; see the pack shader's gViewZIn comment).
+  nvrhi::TextureHandle _packedViewZ;                    // R32_FLOAT.
 
   // True on construction and again after any Resize() that actually
   // reallocates (pool/packed textures hold fresh, undefined GPU contents,

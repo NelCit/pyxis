@@ -518,6 +518,8 @@ bool NrdProvider::CreatePackPipeline() {
       nvrhi::BindingLayoutItem::Texture_UAV(4),              // 4 gDiffRadianceHitDistOut
       nvrhi::BindingLayoutItem::Texture_UAV(5),              // 5 gSpecRadianceHitDistOut
       nvrhi::BindingLayoutItem::VolatileConstantBuffer(6),   // 6 gParams
+      nvrhi::BindingLayoutItem::Texture_SRV(7),              // 7 gViewZIn (miss-sentinel remap)
+      nvrhi::BindingLayoutItem::Texture_UAV(8),              // 8 gViewZOut
   };
   _packBindingLayout = _device->createBindingLayout(layoutDesc);
   if (!_packBindingLayout)
@@ -610,6 +612,10 @@ void NrdProvider::ResizePackedTextures(uint32_t renderWidth, uint32_t renderHeig
              "Nrd.Pack.DiffuseRadianceHitDist");
   makeTexture(_packedSpecRadianceHitDist, nvrhi::Format::RGBA16_FLOAT,
              "Nrd.Pack.SpecRadianceHitDist");
+  // viewZ miss-sentinel remap target (input-gap fix, 2026-07-10 — see
+  // nrd_pack.slang's gViewZIn binding comment): bound to IN_VIEWZ instead
+  // of the raw gViewZ so sky reads >= denoisingRange, not 0.
+  makeTexture(_packedViewZ, nvrhi::Format::R32_FLOAT, "Nrd.Pack.ViewZ");
 }
 
 nrd::CommonSettings NrdProvider::BuildCommonSettings(const FrameInputs& inputs) const noexcept {
@@ -715,6 +721,7 @@ nvrhi::IBindingSet* NrdProvider::GetOrCreatePackBindingSet(const FrameInputs& in
       inputs.normalRoughness,       inputs.diffuseRadianceHitDist,
       inputs.specRadianceHitDist,   _packedNormalRoughness.Get(),
       _packedDiffuseRadianceHitDist.Get(), _packedSpecRadianceHitDist.Get(),
+      inputs.viewZ,                 _packedViewZ.Get(),
   };
   const std::uint64_t key = HashPointers(keyParts, std::size(keyParts));
   if (auto cached = _packBindingSetCache.find(key); cached != _packBindingSetCache.end())
@@ -733,6 +740,8 @@ nvrhi::IBindingSet* NrdProvider::GetOrCreatePackBindingSet(const FrameInputs& in
       nvrhi::BindingSetItem::Texture_UAV(4, _packedDiffuseRadianceHitDist),
       nvrhi::BindingSetItem::Texture_UAV(5, _packedSpecRadianceHitDist),
       nvrhi::BindingSetItem::ConstantBuffer(6, _packParamsBuffer),
+      nvrhi::BindingSetItem::Texture_SRV(7, inputs.viewZ),
+      nvrhi::BindingSetItem::Texture_UAV(8, _packedViewZ),
   };
   nvrhi::BindingSetHandle set = _device->createBindingSet(setDesc, _packBindingLayout);
   if (!set)
@@ -749,7 +758,7 @@ void NrdProvider::DispatchPack(nvrhi::ICommandList* commandList, const FrameInpu
   if (!_packReady)
     return;
   if (inputs.normalRoughness == nullptr || inputs.diffuseRadianceHitDist == nullptr
-      || inputs.specRadianceHitDist == nullptr)
+      || inputs.specRadianceHitDist == nullptr || inputs.viewZ == nullptr)
     return;
 
   NrdPackParams params{};
@@ -772,6 +781,10 @@ void NrdProvider::DispatchPack(nvrhi::ICommandList* commandList, const FrameInpu
   commandList->setTextureState(_packedDiffuseRadianceHitDist, nvrhi::AllSubresources,
                                nvrhi::ResourceStates::UnorderedAccess);
   commandList->setTextureState(_packedSpecRadianceHitDist, nvrhi::AllSubresources,
+                               nvrhi::ResourceStates::UnorderedAccess);
+  commandList->setTextureState(inputs.viewZ, nvrhi::AllSubresources,
+                               nvrhi::ResourceStates::ShaderResource);
+  commandList->setTextureState(_packedViewZ, nvrhi::AllSubresources,
                                nvrhi::ResourceStates::UnorderedAccess);
   commandList->commitBarriers();
 
@@ -827,7 +840,12 @@ bool NrdProvider::Evaluate(nvrhi::ICommandList* commandList, const FrameInputs& 
   // design brief). NRD's own defaults -- no RenderSettings-driven tuning
   // wired up yet, out of this stage's scope (RenderSettings.h is
   // untouched).
-  const nrd::RelaxSettings relaxSettings{};
+  nrd::RelaxSettings relaxSettings{};
+  // ovrtx-parity tuning round 1 (2026-07-10): ovrtx's own indirect-diffuse
+  // ReLAX chain runs 4 a-trous iterations (generatedSchema
+  // indirectDiffuse:denoiser:iterations=4) vs NRD's default 5 — measured
+  // A/B'd against the World Lobby capture.
+  relaxSettings.atrousIterationNum = 4;
   const nrd::Result denoiserResult =
       nrd::SetDenoiserSettings(*_instance, RELAX_DIFFUSE_SPECULAR_ID, &relaxSettings);
   if (denoiserResult != nrd::Result::SUCCESS)
@@ -858,7 +876,9 @@ bool NrdProvider::Evaluate(nvrhi::ICommandList* commandList, const FrameInputs& 
   snapshot[static_cast<std::size_t>(nrd::ResourceType::IN_MV)] = inputs.motionVector;
   snapshot[static_cast<std::size_t>(nrd::ResourceType::IN_NORMAL_ROUGHNESS)] =
       _packedNormalRoughness.Get();
-  snapshot[static_cast<std::size_t>(nrd::ResourceType::IN_VIEWZ)] = inputs.viewZ;
+  // IN_VIEWZ takes the pack shader's miss-sentinel-remapped copy, NOT the
+  // raw gViewZ (input-gap fix — see nrd_pack.slang's gViewZIn comment).
+  snapshot[static_cast<std::size_t>(nrd::ResourceType::IN_VIEWZ)] = _packedViewZ.Get();
   snapshot[static_cast<std::size_t>(nrd::ResourceType::IN_DIFF_RADIANCE_HITDIST)] =
       _packedDiffuseRadianceHitDist.Get();
   snapshot[static_cast<std::size_t>(nrd::ResourceType::IN_SPEC_RADIANCE_HITDIST)] =

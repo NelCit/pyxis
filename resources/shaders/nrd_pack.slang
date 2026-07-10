@@ -76,6 +76,16 @@ struct NrdPackParams
 [[vk::binding(4, 0)]] RWTexture2D<float4> gDiffRadianceHitDistOut;
 [[vk::binding(5, 0)]] RWTexture2D<float4> gSpecRadianceHitDistOut;
 [[vk::binding(6, 0)]] ConstantBuffer<NrdPackParams> gParams;
+// viewZ MISS-SENTINEL REMAP (input-gap fix, 2026-07-10): NRD expects
+// sky/miss pixels at viewZ >= CommonSettings::denoisingRange (500000 —
+// BuildCommonSettings) so they're excluded from denoising; Pyxis's gViewZ
+// writes 0 on miss ("at the camera"), which corrupted RELAX's
+// disocclusion/plane tests around every skyline edge. Remapped here
+// (NRD-only) rather than at the G-buffer source, which the builtin
+// denoiser chain + DLSS depth-convert consume with their own 0-on-miss
+// conventions.
+[[vk::binding(7, 0)]] Texture2D<float>    gViewZIn;
+[[vk::binding(8, 0)]] RWTexture2D<float>  gViewZOut;
 
 // "Best fit" unorm normal packing — the non-oct-packed encoding branch
 // NRD's front-end pack function documents for RGBA8_UNORM/RGBA16_UNORM
@@ -133,4 +143,10 @@ void PackMain(uint3 dispatchThreadId : SV_DispatchThreadID)
 
     gDiffRadianceHitDistOut[pixel] = SanitizeRadianceHitDist(gDiffuseRadianceHitDistIn[pixel]);
     gSpecRadianceHitDistOut[pixel] = SanitizeRadianceHitDist(gSpecRadianceHitDistIn[pixel]);
+
+    // viewZ miss-sentinel remap (see gViewZIn's binding comment): 1e6 is
+    // safely past BuildCommonSettings' denoisingRange (500000), NRD's
+    // "exclude this pixel from denoising" contract for sky.
+    const float viewZ = gViewZIn[pixel];
+    gViewZOut[pixel] = (viewZ <= 0.0) ? 1.0e6 : viewZ;
 }
