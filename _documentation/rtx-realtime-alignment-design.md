@@ -1192,3 +1192,37 @@ items, in EV order: (1) conductor-specular energy + (1−M) as a PAIRED fix [the
 LEVEL error, ~0.0005-0.001]; (2) NRD fetch-at-build optional (default-OFF, licensing path
 documented above); (3) SVGF variance moments; (4) DLSS-RR NGX unblock (needs driver/SDK with
 model 703). Expected honest floor remains ~0.06-0.075.
+
+## Session 2026-07-10 (cont. 4) — metal pairing measured, NRD plumbing landed, SHaRC all-vertex updates
+
+**Metal pairing (both variants measured, reverted):** (1−M)-alone +0.00856 (metals collapse:
+id6 −0.179 — they lived off the wrong diffuse fill). PAIRED with removal of the ad-hoc
+(1−r')^(2M) metal damping (reflections.slang): +0.00203 — id6 mean lands near target
+(−0.031) but its MSE DOUBLES: the old sky-facing over-brightness (the band the damping was
+added for, pre-SHARC content) returns while interior-facing stays dark. CONCLUSION: the metal
+error is ORIENTATION-DEPENDENT REFLECTED-CONTENT error, not a weight/energy scalar — no
+global specWeight/diffuse knob can fix both bands; requires per-direction content work
+(e.g. what the mullion reflection actually shows toward sky vs interior). Parked with data.
+
+**NRD optional dependency SHIPPED (1822bcc):** PYXIS_WITH_NRD (default OFF) →
+FetchContent NVIDIA-RTX/NRD v4.17.3 (submodules, SPIRV-embedded static lib, ShaderMake FXC
+probe disabled), linked into pyxis_renderer + PYXIS_WITH_NRD define; verified live log
+"NRD backend available (v4.17.3, static, SPIRV-embedded)". OFF stays byte-green. Runtime
+NrdProvider skeleton (instance + pipeline/pool translation onto NVRHI) in progress via agent.
+
+**In flight (this session):** SHaRC bootstrap-only updates from translucency TERMINAL
+vertices (NVIDIA's reference updates at all path vertices; ours was depth-1-only —
+gShAccum bound at translucency Set-1 binding 4; accumulate ONLY on query-miss so GI-less
+bootstrap can seed empty exterior cells but never dilute resolved ones).
+
+**SHaRC translucency-terminal bootstrap: measured WASH (+0.00001), reverted.** The gShAccum
+bootstrap-on-query-miss seeds empty exterior cells — but the seeded value IS the GI-less
+shade, so a later query-hit returns exactly what the fallback would have shaded: identical
+pixels by construction. The strip residual (0.519 vs ovrtx 0.747) is CONTENT-limited: those
+cells need real exterior multi-bounce (sky→facade→cap) that only reaches them if interior
+bounce rays through the glass land there (rare) — ovrtx's cache gets it from its
+all-vertex updates over exterior geometry lit by its own GI. A translucency-terminal shade
+with real GI rays is the remaining (expensive, low-EV ~0.0006 MSE) option. Same reasoning
+kills the planned reflections-fallback bootstrap (same physics). NrdProvider skeleton
+committed (3555bdc): instance + pipelines-from-embedded-SPIRV + pools translate onto NVRHI,
+both configs green; next stage = per-frame dispatch translation + graph wiring.
