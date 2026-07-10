@@ -191,6 +191,13 @@ class PYXIS_RENDERER_API PyxisRenderer final {
   // thread it into PassContext::colorLinearResolved for BlitToSrgbPass. Same
   // forward-declared-IRenderPass* + impl-side cast pattern as _lightingPass.
   class IRenderPass* _ssaaPass = nullptr;
+  // PostSoften (RTX-alignment 2026-07-10, "image not smooth") — borrowed
+  // pointer to the PostSoftenPass the graph owns (registered between
+  // TonemapPass and _ssaaPass), kept so RenderFrame can drive its
+  // EnsureTemp hook on the CPU frame path when
+  // RealTimeQuality::postSoftenSigma > 0. Same forward-declared-
+  // IRenderPass* + impl-side cast pattern as the pointers above.
+  class IRenderPass* _postSoftenPass = nullptr;
   // Borrowed pointer to the AutoExposurePass the graph owns — kept so RenderFrame
   // can thread its stats buffer into PassContext::autoExposureStats for
   // TonemapPass. Same forward-declared-IRenderPass* + impl-side cast pattern.

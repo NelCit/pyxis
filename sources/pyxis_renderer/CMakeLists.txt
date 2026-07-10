@@ -178,6 +178,12 @@ target_sources(pyxis_renderer PRIVATE
     # (PyxisRenderer.cpp).
     Private/Passes/TaaPass.h
     Private/Passes/TaaPass.cpp
+    # RTX-alignment 2026-07-10 ("image not smooth") — PostSoftenPass,
+    # registered between TonemapPass and SsaaResolvePass (PyxisRenderer.cpp):
+    # optional display-space Gaussian matching the ovrtx DLSS output
+    # character; sigma 0 (default) disables it entirely.
+    Private/Passes/PostSoftenPass.h
+    Private/Passes/PostSoftenPass.cpp
     Private/Passes/SsaaResolvePass.h
     Private/Passes/SsaaResolvePass.cpp
     Private/Passes/BlitToSrgbPass.h
@@ -944,6 +950,17 @@ pyxis_compile_slang_shader(
     ENTRY_POINT main
     STAGE       compute
     OUTPUT      ssaa_resolve.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP}
+)
+# PostSoften (RTX-alignment 2026-07-10, "image not smooth"): optional
+# display-space Gaussian on the post-tonemap display color, gated on
+# RealTimeQuality::postSoftenSigma > 0 (default 0 = pass disabled).
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/post_soften.slang
+    ENTRY_POINT main
+    STAGE       compute
+    OUTPUT      post_soften.spv
     INCLUDES    ${PYXIS_SHADER_INTEROP}
 )
 # Viewer present blit (compute): linear -> sRGB OETF into the present target.

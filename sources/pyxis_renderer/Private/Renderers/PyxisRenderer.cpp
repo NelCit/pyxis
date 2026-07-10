@@ -18,6 +18,7 @@
 #include "Passes/DirectLightingPass.h"
 #include "Passes/DlssPass.h"
 #include "Passes/IndirectDiffusePass.h"
+#include "Passes/PostSoftenPass.h"
 #include "Passes/RaytracedGBufferPass.h"
 #include "Passes/ReflectionsPass.h"
 #include "Passes/SharcResolvePass.h"
@@ -307,6 +308,17 @@ PyxisRenderer::PyxisRenderer(nvrhi::IDevice* device, GpuScene& scene, Profiler& 
   // writes (threaded via PassContext::linearColor) + the raw AOVs; writes the
   // BGRA8 display target (targets.color). No-ops when either texture is unbound.
   _graph->AddPass(std::make_unique<TonemapPass>(device, scene));
+  // PostSoften runs next (RTX-alignment 2026-07-10, "image not smooth"):
+  // a small display-space Gaussian on the post-tonemap display color,
+  // gated on RealTimeQuality::postSoftenSigma > 0 (default 0 — pass fully
+  // disabled, byte-identical output). ovrtx has NO such pass — its output
+  // softness comes from DLSS; this is the measured stand-in for that
+  // character on the builtin path (see post_soften.slang's file header
+  // for the numbers). When the effective denoiser is Dlss, leave sigma
+  // at 0 — DLSS's own band-limiting already provides the softness.
+  auto postSoften = std::make_unique<PostSoftenPass>(device);
+  _postSoftenPass = postSoften.get();
+  _graph->AddPass(std::move(postSoften));
   // SSAA resolve runs next: it box-downsamples the super-res LINEAR color AOV into
   // a base-res LINEAR intermediate (it owns the texture; RenderFrame threads it via
   // PassContext::colorLinearResolved). No-ops at ssaaFactor < 2.
@@ -321,8 +333,8 @@ PyxisRenderer::PyxisRenderer(nvrhi::IDevice* device, GpuScene& scene, Profiler& 
   Logging::Get().Info(log::RENDER,
                       "PyxisRenderer: initialised (RaytracedGBuffer + 5 signal passes + "
                       "5-pass denoiser chain (Shadow/Temporal/HistoryFix/Atrous/Ao) + Composite + "
-                      "Accumulation + Dlss + AutoExposure + Taa + Tonemap + SsaaResolve + "
-                      "BlitToSrgb registered)");
+                      "Accumulation + Dlss + AutoExposure + Taa + Tonemap + PostSoften + "
+                      "SsaaResolve + BlitToSrgb registered)");
 
 #ifdef PYXIS_WITH_NRD
   // OPTIONAL NRD backend (PYXIS_WITH_NRD=ON builds only — see
@@ -805,6 +817,16 @@ void PyxisRenderer::RenderFrame(nvrhi::ICommandList* commandList, const RenderSe
     const uint32_t baseHeight = effectiveSettings.height / effectiveSettings.ssaaFactor;
     context.colorLinearResolved =
         static_cast<SsaaResolvePass*>(_ssaaPass)->EnsureLinearOutput(baseWidth, baseHeight);
+  }
+  // PostSoften temp (re)allocation on the CPU frame path (never inside
+  // Execute, §30.10) — same-format/same-size mirror of the display color
+  // it blurs. Only when the pass will actually run this frame (sigma > 0).
+  if (_postSoftenPass != nullptr && targets.color != nullptr
+      && effectiveSettings.realTimeQuality.postSoftenSigma > 0.01f) {
+    const nvrhi::TextureDesc& postSoftenColorDesc = targets.color->getDesc();
+    static_cast<PostSoftenPass*>(_postSoftenPass)
+        ->EnsureTemp(postSoftenColorDesc.width, postSoftenColorDesc.height,
+                     postSoftenColorDesc.format);
   }
 
   const Profiler::CpuScope frameScope(*_profiler, "render.frame.cpu");

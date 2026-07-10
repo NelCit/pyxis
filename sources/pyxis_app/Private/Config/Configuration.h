@@ -129,6 +129,13 @@ struct RenderConfig {
     // already default OFF).
     uint32_t denoiser = 0u;        // 0=dlss, 1=builtin, 2=off
     uint32_t dlssExecMode = 0u;    // 0=auto,1=quality,2=balanced,3=performance,4=dlaa
+
+    // RTX-alignment 2026-07-10 ("image not smooth") — mirrors
+    // pyxis::RenderSettings::RealTimeQuality::postSoftenSigma 1:1: optional
+    // post-tonemap display-space Gaussian sigma in PIXELS. 0 (default)
+    // disables the pass entirely (byte-identical output); the
+    // ovrtx-alignment profile sets 0.5 (measured — see RenderSettings.h).
+    float postSoftenSigma = 0.0f;
   } realTimeQuality;
 
   // M3+ extensions: maxBounces, enableAccumulation, toneMap,

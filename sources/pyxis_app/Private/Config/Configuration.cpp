@@ -233,6 +233,11 @@ std::expected<void, std::string> OverlayConfiguration(Configuration& target,
       if (failure.empty())
         failure = ReadDlssExecModeField(*rtq, "dlssExecMode",
                                         target.render.realTimeQuality.dlssExecMode);
+      // RTX-alignment 2026-07-10 ("image not smooth") — optional post-tonemap
+      // Gaussian sigma in pixels; 0 (default) disables the pass entirely.
+      if (failure.empty())
+        failure = ReadField(*rtq, "postSoftenSigma",
+                            target.render.realTimeQuality.postSoftenSigma);
     }
   }
   if (auto output = document.find("output"); output != document.end() && output->is_object())
@@ -541,6 +546,8 @@ std::expected<void, std::string> WriteEffectiveConfig(const Configuration& confi
       DenoiserToString(config.render.realTimeQuality.denoiser);
   document["render"]["realTimeQuality"]["dlssExecMode"] =
       DlssExecModeToString(config.render.realTimeQuality.dlssExecMode);
+  document["render"]["realTimeQuality"]["postSoftenSigma"] =
+      config.render.realTimeQuality.postSoftenSigma;
   document["output"]["image"] = config.output.image;
   document["output"]["ldr"] = config.output.ldr;
   document["output"]["effectiveConfig"] = config.output.effectiveConfig;

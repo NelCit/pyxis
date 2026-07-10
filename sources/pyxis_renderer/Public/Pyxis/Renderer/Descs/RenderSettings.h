@@ -282,11 +282,23 @@ struct RenderSettings {
     // (Streamline hookup) lands.
     uint32_t dlssExecMode = DLSS_EXEC_MODE_AUTO;
 
+    // Post-tonemap image softening, in Gaussian sigma PIXELS (RTX-alignment
+    // 2026-07-10, "image not smooth" — ovrtx-output-character match).
+    // ovrtx's reference output is DLSS-processed and measurably softer than
+    // Pyxis's raw-sharp converged frames at the texture-detail frequency
+    // band; a small display-space Gaussian reproduces that character
+    // (measured, World Lobby vs ovrtx RT-wide: sigma 0.5 takes whole-frame
+    // honest-sRGB RMSE 0.08240 -> 0.07956 AND lands the wall high-frequency
+    // stat at 0.0925 vs ovrtx's 0.0959, from 0.1051 unsoftened). 0 (the
+    // default) disables the pass entirely — byte-identical output, goldens
+    // untouched; the ovrtx-alignment profile sets 0.5. Consumes one
+    // _reserved slot per §22.3 (additive MINOR).
+    float postSoftenSigma = 0.0f;
     // §22.3 reserved tail — the NEXT growth here (Stage 2's two-resolution
-    // pipeline knobs, if they fit in 16 bytes) spends this instead of
+    // pipeline knobs, if they fit in 12 bytes) spends this instead of
     // another MAJOR bump.
     // NOLINTNEXTLINE(readability-identifier-naming)
-    uint32_t _reserved[4]{};
+    uint32_t _reserved[3]{};
   } realTimeQuality;
 
   // RTX-alignment design (rtx-realtime-alignment-design.md), Phase C —

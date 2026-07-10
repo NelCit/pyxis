@@ -1114,6 +1114,10 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
       // up (mirrors the rest of the Real-Time Quality flow).
       settings.realTimeQuality.denoiser = config.render.realTimeQuality.denoiser;
       settings.realTimeQuality.dlssExecMode = config.render.realTimeQuality.dlssExecMode;
+      // RTX-alignment 2026-07-10 ("image not smooth") — optional post-tonemap
+      // Gaussian; config-only (no editor knob yet), default 0 = disabled.
+      settings.realTimeQuality.postSoftenSigma =
+          config.render.realTimeQuality.postSoftenSigma;
       settings.exposureMode = config.render.exposureMode;
       settings.exposureResponsivity = config.render.exposureResponsivity;
       // Push the AOV inspector state into the renderer. The ImGui
@@ -1141,6 +1145,11 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
         // tonemap operator + physical-camera fStop/iso/exposureTime fields
         // to GetRealTimeQuality()'s composed result — see ImGuiHost.h).
         settings.realTimeQuality = imguiHost.GetRealTimeQuality();
+        // postSoftenSigma has no editor knob yet — GetRealTimeQuality()
+        // composes only the editor-backed fields (its default would stomp
+        // the config seed to 0), so re-apply the config value.
+        settings.realTimeQuality.postSoftenSigma =
+            config.render.realTimeQuality.postSoftenSigma;
       }
       // Picker pixel: pinned takes the latched normalised UV
       // (renormalised against the current AOV size each frame so a

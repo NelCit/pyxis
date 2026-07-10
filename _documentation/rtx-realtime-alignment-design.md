@@ -1305,3 +1305,38 @@ id7 −X −0.25 over 3.4k px ≈ ≤0.0005 MSE total) and orientation-content-s
 reflection on undersides; interior reflection content on iron) — parked with data.
 
 STATUS: builtin baseline stands at 0.08240 (64ac447), every identified lever measured.
+
+## Session 2026-07-11 — PostSoftenPass: DLSS-character softening, NEW BEST 0.07958
+
+Owner's #1 complaint after the 0.08240 review: "the biggest problem is that my image is not
+smooth." Root cause is a CHARACTER gap, not an error gap: ovrtx's reference PNG is
+DLSS-processed (band-limited); pyx's 96-frame converged output is raw-sharp at the
+texture-detail frequency band (wall HF stat 0.1051 vs ovrtx 0.0959).
+
+**Why not the real ovrtx softener (owner asked):** ovrtx has NO dedicated soften pass — the
+softness IS DLSS. Our DLSS integration exists (Streamline + NGX, DlssPass) and was
+characterised 2026-07-08: DLAA fixes the grain (lw_hf 0.160→0.088) but DLSS-SR in HDR mode
+does its own tone-handling on the World Lobby's 0–12000 linear range → ~0.10 mean brightness
+error, whole-frame RMSE ~0.40 vs builtin 0.097 — a real-time few-sample AA feature, not a
+converged-offline lever. DLSS-RR (what ovrtx actually runs, and the variant that would
+denoise+soften correctly) remains driver/SDK-blocked (needs model 703). So the honest
+reachable stand-in is a measured display-space Gaussian with DLSS's band-limiting character.
+
+**Implementation (v6.2.0, additive MINOR):** `RealTimeQuality::postSoftenSigma` (consumes a
+_reserved slot, default 0.0 = pass fully disabled → byte-identical, goldens untouched).
+`PostSoftenPass` between Tonemap and SsaaResolve: radius-2 Gaussian (CPU-normalized 1D
+weights, w2 derived in-shader from the 5-tap identity), blur into an owned same-format temp,
+copyTexture back over targets->color. One shader (post_soften.slang), single Set-0 layout
+(SRV/UAV/volatile-CB), zero allocations in Execute (EnsureTemp on the CPU frame path).
+Config: render.realTimeQuality.postSoftenSigma (Configuration → Headless + Viewer seeds; the
+viewer re-applies after the ImGui override since there is no editor knob yet).
+
+**The blur must run in sRGB-ENCODED space** (encode taps → average → decode): the tuning
+measurement and the reference PNG live in the final sRGB image. Measured in-engine at σ0.5:
+display-linear blur 0.08095 (id6 metal REGRESS +0.00011 — bright pixels over-weighted
+through the encode); sRGB-space blur **0.07958** = the numpy prediction (0.07956) within
+0.00002, and EVERY per-material row flat-or-better vs base.
+
+**Result: 0.08240 → 0.07958 (−3.4%), new campaign best.** Wall HF lands at ~ovrtx's 0.0959.
+Baseline artifacts repinned: base.exr := soften05.exr, base_config.json += postSoftenSigma
+0.5. Campaign total: 0.15959 → 0.07958 (−50.1%).
