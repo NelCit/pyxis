@@ -1280,3 +1280,28 @@ NVIDIA-NRD path is COMPLETE for its purpose: ovrtx's own denoiser class, licensi
 (fetch-not-vendor), opt-in, honest ladder, byte-neutral default. Remaining NRD follow-ups
 (low priority): SIGMA_SHADOW wiring for the direct channel, diffuse hitDist signal, moving-
 camera validation (where NRD's temporal machinery actually differentiates).
+
+## METAL THREAD CLOSED — the "wrong diffuse fill" is the conductor ambient (2026-07-10)
+
+Round 2 of the paired metal fix ((1−M) diffuse legs + damping removal) was re-applied and
+measured FACING-RESOLVED (normal-octant classification per material vs ovrtx):
+
+  id6 mullion  −X(interior) n=18.5k: base −0.039 ✓ → fix −0.190 ✗✗ (collapse)
+               −Y(underside) n=2.2k: +0.190 both (untouched by the fix)
+               +Z            n=21k : base +0.059 → fix +0.086
+  id7 iron     −X n=3.4k: −0.245 → −0.263 (bad both)   −Z n=24.7k: −0.074 → −0.056
+  id5 gold     +Z n=8.2k: +0.041 → +0.007 ✓ (the one clean win)
+
+**DEFINITIVE UNDERSTANDING (upgrade from "mysterious compensation"):** for a CONDUCTOR,
+the composite's `indirectDiffuse × gAlbedo.rgb` leg is NOT an incorrect diffuse term —
+since gAlbedo.rgb = baseColor = F0 for metals, that product IS the canonical wide-lobe
+conductor environment approximation (irradiance × F0 ≈ split-sum ambient for rough metal).
+ovrtx's interior-facing mullions glow at luma 0.70 from exactly this term. Applying (1−M)
+deletes real physics; three measured configurations (B alone +0.0086, A pair +0.0020,
+round-2 confirmation) all net-regress. DO NOT re-attempt (1−M) on the composite without
+REPLACING the term by an explicit EnvBRDF(F0,r,NdotV)×irradiance — which it already
+approximates. Remaining true per-face tails are small (id6 −Y underside +0.19 over 2.2k px,
+id7 −X −0.25 over 3.4k px ≈ ≤0.0005 MSE total) and orientation-content-specific (floor
+reflection on undersides; interior reflection content on iron) — parked with data.
+
+STATUS: builtin baseline stands at 0.08240 (64ac447), every identified lever measured.
