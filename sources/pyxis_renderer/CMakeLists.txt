@@ -953,3 +953,21 @@ pyxis_compile_slang_shader(
     STAGE       compute
     OUTPUT      blit_to_srgb.spv
 )
+
+# OPTIONAL NRD denoiser backend, Stage 2 (RTX-alignment 2026-07-10) —
+# NrdProvider's own G-buffer -> NRD-input-encoding pack pre-pass
+# (nrd_pack.slang's PackMain, dispatched by NrdProvider::DispatchPack
+# immediately before the RELAX_DIFFUSE_SPECULAR dispatch chain). Compiled
+# only when PYXIS_WITH_NRD=ON, matching NrdProvider.h/.cpp's own
+# target_sources gating above — both are absent from the target entirely
+# when the option is OFF.
+if(PYXIS_WITH_NRD)
+    pyxis_compile_slang_shader(
+        TARGET      pyxis_renderer
+        SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/nrd_pack.slang
+        ENTRY_POINT PackMain
+        STAGE       compute
+        OUTPUT      nrd_pack.spv
+        INCLUDES    ${PYXIS_SHADER_INTEROP}
+    )
+endif()

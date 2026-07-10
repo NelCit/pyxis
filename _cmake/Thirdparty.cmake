@@ -125,6 +125,25 @@ function(pyxis_thirdparty_setup)
         set(NRD_EMBEDS_SPIRV_SHADERS  ON  CACHE BOOL "" FORCE)
         set(NRD_EMBEDS_DXIL_SHADERS   OFF CACHE BOOL "" FORCE)
         set(NRD_EMBEDS_DXBC_SHADERS   OFF CACHE BOOL "" FORCE)
+        # NRD Stage 2 (RTX-alignment 2026-07-10) — normal/roughness encoding.
+        # NRD's own CMakeLists.txt default is "2" (nrd::NormalEncoding::
+        # R10_G10_B10_A2_UNORM, oct-packed + 2-bit materialID). Pyxis's
+        # G-buffer (raytraced_gbuffer.slang's gNormalRoughness) is a plain
+        # RGBA16F world-space normal + linear roughness with no materialID
+        # channel to spare, so "3" (nrd::NormalEncoding::RGBA16_UNORM — see
+        # nrd-src/Include/NRDSettings.h's enum) avoids the oct-packing /
+        # 2-bit-materialID math entirely: a "best fit" unorm-packed normal
+        # (nrd_pack.slang's PackBestFitNormal) is enough. Set with FORCE
+        # BEFORE FetchContent_MakeAvailable(nrd) below runs NRD's own
+        # CMakeLists.txt — a FORCE'd cache write always wins; NRD's own
+        # subsequent non-FORCE `set(... CACHE STRING ...)` for the same
+        # variable is then a no-op (CMake only seeds a cache variable that
+        # doesn't already exist), same mechanism NRD_STATIC_LIBRARY etc.
+        # above already rely on. See NrdProvider.cpp's ResizePackedTextures()
+        # for the runtime double-check against nrd::GetLibraryDesc() (in
+        # case a build directory configured before this override existed
+        # left the cache at NRD's old default and was never reconfigured).
+        set(NRD_NORMAL_ENCODING       "3" CACHE STRING "" FORCE)
         # SPIRV-only: NRD's bundled ShaderMake must not REQUIRE the D3D FXC
         # compiler (its Windows-SDK probe hard-fails on SDKs without
         # bin/<ver>/x64/fxc.exe); DXC (downloaded by ShaderMake itself) is
