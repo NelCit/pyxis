@@ -1340,3 +1340,56 @@ through the encode); sRGB-space blur **0.07958** = the numpy prediction (0.07956
 **Result: 0.08240 → 0.07958 (−3.4%), new campaign best.** Wall HF lands at ~ovrtx's 0.0959.
 Baseline artifacts repinned: base.exr := soften05.exr, base_config.json += postSoftenSigma
 0.5. Campaign total: 0.15959 → 0.07958 (−50.1%).
+
+## Session 2026-07-11 (cont.) — DLSS-RR UNBLOCKED; converged-RR verdict measured
+
+Owner: "use all ovrtx pipeline/algorithms available; if DLSS-RR blocked, let's see why."
+
+**WHY IT WAS BLOCKED (now resolved):** the 07-06 block was a snippet↔model version
+mismatch, not a hard driver limitation. Driver 610.62 provisions NGX dlssd models for
+snippet versions 310.2.1/310.3.0/310.5.2/310.6.0 (NGX cache dirs 20316673/20316928/
+20317442/20317696 — hex-encoded versions; ALL contain 160_E658700.bin), but Streamline
+2.12's nvngx_dlssd.dll is 310.7 and demands 160_E658703 (absent, OTA has nothing). The
+2.11.1 SDK staged into bin/Release at the tail of the 07-06 session (never re-probed)
+ships nvngx_dlssd.dll 310.6.0 = exact match for the cached model. Probe: slIsFeatureSupported
+(kFeatureDLSS_RR) OK; "Created DLSSDContext feature (853,480)->(1280,720)"; RR evaluates
+end-to-end, fully offline. GENERAL RULE FOR FUTURE BLOCKS: match the snippet DLL version
+to a hex-decoded NGX models/dlssd/versions/ dir — the driver/OTA model set trails the
+newest public SDK snippet.
+
+**First TRUE-RR converged numbers** (all prior "RR" data was the SR+builtin ladder —
+RR never actually ran on this box before today):
+  RR quality + accumulation   0.09294   (broad +0.02..+0.10 luma inflation)
+  RR quality, no accumulation 0.09365   (passMask 767 — double-temporal ruled out)
+  RR quality + pre-exposure   0.09289   (wash)
+vs builtin+postSoften 0.07958 / NRD 0.08949. **Scale-invariance proven:** pre-exposing
+input by ComputeEffectiveExposureScale (~3.5e-4 at ev-0.85 — a ~3000x input change)
+leaves the output within run-to-run noise → RR's internal normalization removes global
+scale; its luma inflation is converged tonal CHARACTER, not an exposure-level error and
+not fixable by any input scaling. VERDICT: RR = real-time few-sample viewer feature
+(now fully working for that purpose); the converged-offline champion remains
+builtin+postSoften. Pre-exposure (dlss_expose.slang, scale→evaluate→inverse, failure
+undo) kept: guide-correct exposed-input convention, protects moving-camera use.
+
+**ovrtx algorithm-adoption scoreboard (owner directive):** SHARC clean-room ✓ (in 3
+signal paths), NRD optional ✓ (0.08949), DLSS SR ✓ / DLAA ✓ / RR ✓ (all live), TAA ✓,
+RIS direct ✓, physical-camera exposure ✓, ACES-approx tonemap ✓ (proven exact vs ovrtx).
+Not adopted, ranked by expected value: SVGF variance moments (replaces the diffuse
+phi=inf patch — real candidate), RTXDI/ReSTIR-DI (large integration; our RIS direct is
+the lite version; converged benefit doubtful — unbiased either way at convergence),
+NRC (binary-DLL licensing OK but converged benefit doubtful vs SHARC), OMM (blocked:
+RTXMU has no OMM support, §16).
+
+**RR research addendum (web sweep, 2026-07-11):** the missing model 703 is not published
+ANYWHERE — the public NGX OTA bucket (https://ngx.download.nvidia.com/, unauthenticated
+S3 listing, verified live) contains ONLY 160_E658700.bin under dlssd across all channels
+including NVIDIA's own dev-models staging tree. NVIDIA has announced the 2nd-generation
+DLSS 4.5 Ray Reconstruction transformer for **August 2026** (via NVIDIA App DLSS
+Override) — the SL 2.12 snippet (310.7) shipped ahead of its own model rollout. So the
+310.6.0 pin is not a workaround; it is the only correct configuration until then.
+Streamline 2.12.0 is still the latest (repo renamed NVIDIA-RTX/Streamline); driver
+610.74 (2026-07-07) exists but the OTA check says it can't help. RE-CHECK METHOD when
+August comes: re-browse the OTA bucket for dlssd/160_E658703.bin (or just retry
+slIsFeatureSupported with the 2.12 snippet) — don't guess by driver version. Trivia
+that explains the DLL-size cliff: snippets ≤310.3 embed model weights (~73 MB), 310.4+
+load the external NGX-provisioned .bin (~28 MB).
