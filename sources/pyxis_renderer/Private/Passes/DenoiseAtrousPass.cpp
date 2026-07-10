@@ -239,7 +239,28 @@ void DenoiseAtrousPass::Execute(nvrhi::ICommandList* commandList, const PassCont
     params.destWidth = width;
     params.destHeight = height;
     params.stepSize = STEP_SIZES[iteration];
-    params.diffPhiLuminance = 2.0f;   // NRD default target.
+    // Diffuse luminance edge-stop DISABLED (phi -> inf; RTX-alignment
+    // 2026-07-08, "wall speckle" root-cause). The diffuse channel is the
+    // DEMODULATED indirect-diffuse GI — its legit content is smooth lighting
+    // (texture detail is re-modulated later in composite), and its noise
+    // spikes are huge (dome-NEE through windows: hundreds of units), so a
+    // fixed phi behaves binary: any usable phi (2..8) leaves every spike a
+    // preserved "edge" (exp(-100/phi) ~ 0 either way) that survives all 5
+    // iterations AND 96-frame accumulation as deterministic salt-and-pepper
+    // speckle — the user-visible "dirty walls" vs ovrtx. ReLAX solves this
+    // with variance-guided phi (phi*sqrt(var) -> huge on noisy pixels,
+    // tiny on converged ones); without a variance estimate (this chain's
+    // documented SVGF simplification), phi=inf IS the high-variance limit,
+    // and the normal/viewZ/materialId stops still do all the edge
+    // preservation that matters for demodulated lighting. Measured (World
+    // Lobby vs ovrtx RT, honest sRGB): whole-frame 0.08986 -> 0.08684
+    // (-3.4%), walls id23 MSE -37%, ZERO per-material regressions; wall
+    // speckle HF 0.114 -> 0.104 (ovrtx 0.096). The specular channel KEEPS
+    // its tight NRD phi: on flat mirrors (glass floor) normal/depth/matId
+    // are constant, so the luminance stop is the only weight preserving
+    // reflected-CONTENT edges — phi=inf there measured flat on RMSE but
+    // blurs the mirror image (perceptually worse; user-reported area).
+    params.diffPhiLuminance = 1.0e6f;
     params.specPhiLuminance = 1.0f;   // NRD default target.
     params._pad0 = 0u;
     params._pad1 = 0u;
