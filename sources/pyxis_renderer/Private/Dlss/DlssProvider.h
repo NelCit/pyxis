@@ -208,6 +208,14 @@ class DlssProvider final {
     TaggedImage depth;
     // renderRes, kBufferTypeMotionVectors (gMotionVector, pixel-space).
     TaggedImage mvec;
+    // 1x1 kBufferTypeExposure — the display exposure gain
+    // (ComputeEffectiveExposureScale, ExposureMath.h) so DLSS uses PYX's own
+    // exposure instead of its internal auto-exposure estimate (which diverged
+    // on the World Lobby's 12000-nit dome and over-brightened the frame ~1.5x).
+    // Null image => Evaluate falls back to useAutoExposure (the pre-2026-07-08
+    // behaviour) so the pass still runs if the exposure texture failed to
+    // create.
+    TaggedImage exposure;
     void* vkCommandBuffer = nullptr;  // VkCommandBuffer
   };
 

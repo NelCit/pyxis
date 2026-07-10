@@ -5,6 +5,7 @@
 
 #include "Dlss/DlssProvider.h"
 #include "Passes/CameraJitter.h"
+#include "Passes/ExposureMath.h"
 #include "Passes/SceneBindings.h"
 #include "RenderGraph/PassContext.h"
 #include "RenderGraph/ShaderLoad.h"
@@ -94,6 +95,23 @@ nvrhi::TextureHandle MakeDisplayOutput(nvrhi::IDevice* device, uint32_t width, u
   desc.isUAV = true;
   desc.isShaderResource = true;
   desc.debugName = "Dlss.Output";
+  desc.initialState = nvrhi::ResourceStates::UnorderedAccess;
+  desc.keepInitialState = true;
+  return device->createTexture(desc);
+}
+
+// 1x1 R32F exposure buffer (kBufferTypeExposure). UAV + shader-resource so
+// ToTaggedImage's GENERAL-layout report is valid; written each frame via
+// commandList->writeTexture.
+nvrhi::TextureHandle MakeExposureTexture(nvrhi::IDevice* device) {
+  nvrhi::TextureDesc desc;
+  desc.width = 1;
+  desc.height = 1;
+  desc.format = nvrhi::Format::R32_FLOAT;
+  desc.dimension = nvrhi::TextureDimension::Texture2D;
+  desc.isUAV = true;
+  desc.isShaderResource = true;
+  desc.debugName = "Dlss.Exposure";
   desc.initialState = nvrhi::ResourceStates::UnorderedAccess;
   desc.keepInitialState = true;
   return device->createTexture(desc);
@@ -190,6 +208,12 @@ DlssPass::DlssPass(nvrhi::IDevice* device, DlssProvider& dlssProvider, GpuScene&
     log.Error(log::RENDER, "DlssPass: createBuffer(depthConvertParams) failed");
     return;
   }
+
+  // 1x1 exposure buffer (kBufferTypeExposure). Non-fatal on failure — Evaluate
+  // falls back to DLSS auto-exposure when inputs.exposure has a null image.
+  _exposureTexture = MakeExposureTexture(_device);
+  if (!_exposureTexture)
+    log.Error(log::RENDER, "DlssPass: createTexture(Exposure) failed — DLSS falls back to auto-exposure");
 
   _depthConvertReady = true;
   log.Info(log::RENDER, "DlssPass: initialised (depth-conversion compute pipeline ready)");
@@ -313,8 +337,17 @@ void DlssPass::Execute(nvrhi::ICommandList* commandList, const PassContext& cont
   nvrhi::ITexture* const specularAlbedo = context.gSpecularAlbedo;
   nvrhi::ITexture* const normalRoughness = context.gNormalRoughness;
   nvrhi::ITexture* const specularHitDistance = context.gReflections;
-  const bool useRR = _dlssProvider->IsRRUsable() && albedo != nullptr && specularAlbedo != nullptr
-                    && normalRoughness != nullptr && specularHitDistance != nullptr;
+  // DLAA (dlssExecMode == 4) is the DLSS-SR feature's native-resolution AA
+  // mode — route it through the SR path (Evaluate), NOT Ray Reconstruction.
+  // RR is a distinct denoiser-replacing feature; the user asked for DLAA, and
+  // only the SR path carries the kBufferTypeExposure buffer the SR options
+  // consume (RTX-alignment 2026-07-08). RR stays the default for the upscaling
+  // modes (Auto/Quality/…) where it's the intended path.
+  const bool wantDlaa =
+      context.settings->realTimeQuality.dlssExecMode == DLSS_EXEC_MODE_DLAA;
+  const bool useRR = !wantDlaa && _dlssProvider->IsRRUsable() && albedo != nullptr
+                    && specularAlbedo != nullptr && normalRoughness != nullptr
+                    && specularHitDistance != nullptr;
 
   const nvrhi::TextureDesc& renderDesc = colorIn->getDesc();
   const nvrhi::TextureDesc& displayDesc = displayTarget->getDesc();
@@ -525,6 +558,34 @@ void DlssPass::Execute(nvrhi::ICommandList* commandList, const PassContext& cont
     inputs.colorOut = ToTaggedImage(output);
     inputs.depth = ToTaggedImage(dlssDepth);  // converted NDC depth, NOT raw gViewZ — see above.
     inputs.mvec = ToTaggedImage(mvec);
+    // Exposure buffer (kBufferTypeExposure): write the SAME display gain
+    // TonemapPass applies downstream (ComputeEffectiveExposureScale) into the
+    // 1x1 texture, so DLSS normalizes with PYX's exposure rather than its own
+    // auto-exposure estimate (which diverged on the 12000-nit dome and
+    // over-brightened ~1.5x). Not an allocation — the texture is ctor-made.
+    if (_exposureTexture)
+    {
+      // The SAME display gain TonemapPass applies downstream. NOTE (measured
+      // 2026-07-08): this correctly turns off DLSS's own auto-exposure but only
+      // WEAKLY counters the DLAA path's residual over-brightening — DLSS-SR in
+      // HDR mode does its own tone handling on the World Lobby's 0-12000 linear
+      // range (out of its trained input domain), leaving the frame ~0.10 mean
+      // too bright regardless of this value. Fully matching would need feeding
+      // DLSS pre-exposed (display-range) color, a deeper pipeline change
+      // tracked as debt; DLSS/DLAA does not improve the CONVERGED offline
+      // metric anyway (it's a real-time/few-sample AA feature).
+      const float exposureGain =
+          ComputeEffectiveExposureScale(*context.settings, camera);
+      commandList->setTextureState(_exposureTexture, nvrhi::AllSubresources,
+                                   nvrhi::ResourceStates::CopyDest);
+      commandList->commitBarriers();
+      commandList->writeTexture(_exposureTexture, /*arraySlice*/ 0, /*mipLevel*/ 0,
+                                &exposureGain, /*rowPitch*/ sizeof(float), /*depthPitch*/ 0);
+      commandList->setTextureState(_exposureTexture, nvrhi::AllSubresources,
+                                   nvrhi::ResourceStates::UnorderedAccess);
+      commandList->commitBarriers();
+      inputs.exposure = ToTaggedImage(_exposureTexture);
+    }
     inputs.vkCommandBuffer = commandList->getNativeObject(nvrhi::ObjectTypes::VK_CommandBuffer);
     evaluateOk = _dlssProvider->Evaluate(inputs);
   }

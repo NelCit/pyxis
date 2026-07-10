@@ -899,3 +899,143 @@ re-tuned for the added reflected-sky energy (−0.70 → −1.00) whole-frame 0.
 transmission −0.046 (now #1), and glossy/metal surfaces reflecting the full bright
 dome now slightly over-bright (id40 satin +0.098, id38 metal-feet +0.538 blown — the
 approximation lacks the mullion breakup ovrtx's real reflected window has).
+## Session 2026-07-08 — SHARC-complete, tonemap-is-perfect, grain root-cause, DLAA characterised
+
+Baseline confirmed **0.09713** (honest sRGB, rank.py) at ev **−0.70**, passMask 895
+(SHARC on), builtin denoiser, 96 frames. NOTE the correct baseline is ev **−0.70**, not
+the −1.00 in the stale sharc_best.json — a 0.30-stop mismatch that alone reads as
+0.125. Pinned as scratchpad/base.exr + base_config.json.
+
+**SHARC "full" = tier-1 (trilinear + finer grid), already shipped (f5576b5).** Tier-2
+(SH-L1 directional radiance encoding: accum/resolved widened to 32 B/cell, luma-weighted
+direction moment, reconstruct L = DC·(1 + w·(shDir·d)/DC_luma)) was implemented end-to-end
+and **measured 0.396 — catastrophically worse**, then reverted. ROOT CAUSE (a real design
+truth, not a tuning miss): the SHARC cache stores **view-independent diffuse** outgoing
+radiance, populated from the single primary-camera view direction. A directional moment
+therefore captures the *population* direction, not a genuine radiance directional
+variation; re-projecting it onto a *different* reflection query direction over-brightens
+up to 2× (dcAvg·(1+w·1)). Directional SH is fundamentally inappropriate for a diffuse
+radiance cache. **Do not retry SH on this cache.**
+
+**THE TONEMAP IS PERFECT — the entire gap is HDR light-transport.** tonemap_fit/
+shape_diagnostic.py: sRGB(ACES_Narkowicz(h_ovrtx)) reproduces ovrtx's own LDR reference at
+**RMSE 0.00114** at gain=1.0, with per-tone bias ~0 across all 10 luma deciles. Pyxis's
+operator 6 == Narkowicz ACES == exactly ovrtx's curve. So every remaining 0.097 of error is
+in the per-pixel HDR radiance (GI/materials/reflections), NOT in exposure/tonemap shape.
+Corollary: chasing tonemap operators or global exposure curves is wasted effort.
+
+**Grain (user issue #1) root-caused = albedo TEXTURE detail, not MC noise, not normal-map,
+not texture-LOD aniso.** In correct sRGB space the wall HF-speckle gap is modest (pyx bw_hf
+0.098 vs ovrtx 0.084; lw_hf 0.160 vs 0.144) — the raw-ACES forensics crops exaggerated it
+by comparing raw-ACES-pyx vs sRGB-ovrtx (mismatched spaces). The à-trous denoiser smooths
+the *lighting*, but composite re-modulates by the **sharp albedo texture** afterward, so the
+final grain is the albedo map's own high-frequency content, which ovrtx's DLSS softens. PROOF
+IT'S FIXABLE-BY-SOFTENING: a σ≈0.6 gaussian on the final image drops RMSE 0.09713 → **0.09158
+(−5.7%)** (σ sweep peak; σ>1.0 over-blurs and regresses). This is the DLSS-character gap the
+user asked to close.
+
+**Anisotropic sampler (maxAnisotropy 1→16 on bindlessSampler) — REVERTED.** Hypothesis was
+that SampleGrad silently collapsed to isotropic. Measured: did NOT reduce the wall speckle
+(bw_hf 0.098→0.103) and brightened the frame (mean 0.485→0.524, RMSE 0.097→0.104). The grain
+is not grazing-aniso aliasing. Reverted.
+
+**DLAA (user request) — RUNS headless (NOT a hang) and FIXES the grain, but auto-exposure
+brightens 1.5×.** The prior "hang" was just slowness: full-res DLAA is ~seconds/frame, so 96
+frames exceeded a 260 s timeout; full-res **8 frames completes fine**, low-res smoke completes.
+At native ev−0.70 DLAA gives lw_hf 0.160→**0.088** (grain gone, below ovrtx) but mean
+**0.641** vs 0.485 — a fixed ~1.5× linear brightening independent of frame count and of TAA
+(passMask 831). Forcing a lower exposure (ev−1.5) rebalances the mean (0.470) but STARVES the
+DLSS input and explodes structure (bw_hf 0.277, RMSE 0.44) — so exposure-compensation is the
+wrong fix. ROOT CAUSE: DlssProviderFrame.cpp:224 sets `useAutoExposure = eTrue` (v1 never
+tagged kBufferTypeExposure), so DLSS runs its own exposure estimate, diverging from pyx's
+manual −0.70. CORRECT FIX (scoped, not yet done): tag a 1×1 kBufferTypeExposure texture with
+pyx's exposure gain (ExposureMath.h) + set `useAutoExposure = eFalse` (+ maybe preExposure/
+exposureScale, sl_dlss.h:81-83); re-measure at native exposure. This is real multi-file
+integration, not a config tweak — deferred as the concrete next DLAA step.
+
+**Multi-sample GI (indirectSamples/directSamples 1→4) — biased.** Reduced leftwall noise but
+brightened the frame to mean 0.637 (RMSE 0.405). Dome-direct (÷sampleCount, line 151) and RIS
+(line 375) look normalized, so the bias is subtler (RIS reservoir behaviour) — a real but
+side-path bug; default 1-spp is the tuned path. Not pursued.
+
+**No ambient-fill term.** Subagent-confirmed: pyx has no analog to ovrtx's
+`rtx:sceneDb:ambientLightIntensity = 0.7`; the dome (intensity 12000, no texture) ingests
+1:1 with no scale, and composite applies AO onto the indirect term only (a contrast
+asymmetry). Untested lever for the too-dark interior materials.
+
+**Net:** baseline 0.09713 unchanged this session (all experiments regressed or reverted).
+Highest-confidence remaining levers, in order: (1) DLAA with the kBufferTypeExposure fix
+(closes the grain/DLSS-softening gap the user wants, worth ≈−5%); (2) per-material calibration
+of the mixed offsets (id40 satin +0.078, id3 concrete +0.069, id30 floor +0.044 too bright;
+id7 −0.091, id2 windows −0.048, id29 −0.039 too dark) — genuinely per-material, no single
+lever; (3) the ambient-fill / AO-on-direct asymmetry. Whole-frame <0.05 is unlikely for a
+different engine — the tonemap-perfect result proves the pipeline is correct and the residual
+is genuine cross-engine light-transport + DLSS-detail difference.
+
+## Session 2026-07-08 (cont.) — DLAA exposure integration + per-material verdict (owner: "do 1 and 2")
+
+**#1 DLAA — exposure buffer IMPLEMENTED + DLAA re-routed off RR (uncommitted working tree).**
+Root cause of the ~1.5x over-brightness was two-fold: (a) with `denoiser=dlss` the pass took
+the **Ray Reconstruction** path (`EvaluateRR`), not the SR/`Evaluate` path — RR is a distinct
+denoiser-replacing feature, NOT DLAA. Gated `useRR=false` when `dlssExecMode==DLSS_EXEC_MODE_DLAA`
+so DLAA (an SR-feature native-res mode) routes through `Evaluate` (DlssPass.cpp). (b) The SR path
+set `useAutoExposure=eTrue`. Added a 1x1 `kBufferTypeExposure` buffer (DlssPass creates it in the
+ctor, writes `ComputeEffectiveExposureScale` — the SAME gain TonemapPass uses — each frame via
+writeTexture; FrameInputs carries it; DlssProviderFrame tags it + sets `useAutoExposure=eFalse`
+when present). MEASURED (1920x1080, 24f, passMask 831): mean 0.641 (RR/auto-exp) → **0.591**
+(SR + exposure buffer). The buffer WORKS but only WEAKLY counters the residual: a 1.5x multiplier
+on the exposure value moved mean only 0.591→0.578, proving DLSS-SR in HDR mode does its OWN tone
+handling on the World Lobby's 0-12000 linear range (out of its trained input domain) that the
+exposure buffer can't fully undo. Kept the principled `exposureGain` (dropped the fudge factor).
+VERDICT: DLAA now runs + routes correctly + auto-exposure is off, but is still ~0.10 mean too
+bright and does NOT beat the converged builtin metric (RMSE ~0.40 vs 0.097) — as expected, DLSS
+is a real-time/few-sample AA feature, not a converged-offline lever. TRUE fix (debt): feed DLSS
+PRE-EXPOSED (display-range) color and move the TonemapPass exposure ahead of DLSS — a pipeline
+reorder, out of scope, and no metric payoff. RR path (Auto/Quality modes) unchanged.
+
+**#2 Per-material — analysed precisely in honest sRGB; NO clean low-risk lever (confirmed).**
+Corrected a stale belief: the DOOR (id6 Iron_Brushed) ALREADY matches ovrtx (pyx RGB
+0.461/0.459/0.444 vs ovrtx 0.417/0.451/0.403, R/B 1.039 vs 1.035) — the earlier "wrong door
+colour" was the raw-ACES-vs-sRGB crop artifact, not a real gap. The real top MSE offsets are all
+in the traced-reflection / transmission path: id2 windows −0.048 (non-blown glass edges dimmer;
+blown-sky fraction already matches 76.8% vs 76.4%), id30 floor +0.044, id40 Paint_Satin +0.078
+(NOT blown, uniform), id3 concrete +0.069. Since REFLECTION_TRACE_ROUGHNESS_CEILING was raised to
+0.6, id40 (rough ~0.4-0.5) and id30 (rough 0) BOTH trace (no dome-mip fallback to cheaply
+attenuate) — their over-brightness lives in the stochastic-GGX-VNDF + SHARC-reflection path the
+last several commits deliberately tuned, so there is no decoupled fix and any change risks
+regressing that work. id7 warm metal (0.482 neutral vs 0.582 warm) is a clean conductor-tint gap
+but tiny MSE (0.00024) and metals split opposite-sign (id5 gold +0.222) so no shared Fresnel fix.
+CONCLUSION (matches every prior session): the 0.097 residual is the entangled reflection
+dynamic-range tail; no single clean lever remains. Whole-frame <0.05 is not reachable for a
+distinct engine (tonemap-perfect proves the pipeline is correct). A real per-material campaign
+would be delicate per-surface reflection-model recalibration with regression risk to the tuned
+stochastic-GGX/SHARC state — recommend NOT doing it blind.
+
+## Session 2026-07-08 (cont.) — REFLECTIONS PASS THROUGH TRANSLUCENT (owner-identified equation bug): 0.09713 -> 0.09346
+
+Owner spotted the real root cause of the reflection artifacts (objects vanishing behind glass in
+reflections): "reflections don't pass on all translucent". CONFIRMED — reflections.slang
+ClosestHitMain, on ANY transmissive hit (transmissionWeight>0.5), returned
+`SampleDomeBackground(WorldRayDirection()) * transmissionColor * (1-R)` — it ASSUMED the only thing
+behind glass is the exterior sky. True for the curtain-wall windows, WRONG for any glass with
+geometry behind it (a plant behind a glass rail, objects behind a pane): they were replaced by the
+dome and disappeared in reflections. Compounding it, HitGroupDefault had NO any-hit at all, so
+alpha-cutout foliage also read as SOLID QUADS in reflections.
+FIX (per-material reflection campaign, the clean win): gave the primary reflection ray a
+transmissive-passthrough + alpha-test any-hit (reflections.slang AnyHitMain, mirrors the GI
+AnyHitMain): a reflection ray now IgnoreHit()s glass (accumulating tint x angle-dependent (1-R)
+Fresnel into ReflectionPayload.throughput via the per-face normal — preserving the grazing (1-R)
+dimming the old dome-shortcut had) and alpha-cutout texels, so the SAME TraceRay continues to the
+REAL geometry behind (ClosestHitMain) or the sky (MissMain). RayGen multiplies the traced color by
+throughput. Bounded by MAX_REFLECTION_TRANSMISSIVE_CONTINUATIONS=4; past-cap glass falls back to the
+old dome approximation. NO recursion increase (any-hit passthrough, maxRecursionDepth stays 2) —
+important on the 8 GB GPU. Files: reflections.slang (payload+throughput, AnyHitMain, RayGen apply,
+ClosestHit block re-scoped to past-cap fallback), ReflectionsPass.{h,cpp} (load reflections_anyhit.spv
++ HitGroupDefault.setAnyHitShader), CMakeLists (compile AnyHitMain).
+MEASURED: whole-frame 0.09713 -> **0.09346 (-3.8%)**, biggest single campaign win + physically
+CORRECT. id2 windows -0.00062 (biggest improver), id40 satin/id29/id7/id6 also better. Regressions
+(the reflection-brightness entanglement, now that reflections show real content): id30 floor
++0.00038, id3 concrete +0.00025, id23/id37/id59 small — net still clearly positive. These
+too-bright-reflection surfaces (id30/id3/id40 cluster) remain the next campaign target; a blanket
+reflection intensity scale is too blunt (helps id40 but regresses id23 walls, whose dark-interior
+reflection is correct) and gTranslucency is NOT a clean glass gate (nonzero on opaque surfaces).

@@ -217,11 +217,14 @@ bool DlssProvider::Evaluate(const FrameInputs& inputs) noexcept {
   options.colorBuffersHDR = sl::Boolean::eTrue;  // colorIn is fp32 LINEAR HDR (CompositePass output).
   // ProgrammingGuideDLSS.md 4.0: "If sl::kBufferTypeExposure is NOT
   // provided or dlssOptions.useAutoExposure is set to be true then DLSS
-  // will be in auto-exposure mode" -- v1 doesn't tag kBufferTypeExposure
-  // (scope cut), so this MUST be true or DLSS has no exposure signal at
-  // all (empirically: eFalse + no tag produced
-  // slEvaluateFeature/eErrorMissingInputParameter on this machine).
-  options.useAutoExposure = sl::Boolean::eTrue;
+  // will be in auto-exposure mode". RTX-alignment 2026-07-08: DlssPass now
+  // provides a 1x1 kBufferTypeExposure buffer holding PYX's own display
+  // exposure gain (see below), so auto-exposure is turned OFF when it's
+  // present — DLSS's own auto-exposure estimate diverged on the World Lobby's
+  // 12000-nit dome and over-brightened the frame ~1.5x. Falls back to
+  // auto-exposure when the exposure image is null (texture-create failure).
+  const bool haveExposure = (inputs.exposure.image != nullptr);
+  options.useAutoExposure = haveExposure ? sl::Boolean::eFalse : sl::Boolean::eTrue;
   options.alphaUpscalingEnabled = sl::Boolean::eFalse;
   const sl::Result optionsResult = _impl->slDLSSSetOptions(_impl->viewport, options);
   if (optionsResult != sl::Result::eOk)
@@ -236,11 +239,15 @@ bool DlssProvider::Evaluate(const FrameInputs& inputs) noexcept {
   sl::Resource colorOutRes = ToSlResource(inputs.colorOut);
   sl::Resource depthRes = ToSlResource(inputs.depth);
   sl::Resource mvecRes = ToSlResource(inputs.mvec);
+  sl::Resource exposureRes = ToSlResource(inputs.exposure);
 
   const sl::Extent renderExtent{0, 0, inputs.renderWidth, inputs.renderHeight};
   const sl::Extent displayExtent{0, 0, inputs.displayWidth, inputs.displayHeight};
+  const sl::Extent exposureExtent{0, 0, 1, 1};
 
-  sl::ResourceTag tags[] = {
+  // Fixed-capacity tag array (4 always-present + 1 optional exposure);
+  // `tagCount` picks how many the eval actually sees.
+  sl::ResourceTag tags[5] = {
       sl::ResourceTag{&colorInRes, sl::kBufferTypeScalingInputColor,
                       sl::ResourceLifecycle::eOnlyValidNow, &renderExtent},
       sl::ResourceTag{&colorOutRes, sl::kBufferTypeScalingOutputColor,
@@ -260,9 +267,17 @@ bool DlssProvider::Evaluate(const FrameInputs& inputs) noexcept {
       sl::ResourceTag{&mvecRes, sl::kBufferTypeMotionVectors,
                       sl::ResourceLifecycle::eValidUntilPresent, &renderExtent},
   };
+  uint32_t tagCount = 4u;
+  // kBufferTypeExposure (1x1): pairs with options.useAutoExposure = eFalse
+  // above. eOnlyValidNow — the buffer is re-written by DlssPass every frame.
+  if (haveExposure)
+  {
+    tags[4] = sl::ResourceTag{&exposureRes, sl::kBufferTypeExposure,
+                              sl::ResourceLifecycle::eOnlyValidNow, &exposureExtent};
+    tagCount = 5u;
+  }
   const sl::Result tagResult = _impl->slSetTagForFrame(
-      *frameToken, _impl->viewport, tags, static_cast<uint32_t>(std::size(tags)),
-      inputs.vkCommandBuffer);
+      *frameToken, _impl->viewport, tags, tagCount, inputs.vkCommandBuffer);
   if (tagResult != sl::Result::eOk)
   {
     log.Info(log::RENDER, "DlssProvider: Evaluate — slSetTagForFrame failed (sl::Result="

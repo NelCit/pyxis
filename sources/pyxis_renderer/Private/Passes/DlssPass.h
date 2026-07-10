@@ -111,6 +111,13 @@ class DlssPass final : public IRenderPass {
   uint32_t _outputH = 0;
   bool _outputCreateFailedLogged = false;
 
+  // 1x1 R32F kBufferTypeExposure buffer (RTX-alignment 2026-07-08). Holds
+  // this frame's display exposure gain so DLSS uses PYX's exposure instead of
+  // its own auto-exposure estimate. Created once in the ctor (fixed size, no
+  // resize); written each frame in Execute via commandList->writeTexture. Null
+  // if creation failed (Evaluate then falls back to useAutoExposure).
+  nvrhi::TextureHandle _exposureTexture;
+
   // Depth-conversion compute pipeline (built once in the ctor, same as
   // every other compute pass in this codebase) + its own render-resolution
   // scratch output + per-frame params cbuffer.
