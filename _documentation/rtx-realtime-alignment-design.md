@@ -1039,3 +1039,156 @@ CORRECT. id2 windows -0.00062 (biggest improver), id40 satin/id29/id7/id6 also b
 too-bright-reflection surfaces (id30/id3/id40 cluster) remain the next campaign target; a blanket
 reflection intensity scale is too blunt (helps id40 but regresses id23 walls, whose dark-interior
 reflection is correct) and gTranslucency is NOT a clean glass gate (nonzero on opaque surfaces).
+
+## Session 2026-07-10 — AO parity audit + wall-speckle root cause (0.09713 → 0.08684)
+
+**Committed:** f578c65 reflections-through-translucent (0.09713→0.09346, ev retuned −0.70→−0.90
+→ **0.08986**), 28b7cfa DLSS DLAA exposure, 8a56d66 atrous diffuse-phi (**0.08986→0.08684**,
+−10.6% cumulative this session). Pinned baseline: scratchpad/base.exr + base_config.json
+(passMask 895, builtin, 96f, ev −0.90) = **0.08684**.
+
+**AO parity vs ovrtx RT (user question "same as NVIDIA?") — VERDICT: at semantic parity.**
+Authoritative source: ovrtx 0.3.0's own generatedSchema.usda (ovrtx/bin/usd_plugins/rtx_settings/).
+ovrtx AO: enabled=1, rayLength **35 cm** (displayName "Ray length (cm)"), minSamples 3 /
+maxSamples 9, denoiserMode "aggressive", stratification on, NO falloff/opacity knob. Pyx:
+0.35 m (world = meters after StageWalker metersPerUnit bake) = **35 cm exact**; 2-spp cosine,
+binary, own AO denoiser (5x5 spatial + 32f temporal); applied to indirect-diffuse ONLY —
+which IS the RTX-RT convention (NVIDIA doc structure nests AO+ambient under "Indirect
+Diffuse Lighting"; dome/IBL is Direct Lighting and pyx's dome-direct is real-shadow-traced,
+verified direct_lighting.slang:130-142). Measured net: aoRayLength 5mm (+0.00016) and 1.05m
+(+0.00200) both WORSE → 35 cm is locally optimal. Remaining deltas vs NVIDIA: 2 vs 3-9 spp
+(converges out over 96f) and their "aggressive" AO denoiser mode. **Ambient light red herring
+RESOLVED**: current ovrtx defaults ambientLight color (0,0,0) intensity 0, and the RT 2.0 FAQ
+says "RTX - Real-Time 2.0 mode does not have global ambient light settings" — the World
+Lobby's authored ambientLightIntensity=0.7 is IGNORED by the RT 2.0 mode we capture against.
+Pyx having no ambient term is CORRECT parity. passMask-off A/B caveat (agent-verified): signal
+textures are allocated but unwritten when a bit is clear → zero-init reads; AO A/B must go
+through aoRayLength, not bit 2.
+
+**Wall/planter speckle (user crop "fix this part") — ROOT CAUSE + FIX (8a56d66).**
+Isolation chain: survives AO-off, SHARC-off, reflections-off; VANISHES with indirect-off
+(wall HF 0.114→0.099 ≈ ovrtx 0.096); raw denoise-off@256f HF 0.229 (the denoiser reduces but
+its residual rectifies into deterministic speckle); albedo AOV vs ovrtx DiffuseAlbedoSD:
+CLEAN (texture path exonerated). Mechanism: fixed diffuse phi luminance edge-stop is binary
+against the indirect signal's huge dome-NEE spikes → spikes preserved as "edges" through all
+iterations + accumulation. Fix: diffuse luminance stop OFF (phi=1e6 = ReLAX's high-variance
+limit; normal/viewZ/matId stops keep real edges). phi 6.0 measured ZERO effect (spikes >> phi
+either way) — do not retry mid-range phi. Spec channel MUST keep phi 1.0: on flat mirrors the
+luminance stop is the only reflected-content edge preserver (spec-inf: RMSE-flat, blurs the
+glass-floor mirror image, id30 luma +0.02 worse direction). Remaining HF gap (wall 0.104,
+planter 0.040 vs ovrtx 0.096/0.021): direct/AO/spec residue + ovrtx's aggressive AO denoiser
++ DLSS softening — diminishing. Proper future fix if wanted: SVGF variance-guided phi (2nd
+luminance moment in DenoiseTemporalPass), tracked as debt.
+
+## Session 2026-07-10 (cont.) — "keep pushing": 0.08684 → 0.08615 + audits closed
+
+**Committed 8d48701**: SHARC cell key + normal octant (NVIDIA SHaRC parity; kills
+cross-face cache sharing). 0.08684 → **0.08615**. Cumulative today: 0.09713 → 0.08615 (−11.3%).
+Baseline pinned (base.exr/base_config.json, ev −0.90, passMask 895).
+
+**Albedo audit — methodology finding (do not repeat the mistake):** ovrtx's DiffuseAlbedoSD
+AOV = baseColor × (1 − metallic) (verified: dielectrics ratio ≈1, metals ≈0, ORM materials
+exactly (1−ORM.B mean): Concrete_Formed ORM.B=0.26 → 0.213×0.74=0.158≈their 0.147). The
+apparent per-material albedo "bugs" (id3/id27/id59/id61) dissolve under the correct semantic.
+Real texture-path is CLEAN. Only true albedo anomaly left: id60 bark3 (pyx (0.11,0.09,0.07)
+vs ovrtx (0.25,0.19,0.07) — R,G ~2.1x brighter in ovrtx, B matches; tiny area, parked).
+Material slot names via temp MATSLOT log (reverted): 3=Concrete_Formed, 27=Slate,
+59=Meadowlark_flowers, 60=bark3, 61=SquareGardenPlanterLong.
+
+**User's column crop (id3 Concrete_Formed, x311-432) — quantified:** pyx is uniformly
+BRIGHTER than ovrtx there (lit +0.042, shadow side +0.117 — the visual "darker/dirtier"
+read was a contrast illusion). ovrtx has MORE lit→shadow contrast (2.4x vs 1.9x). The
+normal-octant fix only moved the shadow side to +0.113 → the over-fill is NOT cache leak;
+remaining suspects: dome-direct at the interior-facing side, bounce-GI over-fill, or
+ovrtx-side stronger occlusion of its GI (their AO "aggressive" denoise). Fireflies on the
+column: only 186 px > +0.25 — negligible MSE. NEXT candidates by MSE: id2 windows 0.00176
+(−0.042 dark; ovrtx bloom hypothesis untested), id30 floor 0.00153 (+0.034).
+
+**id2 bloom hypothesis REFUTED → "window-adjacent under-lighting" discovered (NEXT LEVER).**
+Distance-ring analysis vs ovrtx blown-sky mask: far-field control (>16px from any blown sky,
+1.58M px) matches ovrtx to −0.001 luma — pyx's global transport is *calibrated*. But the
+window-adjacent rings are under-lit and the deficit GROWS outward (2px +0.026, 4px +0.070,
+8px +0.085, 16px +0.121 ovrtx-brighter) — anti-bloom-shaped (bloom decays outward), so NOT
+post-FX. Pyx under-lights the zone within/beyond ~16px of bright sky: window frames (id2),
+terrazzo floor near the curtain wall (id29 −0.039), mullion metals (id7 −0.10), likely id24.
+Combined ≈0.0027 MSE — the single biggest remaining cluster. Attribution TBD: extend rings to
+32/64px (growing→zone under-lit; peaking→halo), then bisect the near-window signal (dome-direct
+grazing transmission? missing sky energy at glancing incidence through panes? indirect bounce
+off the bright floor?). NOTE the visibility-ray convention passes glass UNATTENUATED (would
+bias bright, not dark) — the deficit mechanism is not the obvious one; measure before fixing.
+
+## Session 2026-07-10 (cont. 2) — window-strip root cause + translucency-SHARC (→ 0.08304)
+
+**Committed 97e8e66**: SHARC query at the terminal through-glass segment. The "window strip"
+deficit was RESOLVED to its mechanism chain: strips = exterior curtain-wall structure seen
+THROUGH the glass at near-normal incidence (NdotV~0.91 — Fresnel ruled out; measured pyx 3.0%
+of sky radiance vs ovrtx 13.7%); TranslucencyPass's ShadeSurfaceHit segment shade has no
+indirect GI → exterior sky-averted surfaces went dark. Same substitution as the reflections
+breakthrough. Measured 0.08615 → 0.08338; id30 glass floor luma bias +0.034 → +0.005 (through-
+floor content now lit — the floor's residual is PATTERN, not level, now). ev re-tuned
+−0.90 → **−0.85** → **0.08304**. Cumulative today 0.09713 → 0.08304 (−14.5%).
+Strips 0.479 → 0.507 vs target 0.746 — remainder is SHARC coverage of rarely-visited exterior
+surfaces (cache populates only where camera-driven bounce vertices land). Diminishing there.
+
+**License audit (agent, verbatim quotes on file):** NRD / SHARC / RTXDI / RTXGI / OMM all
+still ship the proprietary "NVIDIA RTX SDKs LICENSE" (no 2024-2025 relicense; §4(b) no
+copy/derivative, §4(e) no-open-source-subjection) → NOT vendorable; fetch-at-build opt-in
+target (source stays out of repo, separate non-Apache lib, default OFF) is the defensible
+integration if ever wanted. NRC = prebuilt DLLs only (NGX-style runtime posture). Streamline
+= MIT incl. sl.nis / sl.deepdvc / sl.dlss_d plugin glue (NGX DLLs runtime-loaded) — extending
+our DlssProvider to NIS/DeepDVC/RR is licensing-clean. NVRHI/Donut/RTXMU MIT (unchanged).
+Our clean-room SHARC implementation remains the correct approach (algorithm not licensable;
+NVIDIA's header text is).
+
+## Session 2026-07-10 (cont. 3) — gap table + two cheap levers closed (→ 0.08240)
+
+**Committed 604f941**: SHARC GRID_DENSITY 0.5→0.25 (swept 0.35/0.25/0.18; knee at 0.25).
+0.08304 → **0.08240**. Cumulative today 0.09713 → 0.08240 (−15.2%), 7 commits.
+
+**Gap-audit results (full pass-by-pass table in the workflow output, agent-verified vs
+generatedSchema):** pipeline is at ALGORITHM-CLASS parity everywhere: G-buffer/RIS-direct/
+dome-IBL/SHARC-GI-at-diffuse+specular+translucency/GGX-VNDF-reflections/à-trous-chain all
+match ovrtx's documented shapes; exact-match constants (aTrous 5, historyFix 14/3, phi spec
+1.0, clamps 6400/19200, AO 35cm). Remaining NON-parity items ranked: (1) reflection cached-
+term fidelity [= the pattern tail, being chipped by density tuning]; (2) translucency firefly
+clamp missing [NO-OP here: descaled clamps ~millions vs dome 12000 — hygiene only];
+(3) diffuse phi=inf is a compensating patch vs NRD's variance-guided phi=2 [debt: SVGF 2nd
+moment in DenoiseTemporalPass]; (4) composite double-Fresnel on directSpecular [A/B'd THIS
+session: +0.00002 = EMPIRICALLY RULED OUT, directSpecular is negligible in this dome-lit
+scene; reverted]; (5) DLSS-RR environment-block [driver/SDK model mismatch, not code].
+Also noted: ovrtx runs a SEPARATE gentler indirect-diffuse denoiser (4 iter, kernel 32,
+history 100) vs our shared chain; ovrtx MIS(BSDF+light) in sampled direct [low-med, unbiased
+either way at convergence]; LTC fallback [not applicable to converged offline comparison].
+
+**Honest asymptote statement for the 0.01 target:** ovrtx's own RT-vs-PT same-renderer delta
+is 0.012; a distinct engine cannot beat cross-renderer detail differences. At 0.0824 the top-2
+contributors (id2 windows 0.00137, id30 floor 0.00127) are ~1/3 of total MSE and are DETAIL/
+pattern-dominated (levels match to +0.01/-0.04). Realistic floor with current architecture:
+~0.06-0.075 (per-material mean-match analysis). Reaching further = NRD-optional integration
+(fetch-at-build, licensing path documented) + DLSS-RR unblock + SVGF variance — each closes
+"character" not "level" gaps.
+
+## Session 2026-07-10 (final) — asymptote reached at 0.08240; negative results logged
+
+Post-0.08240 experiments, ALL measured and reverted (do not retry without new information):
+- **(1−M) diffuse-energy fix** (dome-direct + indirect legs × (1−baseMetalness), gAlbedo.a
+  carrying metalness): PHYSICALLY CORRECT and it fixed the ORM quarter-metals exactly as
+  predicted (id3 concrete +0.087 → +0.037), but TRUE metals collapsed (id6 −0.179, id7
+  −0.155): their brightness was living off the incorrect diffuse fill because the conductor
+  SPECULAR response under-delivers. Net +0.00856 WORSE. The tuned state is a compensating
+  local optimum; this fix requires a companion conductor-specular-energy fix (F82/env-BRDF
+  at dome scale) to land together. Full edit set preserved in this doc's git history.
+- **Temporal history 30→100** (ovrtx indirect-denoiser parity): +0.00015 worse — 96-frame
+  accumulation already dominates; longer EMA just converges slower within the run.
+- **SHARC probe 8→12 + accum-cap 64→96**: +0.00002 (wash) — no collision pressure at
+  density 0.25; resolve cap immaterial at convergence.
+- **Composite double-Fresnel** and **translucency firefly clamp**: ruled out earlier this
+  session (±0.00002 / structurally can't fire).
+
+**Where the remaining 0.0824 lives**: id2 windows 0.00137 + id30 floor 0.00127 ≈ 1/3 of MSE,
+both DETAIL/pattern (levels match to ±0.01); the metal cluster (id6/id7/id5, needs the
+conductor-specular work); the DLSS-softening character (~5%). Sanctioned-but-unstarted big
+items, in EV order: (1) conductor-specular energy + (1−M) as a PAIRED fix [the one remaining
+LEVEL error, ~0.0005-0.001]; (2) NRD fetch-at-build optional (default-OFF, licensing path
+documented above); (3) SVGF variance moments; (4) DLSS-RR NGX unblock (needs driver/SDK with
+model 703). Expected honest floor remains ~0.06-0.075.
