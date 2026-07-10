@@ -1253,3 +1253,30 @@ assignment: NRD resources must bind at slot = range baseRegisterIndex + intra-ra
 (4) check constantBufferData upload versioning. Known input gaps regardless: gViewZ=0 on
 miss (NRD wants >= denoisingRange), gIndirectDiffuse.a=1 placeholder hitDist. Builtin
 default verified unchanged (0.08240 delta +0.00000). SIGMA_SHADOW created but undispatched.
+
+## NRD FIRST LIGHT — WORKING (441e910, 2026-07-10)
+
+Root cause of the black output: NRD SPIRV keeps TWO descriptor sets (resources space 0;
+samplers s0..s1 + CB b0 in space 1 → [Set 1, bindings 0/1/2]); our flattened single-set
+layout was spec-invalid on 20/22 pipelines (VUID-...-07988, found by running the smoke with
+validationLayer=true — THE debugging lesson: validation names the exact set/binding/variable).
+Fix: per-pipeline Set-0 resource layout + ONE shared Set-1 (samplers+CB) layout/binding-set;
+ComputeState.bindings = {set0, set1}. MEASURED: denoiser=nrd @ default RelaxSettings =
+**0.08949** vs tuned builtin 0.08240 (id2 windows already BETTER −8%, id40 luma dead-on
+ovrtx). Remaining validation nits: 2× VkBufferMemoryBarrier2 access-mask warnings (NVRHI-
+internal, benign). NEXT: RelaxSettings tuning toward the ovrtx schema (their indirect chain:
+4 iterations, kernelRadius 32, history 100; main ReLAX phi 2/1, history 31/8) — plausibly
+closes or beats 0.08240 since NRD is ovrtx's own denoiser class. Also SIGMA_SHADOW wiring
+(created, undispatched) for the direct channel.
+
+## NRD block CLOSED at working-optional (c34e101, 2026-07-10)
+
+Post-first-light round: viewZ miss-sentinel remap (pack shader, packed R32F -> IN_VIEWZ) +
+RelaxSettings.atrousIterationNum=4 (ovrtx parity) — both MEASURED CONVERGENCE-NEUTRAL on the
+static-camera 96f comparison (0.08949 unchanged; hashes differ => knobs live, accumulation
+converges RELAX to a settings-insensitive fixed point). VERDICT: denoiser=nrd = 0.08949 vs
+tuned builtin 0.08240; the delta is structural converged bias, not tunable. The optional
+NVIDIA-NRD path is COMPLETE for its purpose: ovrtx's own denoiser class, licensing-clean
+(fetch-not-vendor), opt-in, honest ladder, byte-neutral default. Remaining NRD follow-ups
+(low priority): SIGMA_SHADOW wiring for the direct channel, diffuse hitDist signal, moving-
+camera validation (where NRD's temporal machinery actually differentiates).
