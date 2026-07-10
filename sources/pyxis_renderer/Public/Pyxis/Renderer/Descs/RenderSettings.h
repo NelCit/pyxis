@@ -23,6 +23,12 @@ namespace pyxis {
 inline constexpr uint32_t DENOISER_DLSS = 0u;      // optional Streamline/NGX runtime (DEFAULT)
 inline constexpr uint32_t DENOISER_BUILTIN = 1u;   // ReLAX/SIGMA chain + TAA (today's pipeline)
 inline constexpr uint32_t DENOISER_OFF = 2u;       // raw noisy signals, no denoise, no TAA
+// APPENDED value (§22 additive-MINOR): optional NVIDIA NRD backend
+// (PYXIS_WITH_NRD builds only — RTX-alignment 2026-07-10). Requested-but-
+// unavailable resolves to Builtin via the same {requested, effective}
+// downgrade-and-log ladder DENOISER_DLSS uses; in non-NRD builds this
+// value therefore behaves exactly like DENOISER_BUILTIN plus a log line.
+inline constexpr uint32_t DENOISER_NRD = 3u;
 
 // RenderSettings::RealTimeQuality::dlssExecMode encoding — mirrors
 // omni:rtx:post:dlss:execMode 1:1 (ovrtx default = Auto).

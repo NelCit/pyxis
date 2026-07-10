@@ -484,7 +484,7 @@ void ImGuiHost::BuildEditorPanel(GpuScene& scene) noexcept {
       // decided, straight from GetDlssStatus() (pushed by ViewerMode).
       ImGui::TextDisabled("Denoiser");
       {
-        static const char* const DENOISER_NAMES[] = {"Dlss", "Builtin", "Off"};
+        static const char* const DENOISER_NAMES[] = {"Dlss", "Builtin", "Off", "Nrd"};
         const int denoiserCount =
             static_cast<int>(sizeof(DENOISER_NAMES) / sizeof(DENOISER_NAMES[0]));
         const int currentDenoiser =

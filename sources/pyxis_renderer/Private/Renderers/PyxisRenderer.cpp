@@ -78,6 +78,7 @@ const char* DenoiserName(uint32_t value) noexcept {
     case DENOISER_DLSS: return "Dlss";
     case DENOISER_BUILTIN: return "Builtin";
     case DENOISER_OFF: return "Off";
+    case DENOISER_NRD: return "Nrd";
     default: return "Unknown";
   }
 }
@@ -359,6 +360,21 @@ void PyxisRenderer::RenderFrame(nvrhi::ICommandList* commandList, const RenderSe
   {
     effectiveDenoiser = DENOISER_BUILTIN;
     downgradeReason = dlssAvailability.reason;
+  }
+  // DENOISER_NRD (RTX-alignment 2026-07-10): the optional NRD backend's
+  // frame-loop wiring is staged work (NrdProvider stage 2 translates
+  // dispatches but is not yet driven by this graph) — requested=Nrd
+  // therefore currently resolves to Builtin in EVERY build, with the reason
+  // distinguishing "not compiled in" from "not wired yet" so the log stays
+  // honest when PYXIS_WITH_NRD lands its final stage.
+  if (requestedDenoiser == DENOISER_NRD)
+  {
+    effectiveDenoiser = DENOISER_BUILTIN;
+#ifdef PYXIS_WITH_NRD
+    downgradeReason = "NRD frame-loop wiring staged (NrdProvider stage 3 pending)";
+#else
+    downgradeReason = "renderer built without PYXIS_WITH_NRD";
+#endif
   }
 
   // DLSS Stage 2b — graceful ladder: RR (Ray Reconstruction) -> SR +

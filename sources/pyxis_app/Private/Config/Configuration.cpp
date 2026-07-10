@@ -103,7 +103,9 @@ std::string ReadDenoiserField(const nlohmann::json& parent, const char* key, uin
     if (value == "dlss") { out = 0u; return {}; }
     if (value == "builtin") { out = 1u; return {}; }
     if (value == "off") { out = 2u; return {}; }
-    return std::string{key} + ": expected \"dlss\" | \"builtin\" | \"off\" (got \"" + value + "\")";
+    if (value == "nrd") { out = 3u; return {}; }  // optional NRD backend (PYXIS_WITH_NRD builds)
+    return std::string{key} + ": expected \"dlss\" | \"builtin\" | \"off\" | \"nrd\" (got \""
+         + value + "\")";
   }
   return ReadField(parent, key, out);
 }
@@ -309,6 +311,7 @@ std::string DenoiserToString(uint32_t value) noexcept {
     case 0u: return "dlss";
     case 1u: return "builtin";
     case 2u: return "off";
+    case 3u: return "nrd";
     default: return "dlss";
   }
 }
