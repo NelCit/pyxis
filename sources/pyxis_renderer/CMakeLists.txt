@@ -963,6 +963,17 @@ pyxis_compile_slang_shader(
     OUTPUT      post_soften.spv
     INCLUDES    ${PYXIS_SHADER_INTEROP}
 )
+# DlssPass utility #2 (RTX-alignment 2026-07-11): in-place RGB exposure
+# scale for the DLSS-RR pre-exposure (DLSSDOptions has no exposure hook;
+# see dlss_expose.slang's file comment for the measured rationale).
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/dlss_expose.slang
+    ENTRY_POINT main
+    STAGE       compute
+    OUTPUT      dlss_expose.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP}
+)
 # Viewer present blit (compute): linear -> sRGB OETF into the present target.
 # Split out of SsaaResolvePass so each pass has one job; runs every viewer frame.
 # (Declares its cbuffer locally — no ShaderInterop include.)

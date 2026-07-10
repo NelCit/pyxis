@@ -131,6 +131,22 @@ class DlssPass final : public IRenderPass {
   bool _dlssDepthCreateFailedLogged = false;
   bool _depthConvertReady = false;
   std::unordered_map<std::uint64_t, nvrhi::BindingSetHandle> _depthConvertBindingSetCache;
+
+  // RR pre-exposure compute (dlss_expose.slang — RTX-alignment 2026-07-11).
+  // DLSSDOptions has no useAutoExposure/kBufferTypeExposure hook, so the RR
+  // path pre-multiplies colorIn's RGB by ComputeEffectiveExposureScale
+  // before slEvaluateFeature and divides the reconstructed output by it
+  // after (see the shader's file comment for the measured rationale). Same
+  // build-once-in-ctor shape as the depth converter above; _exposeReady
+  // false (shader/pipeline creation failed) simply skips both dispatches —
+  // RR then behaves exactly as before this change.
+  [[nodiscard]] nvrhi::BindingSetHandle GetOrCreateExposeBindingSet(nvrhi::ITexture* color);
+  nvrhi::ShaderHandle _exposeShader;
+  nvrhi::BindingLayoutHandle _exposeLayout;
+  nvrhi::ComputePipelineHandle _exposePipeline;
+  nvrhi::BufferHandle _exposeParamsBuffer;
+  bool _exposeReady = false;
+  std::unordered_map<nvrhi::ITexture*, nvrhi::BindingSetHandle> _exposeBindingSetCache;
 };
 
 }  // namespace pyxis

@@ -131,6 +131,16 @@ nvrhi::TextureHandle MakeDepthScratch(nvrhi::IDevice* device, uint32_t width, ui
   return device->createTexture(desc);
 }
 
+// Byte-for-byte lockstep with dlss_expose.slang's own DlssExposeParams
+// (16 bytes) — see that shader's file comment for the RR pre-exposure
+// rationale.
+struct DlssExposeParams {
+  uint32_t width;
+  uint32_t height;
+  float scale;
+  float pad0;
+};
+
 std::uint64_t HashPointers(std::initializer_list<const void*> pointers) noexcept {
   std::uint64_t key = 1469598103934665603ull;
   for (const void* ptr : pointers)
@@ -215,8 +225,61 @@ DlssPass::DlssPass(nvrhi::IDevice* device, DlssProvider& dlssProvider, GpuScene&
   if (!_exposureTexture)
     log.Error(log::RENDER, "DlssPass: createTexture(Exposure) failed — DLSS falls back to auto-exposure");
 
+  // RR pre-exposure compute (dlss_expose.slang — see its file comment).
+  // Non-fatal on any failure: _exposeReady stays false and the RR path
+  // simply runs un-pre-exposed, exactly as before this change.
+  do
+  {
+    const auto exposeSpvPath = locator.LocateResource("shaders/dlss_expose.spv");
+    _exposeShader = LoadSpirvShader(_device, exposeSpvPath.View(), nvrhi::ShaderType::Compute,
+                                    "main", "DlssPass.Expose");
+    if (!_exposeShader)
+      break;
+    nvrhi::BindingLayoutDesc exposeLayoutDesc;
+    exposeLayoutDesc.visibility = nvrhi::ShaderType::Compute;
+    exposeLayoutDesc.bindingOffsets.shaderResource = 0;
+    exposeLayoutDesc.bindingOffsets.sampler = 0;
+    exposeLayoutDesc.bindingOffsets.constantBuffer = 0;
+    exposeLayoutDesc.bindingOffsets.unorderedAccess = 0;
+    exposeLayoutDesc.bindings = {
+        nvrhi::BindingLayoutItem::Texture_UAV(0),             // 0 gColor (in-place)
+        nvrhi::BindingLayoutItem::VolatileConstantBuffer(1),  // 1 DlssExposeParams
+    };
+    _exposeLayout = _device->createBindingLayout(exposeLayoutDesc);
+    if (!_exposeLayout)
+    {
+      log.Error(log::RENDER, "DlssPass: createBindingLayout(expose) failed");
+      break;
+    }
+    nvrhi::ComputePipelineDesc exposePipelineDesc;
+    exposePipelineDesc.CS = _exposeShader;
+    exposePipelineDesc.bindingLayouts = {_exposeLayout};
+    _exposePipeline = _device->createComputePipeline(exposePipelineDesc);
+    if (!_exposePipeline)
+    {
+      log.Error(log::RENDER, "DlssPass: createComputePipeline(expose) failed");
+      break;
+    }
+    nvrhi::BufferDesc exposeCbDesc;
+    exposeCbDesc.byteSize = 16;  // DlssExposeParams — see Execute's local mirror.
+    exposeCbDesc.isConstantBuffer = true;
+    exposeCbDesc.isVolatile = true;
+    // TWO writes per RR frame (scale + inverse) — 512 still leaves the
+    // same starvation headroom as the depthConvertParams precedent above.
+    exposeCbDesc.maxVersions = 512;
+    exposeCbDesc.debugName = "Dlss.ExposeParams";
+    _exposeParamsBuffer = _device->createBuffer(exposeCbDesc);
+    if (!_exposeParamsBuffer)
+    {
+      log.Error(log::RENDER, "DlssPass: createBuffer(exposeParams) failed");
+      break;
+    }
+    _exposeReady = true;
+  } while (false);
+
   _depthConvertReady = true;
-  log.Info(log::RENDER, "DlssPass: initialised (depth-conversion compute pipeline ready)");
+  log.Info(log::RENDER, "DlssPass: initialised (depth-conversion compute pipeline ready"
+                        + std::string(_exposeReady ? "; RR pre-exposure ready)" : ")"));
 }
 
 DlssPass::~DlssPass() {
@@ -299,6 +362,22 @@ nvrhi::BindingSetHandle DlssPass::GetOrCreateDepthConvertBindingSet(nvrhi::IText
   };
   nvrhi::BindingSetHandle set = _device->createBindingSet(setDesc, _depthConvertLayout);
   _depthConvertBindingSetCache.emplace(key, set);
+  return set;
+}
+
+nvrhi::BindingSetHandle DlssPass::GetOrCreateExposeBindingSet(nvrhi::ITexture* color) {
+  if (auto cached = _exposeBindingSetCache.find(color); cached != _exposeBindingSetCache.end())
+    return cached->second;
+  constexpr std::size_t MAX_EXPOSE_CACHE_ENTRIES = 4;
+  if (_exposeBindingSetCache.size() >= MAX_EXPOSE_CACHE_ENTRIES)
+    _exposeBindingSetCache.clear();
+  nvrhi::BindingSetDesc setDesc;
+  setDesc.bindings = {
+      nvrhi::BindingSetItem::Texture_UAV(0, color),
+      nvrhi::BindingSetItem::ConstantBuffer(1, _exposeParamsBuffer),
+  };
+  nvrhi::BindingSetHandle set = _device->createBindingSet(setDesc, _exposeLayout);
+  _exposeBindingSetCache[color] = set;
   return set;
 }
 
@@ -469,6 +548,10 @@ void DlssPass::Execute(nvrhi::ICommandList* commandList, const PassContext& cont
   const bool orthographic = camera.projectionMode == 1u;
 
   bool evaluateOk = false;
+  // RR pre-exposure bookkeeping — set inside the RR branch, consumed by the
+  // post-evaluate inverse/undo dispatches at the tail of this function.
+  float rrExposureGain = 1.0f;
+  bool rrPreExposed = false;
   if (useRR)
   {
     // DLSS Stage 2b — DLSSDOptions::worldToCameraView / cameraViewToWorld
@@ -520,6 +603,37 @@ void DlssPass::Execute(nvrhi::ICommandList* commandList, const PassContext& cont
     inputsRR.specularAlbedo = ToTaggedImage(specularAlbedo);
     inputsRR.normalRoughness = ToTaggedImage(normalRoughness);
     inputsRR.specularHitDistance = ToTaggedImage(specularHitDistance);
+    // RR pre-exposure (dlss_expose.slang): DLSSDOptions has no
+    // useAutoExposure/kBufferTypeExposure hook, so scale colorIn's RGB by
+    // the SAME display gain TonemapPass applies downstream — RR's internal
+    // tone handling then sees display-range input (its trained domain)
+    // instead of the World Lobby's raw 0-12000 range. Inverse-scaled after
+    // evaluate (tail of this function) so downstream exposure math is
+    // untouched. Matches ovrtx's exposed-buffer denoiser convention.
+    if (_exposeReady)
+    {
+      rrExposureGain = ComputeEffectiveExposureScale(*context.settings, camera);
+      if (rrExposureGain > 0.0f && rrExposureGain != 1.0f)
+      {
+        const nvrhi::BindingSetHandle exposeSet = GetOrCreateExposeBindingSet(colorIn);
+        if (exposeSet)
+        {
+          DlssExposeParams exposeParams{};
+          exposeParams.width = renderDesc.width;
+          exposeParams.height = renderDesc.height;
+          exposeParams.scale = rrExposureGain;
+          commandList->writeBuffer(_exposeParamsBuffer, &exposeParams, sizeof(exposeParams));
+          nvrhi::ComputeState exposeState;
+          exposeState.pipeline = _exposePipeline;
+          exposeState.bindings = {exposeSet};
+          commandList->setComputeState(exposeState);
+          commandList->dispatch((renderDesc.width + 7u) / 8u, (renderDesc.height + 7u) / 8u,
+                                1u);
+          rrPreExposed = true;
+        }
+      }
+    }
+
     inputsRR.vkCommandBuffer = commandList->getNativeObject(nvrhi::ObjectTypes::VK_CommandBuffer);
     evaluateOk = _dlssProvider->EvaluateRR(inputsRR);
   }
@@ -603,6 +717,26 @@ void DlssPass::Execute(nvrhi::ICommandList* commandList, const PassContext& cont
     Logging::Get().Error(log::RENDER, std::string{"DlssPass: DlssProvider::"}
                                           + (useRR ? "EvaluateRR" : "Evaluate")
                                           + " failed this frame; output stale");
+    // Undo the RR pre-exposure on colorIn — the redirect below never runs
+    // on this path, so downstream AutoExposure/Tonemap still read colorIn
+    // and must not see a double-exposed image.
+    if (rrPreExposed)
+    {
+      const nvrhi::BindingSetHandle undoSet = GetOrCreateExposeBindingSet(colorIn);
+      if (undoSet)
+      {
+        DlssExposeParams undoParams{};
+        undoParams.width = renderDesc.width;
+        undoParams.height = renderDesc.height;
+        undoParams.scale = 1.0f / rrExposureGain;
+        commandList->writeBuffer(_exposeParamsBuffer, &undoParams, sizeof(undoParams));
+        nvrhi::ComputeState undoState;
+        undoState.pipeline = _exposePipeline;
+        undoState.bindings = {undoSet};
+        commandList->setComputeState(undoState);
+        commandList->dispatch((renderDesc.width + 7u) / 8u, (renderDesc.height + 7u) / 8u, 1u);
+      }
+    }
     return;
   }
 
@@ -612,6 +746,27 @@ void DlssPass::Execute(nvrhi::ICommandList* commandList, const PassContext& cont
   // defensive-reassert reasoning as the pre-evaluate transitions above.
   commandList->setTextureState(output, nvrhi::AllSubresources, nvrhi::ResourceStates::UnorderedAccess);
   commandList->commitBarriers();
+
+  // Inverse of the RR pre-exposure, applied to the reconstructed output at
+  // DISPLAY resolution — hands downstream (AutoExposure/Tonemap) the same
+  // unexposed-linear convention every other producer of linearColor uses.
+  if (rrPreExposed)
+  {
+    const nvrhi::BindingSetHandle inverseSet = GetOrCreateExposeBindingSet(output);
+    if (inverseSet)
+    {
+      DlssExposeParams inverseParams{};
+      inverseParams.width = displayDesc.width;
+      inverseParams.height = displayDesc.height;
+      inverseParams.scale = 1.0f / rrExposureGain;
+      commandList->writeBuffer(_exposeParamsBuffer, &inverseParams, sizeof(inverseParams));
+      nvrhi::ComputeState inverseState;
+      inverseState.pipeline = _exposePipeline;
+      inverseState.bindings = {inverseSet};
+      commandList->setComputeState(inverseState);
+      commandList->dispatch((displayDesc.width + 7u) / 8u, (displayDesc.height + 7u) / 8u, 1u);
+    }
+  }
 
   // Redirect the shared cursor to THIS pass's display-resolution output —
   // see PassContext::linearColor's own doc comment for why this field is
