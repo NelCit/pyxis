@@ -114,6 +114,9 @@ class ReflectionsPass final : public IRenderPass {
 
   nvrhi::ShaderHandle _raygenShader;
   nvrhi::ShaderHandle _closestHitShader;
+  // Primary reflection ray transmissive-passthrough + alpha-test any-hit
+  // (RTX-alignment 2026-07-08) — lets reflections see through glass/foliage.
+  nvrhi::ShaderHandle _anyHitShader;
   nvrhi::ShaderHandle _missShader;
   // Occlusion-aware-ambient follow-up (rtx-realtime-alignment-design.md,
   // 2026-07-06) — the short AO ray ClosestHitMain fires at the reflection

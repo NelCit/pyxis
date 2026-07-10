@@ -36,7 +36,8 @@ struct PipelineVariant {
 
 PipelineVariant BuildPipelineVariant(nvrhi::IDevice* device, nvrhi::IBindingLayout* sceneLayout,
                                      nvrhi::IBindingLayout* passLayout, nvrhi::IShader* raygen,
-                                     nvrhi::IShader* closestHit, nvrhi::IShader* miss,
+                                     nvrhi::IShader* closestHit, nvrhi::IShader* anyHit,
+                                     nvrhi::IShader* miss,
                                      nvrhi::IShader* aoAnyHit, nvrhi::IShader* aoMiss,
                                      uint32_t projectionMode,
                                      uint32_t stochasticReflections) noexcept {
@@ -68,18 +69,19 @@ PipelineVariant BuildPipelineVariant(nvrhi::IDevice* device, nvrhi::IBindingLayo
       // MissShaderIndex 1.
       nvrhi::rt::PipelineShaderDesc{}.setExportName("AoMissMain").setShader(aoMiss),
   };
-  // HitGroupDefault: no any-hit — alpha-tested cutout geometry reads as
-  // solid in Phase A reflections (documented approximation — the WP2
-  // contract table lists only RayGen/ClosestHit/Miss for this pass).
-  // HitGroupAo: any-hit only (no closest-hit — the AO ray always carries
-  // RAY_FLAG_SKIP_CLOSEST_HIT_SHADER, same "never invoked" legality
-  // AmbientOcclusionPass's own any-hit-only hit group relies on),
-  // SEPARATE from HitGroupDefault above so the primary reflection ray's
-  // "reads as solid" behavior is unaffected by this any-hit gate.
+  // HitGroupDefault: closest-hit + AnyHitMain (RTX-alignment 2026-07-08). The
+  // any-hit lets the primary reflection ray pass THROUGH glass / alpha-cutout
+  // geometry to what's really behind it (reflections.slang AnyHitMain) — it
+  // previously had none, so reflected foliage read as solid quads and glass
+  // shortcut to the sky. HitGroupAo: any-hit only (no closest-hit — the AO ray
+  // always carries RAY_FLAG_SKIP_CLOSEST_HIT_SHADER, same "never invoked"
+  // legality AmbientOcclusionPass's own any-hit-only hit group relies on),
+  // SEPARATE from HitGroupDefault so the AO ray keeps its own gate.
   pipelineDesc.hitGroups = {
       nvrhi::rt::PipelineHitGroupDesc{}
           .setExportName("HitGroupDefault")
-          .setClosestHitShader(closestHit),
+          .setClosestHitShader(closestHit)
+          .setAnyHitShader(anyHit),
       nvrhi::rt::PipelineHitGroupDesc{}
           .setExportName("HitGroupAo")
           .setAnyHitShader(aoAnyHit),
@@ -131,6 +133,9 @@ ReflectionsPass::ReflectionsPass(nvrhi::IDevice* device, GpuScene& scene,
   const AssetLocator locator;
   const Path raygenPath = locator.LocateResource("shaders/reflections_raygen.spv");
   const Path closestHitPath = locator.LocateResource("shaders/reflections_closesthit.spv");
+  // Primary reflection ray's transmissive-passthrough + alpha-test any-hit
+  // (RTX-alignment 2026-07-08, "reflections pass through translucent" fix).
+  const Path anyHitPath = locator.LocateResource("shaders/reflections_anyhit.spv");
   const Path missPath = locator.LocateResource("shaders/reflections_miss.spv");
   // Occlusion-aware-ambient follow-up (rtx-realtime-alignment-design.md,
   // 2026-07-06) — the short AO ray ClosestHitMain fires at the reflection
@@ -141,10 +146,12 @@ ReflectionsPass::ReflectionsPass(nvrhi::IDevice* device, GpuScene& scene,
   _raygenShader = LoadSpirv(_device, raygenPath.View(), nvrhi::ShaderType::RayGeneration, "main");
   _closestHitShader =
       LoadSpirv(_device, closestHitPath.View(), nvrhi::ShaderType::ClosestHit, "main");
+  _anyHitShader = LoadSpirv(_device, anyHitPath.View(), nvrhi::ShaderType::AnyHit, "main");
   _missShader = LoadSpirv(_device, missPath.View(), nvrhi::ShaderType::Miss, "main");
   _aoAnyHitShader = LoadSpirv(_device, aoAnyHitPath.View(), nvrhi::ShaderType::AnyHit, "main");
   _aoMissShader = LoadSpirv(_device, aoMissPath.View(), nvrhi::ShaderType::Miss, "main");
-  if (!_raygenShader || !_closestHitShader || !_missShader || !_aoAnyHitShader || !_aoMissShader)
+  if (!_raygenShader || !_closestHitShader || !_anyHitShader || !_missShader || !_aoAnyHitShader
+      || !_aoMissShader)
   {
     Logging::Get().Error(log::RENDER, "ReflectionsPass: shader load failed; pass will skip");
     return;
@@ -178,7 +185,7 @@ ReflectionsPass::ReflectionsPass(nvrhi::IDevice* device, GpuScene& scene,
   // projection-only axis already used before this fix.
   PipelineVariant perspective = BuildPipelineVariant(
       _device, _sceneBindings->Layout(), _passLayout, _raygenShader, _closestHitShader,
-      _missShader, _aoAnyHitShader, _aoMissShader,
+      _anyHitShader, _missShader, _aoAnyHitShader, _aoMissShader,
       /*projectionMode=*/0u, /*stochasticReflections=*/0u);
   if (!perspective.pipeline || !perspective.shaderTable)
     return;
@@ -239,7 +246,7 @@ void ReflectionsPass::EnsureProjectionPipeline(bool stochasticReflections) {
     return;
   PipelineVariant built = BuildPipelineVariant(
       _device, _sceneBindings->Layout(), _passLayout, _raygenShader, _closestHitShader,
-      _missShader, _aoAnyHitShader, _aoMissShader, projectionMode,
+      _anyHitShader, _missShader, _aoAnyHitShader, _aoMissShader, projectionMode,
       stochasticReflections ? 1u : 0u);
   if (!built.pipeline || !built.shaderTable)
   {

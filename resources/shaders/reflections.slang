@@ -173,7 +173,21 @@ struct ReflectionPayload {
     float  roughness;  // primary (reflecting) surface roughness — SHARC cache gate
                        // (only glossy reflections use the voxel-blurred cache;
                        // sharp mirrors keep their traced sample). Set by RayGen.
+    // Reflection-through-glass fix (RTX-alignment 2026-07-08): a reflection ray
+    // now PASSES THROUGH transmissive surfaces (AnyHitMain below) to shade what
+    // is REALLY behind the glass — geometry (a plant behind a glass rail, an
+    // object behind a window) OR the sky — instead of the old ClosestHit
+    // shortcut that ALWAYS returned the dome, making everything behind glass
+    // vanish in reflections. `throughput` accumulates each crossed pane's
+    // transmission tint x (1-R) Fresnel; RayGen multiplies the traced color by
+    // it. `transmissiveHitCount` caps the passthrough at
+    // MAX_REFLECTION_TRANSMISSIVE_CONTINUATIONS panes (a stack of glass past the
+    // cap is accepted as opaque, same bound philosophy as the GI bounce ray).
+    float3 throughput;
+    uint   transmissiveHitCount;
 };
+
+static const uint MAX_REFLECTION_TRANSMISSIVE_CONTINUATIONS = 4u;
 
 float ReflectionsLuminance(float3 c) {
     return dot(c, float3(0.2126, 0.7152, 0.0722));
@@ -576,6 +590,8 @@ void RayGenMain() {
         payload.color = float3(0.0f, 0.0f, 0.0f);
         payload.hitT  = -1.0f;
         payload.roughness = roughness;  // SHARC cache gate at the hit (glossy only)
+        payload.throughput = float3(1.0f, 1.0f, 1.0f);  // tint of any glass this ray crosses
+        payload.transmissiveHitCount = 0u;
         TraceRay(gTlas, RAY_FLAG_NONE, 0xFFu, 0, 0, 0, reflRay, payload);
 
         // Heitz 2018 "Sampling the GGX Distribution of Visible Normals" —
@@ -601,7 +617,11 @@ void RayGenMain() {
         // VNDF average alone (no ad hoc single-sample compensation term)
         // supplies the lobe integration ovrtx's real GGX-Smith BRDF
         // produces.)
-        colorSum += payload.color;
+        // Apply the accumulated glass tint x (1-R) from every transmissive pane
+        // the ray crossed (AnyHitMain) — whether it ended on real geometry
+        // (ClosestHitMain) or the sky (MissMain), the result is what's behind
+        // the glass, dimmed by the panes it passed through.
+        colorSum += payload.color * payload.throughput;
         if (payload.hitT >= 0.0f) {
             hitTSum += payload.hitT;
             hitCount += 1u;
@@ -690,18 +710,16 @@ void ClosestHitMain(inout ReflectionPayload payload, in BuiltInTriangleIntersect
         ObjectToWorld3x4(), WorldToObject3x4());
     const float3 viewDir = normalize(-WorldRayDirection());
 
-    // Reflection-through-glass (rtx-realtime-alignment-design.md, 2026-07-07) —
-    // a reflected TRANSMISSIVE surface (the curtain-wall windows, Clear_Glass)
-    // must show what's BEHIND it, not its ~black diffuse. The dominant such case
-    // in this view is the polished floor / tables reflecting the floor-to-ceiling
-    // windows: the reflection ray hits the glass, and behind it is the exterior
-    // (dome/sky). Approximate "seeing through the pane" as the dome radiance in
-    // the ray's own direction, tinted by the glass transmission_color (the pane
-    // is thin, so the refracted direction ≈ the incident one). Without this the
-    // reflected windows read black, darkening the whole left terrazzo strip that
-    // grazes toward them (heatmap: bottom-left −0.11). Mullions/frames are
-    // separate OPAQUE geometry and still hit ClosestHit normally below. Gated on
-    // the shared MATERIAL_FLAG_TRANSMISSION_ENABLED via transmissionWeight.
+    // Reflected TRANSMISSIVE surface — PAST-CAP FALLBACK ONLY (RTX-alignment
+    // 2026-07-08): AnyHitMain now passes the reflection ray THROUGH glass to
+    // the real geometry/sky behind it, so a glass hit only reaches ClosestHit
+    // once the ray has already crossed MAX_REFLECTION_TRANSMISSIVE_CONTINUATIONS
+    // panes (a deep stack). At that point, approximate "the sky behind this Nth
+    // pane" as the dome radiance in the ray's own direction (thin pane, refracted
+    // dir ≈ incident), tinted by transmission_color x (1-R) — the SAME per-pane
+    // attenuation AnyHitMain applies to the panes already crossed (which RayGen
+    // folds in via payload.throughput). Returning the pane's own ~black diffuse
+    // instead would reintroduce the "glass reads black in reflections" bug.
     if (surf.pbr.transmissionWeight > 0.5)
     {
         // Sky TRANSMITTED through the pane = sky · transmission_color · (1 − R),
@@ -809,6 +827,59 @@ void ClosestHitMain(inout ReflectionPayload payload, in BuiltInTriangleIntersect
     const float3 emission = OpenPBREmission(surf.pbr);
     payload.color = direct + ambient + emission * surf.opacity;
     payload.hitT  = RayTCurrent();
+}
+
+// --------------------------------------------------------------------
+// AnyHitMain — the PRIMARY reflection ray's any-hit (RTX-alignment
+// 2026-07-08, "reflections don't pass through translucent" fix). Makes a
+// reflection ray SEE THROUGH glass / alpha-cutout geometry to whatever is
+// really behind it, instead of stopping on the pane. Two passthrough cases,
+// both `IgnoreHit()` so the SAME TraceRay keeps traversing to the real
+// opaque hit (ClosestHitMain) or the sky (MissMain):
+//   * alpha-tested cutout (foliage): a failed alpha texel is a hole — the
+//     plant's real silhouette (and what's behind it) must show in reflections,
+//     not an opaque quad. (HitGroupDefault previously had NO any-hit, so
+//     reflected foliage read as solid rectangles.)
+//   * transmissive pane (glass): attenuate `payload.throughput` by the pane's
+//     transmission tint x (1-R) Fresnel — R reflects off the pane, only (1-R)
+//     transmits through. The face normal is fetched to make R angle-dependent
+//     (grazing panes reflect more, transmit less), preserving the (1-R)
+//     grazing dimming the old ClosestHit dome-shortcut had. Bounded by
+//     MAX_REFLECTION_TRANSMISSIVE_CONTINUATIONS; a stack past the cap is
+//     accepted as opaque and ClosestHitMain's transmissive fallback returns
+//     the (tinted) dome.
+// Shares the SBT hit-group with ClosestHitMain (HitGroupDefault) — see
+// ReflectionsPass.cpp; the AO ray uses the separate HitGroupAo, so this
+// any-hit never runs for it.
+// --------------------------------------------------------------------
+[shader("anyhit")]
+void AnyHitMain(inout ReflectionPayload payload, in BuiltInTriangleIntersectionAttributes attribs) {
+    if (AnyHitIsAlphaTested()) {
+        IgnoreHit();
+        return;
+    }
+    if (AnyHitIsTransmissive()
+        && payload.transmissiveHitCount < MAX_REFLECTION_TRANSMISSIVE_CONTINUATIONS) {
+        const uint instanceId = InstanceID();
+        const uint materialId = gInstanceInfo[instanceId].materialSlot;
+        const OpenPBRMaterialGPU mat = gMaterials[materialId];
+        // Angle-dependent Fresnel (1-R) at the pane, via the per-face normal
+        // (same gMeshFaceNormals path shading.slang's LOD uses — no UV/texture
+        // eval, which an any-hit has no derivatives for).
+        const uint meshSlot = gInstanceInfo[instanceId].meshSlot;
+        const float3 nObj = gMeshFaceNormals[gMeshInfo[meshSlot].faceOffset + PrimitiveIndex()].xyz;
+        const float3x4 o2w = ObjectToWorld3x4();
+        const float3x3 o2w3 = float3x3(o2w[0].xyz, o2w[1].xyz, o2w[2].xyz);
+        const float3 nWorld = normalize(mul(o2w3, nObj));
+        const float NdotV = abs(dot(nWorld, normalize(WorldRayDirection())));
+        const float R = FresnelDielectricExact(NdotV, max(1.01, mat.specularIor));
+        const float3 tint = saturate(float3(mat.transmissionColorR, mat.transmissionColorG,
+                                            mat.transmissionColorB))
+                          * saturate(mat.transmissionWeight);
+        payload.throughput *= tint * (1.0 - R);
+        payload.transmissiveHitCount += 1u;
+        IgnoreHit();
+    }
 }
 
 // --------------------------------------------------------------------

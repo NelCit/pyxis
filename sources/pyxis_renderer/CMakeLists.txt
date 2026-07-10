@@ -618,6 +618,16 @@ pyxis_compile_slang_shader(
 pyxis_compile_slang_shader(
     TARGET      pyxis_renderer
     SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/reflections.slang
+    ENTRY_POINT AnyHitMain
+    STAGE       anyhit
+    OUTPUT      reflections_anyhit.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
+                ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR} ${PYXIS_SHADER_ANYHIT}
+                ${PYXIS_SHADER_RNG} ${PYXIS_SHADER_RADIANCE_CACHE}
+)
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/reflections.slang
     ENTRY_POINT AoAnyHitMain
     STAGE       anyhit
     OUTPUT      reflections_ao_anyhit.spv
