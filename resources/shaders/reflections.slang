@@ -761,7 +761,8 @@ void ClosestHitMain(inout ReflectionPayload payload, in BuiltInTriangleIntersect
     if (gQuality.giMode != 0u)
     {
         float3 cachedRadiance;
-        if (SharcQuery(gShHash, gShResolved, worldHit, SharcCameraWorld(), cachedRadiance))
+        if (SharcQuery(gShHash, gShResolved, worldHit, SharcCameraWorld(), surf.normalWorld,
+                       cachedRadiance))
         {
             payload.color = cachedRadiance;
             payload.hitT  = RayTCurrent();

@@ -253,7 +253,8 @@ void ClosestHitMain(inout BouncePayload payload, in BuiltInTriangleIntersectionA
     if (gQuality.giMode != 0u && payload.bounceDepth >= 2u)
     {
         float3 cachedRadiance;
-        if (SharcQuery(gShHash, gShResolved, worldHit, SharcCameraWorld(), cachedRadiance))
+        if (SharcQuery(gShHash, gShResolved, worldHit, SharcCameraWorld(), surf.normalWorld,
+                       cachedRadiance))
         {
             payload.radiance = cachedRadiance * payload.throughput;
             return;
@@ -520,7 +521,7 @@ void ClosestHitMain(inout BouncePayload payload, in BuiltInTriangleIntersectionA
     if (gQuality.giMode != 0u && payload.bounceDepth == 1u)
     {
         const float3 tp = max(payload.throughput, float3(1e-4, 1e-4, 1e-4));
-        SharcAccumulate(gShHash, gShAccum, worldHit, SharcCameraWorld(),
+        SharcAccumulate(gShHash, gShAccum, worldHit, SharcCameraWorld(), surf.normalWorld,
                         payload.radiance / tp);
     }
 }

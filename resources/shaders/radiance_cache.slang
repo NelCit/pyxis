@@ -103,9 +103,26 @@ uint SharcHashU32(uint x)
 
 // Combine the (coord, level) tuple into a 32-bit key, then hash. The raw key
 // doubles as the stored checksum so a probed slot can be validated.
-uint SharcVoxelKey(int3 c, int level)
+// Dominant-axis normal octant (6 directions: +X,-X,+Y,-Y,+Z,-Z). Folded into
+// the cell key (NVIDIA SHaRC parity, RTX-alignment 2026-07-10): without a
+// normal term, OPPOSITE and PERPENDICULAR faces crossing the same voxel share
+// one cache cell, and bright energy leaks around corners/through walls — the
+// measured symptom was interior-facing surfaces (the lobby's concrete column
+// shadow side) over-filled +0.117 luma vs ovrtx by floor/window cells bleeding
+// into them. Keying by normal octant separates them at ZERO layout cost (the
+// key/checksum is hashed anyway); capacity pressure (up to 6x key space) is
+// absorbed by the 2^22 table.
+uint SharcNormalOctant(float3 n)
 {
-    // Bias coords into unsigned; pack low bits of each axis + level.
+    const float3 a = abs(n);
+    if (a.x >= a.y && a.x >= a.z) return (n.x >= 0.0) ? 0u : 1u;
+    if (a.y >= a.z)               return (n.y >= 0.0) ? 2u : 3u;
+    return (n.z >= 0.0) ? 4u : 5u;
+}
+
+uint SharcVoxelKey(int3 c, int level, uint octant)
+{
+    // Bias coords into unsigned; pack low bits of each axis + level + octant.
     const uint ux = uint(c.x + 0x40000000);
     const uint uy = uint(c.y + 0x40000000);
     const uint uz = uint(c.z + 0x40000000);
@@ -113,6 +130,7 @@ uint SharcVoxelKey(int3 c, int level)
     k = (k ^ (uy + 0x85ebca6bu)) * 0xc2b2ae35u;
     k = (k ^ (uz + 0x27d4eb2fu)) * 0x165667b1u;
     k = (k ^ (uint(level) * 0x9e3779b1u));
+    k = (k ^ ((octant + 1u) * 0x85ebca6bu));
     return k;
 }
 
@@ -121,14 +139,15 @@ uint SharcVoxelKey(int3 c, int level)
 // accum      : 16 bytes/cell (uint32 r,g,b scaled-int sum + uint32 sampleCount)
 // resolved   : 16 bytes/cell (float32 r,g,b resolved radiance + float32 frameW)
 
-// Locate the slot for a world position; returns SHARC_CAPACITY on failure.
-// `insert` = true allocates an empty slot (used by the UPDATE path).
+// Locate the slot for a world position + surface orientation; returns
+// SHARC_CAPACITY on failure. `insert` = true allocates an empty slot (the
+// UPDATE path). `octant` = SharcNormalOctant(surface normal).
 uint SharcFindSlot(RWByteAddressBuffer hashEntries, float3 posWorld, float3 camWorld,
-                   bool insert, out uint outChecksum)
+                   uint octant, bool insert, out uint outChecksum)
 {
     const int level = SharcGridLevel(posWorld, camWorld);
     const int3 coord = SharcGridCoord(posWorld, level);
-    uint checksum = SharcVoxelKey(coord, level);
+    uint checksum = SharcVoxelKey(coord, level, octant);
     if (checksum == SHARC_EMPTY) checksum = 1u;  // avoid the empty sentinel
     outChecksum = checksum;
 
@@ -155,12 +174,13 @@ uint SharcFindSlot(RWByteAddressBuffer hashEntries, float3 posWorld, float3 camW
     return SHARC_CAPACITY;
 }
 
-// UPDATE: accumulate a radiance sample into the cell at posWorld.
+// UPDATE: accumulate a radiance sample into the cell at (posWorld, normal octant).
 void SharcAccumulate(RWByteAddressBuffer hashEntries, RWByteAddressBuffer accum,
-                     float3 posWorld, float3 camWorld, float3 radiance)
+                     float3 posWorld, float3 camWorld, float3 normalWorld, float3 radiance)
 {
     uint checksum;
-    const uint slot = SharcFindSlot(hashEntries, posWorld, camWorld, /*insert*/ true, checksum);
+    const uint slot = SharcFindSlot(hashEntries, posWorld, camWorld,
+                                    SharcNormalOctant(normalWorld), /*insert*/ true, checksum);
     if (slot >= SHARC_CAPACITY) return;
     const float3 r =
         clamp(radiance, float3(0.0, 0.0, 0.0), float3(SHARC_RADIANCE_CLAMP, SHARC_RADIANCE_CLAMP,
@@ -178,10 +198,10 @@ void SharcAccumulate(RWByteAddressBuffer hashEntries, RWByteAddressBuffer accum,
 // cell is empty / unresolved. Buffers are UAVs (RW) so a query pass can share
 // the update binding set; UAV .Load reads are valid.
 bool SharcReadCellAt(RWByteAddressBuffer hashEntries, RWByteAddressBuffer resolved,
-                     int3 coord, int level, out float3 radiance)
+                     int3 coord, int level, uint octant, out float3 radiance)
 {
     radiance = float3(0.0, 0.0, 0.0);
-    uint checksum = SharcVoxelKey(coord, level);
+    uint checksum = SharcVoxelKey(coord, level, octant);
     if (checksum == SHARC_EMPTY) checksum = 1u;
     const uint base = SharcHashU32(checksum) & SHARC_CAPACITY_MASK;
     [loop]
@@ -209,11 +229,12 @@ bool SharcReadCellAt(RWByteAddressBuffer hashEntries, RWByteAddressBuffer resolv
 // neighbourhood still returns a smooth value. Returns false only if ALL 8
 // corners are empty (caller falls back to its own path).
 bool SharcQuery(RWByteAddressBuffer hashEntries, RWByteAddressBuffer resolved,
-                float3 posWorld, float3 camWorld, out float3 radiance)
+                float3 posWorld, float3 camWorld, float3 normalWorld, out float3 radiance)
 {
     radiance = float3(0.0, 0.0, 0.0);
     const int level = SharcGridLevel(posWorld, camWorld);
     const float voxel = SharcVoxelSize(level);
+    const uint octant = SharcNormalOctant(normalWorld);
     // Cell-center space: cell C's centre is (C+0.5)*voxel, so shift by -0.5.
     const float3 g = posWorld / voxel - 0.5;
     const int3 baseC = int3(floor(g));
@@ -230,7 +251,7 @@ bool SharcQuery(RWByteAddressBuffer hashEntries, RWByteAddressBuffer resolved,
         const float w = wv.x * wv.y * wv.z;
         if (w < 1e-4) continue;
         float3 r;
-        if (SharcReadCellAt(hashEntries, resolved, baseC + o, level, r))
+        if (SharcReadCellAt(hashEntries, resolved, baseC + o, level, octant, r))
         {
             sum += w * r;
             wsum += w;
