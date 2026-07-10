@@ -237,6 +237,16 @@ class PYXIS_RENDERER_API PyxisRenderer final {
   // PassContext::linearColor to it (see PassContext.h's own comment on
   // why that field is `mutable`).
   class IRenderPass* _dlssPass = nullptr;
+  // NRD stage 3 (RTX-alignment 2026-07-10) — optional NRD denoiser pass,
+  // registered between _denoiseAoPass and _compositePass ONLY in
+  // PYXIS_WITH_NRD builds; stays null otherwise. The pointer itself is
+  // unconditional (public headers are build-flag-independent — §18/§22);
+  // same forward-declared-IRenderPass* + impl-side cast pattern as above.
+  // [[maybe_unused]] because ONLY PYXIS_WITH_NRD builds of PyxisRenderer.cpp
+  // reference it — a non-NRD build otherwise trips clang's
+  // -Wunused-private-field under /WX (the field must stay unconditional
+  // per the §18/§22 note above, so the attribute, not an #ifdef, is the fix).
+  [[maybe_unused]] class IRenderPass* _nrdDenoisePass = nullptr;
   uint64_t _frameIndex = 0;
   // Active frames-in-flight count from RendererCreateDesc. Threaded
   // into every PassContext so passes can size per-FIF rings.

@@ -380,15 +380,18 @@ if(PYXIS_WITH_NRD)
 
     # NrdProvider — creates the nrd::Instance and translates its pipeline/
     # resource contract onto NVRHI (compute shaders, binding layouts,
-    # permanent/transient pool textures). Needs <NRD.h>/<NRDDescs.h>/
-    # <NRDSettings.h>, only available once pyxis_thirdparty_require_nrd()
-    # above has fetched them, so these two files are only ever added to
-    # the target's source list here — never compiled when
-    # PYXIS_WITH_NRD=OFF. See Private/Nrd/NrdProvider.h's file comment for
-    # the staging plan (per-frame evaluate + graph wiring are follow-ups).
+    # permanent/transient pool textures) + the Stage 2 per-frame Evaluate()
+    # path. NrdDenoisePass (Stage 3a) is the thin IRenderPass driving that
+    # Evaluate(). All four files need <NRD.h>/<NRDDescs.h>/<NRDSettings.h>,
+    # only available once pyxis_thirdparty_require_nrd() above has fetched
+    # them, so they are only ever added to the target's source list here —
+    # never compiled when PYXIS_WITH_NRD=OFF. See Private/Nrd/NrdProvider.h's
+    # file comment for the staging plan (graph registration is the follow-up).
     target_sources(pyxis_renderer PRIVATE
         Private/Nrd/NrdProvider.h
         Private/Nrd/NrdProvider.cpp
+        Private/Passes/NrdDenoisePass.h
+        Private/Passes/NrdDenoisePass.cpp
     )
 endif()
 

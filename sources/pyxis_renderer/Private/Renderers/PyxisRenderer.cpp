@@ -23,6 +23,7 @@
 #include "Passes/SharcResolvePass.h"
 
 #ifdef PYXIS_WITH_NRD
+#include "Passes/NrdDenoisePass.h"  // optional NRD denoiser pass (stage 3)
 #include <NRD.h>  // optional NVIDIA NRD backend — see _cmake/Thirdparty.cmake
 #endif
 #include "Passes/SceneBindings.h"
@@ -236,6 +237,19 @@ PyxisRenderer::PyxisRenderer(nvrhi::IDevice* device, GpuScene& scene, Profiler& 
   DenoiseAoPass* const denoiseAoRaw = denoiseAo.get();
   _denoiseAoPass = denoiseAoRaw;
   _graph->AddPass(std::move(denoiseAo));
+#ifdef PYXIS_WITH_NRD
+  // NRD stage 3 (RTX-alignment 2026-07-10) — the optional NRD backend's
+  // graph hook, AFTER the builtin chain (which still runs this stage —
+  // correctness-first; skipping the redundant builtin trio when NRD is
+  // active is a tracked perf follow-up) and BEFORE CompositePass, which
+  // prefers the context.nrdDenoised* textures this pass publishes when it
+  // ran. CMake-source-gated like NrdProvider itself.
+  {
+    auto nrdDenoise = std::make_unique<NrdDenoisePass>(device, *_sceneBindings);
+    _nrdDenoisePass = nrdDenoise.get();
+    _graph->AddPass(std::move(nrdDenoise));
+  }
+#endif
   // RTX-alignment design (rtx-realtime-alignment-design.md), WP2-final —
   // CompositePass replaces the retired RaytracedLightingPass megakernel:
   // it recombines the five signal passes' outputs (+ the G-buffer's
@@ -361,18 +375,22 @@ void PyxisRenderer::RenderFrame(nvrhi::ICommandList* commandList, const RenderSe
     effectiveDenoiser = DENOISER_BUILTIN;
     downgradeReason = dlssAvailability.reason;
   }
-  // DENOISER_NRD (RTX-alignment 2026-07-10): the optional NRD backend's
-  // frame-loop wiring is staged work (NrdProvider stage 2 translates
-  // dispatches but is not yet driven by this graph) — requested=Nrd
-  // therefore currently resolves to Builtin in EVERY build, with the reason
-  // distinguishing "not compiled in" from "not wired yet" so the log stays
-  // honest when PYXIS_WITH_NRD lands its final stage.
+  // DENOISER_NRD (RTX-alignment 2026-07-10, stage 3): honored when the
+  // optional backend is compiled in AND its provider initialised (NRD
+  // instance + pipelines + pools) — NrdDenoisePass then runs after the
+  // builtin chain and CompositePass prefers its outputs. Anything else
+  // downgrades to Builtin with an honest reason, same ladder as DLSS.
   if (requestedDenoiser == DENOISER_NRD)
   {
-    effectiveDenoiser = DENOISER_BUILTIN;
 #ifdef PYXIS_WITH_NRD
-    downgradeReason = "NRD frame-loop wiring staged (NrdProvider stage 3 pending)";
+    if (_nrdDenoisePass == nullptr
+        || !static_cast<NrdDenoisePass*>(_nrdDenoisePass)->IsUsable())
+    {
+      effectiveDenoiser = DENOISER_BUILTIN;
+      downgradeReason = "NRD provider not usable (instance/pipeline creation failed)";
+    }
 #else
+    effectiveDenoiser = DENOISER_BUILTIN;
     downgradeReason = "renderer built without PYXIS_WITH_NRD";
 #endif
   }
@@ -573,6 +591,15 @@ void PyxisRenderer::RenderFrame(nvrhi::ICommandList* commandList, const RenderSe
       dlss->EnsureOutput(colorDesc.width, colorDesc.height);
       dlss->EnsureDepthScratch(renderWidth, renderHeight);
     }
+#ifdef PYXIS_WITH_NRD
+    // NRD stage 3 — render-resolution outputs + provider pools, allocated
+    // only when NRD will actually run this frame (same lazy discipline as
+    // the DLSS block above).
+    if (_nrdDenoisePass != nullptr && effectiveDenoiser == DENOISER_NRD) {
+      static_cast<NrdDenoisePass*>(_nrdDenoisePass)
+          ->EnsureOutputs(renderWidth, renderHeight);
+    }
+#endif
     if (_gbufferPass != nullptr) {
       context.visibility = static_cast<RaytracedGBufferPass*>(_gbufferPass)
                                ->EnsureVisibilityBuffer(renderWidth, renderHeight);

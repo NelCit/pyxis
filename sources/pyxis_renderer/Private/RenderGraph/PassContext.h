@@ -126,6 +126,16 @@ struct PassContext {
   nvrhi::ITexture* gReflections = nullptr;
   nvrhi::ITexture* gReflectionWeight = nullptr;
   nvrhi::ITexture* gTranslucency = nullptr;
+  // NRD stage 3 (RTX-alignment 2026-07-10, PYXIS_WITH_NRD builds only):
+  // NrdDenoisePass::Execute sets these to its denoised diffuse/specular
+  // outputs when NRD actually ran this frame; CompositePass then prefers
+  // them over the builtin à-trous chain's outputs. `mutable` for the same
+  // reason as `linearColor` above — an earlier pass hands its result
+  // forward through the shared per-frame context. Always null in non-NRD
+  // builds and whenever the effective denoiser isn't Nrd, so the builtin
+  // path is untouched byte-for-byte.
+  mutable nvrhi::ITexture* nrdDenoisedDiffuse = nullptr;
+  mutable nvrhi::ITexture* nrdDenoisedSpecular = nullptr;
   // Renderer-internal scratch: an 8-byte uint2 buffer (sum of fixed-point
   // log2-luminance, lit-pixel count) AutoExposurePass clears + accumulates from
   // `linearColor` and TonemapPass reads to derive the auto exposure. PyxisRenderer

@@ -380,6 +380,15 @@ void CompositePass::Execute(nvrhi::ICommandList* commandList, const PassContext&
       if (nvrhi::ITexture* const denoised = _denoiseAtrousPass->Specular())
         reflections = denoised;
     }
+    // NRD stage 3 (RTX-alignment 2026-07-10): when NrdDenoisePass ran this
+    // frame (PYXIS_WITH_NRD builds, effective denoiser == Nrd) it publishes
+    // its denoised diffuse/specular through the shared context — prefer
+    // them over the builtin à-trous outputs above. Null in every other
+    // configuration, so the builtin path is untouched byte-for-byte.
+    if (context.nrdDenoisedDiffuse != nullptr)
+      indirectDiffuse = context.nrdDenoisedDiffuse;
+    if (context.nrdDenoisedSpecular != nullptr)
+      reflections = context.nrdDenoisedSpecular;
     // Noise-floor + vegetation spec (rtx-realtime-alignment-design.md,
     // 2026-07-06), work item 1 — same raw-vs-denoised swap for AO.
     if (_denoiseAoPass != nullptr) {
