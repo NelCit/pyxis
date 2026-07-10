@@ -286,11 +286,25 @@ DeviceManagerCreateStatus VkDeviceManagerHeadless::Bringup(
   v12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
   v12.shaderStorageBufferArrayNonUniformIndexing = VK_TRUE;
   v12.hostQueryReset = VK_TRUE;
+  // 16-bit shader arithmetic + storage (RTX-alignment 2026-07-10, NRD first
+  // light): NVIDIA NRD's embedded SPIRV declares the Float16/Int16
+  // capabilities (fp16 filter math) — without these device features every
+  // NRD vkCreateShaderModule is invalid (VUID-VkShaderModuleCreateInfo-
+  // pCode-08740) and its dispatches silently no-op with validation off (the
+  // "black NRD output" first-light bug). Universally supported on the
+  // RT-capable hardware this renderer targets (plan §5.b matrix), so
+  // enabled unconditionally rather than plumbed through a PYXIS_WITH_NRD
+  // build flag into the platform layer.
+  v12.shaderFloat16 = VK_TRUE;
+  v12.storageBuffer8BitAccess = VK_TRUE;
   v12.pNext = &v13;
 
   VkPhysicalDeviceVulkan11Features v11{};
   v11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
   v11.shaderDrawParameters = VK_TRUE;
+  // 16-bit SSBO/UBO access — companion to shaderFloat16 above (NRD).
+  v11.storageBuffer16BitAccess = VK_TRUE;
+  v11.uniformAndStorageBuffer16BitAccess = VK_TRUE;
   v11.pNext = &v12;
 
   VkPhysicalDeviceAccelerationStructureFeaturesKHR asFeats{};
@@ -306,6 +320,9 @@ DeviceManagerCreateStatus VkDeviceManagerHeadless::Bringup(
   VkPhysicalDeviceFeatures2 features2{};
   features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
   features2.features.shaderInt64 = VK_TRUE;
+  // shaderInt16 — NRD SPIRV declares the Int16 capability (see the
+  // shaderFloat16 comment above).
+  features2.features.shaderInt16 = VK_TRUE;
   features2.features.shaderStorageImageReadWithoutFormat = VK_TRUE;
   // Slang emits RWTexture2D<float4> as Image with format=Unknown,
   // which requires both Read and Write WithoutFormat to be enabled

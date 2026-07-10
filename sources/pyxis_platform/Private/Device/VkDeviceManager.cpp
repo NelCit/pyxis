@@ -341,6 +341,11 @@ DeviceManagerCreateStatus VkDeviceManager::Bringup(const DeviceCreationParams& p
   v12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
   v12.shaderStorageBufferArrayNonUniformIndexing = VK_TRUE;
   v12.hostQueryReset = VK_TRUE;
+  // 16-bit shader arithmetic + storage — match VkDeviceManagerHeadless (NRD
+  // first light, 2026-07-10): NRD's embedded SPIRV declares Float16/Int16;
+  // see the headless manager's fuller comment.
+  v12.shaderFloat16 = VK_TRUE;
+  v12.storageBuffer8BitAccess = VK_TRUE;
   v12.pNext = &v13;
 
   // Slang's emitted SPIR-V routinely declares the `DrawParameters`
@@ -354,6 +359,9 @@ DeviceManagerCreateStatus VkDeviceManager::Bringup(const DeviceCreationParams& p
   VkPhysicalDeviceVulkan11Features v11{};
   v11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
   v11.shaderDrawParameters = VK_TRUE;
+  // 16-bit SSBO/UBO access — companion to shaderFloat16 above (NRD).
+  v11.storageBuffer16BitAccess = VK_TRUE;
+  v11.uniformAndStorageBuffer16BitAccess = VK_TRUE;
   v11.pNext = &v12;
 
   VkPhysicalDeviceAccelerationStructureFeaturesKHR asFeats{};
@@ -369,6 +377,9 @@ DeviceManagerCreateStatus VkDeviceManager::Bringup(const DeviceCreationParams& p
   VkPhysicalDeviceFeatures2 features2{};
   features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
   features2.features.shaderInt64 = VK_TRUE;
+  // shaderInt16 — NRD SPIRV declares the Int16 capability (see the
+  // headless manager's comment).
+  features2.features.shaderInt16 = VK_TRUE;
   features2.features.shaderStorageImageReadWithoutFormat = VK_TRUE;
   // Match VkDeviceManagerHeadless: Slang's RWTexture2D<float4> emits
   // Unknown image format, requiring Write-WithoutFormat for the

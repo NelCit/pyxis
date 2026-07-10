@@ -812,6 +812,20 @@ bool NrdProvider::Evaluate(nvrhi::ICommandList* commandList, const FrameInputs& 
                                + std::to_string(static_cast<uint32_t>(dispatchResult)) + ")");
     return false;
   }
+  // TEMP DIAGNOSTIC (first-light debug step 1 — revert before commit):
+  // dispatch inventory, frame 0 only.
+  if (inputs.frameIndex == 0)
+  {
+    log.Info(log::RENDER, "NRDDBG dispatchNum=" + std::to_string(dispatchDescsNum));
+    for (uint32_t i = 0; i < dispatchDescsNum; ++i)
+      log.Info(log::RENDER,
+               "NRDDBG   [" + std::to_string(i) + "] "
+                   + (dispatchDescs[i].name != nullptr ? dispatchDescs[i].name : "?")
+                   + " pipe=" + std::to_string(dispatchDescs[i].pipelineIndex)
+                   + " res=" + std::to_string(dispatchDescs[i].resourcesNum)
+                   + " grid=" + std::to_string(dispatchDescs[i].gridWidth) + "x"
+                   + std::to_string(dispatchDescs[i].gridHeight));
+  }
 
   // ---- 5. Resource snapshot -- "real" (non-pool) resource types resolve
   // through this array; pool types resolve through Xxx PoolTexture() below.
@@ -836,6 +850,11 @@ bool NrdProvider::Evaluate(nvrhi::ICommandList* commandList, const FrameInputs& 
   // Denoise()/_Dispatch()), which is dictated by NRD's public API contract
   // (resolve ResourceDesc list -> binding set -> constants -> barriers ->
   // dispatch), not copied from it.
+  // See the constant-buffer upload comment inside the loop: the very first
+  // CB-carrying dispatch of every Evaluate must write regardless of NRD's
+  // cross-call matches-previous flag (volatile-CB versions are per command
+  // list).
+  bool cbWrittenThisCall = false;
   for (uint32_t dispatchIndex = 0; dispatchIndex < dispatchDescsNum; ++dispatchIndex)
   {
     const nrd::DispatchDesc& dispatch = dispatchDescs[dispatchIndex];
@@ -939,17 +958,23 @@ bool NrdProvider::Evaluate(nvrhi::ICommandList* commandList, const FrameInputs& 
       _dispatchBindingSetCache.emplace(key, std::move(newSet));
     }
 
-    // ---- Constant-buffer upload -- skipped when NRD reports this
-    // dispatch's data is byte-identical to the previous dispatch's (the
-    // volatile CB's "most recently written version" simply carries over
-    // unchanged; nvrhi resolves a VolatileConstantBuffer binding to
-    // whichever version was most recently written on THIS command list,
-    // not a version baked into the binding set itself -- see nvrhi.h's
-    // writeBuffer() doc comment on Vulkan volatile buffers).
-    if (dispatch.constantBufferDataSize > 0u && !dispatch.constantBufferDataMatchesPreviousDispatch
-        && _nrdConstantBuffer)
+    // ---- Constant-buffer upload -- NRD's constantBufferDataMatchesPrevious-
+    // Dispatch flag lets identical consecutive uploads be skipped, BUT its
+    // "previous dispatch" spans Evaluate() calls (frames), while nvrhi's
+    // volatile-CB versioning is PER COMMAND LIST: a frame whose FIRST
+    // CB-carrying dispatch reported matches-previous would write nothing on
+    // this frame's fresh command list and the binding would resolve to a
+    // stale/undefined version — the first-light "black output" bug
+    // (2026-07-10 debug: dispatch inventory healthy, packed inputs healthy
+    // via bypass probe, output black). Force-write the first CB-carrying
+    // dispatch of every Evaluate; honor the skip only within the same call.
+    if (dispatch.constantBufferDataSize > 0u && _nrdConstantBuffer
+        && (!dispatch.constantBufferDataMatchesPreviousDispatch || !cbWrittenThisCall))
+    {
       commandList->writeBuffer(_nrdConstantBuffer, dispatch.constantBufferData,
                                dispatch.constantBufferDataSize);
+      cbWrittenThisCall = true;
+    }
 
     // ---- Explicit resource-state transitions, per dispatch -- pool
     // textures ping-pong between SRV and UAV roles dispatch to dispatch
