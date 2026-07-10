@@ -21,6 +21,10 @@
 #include "Passes/RaytracedGBufferPass.h"
 #include "Passes/ReflectionsPass.h"
 #include "Passes/SharcResolvePass.h"
+
+#ifdef PYXIS_WITH_NRD
+#include <NRD.h>  // optional NVIDIA NRD backend — see _cmake/Thirdparty.cmake
+#endif
 #include "Passes/SceneBindings.h"
 #include "Passes/SsaaResolvePass.h"
 #include "Passes/TaaPass.h"
@@ -304,6 +308,27 @@ PyxisRenderer::PyxisRenderer(nvrhi::IDevice* device, GpuScene& scene, Profiler& 
                       "5-pass denoiser chain (Shadow/Temporal/HistoryFix/Atrous/Ao) + Composite + "
                       "Accumulation + Dlss + AutoExposure + Taa + Tonemap + SsaaResolve + "
                       "BlitToSrgb registered)");
+
+#ifdef PYXIS_WITH_NRD
+  // OPTIONAL NRD backend (PYXIS_WITH_NRD=ON builds only — see
+  // _cmake/Thirdparty.cmake for the fetch-not-vendor licensing posture).
+  // Plumbing-verification log: proves the fetched static lib links and its
+  // API is callable. Runtime integration (an NrdProvider translating NRD's
+  // dispatch descriptions onto NVRHI, replacing the builtin
+  // Temporal/HistoryFix/Atrous chain when selected) is staged work behind
+  // this define — the builtin chain above is untouched and remains the
+  // default and fallback.
+  {
+    const nrd::LibraryDesc* nrdDesc = nrd::GetLibraryDesc();
+    if (nrdDesc != nullptr)
+      Logging::Get().Info(log::RENDER,
+                          "PyxisRenderer: NRD backend available (v"
+                              + std::to_string(nrdDesc->versionMajor) + "."
+                              + std::to_string(nrdDesc->versionMinor) + "."
+                              + std::to_string(nrdDesc->versionBuild)
+                              + ", static, SPIRV-embedded) — runtime integration staged");
+  }
+#endif
 }
 
 // Out-of-line dtor lives here so unique_ptr<RenderGraph>'s (and, since

@@ -366,6 +366,19 @@ target_compile_definitions(pyxis_renderer PRIVATE
     $<$<BOOL:${PYXIS_DEBUG_TOOLS}>:PYXIS_DEBUG_TOOLS=1>
 )
 
+# OPTIONAL NRD denoiser backend (RTX-alignment 2026-07-10, default OFF —
+# proprietary NVIDIA RTX SDKs license; fetched into the build tree only,
+# never vendored/installed. See _cmake/Thirdparty.cmake's PYXIS_WITH_NRD
+# block for the licensing rationale). When ON, the NRD static lib + headers
+# become available and PYXIS_WITH_NRD=1 is defined; runtime integration is
+# staged behind that define (an absent define compiles the builtin chain
+# byte-identically).
+if(PYXIS_WITH_NRD)
+    pyxis_thirdparty_require_nrd()
+    target_link_libraries(pyxis_renderer PRIVATE NRD)
+    target_compile_definitions(pyxis_renderer PRIVATE PYXIS_WITH_NRD=1)
+endif()
+
 # Versioning (§22.2): pyxis_renderer.dll is the canonical owner of the
 # generated Version.h / Version.cpp. Version.h is PYXIS_RENDERER_API
 # decorated, so it lives here, not in pyxis_platform.

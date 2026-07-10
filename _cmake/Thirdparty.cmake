@@ -52,6 +52,18 @@ set(PYXIS_IMGUI_GIT_TAG "c51f1a6e47b8b5b11ca13490c461842c96bc4ca2")
 # (see ImGuiHost::BuildFpsPanel) which gives us multi-series
 # overlay + auto-scaling without the dep.
 
+# NRD — NVIDIA Real-time Denoisers (ReLAX / ReBLUR / SIGMA), OPTIONAL and
+# default OFF (RTX-alignment 2026-07-10, owner-approved). LICENSING: NRD is
+# under the proprietary "NVIDIA RTX SDKs LICENSE" (§4(e): must not become
+# subject to an open-source license) — it is therefore NEVER vendored into
+# this Apache-2.0 repo; FetchContent pulls it into the BUILD TREE only, with
+# NVIDIA's own LICENSE.txt intact, exactly like the DLSS/Streamline runtime
+# posture (.claude/skills/dlss-streamline-integration). Official release
+# builds keep this OFF; it exists for local parity experiments against the
+# ovrtx reference (which uses NRD for its denoiser chains).
+option(PYXIS_WITH_NRD "Fetch + build NVIDIA NRD as an optional denoiser backend (proprietary NVIDIA RTX SDKs license — see _cmake/Thirdparty.cmake)" OFF)
+set(PYXIS_NRD_GIT_TAG "v4.17.3")
+
 # Slang — prebuilt Windows x86_64 binary release. Pulled via URL mode so
 # we don't pay Slang's full source build (~10–15 min on a fresh clone).
 # slangc.exe lives at <slang_root>/bin/slangc.exe after unpack.
@@ -99,6 +111,26 @@ function(pyxis_thirdparty_setup)
         GIT_TAG        ${PYXIS_IMGUI_GIT_TAG}
         GIT_SHALLOW    FALSE
     )
+
+    if(PYXIS_WITH_NRD)
+        FetchContent_Declare(
+            nrd
+            GIT_REPOSITORY        https://github.com/NVIDIA-RTX/NRD.git
+            GIT_TAG               ${PYXIS_NRD_GIT_TAG}
+            GIT_SHALLOW           FALSE
+            GIT_SUBMODULES_RECURSE TRUE
+        )
+        # Vulkan-only consumer: embed SPIRV permutations, skip the D3D blobs.
+        set(NRD_STATIC_LIBRARY        ON  CACHE BOOL "" FORCE)
+        set(NRD_EMBEDS_SPIRV_SHADERS  ON  CACHE BOOL "" FORCE)
+        set(NRD_EMBEDS_DXIL_SHADERS   OFF CACHE BOOL "" FORCE)
+        set(NRD_EMBEDS_DXBC_SHADERS   OFF CACHE BOOL "" FORCE)
+        # SPIRV-only: NRD's bundled ShaderMake must not REQUIRE the D3D FXC
+        # compiler (its Windows-SDK probe hard-fails on SDKs without
+        # bin/<ver>/x64/fxc.exe); DXC (downloaded by ShaderMake itself) is
+        # the only compiler the SPIRV permutations need.
+        set(SHADERMAKE_FIND_FXC       OFF CACHE BOOL "" FORCE)
+    endif()
 endfunction()
 
 
@@ -108,6 +140,29 @@ endfunction()
 # Disables clang-tidy + /WX inside NVRHI's source tree so we don't gate
 # our build on third-party diagnostics.
 # ===========================================================================
+# ===========================================================================
+# pyxis_thirdparty_require_nrd() — OPTIONAL (PYXIS_WITH_NRD=ON only); pulled
+# in by pyxis_renderer when the NRD denoiser backend is enabled. Same
+# clang-tidy/-WX isolation as NVRHI below. The fetched tree stays in the
+# build dir under its own NVIDIA license — never installed, never vendored.
+# ===========================================================================
+function(pyxis_thirdparty_require_nrd)
+    if(NOT PYXIS_WITH_NRD)
+        message(FATAL_ERROR "pyxis_thirdparty_require_nrd() called with PYXIS_WITH_NRD=OFF")
+    endif()
+    if(TARGET NRD)
+        return()
+    endif()
+    set(_savedTidy "${CMAKE_CXX_CLANG_TIDY}")
+    set(CMAKE_CXX_CLANG_TIDY "")
+    FetchContent_MakeAvailable(nrd)
+    set(CMAKE_CXX_CLANG_TIDY "${_savedTidy}")
+    if(TARGET NRD)
+        # Third-party warnings must not gate our build.
+        target_compile_options(NRD PRIVATE /W0)
+    endif()
+endfunction()
+
 function(pyxis_thirdparty_require_nvrhi)
     if(TARGET nvrhi)
         return()
