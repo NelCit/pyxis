@@ -64,7 +64,7 @@ static const float SHARC_LOG_BASE        = 2.0;
 // by powers of LOG_BASE. LOWER GRID_DENSITY => finer cells (0.015·2 = ~3% of
 // distance here). Finer = sharper reflected detail (reflections read this cache),
 // at the cost of more occupied cells (raise SHARC_CAPACITY if collisions appear).
-static const float SHARC_GRID_DENSITY    = 0.5;      // lower = finer cells; trilinear query averages 8 => finer viable
+static const float SHARC_GRID_DENSITY    = 0.25;     // lower = finer cells; trilinear query averages 8 => finer viable
 static const float SHARC_VOXEL_BASE      = 0.015;    // metres, finest cell edge
 static const int   SHARC_LEVEL_MIN       = 0;
 static const int   SHARC_LEVEL_MAX       = 16;
