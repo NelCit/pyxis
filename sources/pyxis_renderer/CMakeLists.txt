@@ -377,6 +377,19 @@ if(PYXIS_WITH_NRD)
     pyxis_thirdparty_require_nrd()
     target_link_libraries(pyxis_renderer PRIVATE NRD)
     target_compile_definitions(pyxis_renderer PRIVATE PYXIS_WITH_NRD=1)
+
+    # NrdProvider — creates the nrd::Instance and translates its pipeline/
+    # resource contract onto NVRHI (compute shaders, binding layouts,
+    # permanent/transient pool textures). Needs <NRD.h>/<NRDDescs.h>/
+    # <NRDSettings.h>, only available once pyxis_thirdparty_require_nrd()
+    # above has fetched them, so these two files are only ever added to
+    # the target's source list here — never compiled when
+    # PYXIS_WITH_NRD=OFF. See Private/Nrd/NrdProvider.h's file comment for
+    # the staging plan (per-frame evaluate + graph wiring are follow-ups).
+    target_sources(pyxis_renderer PRIVATE
+        Private/Nrd/NrdProvider.h
+        Private/Nrd/NrdProvider.cpp
+    )
 endif()
 
 # Versioning (§22.2): pyxis_renderer.dll is the canonical owner of the
