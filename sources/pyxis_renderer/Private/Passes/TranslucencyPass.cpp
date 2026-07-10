@@ -3,6 +3,7 @@
 #include "Passes/TranslucencyPass.h"
 
 #include "Passes/SceneBindings.h"
+#include "Passes/SharcResolvePass.h"
 #include "RenderGraph/PassContext.h"
 #include "RenderGraph/ShaderLoad.h"
 #include "Scene/SceneResources.h"
@@ -99,8 +100,8 @@ PipelineVariant BuildPipelineVariant(nvrhi::IDevice* device, nvrhi::IBindingLayo
 }  // namespace
 
 TranslucencyPass::TranslucencyPass(nvrhi::IDevice* device, GpuScene& scene,
-                                   SceneBindings& sceneBindings)
-    : _device(device), _scene(&scene), _sceneBindings(&sceneBindings) {
+                                   SceneBindings& sceneBindings, SharcResolvePass& sharc)
+    : _device(device), _scene(&scene), _sceneBindings(&sceneBindings), _sharc(&sharc) {
   if (!_sceneBindings->IsOperational())
   {
     Logging::Get().Error(log::RENDER,
@@ -137,6 +138,8 @@ TranslucencyPass::TranslucencyPass(nvrhi::IDevice* device, GpuScene& scene,
   layoutDesc.bindings = {
       nvrhi::BindingLayoutItem::StructuredBuffer_SRV(0),  // 0 visibility (packed 16 B)
       nvrhi::BindingLayoutItem::Texture_UAV(1),           // 1 gTranslucency
+      nvrhi::BindingLayoutItem::RawBuffer_UAV(2),         // 2 gShHash (SHARC cache query)
+      nvrhi::BindingLayoutItem::RawBuffer_UAV(3),         // 3 gShResolved (SHARC cache query)
   };
   _passLayout = _device->createBindingLayout(layoutDesc);
   if (!_passLayout)
@@ -216,10 +219,20 @@ nvrhi::BindingSetHandle TranslucencyPass::GetOrCreateBindingSet(nvrhi::IBuffer* 
   if (_bindingSetCache.size() >= MAX_CACHE_ENTRIES)
     _bindingSetCache.clear();
 
+  // SHARC cache buffers (owned by SharcResolvePass) — always bound; queried by
+  // the shader only when gQuality.giMode != 0 at the terminal through-glass
+  // segment (same convention as ReflectionsPass).
+  nvrhi::IBuffer* const shHash = _sharc != nullptr ? _sharc->HashBuffer() : nullptr;
+  nvrhi::IBuffer* const shResolved = _sharc != nullptr ? _sharc->ResolvedBuffer() : nullptr;
+  if (shHash == nullptr || shResolved == nullptr)
+    return nullptr;  // catastrophic (GPU OOM) — pass skips; see SharcResolvePass ctor.
+
   nvrhi::BindingSetDesc setDesc;
   setDesc.bindings = {
       nvrhi::BindingSetItem::StructuredBuffer_SRV(0, visibility),
       nvrhi::BindingSetItem::Texture_UAV(1, _output.Get()),
+      nvrhi::BindingSetItem::RawBuffer_UAV(2, shHash),
+      nvrhi::BindingSetItem::RawBuffer_UAV(3, shResolved),
   };
   nvrhi::BindingSetHandle set = _device->createBindingSet(setDesc, _passLayout);
   _bindingSetCache[visibility] = set;

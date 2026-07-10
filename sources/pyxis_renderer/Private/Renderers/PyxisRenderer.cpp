@@ -180,7 +180,10 @@ PyxisRenderer::PyxisRenderer(nvrhi::IDevice* device, GpuScene& scene, Profiler& 
       std::make_unique<ReflectionsPass>(device, scene, *_sceneBindings, *sharcResolveRaw);
   _reflectionsPass = reflections.get();
   _graph->AddPass(std::move(reflections));
-  auto translucency = std::make_unique<TranslucencyPass>(device, scene, *_sceneBindings);
+  // Translucency also QUERIES the SHARC cache (terminal through-glass segment
+  // — the "window strip" fix, 2026-07-10); same shared-buffer convention.
+  auto translucency =
+      std::make_unique<TranslucencyPass>(device, scene, *_sceneBindings, *sharcResolveRaw);
   _translucencyPass = translucency.get();
   _graph->AddPass(std::move(translucency));
   // RTX-alignment design (rtx-realtime-alignment-design.md), Phase B —

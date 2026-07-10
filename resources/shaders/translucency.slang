@@ -26,9 +26,27 @@
 #include "ShaderInterop.slang"
 #include "camera_ray.slang"  // gCamera (0) + BuildCameraRay
 #include "shading.slang"     // gTlas (1) + full Set-0 scene tables + ShadeSurfaceHit
+#include "radiance_cache.slang"  // SHARC world-space radiance cache (gQuality.giMode gate)
 
 [[vk::binding(0, 1)]] StructuredBuffer<VisibilityGpu> gVisibility;
 [[vk::binding(1, 1)]] RWTexture2D<float4>              gTranslucency;
+// SHARC radiance cache (RTX-alignment 2026-07-10, "window strip" fix) — the
+// same read-only QUERY wiring ReflectionsPass uses (see that file's SHARC
+// comment): the through-glass segment shade (ShadeSurfaceHit) is direct +
+// dome-ambient + emission WITHOUT indirect GI, so exterior structure seen
+// through the curtain wall (mullion caps etc., facing away from the sky)
+// rendered ~4.6x darker than ovrtx (measured: pyx 3.0% of sky radiance vs
+// ovrtx 13.7% on the deficient glass strips). Querying the cache at the
+// TERMINAL opaque segment supplies the full cached outgoing radiance
+// (direct + dome + emission + infinite-bounce GI). Bound full-size when
+// PASS_MASK_SHARC_GI is set, 1-cell placeholder otherwise; touched only
+// when gQuality.giMode != 0, so the builtin path stays byte-identical.
+[[vk::binding(2, 1)]] RWByteAddressBuffer gShHash;      // 4 B/cell checksum table
+[[vk::binding(3, 1)]] RWByteAddressBuffer gShResolved;  // 16 B/cell resolved radiance
+
+// Camera world position (SHARC grid-LoD origin) — same derivation as
+// indirect_diffuse.slang / reflections.slang (§10 row-major/column-vector).
+float3 SharcCameraWorld() { return mul(gCamera.worldFromView, float4(0.0, 0.0, 0.0, 1.0)).xyz; }
 
 // Same per-segment loop cap as raytraced_lighting_raygen.slang's own
 // spec constant (identical numeric SPEC_ID — scoped per SPIR-V module,
@@ -112,6 +130,23 @@ void RayGenMain() {
                  /*MissShaderIndex*/ 0,
                  segRay,
                  segPayload);
+
+        // SHARC QUERY (see the binding block's doc comment): the TERMINAL
+        // opaque surface behind the glass gets its full cached outgoing
+        // radiance (direct + dome + emission + infinite-bounce GI) instead of
+        // ShadeSurfaceHit's GI-less shade — the same substitution that fixed
+        // the systematically-dark reflections (reflections.slang). Glass
+        // segments (still-transmissive) keep the shaded color: their own
+        // surface term is small and the loop continues through them.
+        const float3 segT = segPayload.transmittance;
+        const bool segOpaque = max(max(segT.x, segT.y), segT.z) < 1e-3f;
+        if (gQuality.giMode != 0u && segPayload.hitT >= 0.0f && segOpaque)
+        {
+            float3 cachedRadiance;
+            if (SharcQuery(gShHash, gShResolved, segPayload.worldHit, SharcCameraWorld(),
+                           segPayload.normalWorld, cachedRadiance))
+                segPayload.color = cachedRadiance;
+        }
 
         radiance += throughput * segPayload.color;
 

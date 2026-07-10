@@ -48,10 +48,16 @@ namespace pyxis {
 
 class GpuScene;
 class SceneBindings;
+class SharcResolvePass;
 
 class TranslucencyPass final : public IRenderPass {
  public:
-  TranslucencyPass(nvrhi::IDevice* device, GpuScene& scene, SceneBindings& sceneBindings);
+  // `sharc` supplies the SHARC radiance-cache buffers this pass's terminal
+  // through-glass segment QUERIES (read-only) when PASS_MASK_SHARC_GI is on —
+  // same structural-dependency convention ReflectionsPass uses. Borrowed;
+  // owned by PyxisRenderer, outlives this pass.
+  TranslucencyPass(nvrhi::IDevice* device, GpuScene& scene, SceneBindings& sceneBindings,
+                   SharcResolvePass& sharc);
   ~TranslucencyPass() override;
   TranslucencyPass(const TranslucencyPass&) = delete;
   TranslucencyPass& operator=(const TranslucencyPass&) = delete;
@@ -79,6 +85,7 @@ class TranslucencyPass final : public IRenderPass {
   nvrhi::IDevice* _device = nullptr;
   GpuScene* _scene = nullptr;
   SceneBindings* _sceneBindings = nullptr;
+  SharcResolvePass* _sharc = nullptr;  // borrowed — see ctor doc.
 
   nvrhi::ShaderHandle _raygenShader;
   nvrhi::ShaderHandle _closestHitShader;

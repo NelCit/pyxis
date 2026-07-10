@@ -657,6 +657,7 @@ pyxis_compile_slang_shader(
     OUTPUT      translucency_raygen.spv
     INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
                 ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR} ${PYXIS_SHADER_ANYHIT}
+                ${PYXIS_SHADER_RADIANCE_CACHE}
 )
 pyxis_compile_slang_shader(
     TARGET      pyxis_renderer
@@ -666,6 +667,7 @@ pyxis_compile_slang_shader(
     OUTPUT      translucency_closesthit.spv
     INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
                 ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR} ${PYXIS_SHADER_ANYHIT}
+                ${PYXIS_SHADER_RADIANCE_CACHE}
 )
 pyxis_compile_slang_shader(
     TARGET      pyxis_renderer
@@ -675,6 +677,7 @@ pyxis_compile_slang_shader(
     OUTPUT      translucency_miss.spv
     INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
                 ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR} ${PYXIS_SHADER_ANYHIT}
+                ${PYXIS_SHADER_RADIANCE_CACHE}
 )
 # ShadowMissMain — required by the reused ShadeSurfaceHit's internal
 # shadow/AO rays (hardcoded MissShaderIndex = 1); see the entry's own
@@ -688,6 +691,7 @@ pyxis_compile_slang_shader(
     OUTPUT      translucency_shadow_miss.spv
     INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
                 ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR} ${PYXIS_SHADER_ANYHIT}
+                ${PYXIS_SHADER_RADIANCE_CACHE}
 )
 pyxis_compile_slang_shader(
     TARGET      pyxis_renderer
@@ -697,6 +701,7 @@ pyxis_compile_slang_shader(
     OUTPUT      translucency_anyhit.spv
     INCLUDES    ${PYXIS_SHADER_INTEROP} ${PYXIS_SHADER_CAMERA_RAY} ${PYXIS_SHADER_DOME}
                 ${PYXIS_SHADER_SHADING} ${PYXIS_SHADER_OPENPBR} ${PYXIS_SHADER_ANYHIT}
+                ${PYXIS_SHADER_RADIANCE_CACHE}
 )
 
 # --- RTX-alignment design (rtx-realtime-alignment-design.md), WP2-final —
