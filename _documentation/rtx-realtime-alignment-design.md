@@ -1467,3 +1467,34 @@ postBloomGain 0.10 = 0.07883. Campaign 0.15959 -> 0.07883 (-50.6%).
   character/look match for the viewer.** There is no hand-filter tuning path to RR's
   phase-coherent smoothness — that thread is CLOSED; do not spend more renders on
   atrous knobs chasing it.
+
+## Session 2026-07-11 (cont. 4) — blob forensics round 2 (user 3rd push); aniso filtering shipped
+
+Method upgrade after the user's third noise report: full-pipeline SIGNAL-ISOLATION renders
+(one passMask signal + denoise + accum + SHARC at a time) correlated per-region against
+the full image's blob field (2-16px bandpass) — fixes round 1's flaw (raw renders, 1px
+stats). Results:
+- direct-only +0.89 / indirect+AO +0.89 / reflections +0.40 / translucency +0.32 (wall)
+  -> every diffuse term carries the same pattern; common factors: x albedo (composite)
+  and the SHARED filter chain + guides (residue lands in the same places).
+- Our albedo AOV's own blob field correlates +0.79 with the final on the wall; final amp
+  0.0444 vs albedo 0.0255 — but ovrtx amplifies its albedo the same way (0.0301 ->
+  0.0458). NOT an anomaly.
+- Demod round-trip: MIN_DEMODULATION_ALBEDO 0.04 -> 4.0 (constant demod) = byte-flat
+  blob band. MEASURED NON-LEVER, annotated in shading.slang.
+- **FINAL-image blob amplitude vs ovrtx: wall 0.0444/0.0458, bowl 0.0249/0.0248,
+  ceiling 0.0633/0.0648 = PARITY. Column 0.0361/0.0288 = the one +25% excess**, and it
+  proved LIGHTING-residue: sampler aniso 16 (null) and planar-projection elliptical
+  gradients (null on column, +0.0006) both left it unchanged.
+- Shipped f4f92bb anyway (correctness): material sampler maxAnisotropy 1 -> 16 (the
+  elliptical SampleGrad footprints finally do hardware aniso) + the planarProj gradient
+  branch's isotropic-circle proxy replaced with the true view-stretched ellipse
+  projected onto the projection-plane axes. Metric-neutral; matches ovrtx filtering by
+  construction. (The 2026-07-08 'aniso 16 brightened' note did not reproduce.)
+
+BOTTOM LINE (three rounds, every hypothesis measured): our blob AMPLITUDE equals
+ovrtx's everywhere that matters; the perceptual 'noisy/non-uniform' = PHASE COHERENCE
+of hand-filter residue vs their neural denoiser — reproduced exactly by our DLSS-RR
+path (planter/wall crops). The builtin chain has no remaining measured smoothness
+lever; further tuning renders on it for THIS purpose is waste. Profile guidance:
+builtin = metric/regression champion (0.07901); denoiser=dlss (RR) = the ovrtx look.
