@@ -222,11 +222,20 @@ void DenoiseShadowPass::Execute(nvrhi::ICommandList* commandList, const PassCont
   const uint32_t groupsY = (height + 7u) / 8u;
 
   // ---- Dispatch 0: raw signal -> scratch (narrow radius). --------------
+  // Radii 1/3 -> 2/8 (RTX-alignment 2026-07-11, "green sofas really
+  // strange"): the felt poufs carry dense converged speckle that the
+  // direct-only isolation pinned to THIS channel (flat albedo + smooth
+  // normals + zero reflections there — full forensics in the design
+  // doc). A ~4px total footprint can't average a 1-spp RIS + area-shadow
+  // estimator over 25 disk lights; SIGMA's real kernels are far wider,
+  // and this filter's three guides (occluder-hitT, normal, materialId
+  // hard reject) are what protect penumbra boundaries at the wider
+  // radii — same guided-scalar reasoning as DenoiseAoPass's radius 6.
   {
     shaderinterop::DenoiseShadowUniforms params{};
     params.destWidth = width;
     params.destHeight = height;
-    params.radiusPixels = 1.0f;
+    params.radiusPixels = 2.0f;
     params._pad0 = 0u;
     commandList->writeBuffer(_paramsBuffer, &params, sizeof(params));
 
@@ -262,7 +271,7 @@ void DenoiseShadowPass::Execute(nvrhi::ICommandList* commandList, const PassCont
     shaderinterop::DenoiseShadowUniforms params{};
     params.destWidth = width;
     params.destHeight = height;
-    params.radiusPixels = 3.0f;
+    params.radiusPixels = 8.0f;
     params._pad0 = 0u;
     commandList->writeBuffer(_paramsBuffer, &params, sizeof(params));
 
