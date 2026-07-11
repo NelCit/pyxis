@@ -201,8 +201,16 @@ void DenoiseAoPass::Execute(nvrhi::ICommandList* commandList, const PassContext&
   params.destWidth = width;
   params.destHeight = height;
   params.hasHistory = _hasHistory ? 1u : 0u;
-  params.maxAccumFrames = 32u;        // NRD-ReBLUR-occlusion-default-derived.
-  params.spatialRadiusPixels = 2.0f;  // NRD-default-derived (ReBLUR pre-pass).
+  // RTX-alignment 2026-07-11 ("shadow really not smooth"): the planter
+  // contact-shadow blotch is AO-field residue (aoRayLength-0.005 A/B in
+  // the design doc). AO is a texture-free scalar whose normal/viewZ
+  // guides already protect silhouettes, so filter it MUCH harder than
+  // the ReBLUR real-time defaults (radius 2 / cap 32): radius 6 (13x13
+  // guided window) + accumulation cap matched to the 96-frame headless
+  // convergence window. ovrtx runs its AO denoiser on "aggressive" (the
+  // generatedSchema default) — same philosophy.
+  params.maxAccumFrames = 96u;
+  params.spatialRadiusPixels = 6.0f;
   params._pad0 = 0u;
   params._pad1 = 0u;
   params._pad2 = 0u;
