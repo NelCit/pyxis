@@ -1433,3 +1433,37 @@ ring 13-16 deficit -0.055 -> -0.029; stronger gain fixes the ring fully but regr
 whole-frame (single-Gaussian model saturates). Mullions inside the halo zone get veiled
 -> directly addresses the "shadowed borders" perception. Proposed: optional PostBloomPass
 (threshold/sigma/gain knobs, default OFF), ovrtx profile 0.8/24/0.10.
+
+## Session 2026-07-11 (cont. 3) — PostBloom shipped (0.07883); mottle attribution CLOSED: RR is the answer
+
+**PostBloom SHIPPED (1b99b1d):** in-engine 0.07883 (numpy predicted 0.07877), windows id2
+-0.00040, mullions-against-sky veiled like the reference. Baseline repinned: base.exr /
+base_config.json = passMask 895 + builtin + 96f + ev-0.85 + postSoftenSigma 0.5 +
+postBloomGain 0.10 = 0.07883. Campaign 0.15959 -> 0.07883 (-50.6%).
+
+**Mottle attribution, final rounds (all measured):**
+- Global bump flatten x0.5 (shading.slang): -0.00043 whole-frame (softer shading reads
+  ovrtx-ish) but the planter/wall mottle UNCHANGED -> not bump-response. REVERTED
+  (material-override debt, off-thesis); logged as a look-tuning data point in-code.
+- SHARC OFF at 96f raw: wall HF 0.1028 vs 0.1027 ON -> identical; cache voxel error
+  eliminated as the blob source.
+- ACES-shoulder insight: the 8f->96f "convergence stall" (1.33x vs sqrt(12)=3.46x) is a
+  DISPLAY-SPACE artifact — the tonemap shoulder compresses large linear noise
+  nonlinearly; linear-space convergence is likely healthy. (Retracts the earlier
+  "heavy-tail firefly" framing; the clamp-sweep no-op already said the estimators are
+  bounded.)
+- Seed-pair test on the FULL pipeline (seed 42 vs 43, 96f): blob-band (2-16px)
+  correlation +0.97 wall / +0.91 bowl -> the mottle is DETERMINISTIC, not seeded-RNG
+  residue. rngSeed wiring verified correct (SceneBindings.cpp:406). Remaining
+  deterministic input: the seed-independent frameIndex-Halton jitter path + converged
+  filter residue; no cheap knob tests it.
+- **DECISIVE: DLSS-RR renders the SAME raw signals with the planter bowl SMOOTH WHITE
+  and the wall panels CLEAN + streaky — visually matching ovrtx almost exactly where
+  the user complained** (crop_planter_rr.png / crop_wall_rr.png: ovrtx | builtin | RR).
+  The mottle is hand-filter (ReLAX-class) residue character; ovrtx's smoothness IS its
+  neural denoiser, and ours reproduces it now that RR is unblocked. RR whole-frame
+  metric stays 0.09293 (converged tone/level diverges elsewhere — the known structural
+  bias), so: **builtin profile = the metric champion (0.07883); RR profile = the
+  character/look match for the viewer.** There is no hand-filter tuning path to RR's
+  phase-coherent smoothness — that thread is CLOSED; do not spend more renders on
+  atrous knobs chasing it.

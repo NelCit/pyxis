@@ -716,6 +716,13 @@ SurfaceMaterialEval EvaluateSurfaceMaterial(uint instanceId, uint primitiveIndex
             // V2.A.23 — normal-map strength (OmniPBR bump_factor): scale
             // the tangent-space deviation, then reconstruct Z from the
             // scaled XY so a stronger bump tilts the normal more.
+            // MEASURED DATA POINT (2026-07-11 mottle forensics, reverted):
+            // a global *0.5 flatten here read -0.00043 whole-frame vs
+            // ovrtx (softer shading matches their DLSS-flattened look) but
+            // did NOT reduce the planter/wall mottle it was testing for —
+            // the mottle is not bump-response-driven. Left at authored
+            // strength: a global material override is look-tuning debt,
+            // not parity.
             nXY *= mat.normalStrength;
             const float nZ = sqrt(saturate(1.0 - dot(nXY, nXY)));
             float3 nTangent = normalize(float3(nXY, nZ));
