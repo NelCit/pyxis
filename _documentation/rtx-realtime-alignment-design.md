@@ -1565,3 +1565,14 @@ OmniGlass internals (spectral IOR behavior) or capture-side processing. A Beer-L
 thickness term would be a no-op on white glass_color (tint^(1/cos) = 1). Not faking
 it; documented as a cross-engine appearance difference. (The queued glossy-cone
 reflection continuation and F82 conductor tail remain the two open feature items.)
+
+**Item 6b follow-up (gold saturation) — ROOT-CAUSED, closed:** conductor Fresnel is
+NOT the cause (F82-tint verified colored at every lobe: EvaluateOpenPBRDirect line
+~562, the Split sibling, OpenPBRReflectionWeight). Measured: id5 gold saturation
+0.264 with bloom vs 0.310 bloom-off vs ovrtx 0.346 — the postBloom veil over OUR
+brighter-than-ovrtx panes (item 1's structural transport ratio) adds uncolored light
+over the doors and is the MAJORITY of the desaturation; the residual 0.036 is the
+small intrinsic conductor tail (per-face data on file, ~<=0.0005 MSE). No code
+change warranted: the veil is a shipped net-win and its desaturation is real veiling
+physics; postBloomGain remains the taste knob. SHARC pocket deep-debug remains the
+one open thread (needs cell-content instrumentation — a dedicated session).
