@@ -635,6 +635,14 @@ Expected<void> GpuScene::Impl::EnsureBindlessFallbacks(nvrhi::ICommandList* comm
     samplerDesc.addressU = nvrhi::SamplerAddressMode::Wrap;
     samplerDesc.addressV = nvrhi::SamplerAddressMode::Wrap;
     samplerDesc.addressW = nvrhi::SamplerAddressMode::Wrap;
+    // RTX-alignment 2026-07-11 (blob forensics): shading.slang feeds
+    // SampleGrad TRUE elliptical footprints (major/minor axes), but with
+    // maxAnisotropy 1 the hardware collapses them to the coarse
+    // major-axis mip — blurring BOTH axes on every grazing surface
+    // (columns/ceiling measured +25% blob band vs ovrtx, the one region
+    // with a real excess). 16 lets the hardware walk the major axis at
+    // the minor-axis mip, matching ovrtx's anisotropic filtering.
+    samplerDesc.maxAnisotropy = 16.0f;
     bindlessSampler = device->createSampler(samplerDesc);
   }
   if (!domeSampler)

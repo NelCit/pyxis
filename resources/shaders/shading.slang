@@ -349,6 +349,10 @@ SurfaceMaterialEval EvaluateSurfaceMaterial(uint instanceId, uint primitiveIndex
     const bool worldProj  = (mat.flags & MATERIAL_FLAG_WORLD_PROJECTION) != 0u;
     const bool objectProj = (mat.flags & MATERIAL_FLAG_OBJECT_PROJECTION) != 0u;
     const bool planarProj = worldProj || objectProj;
+    // Which projection plane the UV block below picked — reused by the
+    // gradient block to project the anisotropic footprint ellipse onto
+    // the same axes (0 = Y-dominant floor/ceiling, 1 = wall ⟂X, 2 = wall ⟂Z).
+    uint planarAxis = 0u;
     if (planarProj) {
         const float3 hitW = worldHit;
         const float3 faceNormalLocal =
@@ -367,9 +371,9 @@ SurfaceMaterialEval EvaluateSurfaceMaterial(uint instanceId, uint primitiveIndex
             fnP = abs(normalize(mul(w3, faceNormalLocal)));
         }
         float2 wuv;
-        if (fnP.y >= fnP.x && fnP.y >= fnP.z) wuv = float2(hp.x, hp.z);  // floor/ceiling
-        else if (fnP.x >= fnP.z)              wuv = float2(hp.y, hp.z);  // wall ⟂X: U=up
-        else                                  wuv = float2(hp.y, hp.x);  // wall ⟂Z: U=up
+        if (fnP.y >= fnP.x && fnP.y >= fnP.z) { wuv = float2(hp.x, hp.z); planarAxis = 0u; }  // floor/ceiling
+        else if (fnP.x >= fnP.z)              { wuv = float2(hp.y, hp.z); planarAxis = 1u; }  // wall ⟂X: U=up
+        else                                  { wuv = float2(hp.y, hp.x); planarAxis = 2u; }  // wall ⟂Z: U=up
         uv = wuv * float2(mat.uvScaleX, mat.uvScaleY);
     } else if ((mat.flags & MATERIAL_FLAG_HAS_UV_TRANSFORM) != 0u) {
         const float cosR = cos(mat.uvRotateRadians);
@@ -452,16 +456,51 @@ SurfaceMaterialEval EvaluateSurfaceMaterial(uint instanceId, uint primitiveIndex
     float2 ddxUv;
     float2 ddyUv;
     if (planarProj) {
-        // World-projected UV (meters × scale): the texel footprint per
-        // pixel = cone radius (world m) × tile scale, grazing-boosted.
-        // Isotropic is fine here — world-projected surfaces are flat
-        // panels, not the grazing-critical case the tangent-frame aniso
-        // targets, and the mesh tangent frame doesn't apply to this UV.
-        const float3 vw  = normalize(-rayDir);
-        const float  nd  = max(abs(dot(faceNormalW, vw)), 0.1);
-        const float  fpw = coneRadius * max(abs(mat.uvScaleX), abs(mat.uvScaleY)) / nd;
-        ddxUv = float2(fpw, 0.0);
-        ddyUv = float2(0.0, fpw);
+        // Elliptical footprint for planar-projected UVs (RTX-alignment
+        // 2026-07-11 blob forensics — REPLACES the isotropic proxy). The
+        // old circle was pre-inflated by /|N·V|, so grazing planar
+        // surfaces (columns, ceiling slats) picked the coarse major-axis
+        // mip in BOTH directions and their texture magnified into soft
+        // blobs (column blob band measured +25% vs ovrtx — the one region
+        // with a real excess). Project the true view-stretched ellipse
+        // onto the SAME plane axes the UV block picked; with the material
+        // sampler's maxAnisotropy 16 the hardware then walks the major
+        // axis at the minor-axis mip — real anisotropic filtering, like
+        // ovrtx. Planar UV = world/object position components, so a
+        // direction's UV-gradient is just its matching components × scale.
+        const float3 viewW = normalize(-rayDir);
+        const float  ndv   = clamp(abs(dot(faceNormalW, viewW)), 0.1, 1.0);
+        float3 majorDir = viewW - faceNormalW * dot(viewW, faceNormalW);
+        const float majLenSq = dot(majorDir, majorDir);
+        majorDir = (majLenSq > 1e-8)
+                       ? majorDir * rsqrt(majLenSq)
+                       : normalize(cross(faceNormalW, (abs(faceNormalW.y) < 0.9)
+                                                          ? float3(0.0, 1.0, 0.0)
+                                                          : float3(1.0, 0.0, 0.0)));
+        const float3 minorDir = cross(faceNormalW, majorDir);
+        float3 majorVec = majorDir * (coneRadius / ndv);
+        float3 minorVec = minorDir * coneRadius;
+        if (objectProj) {
+            // Object-space projection: carry the ellipse into the local
+            // frame (worldToObject's rotation+inverse-scale part), same
+            // frame the UV block projected `hp` in.
+            const float3x3 w2o3 = float3x3(worldToObject[0].xyz,
+                                           worldToObject[1].xyz,
+                                           worldToObject[2].xyz);
+            majorVec = mul(w2o3, majorVec);
+            minorVec = mul(w2o3, minorVec);
+        }
+        float2 majUv;
+        float2 minUv;
+        if (planarAxis == 0u)      { majUv = float2(majorVec.x, majorVec.z);
+                                     minUv = float2(minorVec.x, minorVec.z); }
+        else if (planarAxis == 1u) { majUv = float2(majorVec.y, majorVec.z);
+                                     minUv = float2(minorVec.y, minorVec.z); }
+        else                       { majUv = float2(majorVec.y, majorVec.x);
+                                     minUv = float2(minorVec.y, minorVec.x); }
+        const float2 scaleUv = float2(mat.uvScaleX, mat.uvScaleY);
+        ddxUv = majUv * scaleUv;
+        ddyUv = minUv * scaleUv;
     } else {
         const uint   tanBase  = mi.vertexAttribOffset;
         const float4 tan0     = gMeshVertexAttribs[tanBase + v0].tangent;
@@ -1542,6 +1581,12 @@ bool EvaluateDomeAmbient(OpenPBRSurfaceParams pbr, float3 nWorld, float3 viewDir
 // trip stays exact: signal / max(albedo, floor) * max(albedo, floor) ==
 // signal, for ANY floor value — the floor only bounds the amplitude the
 // denoiser sees, it does not change the undenoised result.
+// MEASURED NON-LEVER (2026-07-11 blob forensics): raising this to 4.0
+// (constant /4 demod — filters see pure radiance) left the wall blob
+// band byte-flat (0.0444 -> 0.0445). The demod/remod round trip through
+// the denoiser is NOT a blob amplifier at this scene's albedo levels;
+// the floor's real job remains the dark-object halo bound (file comment
+// above). Do not re-tune expecting smoothness.
 static const float MIN_DEMODULATION_ALBEDO = 0.04;
 
 float3 DemodulateByAlbedo(float3 signal, float3 albedo) {
