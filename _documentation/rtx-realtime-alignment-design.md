@@ -1537,3 +1537,22 @@ soften 0.5/bloom 0.10/reflSamples 4/cap 2.5/emissiveScale 0.5 = **0.07641**
 (campaign 0.15959 -> 0.07641, -52.1%). Queued features from this review:
 confidence-blend SHARC query; glass thickness absorption; glossy-cone reflection
 continuation; conductor F82 color tail.
+
+## Session 2026-07-11 (cont. 6) — SHARC confidence-blend: measured null, diagnosis corrected
+
+Implemented the queued item-4 fix (SharcQuery confidence from resolved.w frameWeight,
+lerp(bootstrap, cached, conf) at query sites) and measured THREE configurations:
+- All three query sites: whole-frame +0.0126 CATASTROPHIC (id30 floor +0.064 luma) —
+  the reflected/through-glass world DEPENDS on rarely-updated cells; the unconditional
+  substitution at reflections/translucency is the tuned behavior. Do not blend there.
+- Indirect-depth>=2 only: whole-frame +0.0004, crease core UNCHANGED (0.238 vs 0.242).
+**DIAGNOSIS CORRECTED: the pocket cells are NOT starved** — every camera-visible crease
+pixel updates them each frame, frameWeight caps out, confidence = 1, the blend never
+engages. The pocket's dark cache value is a CONVERGED-BUT-BIASED fixed point: the
+recursion (cell ~ direct + albedo x cells) loses energy in the pocket relative to true
+transport. Remaining suspects for the bias: normal-octant keying blocking cross-octant
+energy inside the fold (the facing curl surfaces live in OPPOSITE octants and cannot
+borrow each other's light), and the octant-averaged trilinear neighbourhood. Reverted
+in full; item 4 stays a documented limitation with this sharper root cause. Next
+investigation angle when resumed: octant-blended query (sample both the surface octant
+and its opposite, cosine-weighted) at pocket-like curvature.
