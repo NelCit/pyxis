@@ -1556,3 +1556,12 @@ borrow each other's light), and the octant-averaged trilinear neighbourhood. Rev
 in full; item 4 stays a documented limitation with this sharper root cause. Next
 investigation angle when resumed: octant-blended query (sample both the surface octant
 and its opposite, cosine-weighted) at pocket-like curvature.
+
+**Item 6a follow-up (glass green edge tint) — CLOSED as not-honestly-reproducible:**
+Clear_Glass.mdl authors glass_color = WHITE (1,1,1), absorption_coeff WHITE, depth
+0.0001 — the scene data contains NO green. ovrtx's greenish pane-edge strips therefore
+have no material source a faithful renderer can implement from; candidates are their
+OmniGlass internals (spectral IOR behavior) or capture-side processing. A Beer-Lambert
+thickness term would be a no-op on white glass_color (tint^(1/cos) = 1). Not faking
+it; documented as a cross-engine appearance difference. (The queued glossy-cone
+reflection continuation and F82 conductor tail remain the two open feature items.)
