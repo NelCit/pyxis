@@ -1393,3 +1393,43 @@ August comes: re-browse the OTA bucket for dlssd/160_E658703.bin (or just retry
 slIsFeatureSupported with the 2.12 snippet) — don't guess by driver version. Trivia
 that explains the DLL-size cliff: snippets ≤310.3 embed model weights (~73 MB), 310.4+
 load the external NGX-provisioned .bin (~28 MB).
+
+## Session 2026-07-11 (cont. 2) — noise + window-border forensics (user reports)
+
+User reports post-soften: (1) "scene too noisy vs ovrtx"; (2) "window borders uniform on
+ovrtx, shadowed on pyx". Full elimination chain, all measured:
+
+**(1) The "noise" is converged bump-lighting response with EQUAL energy but WRONG PHASE
+COHERENCE — not MC noise, not fireflies, not a filter bug.** Elimination trail:
+- Raw converged signal (denoise off, 96f): wall HF 0.1027, SEED-INDEPENDENT (r=+0.08
+  between seed noise fields), config-independent (removing direct/indirect/refl/AO one
+  at a time leaves it at ~0.14 @8f), clamp-immune (indirect clamp sweep 25/50/100 =
+  byte-flat: the estimators are bounded, nothing to clamp), NOT albedo (our baseColor
+  AOV is CLEANER than ovrtx's DiffuseAlbedoSD: wall gx 0.0203 vs 0.0371, bowl HF 0.0093
+  vs 0.0167), NOT the normal G-buffer per se (both engines' normal AOVs equally bumpy:
+  flat-wall HFdev 0.15-0.27 BOTH).
+- à-trous diffuse normal edge-stop 32 -> 1 (with phi already inf = filter nearly wide
+  open): metric 0.07958 -> 0.07956 (wash), wall/bowl visuals UNCHANGED -> the mottle is
+  not in the indirect-diffuse signal the atrous filters. REVERTED to 32.
+- Multi-scale band energies (1-2/2-6/6-16/16-32px) on wall AND bowl: pyx == ovrtx to
+  ~1e-3 AT EVERY SCALE. The visible difference is PHASE: their detail is spatially
+  coherent (albedo streaks, smooth shading gradients), ours is random-phase blotch from
+  bumpy-normal shading response scattered through all signals. Energy-domain filters
+  (any phi/power/sigma tuning, any clamp) CANNOT change phase coherence — this is
+  exactly the class of gap a learned denoiser (DLSS-RR) closes and hand filters don't.
+- SOURCE-side fix identified (not yet built): Toksvig/LEAN-style filtered normal
+  shading — flatten the shading normal toward geometric with distance/footprint and
+  compensate by widening roughness. Kills the incoherent bump response at the source
+  (walls/planters shade smooth like ovrtx's final) instead of asking a filter to
+  reconstruct coherence after the fact.
+
+**(2) Window borders: ovrtx has a wide bright halo around blown sky that we lack.**
+Ring profile (luma vs distance-from-blown-sky): deficit -0.008 @1-2px (both clipped),
+growing to -0.055/-0.056 @13-24px, decaying by 32px — the signature of a wide veiling
+glare/RR bleed + clipping, NOT the earlier "anti-bloom" reading (which forgot that
+clipping hides the near-edge delta). numpy bloom prototype on base.exr: threshold 0.8
+(display-linear), sigma 24px, gain 0.10 -> whole-frame 0.07958 -> 0.07877 (-0.0008) and
+ring 13-16 deficit -0.055 -> -0.029; stronger gain fixes the ring fully but regresses
+whole-frame (single-Gaussian model saturates). Mullions inside the halo zone get veiled
+-> directly addresses the "shadowed borders" perception. Proposed: optional PostBloomPass
+(threshold/sigma/gain knobs, default OFF), ovrtx profile 0.8/24/0.10.

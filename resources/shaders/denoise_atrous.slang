@@ -93,6 +93,15 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID) {
     // surfaces tolerate more normal deviation (power -> 4), matching how
     // a broad GGX lobe is itself insensitive to small normal changes.
     const float specularNormalPower = lerp(32.0, 4.0, saturate(centerRoughness));
+    // MEASURED NON-LEVER (RTX-alignment 2026-07-11, "scene too noisy"
+    // forensics — full trail in the design doc): loosening this to 1.0 was
+    // metric-neutral (0.07958 -> 0.07956) AND visually neutral on the wall
+    // mottle, because the mottle is converged bump-lighting response with
+    // the SAME band energy as ovrtx at every scale (1-32px) — the gap is
+    // PHASE COHERENCE (their detail is structured, ours random-phase),
+    // which no energy-domain edge-stop can alter. Do not re-tune this
+    // expecting smoothness; the source-side fix is Toksvig/LEAN-style
+    // normal-map filtering (flatten + roughness-compensate at distance).
     const float diffuseNormalPower = 32.0;
 
     const int step = int(max(gParams.stepSize, 1u));
