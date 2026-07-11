@@ -789,21 +789,27 @@ void ClosestHitMain(inout ReflectionPayload payload, in BuiltInTriangleIntersect
     }
 
     // Occlusion-aware ambient — see this function's doc comment above.
-    // ONE short cosine-hemisphere AO ray from the reflection hit, TMax =
+    // ONE short AO probe from the reflection hit, TMax =
     // gQuality.aoRayLength (same knob AmbientOcclusionPass's own
     // hemispherical ray uses), through the dedicated HitGroupAo/AoMissMain
     // pair (RayContributionToHitGroupIndex 1 / MissShaderIndex 1 — this
     // pipeline's OTHER hit group/miss (index 0) stay the primary
     // reflection ray's HitGroupDefault/MissMain, untouched).
-    float3 aoTangent;
-    float3 aoBitangent;
-    BuildOrthonormalBasis(surf.normalWorld, aoTangent, aoBitangent);
-    Pcg32 aoRng = SeedPcg32(gSampling.rngSeed, gSampling.frameIndex, DispatchRaysIndex().xy,
-                            DispatchRaysDimensions().x,
-                            MakeStreamId(RNG_STREAM_REFLECTIONS, 0u, 1u));
-    const float2 uAo = Pcg32NextFloat2(aoRng);
-    const float3 aoDirLocal = CosineSampleHemisphere(uAo);
-    const float3 aoDirWorld = LocalToWorld(aoDirLocal, aoTangent, aoBitangent, surf.normalWorld);
+    //
+    // DETERMINISTIC normal-direction probe (RTX-alignment 2026-07-11,
+    // "reflected objects not smooth"): this used to be a per-pixel
+    // cosine-hemisphere RNG sample — 1-spp binary-visibility variance
+    // that survives 96-frame accumulation as speckle on every
+    // ambient-dominated surface SEEN IN a reflection, and that no
+    // denoiser can remove (it lives inside the reflection signal, whose
+    // spec a-trous must preserve reflected content — its luminance stop
+    // is a measured non-lever, see denoise_atrous.slang). Probing along
+    // the shading normal keeps the term's purpose (proximity/contact
+    // occlusion) with ZERO variance — reduced-accuracy-but-smooth
+    // reflection-hit shading, the same trade ovrtx makes inside
+    // reflections. Primary-visible AO is untouched (AmbientOcclusionPass
+    // keeps its stochastic hemisphere + dedicated denoiser).
+    const float3 aoDirWorld = surf.normalWorld;
 
     RayDesc aoRay;
     aoRay.Origin    = worldHit + surf.normalWorld * 1e-3f;
