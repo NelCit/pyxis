@@ -421,7 +421,16 @@ void PyxisRenderer::RenderFrame(nvrhi::ICommandList* commandList, const RenderSe
   // true once DlssProvider::Initialize confirmed BOTH SR and RR usable
   // (see its own doc comment), so this is cheap and safe to re-derive
   // every frame exactly like `dlssAvailability` above — no separate probe.
-  const bool dlssUsesRR = _dlssProvider->IsRRUsable();
+  // ... AND the requested exec mode isn't DLAA: DLAA is the DLSS-SR
+  // feature's native-resolution AA mode and routes through Evaluate, NOT
+  // RR, in DlssPass (its `wantDlaa` gate). The rung derivation here MUST
+  // match that gate — deriving from IsRRUsable() alone forced
+  // PASS_MASK_DENOISE off (RR semantics: raw signals) while the pass ran
+  // SR, feeding the upscaler raw undenoised radiance (caught by the
+  // v6.4.0 DLAA-default verification render, 2026-07-11).
+  const bool dlssUsesRR =
+      _dlssProvider->IsRRUsable()
+      && settings.realTimeQuality.dlssExecMode != DLSS_EXEC_MODE_DLAA;
 
   // DLSS Stage 2a/2b — two-resolution pipeline. `renderWidth`/`renderHeight`
   // default to native (== the display target's own dims) so the
@@ -499,6 +508,8 @@ void PyxisRenderer::RenderFrame(nvrhi::ICommandList* commandList, const RenderSe
   {
     if (dlssUsesRR)
       Logging::Get().Info(log::RENDER, "dlss: RR active");
+    else if (settings.realTimeQuality.dlssExecMode == DLSS_EXEC_MODE_DLAA)
+      Logging::Get().Info(log::RENDER, "dlss: SR+builtin (DLAA native-res AA)");
     else
       Logging::Get().Info(log::RENDER, "dlss: SR+builtin (RR unsupported: "
                                            + _dlssProvider->LastRRResult().reason + ")");

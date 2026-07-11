@@ -265,7 +265,7 @@ class ImGuiHost {
   // match RenderSettings' own defaults so the viewer matches headless
   // until the user touches the combo.
   int                                   _editorRtqDenoiser = 0;      // DENOISER_DLSS
-  int                                   _editorRtqDlssExecMode = 0;  // DLSS_EXEC_MODE_AUTO
+  int                                   _editorRtqDlssExecMode = 4;  // DLSS_EXEC_MODE_DLAA (owner 2026-07-11)
   // ShaderMake rebuild status — pushed by ViewerMode each frame.
   // True while the worker thread is spawning cmake / waiting for
   // exit; the editor's Reload Shaders button shows "Rebuilding..."

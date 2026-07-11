@@ -277,10 +277,16 @@ struct RenderSettings {
     // bits already default OFF (0x1F, see above) regardless.
     uint32_t denoiser = DENOISER_DLSS;
     // DLSS execution-mode preset — mirrors omni:rtx:post:dlss:execMode 1:1
-    // (see DLSS_EXEC_MODE_* above). Stage 1: parsed, plumbed, logged;
-    // consumed by nothing until Stage 2's two-resolution pipeline
-    // (Streamline hookup) lands.
-    uint32_t dlssExecMode = DLSS_EXEC_MODE_AUTO;
+    // (see DLSS_EXEC_MODE_* above). DEFAULT = DLAA (owner directive
+    // 2026-07-11, "use DLAA by default"): native-resolution neural AA via
+    // the DLSS-SR feature — no upscale, no RR tone shifts; the builtin
+    // denoiser chain still runs under it at render resolution. Was Auto
+    // (which the <1440p heuristic resolved to Quality = 720p-upscaled RR)
+    // — v6.4.0 behavioral default change; the field itself is unchanged
+    // ABI. Headless/golden/regression configs author denoiser=builtin
+    // explicitly (base_config.json et al.), so the §33.7 byte-equal path
+    // is untouched by this default.
+    uint32_t dlssExecMode = DLSS_EXEC_MODE_DLAA;
 
     // Post-tonemap image softening, in Gaussian sigma PIXELS (RTX-alignment
     // 2026-07-10, "image not smooth" — ovrtx-output-character match).

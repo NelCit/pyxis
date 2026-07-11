@@ -494,7 +494,7 @@ void PrintUsage() noexcept {
       "  render.realTimeQuality.denoiser / .dlssExecMode  (parameters.json only, no\n"
       "                          CLI flag yet) — DLSS Stage 1 (rtx-realtime-alignment-\n"
       "                          design.md). denoiser: \"dlss\" (default) | \"builtin\" |\n"
-      "                          \"off\". dlssExecMode: \"auto\" (default) | \"quality\" |\n"
+      "                          \"off\". dlssExecMode: \"dlaa\" (default) | \"auto\" |\n"
       "                          \"balanced\" | \"performance\" | \"dlaa\". A startup\n"
       "                          capability probe downgrades \"dlss\" to \"builtin\" with a\n"
       "                          logged reason whenever the Streamline SDK isn't staged\n"

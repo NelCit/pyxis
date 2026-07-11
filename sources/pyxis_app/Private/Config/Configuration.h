@@ -128,7 +128,9 @@ struct RenderConfig {
     // byte-identical regardless, since passMask's own denoise/TAA bits
     // already default OFF).
     uint32_t denoiser = 0u;        // 0=dlss, 1=builtin, 2=off
-    uint32_t dlssExecMode = 0u;    // 0=auto,1=quality,2=balanced,3=performance,4=dlaa
+    uint32_t dlssExecMode = 4u;    // 0=auto,1=quality,2=balanced,3=performance,4=dlaa
+                                   // (default DLAA — owner 2026-07-11; mirrors
+                                   // RenderSettings::RealTimeQuality::dlssExecMode)
 
     // RTX-alignment 2026-07-10 ("image not smooth") — mirrors
     // pyxis::RenderSettings::RealTimeQuality::postSoftenSigma 1:1: optional
