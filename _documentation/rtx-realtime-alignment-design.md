@@ -1498,3 +1498,42 @@ of hand-filter residue vs their neural denoiser — reproduced exactly by our DL
 path (planter/wall crops). The builtin chain has no remaining measured smoothness
 lever; further tuning renders on it for THIS purpose is waste. Profile guidance:
 builtin = metric/regression champion (0.07901); denoiser=dlss (RR) = the ovrtx look.
+
+## Session 2026-07-11 (cont. 5) — owner 7-item diff review: outcomes
+
+Item-by-item (owner: "tackle one by one"):
+1. WINDOWS — DONE (ee23566): maxExposedLuminance knob (v6.5.0), ovrtx's measured
+   pre-tonemap bound; pinned 2.5 (windows-optimal; lower trades windows for other
+   highlights). Residual = interior/sky transport ratio (their panes sit BELOW their
+   own cap) + post-bloom self-veil.
+2. MIDDLE TABLE — DONE (fc5467d): brightness was reflected-fixture energy; fixed by
+   emissiveScale 0.5 (id40 'better') on top of reflectionSamples 4. reflSamples 8
+   measured -0.00007 = diminishing (profile stays 4).
+3. TOP LIGHTS — DONE (fc5467d): emissiveScale (v6.6.0, LAST RealTimeQuality reserved
+   slot; RealTimeQualityUniforms 48->64B): bulbs render warm ((0.85,0.79,0.71) at
+   ovrtx's hottest-pixel mask vs their (0.93,0.90,0.83); was washed white). Applied at
+   pbr.emission's single fill site => direct + reflections + GI + cache all scale.
+4. BLACK MIDDLE (plaque-fold pocket) — DOCUMENTED LIMITATION (83eb879): SHARC pocket
+   fixed-point under-convergence (crease 0.242 cache vs 0.392 builtin vs 0.585 ovrtx);
+   accum-cap 128 = non-lever (crease flat, whole-frame +0.0006); AO/normals eliminated.
+   Future fix designed: confidence-weighted cache/bootstrap blend (per-cell counts).
+5. WINDOW PILLAR — AT PARITY after today's fixes (dRGB <= 0.02, blob band within
+   +-15%): no action needed beyond items 1/3's improvements.
+6. LEFT DOORS — PARTIAL/DOCUMENTED: two components: (a) ovrtx's glass GREEN EDGE TINT
+   = MDL thickness-based absorption (Beer-Lambert), a real feature (queued design);
+   (b) gold-frame saturation = the parked conductor-color tail (F82 per-face data on
+   file).
+7. LAMP FLOOR REFLECTION — ROOT-CAUSED, fix reverted as measured-worse: the ovrtx
+   streak = glossy floor reflecting the brushed-chrome stem which itself mirrors the
+   window = MULTI-BOUNCE GLOSSY specular. Tried single-level mirror-metal continuation
+   in ReflectionsPass (raygen-traced, SHARC-skip for conductors): streak did NOT
+   materialize (stem roughness > the 0.15 mirror gate) and chrome glints regressed
+   whole-frame +0.00061 (id40). Honest fix = roughness-cone continuation (glossy
+   multi-bounce) — queued as the same feature class as item 6a. The earlier
+   deterministic reflection-hit AO (7ea8b85) remains item 7's shipped improvement.
+
+Baseline after the campaign: base.exr/base_config = 895/builtin/96f/ev-0.85/
+soften 0.5/bloom 0.10/reflSamples 4/cap 2.5/emissiveScale 0.5 = **0.07641**
+(campaign 0.15959 -> 0.07641, -52.1%). Queued features from this review:
+confidence-blend SHARC query; glass thickness absorption; glossy-cone reflection
+continuation; conductor F82 color tail.
