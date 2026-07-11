@@ -55,6 +55,18 @@ static const uint  SHARC_PROBE_COUNT     = 8u;
 static const float SHARC_RADIANCE_SCALE  = 256.0;
 static const float SHARC_RADIANCE_CLAMP  = 8192.0;   // per-component store cap
 // Temporal running-mean cap (larger = higher quality, slower response).
+// KNOWN LIMITATION (RTX-alignment 2026-07-11, owner item 4 "black middle"
+// = the wall-plaque fold pocket, full forensics in the design doc):
+// concave pockets converge their multi-bounce fixed point through
+// TEMPORAL recursion (cell_n+1 ~ direct + albedo x cells_n) and
+// sparsely-updated pocket cells lock DARK (crease core 0.242 vs
+// builtin-2-bounce 0.392 vs ovrtx 0.585). MEASURED NON-LEVERS: cap
+// 64->128 (crease 0.246, whole-frame +0.00060 WORSE — slower global
+// convergence in 96f); AO-off (+0.017); normals verified sane. The
+// principled future fix is a CONFIDENCE-WEIGHTED blend at the query
+// site — lerp(bootstrapShade, cached, count/(count+k)) using the accum
+// buffer's per-cell sample count — so starved cells lean on the honest
+// local estimate; requires plumbing count through SharcQuery.
 static const float SHARC_ACCUM_FRAME_MAX = 64.0;
 // Grid level-of-detail. cellSize(d) = SHARC_VOXEL_BASE · logBase^level, where
 // level = floor(log_logBase(d · SHARC_GRID_DENSITY)). Tuned for World Lobby's
