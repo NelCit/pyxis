@@ -261,7 +261,16 @@ void DenoiseAtrousPass::Execute(nvrhi::ICommandList* commandList, const PassCont
     // reflected-CONTENT edges — phi=inf there measured flat on RMSE but
     // blurs the mirror image (perceptually worse; user-reported area).
     params.diffPhiLuminance = 1.0e6f;
-    params.specPhiLuminance = 1.0f;   // NRD default target.
+    // Spec phi 1.0 -> 0.5 (RTX-alignment 2026-07-11, "lamp reflection too
+    // wide"): the lamp-stem floor streak measured 21-25 px at half-max vs
+    // ovrtx's 7-8, and the excess is THIS filter smearing the bright core
+    // sideways on the flat floor (same-normal taps; exp(-0.5/1.0) = 0.6
+    // barely resists) — the traced-lobe trim was a measured non-lever
+    // (reflections.slang). A tighter phi preserves reflected-content
+    // edges MORE (the historical constraint was only against loosening:
+    // phi=inf blurs the glass-floor mirror; sharper is the untested
+    // direction).
+    params.specPhiLuminance = 0.5f;
     params._pad0 = 0u;
     params._pad1 = 0u;
     params._pad2 = 0u;

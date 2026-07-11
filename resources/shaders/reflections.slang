@@ -582,6 +582,15 @@ void RayGenMain() {
     BuildOrthonormalBasis(nWorld, tangent, bitangent);
     const float3 viewLocal =
         float3(dot(viewDir, tangent), dot(viewDir, bitangent), dot(viewDir, nWorld));
+    // MEASURED NON-LEVER (RTX-alignment 2026-07-11, "lamp reflection too
+    // wide"): trimming this traced lobe to 0.6x roughness left the
+    // lamp-stem floor-streak width UNCHANGED (24 px vs 23-25; ovrtx 7-8)
+    // and regressed rough metals (id7 iron -0.142 luma — their broad
+    // lobes need the full spread to gather the bright surroundings). The
+    // streak's excess width is injected by the spec a-trous smearing the
+    // bright core sideways on the flat floor (same-normal taps, only the
+    // luminance stop resists), NOT by this sample distribution. Keep the
+    // honest full-roughness VNDF lobe.
     const float alpha = max(0.001, roughness * roughness);
 
     Pcg32 rng = SeedPcg32(gSampling.rngSeed, gSampling.frameIndex, launchIndex, launchDim.x,
@@ -818,29 +827,20 @@ void ClosestHitMain(inout ReflectionPayload payload, in BuiltInTriangleIntersect
         && surf.pbr.baseMetalness > 0.5f;
     if (metalCont)
     {
-        // VNDF-sampled continuation direction at the HIT surface's own
-        // roughness (frame-varying stream 2 — decorrelated from the
-        // primary VNDF draw's stream 0 and the retired AO stream 1;
-        // accumulation averages the lobe across frames, same convergence
-        // contract as the primary loop).
-        float3 contTangent;
-        float3 contBitangent;
-        BuildOrthonormalBasis(surf.normalWorld, contTangent, contBitangent);
-        Pcg32 contRng = SeedPcg32(gSampling.rngSeed, gSampling.frameIndex,
-                                  DispatchRaysIndex().xy, DispatchRaysDimensions().x,
-                                  MakeStreamId(RNG_STREAM_REFLECTIONS, 0u, 2u));
-        const float2 uCont = Pcg32NextFloat2(contRng);
-        const float3 viewWorldNeg = -WorldRayDirection();
-        const float3 viewLocal = float3(dot(viewWorldNeg, contTangent),
-                                        dot(viewWorldNeg, contBitangent),
-                                        dot(viewWorldNeg, surf.normalWorld));
-        const float contAlpha =
-            max(surf.pbr.specularRoughness * surf.pbr.specularRoughness, 1e-4f);
-        const float3 halfLocal = SampleGGXVNDF(viewLocal, contAlpha, uCont);
-        const float3 halfWorld = LocalToWorld(halfLocal, contTangent, contBitangent,
-                                              surf.normalWorld);
+        // PURE MIRROR continuation direction (RTX-alignment 2026-07-11,
+        // "lamp reflection too wide" follow-up): the first version drew a
+        // VNDF sample at the stem's own brushed roughness — which made
+        // every floor ray hitting the stem bright across the stem's FULL
+        // lobe, so the floor streak inherited the STEM's lobe width
+        // (measured 21-25 px vs ovrtx's 7-8; the floor-lobe trim and a
+        // sharper spec phi were BOTH width-null, isolating this term).
+        // ovrtx's tight streak means its in-reflection metal shading is
+        // mirror-direction (the same reduced-shading trade as its
+        // reflection hits generally); the (1 - roughness) energy rolloff
+        // on mirrorF below already accounts for the lobe's un-traced
+        // spread.
         payload.mirrorHit = 1u;
-        payload.mirrorDir = normalize(reflect(WorldRayDirection(), halfWorld));
+        payload.mirrorDir = normalize(reflect(WorldRayDirection(), surf.normalWorld));
         // Conductor F0 ~ baseColor, rolled off by (1 - roughness): a
         // brushed lobe loses single-scatter energy to shadowing/multi-
         // scatter the single VNDF sample doesn't carry — the full-F0
