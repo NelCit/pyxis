@@ -145,6 +145,11 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID) {
 
     float3 color;
     float  alpha;
+    // (The frame-wide luminance cap gQuality.maxLumaUnexposed is applied
+    // to `color` just before the writes at the end of this function —
+    // AFTER both the miss and hit branches, so the background sky seen
+    // directly or through glass obeys the same bound. See the field's
+    // doc comment in ShaderInterop.slang for the measured ovrtx basis.)
 
     if (vis.hitT < 0.0f)
     {
@@ -208,6 +213,20 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID) {
         const float4 translucency = gTranslucency[launchIndex];
         color = lit + translucency.rgb;
         alpha = 1.0f;
+    }
+
+    // Frame-wide composed-luminance cap (RTX-alignment 2026-07-11, item 1
+    // "windows different"): hue-preserving clamp of the composed radiance
+    // so EXPOSED luminance never exceeds the ovrtx-measured ~3.5-3.7 bound
+    // (gQuality.maxLumaUnexposed carries the cap pre-descaled to this
+    // shader's unexposed domain; 0 = off, byte-identical). Applied to BOTH
+    // the miss (background sky) and hit branches — ovrtx's HdrColor bound
+    // is frame-wide.
+    if (gQuality.maxLumaUnexposed > 0.0f)
+    {
+        const float capLum = dot(color, float3(0.2126f, 0.7152f, 0.0722f));
+        if (capLum > gQuality.maxLumaUnexposed)
+            color *= gQuality.maxLumaUnexposed / capLum;
     }
 
     // colorHdr + alpha AOVs move here from the retired lighting pass (WP2-

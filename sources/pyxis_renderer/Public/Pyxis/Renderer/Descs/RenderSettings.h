@@ -317,11 +317,27 @@ struct RenderSettings {
     // goldens untouched; the ovrtx-alignment profile sets 0.10. Consumes
     // one _reserved slot per §22.3 (additive MINOR, version 6.3.0).
     float postBloomGain = 0.0f;
-    // §22.3 reserved tail — the NEXT growth here (Stage 2's two-resolution
-    // pipeline knobs, if they fit in 8 bytes) spends this instead of
+
+    // Frame-wide composed-radiance luminance cap, in EXPOSED units
+    // (radiance x exposure gain — the domain the tonemapper sees).
+    // RTX-alignment 2026-07-11 (item 1, "windows different"): ovrtx's own
+    // pre-tonemap HdrColor measures hard-bounded at ~3.5-3.7 exposed
+    // frame-wide (RT-wide capture: window-pane p95 2.88, frame max 3.51)
+    // — that bound is why its blown-sky panes render bright-but-never-
+    // clipped (ACES(3.5) = 0.93) while Pyxis's unbounded transmitted dome
+    // clips to paper white (54.6% of left-pane pixels > 0.98 display vs
+    // ovrtx's 2.7%). CompositePass applies the cap hue-preserving (scale
+    // RGB so luminance <= cap) on its composed output, converted to
+    // unexposed units CPU-side (SceneBindings, same descale convention as
+    // maxRayIntensity*). 0 (the default) disables the cap entirely —
+    // byte-identical output, goldens untouched; the ovrtx-alignment
+    // profile sets 3.6. Consumes one _reserved slot per §22.3 (additive
+    // MINOR, version 6.5.0).
+    float maxExposedLuminance = 0.0f;
+    // §22.3 reserved tail — the NEXT growth here spends this instead of
     // another MAJOR bump.
     // NOLINTNEXTLINE(readability-identifier-naming)
-    uint32_t _reserved[2]{};
+    uint32_t _reserved[1]{};
   } realTimeQuality;
 
   // RTX-alignment design (rtx-realtime-alignment-design.md), Phase C —

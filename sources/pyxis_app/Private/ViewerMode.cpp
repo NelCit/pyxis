@@ -1120,6 +1120,8 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
           config.render.realTimeQuality.postSoftenSigma;
       settings.realTimeQuality.postBloomGain =
           config.render.realTimeQuality.postBloomGain;
+      settings.realTimeQuality.maxExposedLuminance =
+          config.render.realTimeQuality.maxExposedLuminance;
       settings.exposureMode = config.render.exposureMode;
       settings.exposureResponsivity = config.render.exposureResponsivity;
       // Push the AOV inspector state into the renderer. The ImGui
@@ -1154,6 +1156,8 @@ int RunViewerLoop(const Configuration& config, const ResolvedScene& resolvedScen
             config.render.realTimeQuality.postSoftenSigma;
         settings.realTimeQuality.postBloomGain =
             config.render.realTimeQuality.postBloomGain;
+        settings.realTimeQuality.maxExposedLuminance =
+            config.render.realTimeQuality.maxExposedLuminance;
       }
       // Picker pixel: pinned takes the latched normalised UV
       // (renormalised against the current AOV size each frame so a

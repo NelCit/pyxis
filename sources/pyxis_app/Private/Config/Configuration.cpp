@@ -243,6 +243,11 @@ std::expected<void, std::string> OverlayConfiguration(Configuration& target,
       if (failure.empty())
         failure = ReadField(*rtq, "postBloomGain",
                             target.render.realTimeQuality.postBloomGain);
+      // RTX-alignment 2026-07-11 (item 1, "windows different") — frame-wide
+      // exposed-luminance cap; 0 (default) disables it.
+      if (failure.empty())
+        failure = ReadField(*rtq, "maxExposedLuminance",
+                            target.render.realTimeQuality.maxExposedLuminance);
     }
   }
   if (auto output = document.find("output"); output != document.end() && output->is_object())
@@ -555,6 +560,8 @@ std::expected<void, std::string> WriteEffectiveConfig(const Configuration& confi
       config.render.realTimeQuality.postSoftenSigma;
   document["render"]["realTimeQuality"]["postBloomGain"] =
       config.render.realTimeQuality.postBloomGain;
+  document["render"]["realTimeQuality"]["maxExposedLuminance"] =
+      config.render.realTimeQuality.maxExposedLuminance;
   document["output"]["image"] = config.output.image;
   document["output"]["ldr"] = config.output.ldr;
   document["output"]["effectiveConfig"] = config.output.effectiveConfig;

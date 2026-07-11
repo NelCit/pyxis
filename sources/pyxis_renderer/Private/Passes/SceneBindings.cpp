@@ -385,7 +385,14 @@ nvrhi::BindingSetHandle SceneBindings::Update(nvrhi::ICommandList* commandList,
   // world-space cache query+update. Clear => builtin path (byte-identical).
   qualityUniforms.giMode =
       (quality.passMask & shaderinterop::PASS_MASK_SHARC_GI) != 0u ? 1u : 0u;
-  qualityUniforms._rtqPad1 = 0u;
+  // RTX-alignment 2026-07-11 (item 1, "windows different") — frame-wide
+  // composed-luminance cap, same exposed->unexposed descale as the ray
+  // clamps above; 0 (the default) keeps it off. See the field's doc
+  // comment in ShaderInterop.slang for the measured ovrtx basis.
+  qualityUniforms.maxLumaUnexposed =
+      (quality.maxExposedLuminance > 0.0f)
+          ? quality.maxExposedLuminance / exposureScale
+          : 0.0f;
   commandList->writeBuffer(_realTimeQualityBuffer.Get(), &qualityUniforms,
                            sizeof(qualityUniforms));
 

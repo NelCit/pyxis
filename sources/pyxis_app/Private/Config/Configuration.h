@@ -146,6 +146,13 @@ struct RenderConfig {
     // entirely; the ovrtx-alignment profile sets 0.10 (measured — see
     // RenderSettings.h).
     float postBloomGain = 0.0f;
+
+    // RTX-alignment 2026-07-11 (item 1, "windows different") — mirrors
+    // pyxis::RenderSettings::RealTimeQuality::maxExposedLuminance 1:1:
+    // frame-wide composed-luminance cap in EXPOSED units. 0 (default)
+    // disables it; the ovrtx-alignment profile sets 3.6 (their measured
+    // pre-tonemap bound — see RenderSettings.h).
+    float maxExposedLuminance = 0.0f;
   } realTimeQuality;
 
   // M3+ extensions: maxBounces, enableAccumulation, toneMap,

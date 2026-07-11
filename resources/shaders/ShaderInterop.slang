@@ -979,7 +979,16 @@ struct RealTimeQualityUniforms {
     // Derived CPU-side from RealTimeQuality::passMask bit 9 (PASS_MASK_SHARC_GI)
     // in SceneBindings::Update — a dynamically-uniform branch, no spec constant.
     uint  giMode;                       // was _rtqPad0
-    uint  _rtqPad1;
+    // RTX-alignment 2026-07-11 (item 1, "windows different") — frame-wide
+    // composed-radiance luminance cap in UNEXPOSED units (was _rtqPad1).
+    // Derived CPU-side in SceneBindings::Update from
+    // RenderSettings::RealTimeQuality::maxExposedLuminance / exposureScale
+    // (same descale convention as maxRayIntensity* above). 0 = off.
+    // Empirical basis: ovrtx's pre-tonemap HdrColor is hard-bounded at
+    // ~3.5-3.7 EXPOSED units frame-wide (measured from the RT-wide
+    // capture) — that bound is why its window panes render bright-but-
+    // never-clipped; composite.slang applies this cap hue-preserving.
+    float maxLumaUnexposed;             // was _rtqPad1
 };
 
 // RtxSamplingUniforms — RTX-alignment design (rtx-realtime-alignment-

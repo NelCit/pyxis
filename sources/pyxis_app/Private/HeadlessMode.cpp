@@ -253,6 +253,7 @@ void LogDeterminismPin(const Configuration& config, uint32_t framesInFlight) noe
   // goldens untouched).
   settings.realTimeQuality.postSoftenSigma = realTimeQuality.postSoftenSigma;
   settings.realTimeQuality.postBloomGain = realTimeQuality.postBloomGain;
+  settings.realTimeQuality.maxExposedLuminance = realTimeQuality.maxExposedLuminance;
   renderer.RenderFrame(commandList, settings, targets);
   // Force the offscreen RT into CopySource before we close the
   // command list. Without this we relied on NVRHI's auto-barrier
