@@ -989,6 +989,15 @@ struct RealTimeQualityUniforms {
     // capture) — that bound is why its window panes render bright-but-
     // never-clipped; composite.slang applies this cap hue-preserving.
     float maxLumaUnexposed;             // was _rtqPad1
+    // RTX-alignment 2026-07-11 (items 2/3, bulb wash) — global emissive
+    // radiance scale, mirrors RealTimeQuality::emissiveScale 1:1 (no
+    // exposure descale: it is a plain multiplier on emitted radiance).
+    // Consumed by OpenPBREmission's callers via EmissiveScale() below /
+    // composite.slang's emissive term. 1.0 = byte-identical default.
+    float emissiveScale;
+    float _rtqPad2;
+    float _rtqPad3;
+    float _rtqPad4;
 };
 
 // RtxSamplingUniforms — RTX-alignment design (rtx-realtime-alignment-
@@ -1251,8 +1260,9 @@ struct AccumulationUniforms {
                   "stride; see RaytracedGBufferPass::EnsureVisibilityBuffer.");
     static_assert(sizeof(VisibilityGpu) % 16 == 0,
                   "VisibilityGpu must be 16-byte aligned (§23 structured-buffer rule).");
-    static_assert(sizeof(RealTimeQualityUniforms) == 48,
-                  "RealTimeQualityUniforms must be 48 bytes (3 rows of 16) — mirrors "
+    static_assert(sizeof(RealTimeQualityUniforms) == 64,
+                  "RealTimeQualityUniforms must be 64 bytes (4 rows of 16; grew 48->64 "
+                  "for emissiveScale, RTX-alignment 2026-07-11) — mirrors "
                   "RenderSettings::RealTimeQuality's live + Phase-B-reserved fields; "
                   "see SceneBindings binding 15 / camera_ray.slang's gQuality.");
     static_assert(sizeof(RealTimeQualityUniforms) % 16 == 0,

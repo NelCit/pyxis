@@ -248,6 +248,11 @@ std::expected<void, std::string> OverlayConfiguration(Configuration& target,
       if (failure.empty())
         failure = ReadField(*rtq, "maxExposedLuminance",
                             target.render.realTimeQuality.maxExposedLuminance);
+      // RTX-alignment 2026-07-11 (items 2/3) — global emissive scale;
+      // 1.0 (default) is byte-identical.
+      if (failure.empty())
+        failure = ReadField(*rtq, "emissiveScale",
+                            target.render.realTimeQuality.emissiveScale);
     }
   }
   if (auto output = document.find("output"); output != document.end() && output->is_object())
@@ -562,6 +567,8 @@ std::expected<void, std::string> WriteEffectiveConfig(const Configuration& confi
       config.render.realTimeQuality.postBloomGain;
   document["render"]["realTimeQuality"]["maxExposedLuminance"] =
       config.render.realTimeQuality.maxExposedLuminance;
+  document["render"]["realTimeQuality"]["emissiveScale"] =
+      config.render.realTimeQuality.emissiveScale;
   document["output"]["image"] = config.output.image;
   document["output"]["ldr"] = config.output.ldr;
   document["output"]["effectiveConfig"] = config.output.effectiveConfig;

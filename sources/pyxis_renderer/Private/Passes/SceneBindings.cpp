@@ -31,8 +31,9 @@ static_assert(sizeof(CameraUniforms) == 208,
 static_assert(sizeof(MotionVectorCameraUniforms) == 80,
               "MotionVectorCameraUniforms is one float4x4 + a 16-byte row = 80 bytes; "
               "see resources/shaders/ShaderInterop.slang.");
-static_assert(sizeof(RealTimeQualityUniforms) == 48,
-              "RealTimeQualityUniforms is 3 rows of 16 = 48 bytes; "
+static_assert(sizeof(RealTimeQualityUniforms) == 64,
+              "RealTimeQualityUniforms is 4 rows of 16 = 64 bytes (grew for "
+              "emissiveScale, RTX-alignment 2026-07-11); "
               "see resources/shaders/ShaderInterop.slang.");
 static_assert(sizeof(RtxSamplingUniforms) == 16,
               "RtxSamplingUniforms is one cbuffer row = 16 bytes; "
@@ -393,6 +394,14 @@ nvrhi::BindingSetHandle SceneBindings::Update(nvrhi::ICommandList* commandList,
       (quality.maxExposedLuminance > 0.0f)
           ? quality.maxExposedLuminance / exposureScale
           : 0.0f;
+  // Plain radiance multiplier — deliberately NOT exposure-descaled (see
+  // the interop field's doc comment). Guard nonpositive values to the
+  // identity so a zero-initialized POD can't black out the fixtures.
+  qualityUniforms.emissiveScale =
+      (quality.emissiveScale > 0.0f) ? quality.emissiveScale : 1.0f;
+  qualityUniforms._rtqPad2 = 0.0f;
+  qualityUniforms._rtqPad3 = 0.0f;
+  qualityUniforms._rtqPad4 = 0.0f;
   commandList->writeBuffer(_realTimeQualityBuffer.Get(), &qualityUniforms,
                            sizeof(qualityUniforms));
 

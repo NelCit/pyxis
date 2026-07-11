@@ -153,6 +153,13 @@ struct RenderConfig {
     // disables it; the ovrtx-alignment profile sets 3.6 (their measured
     // pre-tonemap bound — see RenderSettings.h).
     float maxExposedLuminance = 0.0f;
+
+    // RTX-alignment 2026-07-11 (items 2/3, bulb wash) — mirrors
+    // pyxis::RenderSettings::RealTimeQuality::emissiveScale 1:1: global
+    // emissive-surface radiance multiplier. 1.0 (default) is
+    // byte-identical; the ovrtx-alignment profile sets the measured ~0.5
+    // (see RenderSettings.h).
+    float emissiveScale = 1.0f;
   } realTimeQuality;
 
   // M3+ extensions: maxBounces, enableAccumulation, toneMap,

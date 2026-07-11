@@ -254,6 +254,7 @@ void LogDeterminismPin(const Configuration& config, uint32_t framesInFlight) noe
   settings.realTimeQuality.postSoftenSigma = realTimeQuality.postSoftenSigma;
   settings.realTimeQuality.postBloomGain = realTimeQuality.postBloomGain;
   settings.realTimeQuality.maxExposedLuminance = realTimeQuality.maxExposedLuminance;
+  settings.realTimeQuality.emissiveScale = realTimeQuality.emissiveScale;
   renderer.RenderFrame(commandList, settings, targets);
   // Force the offscreen RT into CopySource before we close the
   // command list. Without this we relied on NVRHI's auto-barrier

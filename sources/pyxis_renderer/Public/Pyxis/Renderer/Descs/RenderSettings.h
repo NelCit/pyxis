@@ -334,10 +334,24 @@ struct RenderSettings {
     // profile sets 3.6. Consumes one _reserved slot per §22.3 (additive
     // MINOR, version 6.5.0).
     float maxExposedLuminance = 0.0f;
-    // §22.3 reserved tail — the NEXT growth here spends this instead of
-    // another MAJOR bump.
-    // NOLINTNEXTLINE(readability-identifier-naming)
-    uint32_t _reserved[1]{};
+
+    // Global emissive-surface radiance scale (RTX-alignment 2026-07-11,
+    // owner diff-review items 2/3: "top lights render differently" +
+    // "middle table too different"). At the reference exposure ovrtx's
+    // 2900K shell bulbs measure exposed RGB ~(1.38, 0.91, 0.56) — ACES
+    // renders that warm amber — while Pyxis's identical 3000-nit
+    // emissives land ~2x hotter (washed toward white), and that same
+    // factor rides into every reflection of the fixtures (satin-table
+    // glints, glass-floor light dots). The 2x is the documented
+    // interior/sky transport-ratio structural gap expressed through the
+    // exposure calibration, not an authoring error on either side.
+    // Applied at the emission SOURCE (OpenPBREmission consumers via
+    // gQuality) so direct view, reflections, translucency and the SHARC
+    // cache all scale together. 1.0 (default) is byte-identical; the
+    // ovrtx-alignment profile sets the measured ~0.5. Consumes the LAST
+    // RealTimeQuality _reserved slot (§22.3, additive MINOR, v6.6.0) —
+    // any further growth of this POD is a MAJOR bump.
+    float emissiveScale = 1.0f;
   } realTimeQuality;
 
   // RTX-alignment design (rtx-realtime-alignment-design.md), Phase C —

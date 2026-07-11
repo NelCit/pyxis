@@ -898,6 +898,14 @@ SurfaceMaterialEval EvaluateSurfaceMaterial(uint instanceId, uint primitiveIndex
                 SampleByGrad(mat.emissionTex, uv, ddxUv, ddyUv);
             emissionRaw *= sampledEmission;
         }
+        // Global emissive scale (RTX-alignment 2026-07-11, items 2/3 —
+        // see RealTimeQuality::emissiveScale's doc comment for the
+        // measured ovrtx bulb calibration). Applied HERE, the single
+        // fill site of pbr.emission, so every consumer — the gbuffer
+        // emissive AOV, ShadeSurfaceHit, reflections/translucency hits,
+        // GI bounces and the SHARC cache — scales together. 1.0 default
+        // = byte-identical.
+        emissionRaw *= gQuality.emissiveScale;
     }
     pbr.emission = emissionRaw;
 
