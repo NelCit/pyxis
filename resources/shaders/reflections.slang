@@ -185,6 +185,25 @@ struct ReflectionPayload {
     // cap is accepted as opaque, same bound philosophy as the GI bounce ray).
     float3 throughput;
     uint   transmissiveHitCount;
+    // Glossy-metal continuation (RTX-alignment 2026-07-11, owner item 7:
+    // "lamp does not reflect well on the floor"). A reflection ray landing
+    // on a polished/brushed METAL (chrome lamp stem, steel legs) used to
+    // shade it with the flat direct+ambient approximation — but a metal's
+    // ambient IS its reflected content, so chrome seen in the floor read
+    // dull grey while ovrtx shows the window it mirrors. ClosestHitMain
+    // flags such hits (roughness < 0.35, metalness > 0.5), REPLACES their
+    // ambient term with nothing (energy honesty — the first attempt ADDED
+    // the continuation on top of the ambient and measured +0.0006 worse),
+    // and reports a VNDF-sampled continuation direction at the hit's own
+    // roughness + the conductor F0; RAYGEN traces the one continuation
+    // segment (kept out of the closesthit so pipeline recursion depth is
+    // unchanged) and adds F0 x continuationRadiance. isContinuation
+    // bounds it to one level (metal seen in metal falls back to the flat
+    // shade).
+    float3 mirrorDir;
+    float3 mirrorF;
+    uint   mirrorHit;
+    uint   isContinuation;
 };
 
 static const uint MAX_REFLECTION_TRANSMISSIVE_CONTINUATIONS = 4u;
@@ -592,7 +611,37 @@ void RayGenMain() {
         payload.roughness = roughness;  // SHARC cache gate at the hit (glossy only)
         payload.throughput = float3(1.0f, 1.0f, 1.0f);  // tint of any glass this ray crosses
         payload.transmissiveHitCount = 0u;
+        payload.mirrorDir = float3(0.0f, 0.0f, 0.0f);
+        payload.mirrorF = float3(0.0f, 0.0f, 0.0f);
+        payload.mirrorHit = 0u;
+        payload.isContinuation = 0u;
         TraceRay(gTlas, RAY_FLAG_NONE, 0xFFu, 0, 0, 0, reflRay, payload);
+
+        // Glossy-metal continuation (payload doc comment): ONE extra
+        // segment from a flagged metal hit along its VNDF-sampled mirror
+        // direction; F0 x that radiance REPLACES the ambient term the
+        // closesthit deliberately zeroed for these hits.
+        if (payload.mirrorHit != 0u && payload.hitT >= 0.0f)
+        {
+            RayDesc contRay;
+            contRay.Origin    = reflRay.Origin + reflRay.Direction * payload.hitT
+                              + payload.mirrorDir * 1e-3f;
+            contRay.Direction = payload.mirrorDir;
+            contRay.TMin      = 1e-3f;
+            contRay.TMax      = 10000.0f;
+            ReflectionPayload cont;
+            cont.color = float3(0.0f, 0.0f, 0.0f);
+            cont.hitT  = -1.0f;
+            cont.roughness = 0.0f;
+            cont.throughput = float3(1.0f, 1.0f, 1.0f);
+            cont.transmissiveHitCount = 0u;
+            cont.mirrorDir = float3(0.0f, 0.0f, 0.0f);
+            cont.mirrorF = float3(0.0f, 0.0f, 0.0f);
+            cont.mirrorHit = 0u;
+            cont.isContinuation = 1u;
+            TraceRay(gTlas, RAY_FLAG_NONE, 0xFFu, 0, 0, 0, contRay, cont);
+            payload.color += payload.mirrorF * cont.color * cont.throughput;
+        }
 
         // Heitz 2018 "Sampling the GGX Distribution of Visible Normals" —
         // sampling H from the VNDF (SampleGGXVNDF above, unconditional,
@@ -758,7 +807,50 @@ void ClosestHitMain(inout ReflectionPayload payload, in BuiltInTriangleIntersect
     // is the faithful refinement, tracked as debt. giMode is dynamically uniform
     // => builtin path untouched when off. `payload.roughness` is retained for
     // that future cone gate.
-    if (gQuality.giMode != 0u)
+    // Glossy-metal continuation gate (payload doc comment): a metal's
+    // appearance is its mirrored content — flag it for RayGen's
+    // continuation, and SKIP the SHARC substitution below (the cache
+    // holds DIFFUSE outgoing radiance, near-black for conductors —
+    // exactly the dull-grey-stem artifact the owner flagged).
+    const bool metalCont =
+        payload.isContinuation == 0u
+        && surf.pbr.specularRoughness < 0.28f
+        && surf.pbr.baseMetalness > 0.5f;
+    if (metalCont)
+    {
+        // VNDF-sampled continuation direction at the HIT surface's own
+        // roughness (frame-varying stream 2 — decorrelated from the
+        // primary VNDF draw's stream 0 and the retired AO stream 1;
+        // accumulation averages the lobe across frames, same convergence
+        // contract as the primary loop).
+        float3 contTangent;
+        float3 contBitangent;
+        BuildOrthonormalBasis(surf.normalWorld, contTangent, contBitangent);
+        Pcg32 contRng = SeedPcg32(gSampling.rngSeed, gSampling.frameIndex,
+                                  DispatchRaysIndex().xy, DispatchRaysDimensions().x,
+                                  MakeStreamId(RNG_STREAM_REFLECTIONS, 0u, 2u));
+        const float2 uCont = Pcg32NextFloat2(contRng);
+        const float3 viewWorldNeg = -WorldRayDirection();
+        const float3 viewLocal = float3(dot(viewWorldNeg, contTangent),
+                                        dot(viewWorldNeg, contBitangent),
+                                        dot(viewWorldNeg, surf.normalWorld));
+        const float contAlpha =
+            max(surf.pbr.specularRoughness * surf.pbr.specularRoughness, 1e-4f);
+        const float3 halfLocal = SampleGGXVNDF(viewLocal, contAlpha, uCont);
+        const float3 halfWorld = LocalToWorld(halfLocal, contTangent, contBitangent,
+                                              surf.normalWorld);
+        payload.mirrorHit = 1u;
+        payload.mirrorDir = normalize(reflect(WorldRayDirection(), halfWorld));
+        // Conductor F0 ~ baseColor, rolled off by (1 - roughness): a
+        // brushed lobe loses single-scatter energy to shadowing/multi-
+        // scatter the single VNDF sample doesn't carry — the full-F0
+        // version measured +0.00066 whole-frame (satin/window metals
+        // over-glinting) with the streak at 0.425 vs ovrtx 0.465.
+        payload.mirrorF   = saturate(surf.baseColor)
+                          * (1.0f - surf.pbr.specularRoughness);
+    }
+
+    if (gQuality.giMode != 0u && !metalCont)
     {
         float3 cachedRadiance;
         if (SharcQuery(gShHash, gShResolved, worldHit, SharcCameraWorld(), surf.normalWorld,
@@ -809,27 +901,34 @@ void ClosestHitMain(inout ReflectionPayload payload, in BuiltInTriangleIntersect
     // reflection-hit shading, the same trade ovrtx makes inside
     // reflections. Primary-visible AO is untouched (AmbientOcclusionPass
     // keeps its stochastic hemisphere + dedicated denoiser).
-    const float3 aoDirWorld = surf.normalWorld;
-
-    RayDesc aoRay;
-    aoRay.Origin    = worldHit + surf.normalWorld * 1e-3f;
-    aoRay.Direction = aoDirWorld;
-    aoRay.TMin      = 1e-3f;
-    aoRay.TMax      = gQuality.aoRayLength;
-    OcclusionPayload aoPayload;
-    aoPayload.visible = 0.0f;  // pre-trace = occluded
-    aoPayload.hitT    = 0.0f;
-    TraceRay(gTlas,
-             RAY_FLAG_SKIP_CLOSEST_HIT_SHADER | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH,
-             0xFFu,
-             /*RayContributionToHitGroupIndex*/ 1,
-             /*MultiplierForGeometryContributionToHitGroupIndex*/ 0,
-             /*MissShaderIndex*/ 1,
-             aoRay,
-             aoPayload);
-
     float3 ambient = float3(0.0f, 0.0f, 0.0f);
-    EvaluateDomeAmbient(surf.pbr, surf.normalWorld, viewDir, aoPayload.visible, ambient);
+    if (!metalCont)
+    {
+        const float3 aoDirWorld = surf.normalWorld;
+
+        RayDesc aoRay;
+        aoRay.Origin    = worldHit + surf.normalWorld * 1e-3f;
+        aoRay.Direction = aoDirWorld;
+        aoRay.TMin      = 1e-3f;
+        aoRay.TMax      = gQuality.aoRayLength;
+        OcclusionPayload aoPayload;
+        aoPayload.visible = 0.0f;  // pre-trace = occluded
+        aoPayload.hitT    = 0.0f;
+        TraceRay(gTlas,
+                 RAY_FLAG_SKIP_CLOSEST_HIT_SHADER | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH,
+                 0xFFu,
+                 /*RayContributionToHitGroupIndex*/ 1,
+                 /*MultiplierForGeometryContributionToHitGroupIndex*/ 0,
+                 /*MissShaderIndex*/ 1,
+                 aoRay,
+                 aoPayload);
+        EvaluateDomeAmbient(surf.pbr, surf.normalWorld, viewDir, aoPayload.visible, ambient);
+    }
+    // metalCont: ambient stays ZERO — the RayGen continuation (F0 x traced
+    // mirror content) REPLACES the conductor's ambient term; adding both
+    // double-counts energy (the first attempt measured +0.0006 worse). The
+    // AO probe is skipped too (one ray saved; the continuation carries the
+    // occlusion information implicitly).
 
     const float3 emission = OpenPBREmission(surf.pbr);
     payload.color = direct + ambient + emission * surf.opacity;
