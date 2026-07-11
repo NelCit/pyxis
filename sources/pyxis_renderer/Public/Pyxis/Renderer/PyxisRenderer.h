@@ -198,6 +198,13 @@ class PYXIS_RENDERER_API PyxisRenderer final {
   // RealTimeQuality::postSoftenSigma > 0. Same forward-declared-
   // IRenderPass* + impl-side cast pattern as the pointers above.
   class IRenderPass* _postSoftenPass = nullptr;
+  // PostBloom (RTX-alignment 2026-07-11, "window borders shadowed") —
+  // borrowed pointer to the PostBloomPass the graph owns (registered
+  // between _postSoftenPass and _ssaaPass), kept so RenderFrame can drive
+  // its EnsureTemps hook on the CPU frame path when
+  // RealTimeQuality::postBloomGain > 0. Same forward-declared-
+  // IRenderPass* + impl-side cast pattern as the pointers above.
+  class IRenderPass* _postBloomPass = nullptr;
   // Borrowed pointer to the AutoExposurePass the graph owns — kept so RenderFrame
   // can thread its stats buffer into PassContext::autoExposureStats for
   // TonemapPass. Same forward-declared-IRenderPass* + impl-side cast pattern.

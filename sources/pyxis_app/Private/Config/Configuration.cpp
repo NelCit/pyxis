@@ -238,6 +238,11 @@ std::expected<void, std::string> OverlayConfiguration(Configuration& target,
       if (failure.empty())
         failure = ReadField(*rtq, "postSoftenSigma",
                             target.render.realTimeQuality.postSoftenSigma);
+      // RTX-alignment 2026-07-11 ("window borders shadowed") — optional
+      // veiling-bloom gain; 0 (default) disables the pass entirely.
+      if (failure.empty())
+        failure = ReadField(*rtq, "postBloomGain",
+                            target.render.realTimeQuality.postBloomGain);
     }
   }
   if (auto output = document.find("output"); output != document.end() && output->is_object())
@@ -548,6 +553,8 @@ std::expected<void, std::string> WriteEffectiveConfig(const Configuration& confi
       DlssExecModeToString(config.render.realTimeQuality.dlssExecMode);
   document["render"]["realTimeQuality"]["postSoftenSigma"] =
       config.render.realTimeQuality.postSoftenSigma;
+  document["render"]["realTimeQuality"]["postBloomGain"] =
+      config.render.realTimeQuality.postBloomGain;
   document["output"]["image"] = config.output.image;
   document["output"]["ldr"] = config.output.ldr;
   document["output"]["effectiveConfig"] = config.output.effectiveConfig;

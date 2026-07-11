@@ -18,6 +18,7 @@
 #include "Passes/DirectLightingPass.h"
 #include "Passes/DlssPass.h"
 #include "Passes/IndirectDiffusePass.h"
+#include "Passes/PostBloomPass.h"
 #include "Passes/PostSoftenPass.h"
 #include "Passes/RaytracedGBufferPass.h"
 #include "Passes/ReflectionsPass.h"
@@ -319,6 +320,14 @@ PyxisRenderer::PyxisRenderer(nvrhi::IDevice* device, GpuScene& scene, Profiler& 
   auto postSoften = std::make_unique<PostSoftenPass>(device);
   _postSoftenPass = postSoften.get();
   _graph->AddPass(std::move(postSoften));
+  // PostBloom runs next (RTX-alignment 2026-07-11, "window borders
+  // shadowed"): wide veiling halo around blown highlights, gated on
+  // RealTimeQuality::postBloomGain > 0 (default 0 — pass fully disabled,
+  // byte-identical). AFTER PostSoften — the measured 0.07877 is bloom on
+  // top of the softened image (post_bloom.slang's file header).
+  auto postBloom = std::make_unique<PostBloomPass>(device);
+  _postBloomPass = postBloom.get();
+  _graph->AddPass(std::move(postBloom));
   // SSAA resolve runs next: it box-downsamples the super-res LINEAR color AOV into
   // a base-res LINEAR intermediate (it owns the texture; RenderFrame threads it via
   // PassContext::colorLinearResolved). No-ops at ssaaFactor < 2.
@@ -334,7 +343,7 @@ PyxisRenderer::PyxisRenderer(nvrhi::IDevice* device, GpuScene& scene, Profiler& 
                       "PyxisRenderer: initialised (RaytracedGBuffer + 5 signal passes + "
                       "5-pass denoiser chain (Shadow/Temporal/HistoryFix/Atrous/Ao) + Composite + "
                       "Accumulation + Dlss + AutoExposure + Taa + Tonemap + PostSoften + "
-                      "SsaaResolve + BlitToSrgb registered)");
+                      "PostBloom + SsaaResolve + BlitToSrgb registered)");
 
 #ifdef PYXIS_WITH_NRD
   // OPTIONAL NRD backend (PYXIS_WITH_NRD=ON builds only — see
@@ -827,6 +836,14 @@ void PyxisRenderer::RenderFrame(nvrhi::ICommandList* commandList, const RenderSe
     static_cast<PostSoftenPass*>(_postSoftenPass)
         ->EnsureTemp(postSoftenColorDesc.width, postSoftenColorDesc.height,
                      postSoftenColorDesc.format);
+  }
+  // PostBloom temps, same CPU-frame-path contract (§30.10).
+  if (_postBloomPass != nullptr && targets.color != nullptr
+      && effectiveSettings.realTimeQuality.postBloomGain > 0.0001f) {
+    const nvrhi::TextureDesc& postBloomColorDesc = targets.color->getDesc();
+    static_cast<PostBloomPass*>(_postBloomPass)
+        ->EnsureTemps(postBloomColorDesc.width, postBloomColorDesc.height,
+                      postBloomColorDesc.format);
   }
 
   const Profiler::CpuScope frameScope(*_profiler, "render.frame.cpu");

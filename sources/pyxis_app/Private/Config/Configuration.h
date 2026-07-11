@@ -136,6 +136,14 @@ struct RenderConfig {
     // disables the pass entirely (byte-identical output); the
     // ovrtx-alignment profile sets 0.5 (measured — see RenderSettings.h).
     float postSoftenSigma = 0.0f;
+
+    // RTX-alignment 2026-07-11 ("window borders shadowed") — mirrors
+    // pyxis::RenderSettings::RealTimeQuality::postBloomGain 1:1: optional
+    // post-tonemap veiling-bloom gain (threshold/sigma are fixed measured
+    // constants in post_bloom.slang). 0 (default) disables the pass
+    // entirely; the ovrtx-alignment profile sets 0.10 (measured — see
+    // RenderSettings.h).
+    float postBloomGain = 0.0f;
   } realTimeQuality;
 
   // M3+ extensions: maxBounces, enableAccumulation, toneMap,

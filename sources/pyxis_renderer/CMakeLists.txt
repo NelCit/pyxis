@@ -184,6 +184,12 @@ target_sources(pyxis_renderer PRIVATE
     # character; sigma 0 (default) disables it entirely.
     Private/Passes/PostSoftenPass.h
     Private/Passes/PostSoftenPass.cpp
+    # RTX-alignment 2026-07-11 ("window borders shadowed") — PostBloomPass,
+    # registered between PostSoftenPass and SsaaResolvePass: optional wide
+    # veiling bloom matching ovrtx's blown-highlight halo; gain 0 (default)
+    # disables it entirely.
+    Private/Passes/PostBloomPass.h
+    Private/Passes/PostBloomPass.cpp
     Private/Passes/SsaaResolvePass.h
     Private/Passes/SsaaResolvePass.cpp
     Private/Passes/BlitToSrgbPass.h
@@ -961,6 +967,17 @@ pyxis_compile_slang_shader(
     ENTRY_POINT main
     STAGE       compute
     OUTPUT      post_soften.spv
+    INCLUDES    ${PYXIS_SHADER_INTEROP}
+)
+# PostBloom (RTX-alignment 2026-07-11, "window borders shadowed"): optional
+# separable veiling bloom on the post-tonemap display color, gated on
+# RealTimeQuality::postBloomGain > 0 (default 0 = pass disabled).
+pyxis_compile_slang_shader(
+    TARGET      pyxis_renderer
+    SOURCE      ${CMAKE_SOURCE_DIR}/resources/shaders/post_bloom.slang
+    ENTRY_POINT main
+    STAGE       compute
+    OUTPUT      post_bloom.spv
     INCLUDES    ${PYXIS_SHADER_INTEROP}
 )
 # DlssPass utility #2 (RTX-alignment 2026-07-11): in-place RGB exposure

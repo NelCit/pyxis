@@ -248,10 +248,11 @@ void LogDeterminismPin(const Configuration& config, uint32_t framesInFlight) noe
   // output — passMask's own denoise/TAA bits already default OFF).
   settings.realTimeQuality.denoiser = realTimeQuality.denoiser;
   settings.realTimeQuality.dlssExecMode = realTimeQuality.dlssExecMode;
-  // RTX-alignment 2026-07-10 ("image not smooth") — optional post-tonemap
-  // Gaussian; config default 0 keeps the pass disabled (byte-identical,
+  // RTX-alignment 2026-07-10/11 — optional post-tonemap soften + veiling
+  // bloom; config defaults 0 keep both passes disabled (byte-identical,
   // goldens untouched).
   settings.realTimeQuality.postSoftenSigma = realTimeQuality.postSoftenSigma;
+  settings.realTimeQuality.postBloomGain = realTimeQuality.postBloomGain;
   renderer.RenderFrame(commandList, settings, targets);
   // Force the offscreen RT into CopySource before we close the
   // command list. Without this we relied on NVRHI's auto-barrier

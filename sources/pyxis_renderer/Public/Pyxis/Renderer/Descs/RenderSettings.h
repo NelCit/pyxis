@@ -294,11 +294,28 @@ struct RenderSettings {
     // untouched; the ovrtx-alignment profile sets 0.5. Consumes one
     // _reserved slot per §22.3 (additive MINOR).
     float postSoftenSigma = 0.0f;
+
+    // Post-tonemap veiling bloom GAIN (RTX-alignment 2026-07-11, "window
+    // borders shadowed" — ovrtx halo match). ovrtx's output carries a wide
+    // veiling halo around blown-out highlights (ring-profiled: pyx is
+    // -0.055 luma darker 13-24px from blown sky, converging at the edge
+    // where both clip); window mullions inside that zone read washed-out
+    // on ovrtx and hard-dark on pyx without it. PostBloomPass adds
+    // gain x GaussianBlur(highlights above a fixed display-linear
+    // threshold): threshold 0.8 and sigma 24px are FIXED constants in the
+    // pass (post_bloom.slang) — the measured optimum band; gain is the
+    // one dial that matters (World Lobby vs ovrtx RT-wide, on top of
+    // postSoftenSigma 0.5: gain 0.10 takes whole-frame honest-sRGB RMSE
+    // 0.07958 -> 0.07877 and halves the window-ring deficit). 0 (the
+    // default) disables the pass entirely — byte-identical output,
+    // goldens untouched; the ovrtx-alignment profile sets 0.10. Consumes
+    // one _reserved slot per §22.3 (additive MINOR, version 6.3.0).
+    float postBloomGain = 0.0f;
     // §22.3 reserved tail — the NEXT growth here (Stage 2's two-resolution
-    // pipeline knobs, if they fit in 12 bytes) spends this instead of
+    // pipeline knobs, if they fit in 8 bytes) spends this instead of
     // another MAJOR bump.
     // NOLINTNEXTLINE(readability-identifier-naming)
-    uint32_t _reserved[3]{};
+    uint32_t _reserved[2]{};
   } realTimeQuality;
 
   // RTX-alignment design (rtx-realtime-alignment-design.md), Phase C —
