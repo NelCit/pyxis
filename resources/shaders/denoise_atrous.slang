@@ -145,6 +145,15 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID) {
             diffuseWeightSum += diffuseWeight;
 
             const float4 sampleSpecular = gInSpecular[samplePixel];
+            // MEASURED NON-LEVER (RTX-alignment 2026-07-11, "table tops
+            // speckled"): a roughness-aware luminance phi here
+            // (lerp(1, 1e6, smoothstep(0.15, 0.4, roughness))) read
+            // WORSE whole-frame (+0.00024, id40 satin brightened +0.037
+            // luma) and over-blurred mixed-roughness floor regions BELOW
+            // ovrtx's own detail (HF 0.0102 -> 0.0061 vs their 0.0100)
+            // without measurably reducing the table speckle. The tight
+            // phi stays; the satin speckle lives in the traced-reflection
+            // SIGNAL, not this filter's edge-stop.
             const float specularLumWeight =
                 exp(-abs(AtrousLuminance(sampleSpecular.rgb) - centerLumSpecular)
                     / max(gParams.specPhiLuminance, 1e-3));

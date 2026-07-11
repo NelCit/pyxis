@@ -392,7 +392,19 @@ SurfaceMaterialEval EvaluateSurfaceMaterial(uint instanceId, uint primitiveIndex
     // grazing-angle correction (would need the not-yet-computed
     // smooth normal upstream of the baseColor sample). Ref:
     // Akenine-Möller, Ray Tracing Gems Ch 20.
-    const float coneRadius = gCamera.pixelSpreadRadians * hitT;
+    //
+    // TEMPORAL-RECONSTRUCTION MIP BIAS (RTX-alignment 2026-07-11): every
+    // Pyxis profile temporally reconstructs sub-pixel detail — 96-frame
+    // jittered accumulation headless, DLSS/DLAA or TAA in the viewer —
+    // so, exactly like every TAA/DLSS engine (NVIDIA's DLSS guideline:
+    // bias = log2(renderRes/displayRes) - 1), textures sample one mip
+    // FINER than the single-frame footprint; the jitter average resolves
+    // what one frame would alias. Calibrated against ovrtx's own albedo
+    // G-buffer: without the bias our wall-albedo streak energy measured
+    // 0.55x theirs (= almost exactly one mip too coarse — their capture
+    // runs DLSS and therefore this same class of bias); 0.5 = -1 mip.
+    const float TEMPORAL_MIP_BIAS_SCALE = 0.5;
+    const float coneRadius = gCamera.pixelSpreadRadians * hitT * TEMPORAL_MIP_BIAS_SCALE;
 
     // V2.B.* — UV-density-aware LOD. The cone radius is a WORLD-space
     // length; SampleByCone needs the footprint in UV space to pick the
